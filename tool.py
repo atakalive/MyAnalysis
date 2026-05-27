@@ -76,6 +76,17 @@ def main() -> None:
     apply_dark_theme(app)
     win = ToolWindow()
     win.add_tab(build_demo_tab() if args.demo else build_placeholder_tab())
+
+    try:
+        from gui.chat import ChatWidget
+        from gui.llm import get_backend
+        backend = get_backend()
+        win.set_chat_widget(ChatWidget(backend))
+    except RuntimeError as e:
+        win.set_chat_widget(
+            QLabel(f"Chat disabled — {e}")
+        )
+
     win.show()
     sys.exit(app.exec())
 
