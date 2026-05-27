@@ -2,7 +2,6 @@
 import contextlib
 import fcntl
 import json
-from collections.abc import Callable
 from common.paths import state_dir
 
 

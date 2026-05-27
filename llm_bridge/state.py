@@ -1,6 +1,5 @@
 """Per-tab state read/write. State is JSON describing current selection."""
 import json
-from pathlib import Path
 from collections.abc import Callable
 from common.paths import state_dir
 

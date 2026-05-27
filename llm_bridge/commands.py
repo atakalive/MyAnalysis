@@ -5,8 +5,6 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from pathlib import Path
-from collections.abc import Callable
 from llm_bridge.paths import commands_queue_dir, command_log_path
 
 
