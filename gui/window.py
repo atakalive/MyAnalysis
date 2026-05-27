@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget,
     QLabel,
@@ -18,6 +18,8 @@ RESERVED_WINDOW_VERBS = frozenset([
 
 
 class ToolWindow(QMainWindow):
+    tab_changed = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("MyAnalysis Tool")
@@ -98,7 +100,11 @@ class ToolWindow(QMainWindow):
     def dispatch_command(self, verb: str, **kwargs) -> object:
         return self._command_handlers[verb](**kwargs)
 
+    def has_command(self, verb: str) -> bool:
+        return verb in self._command_handlers
+
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)
         if tab is not None:
             self.statusBar().showMessage(f"Active: {tab.name}")
+        self.tab_changed.emit(idx)

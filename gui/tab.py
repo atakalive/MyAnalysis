@@ -84,6 +84,9 @@ class AnalysisTab(QWidget):
     def dispatch_command(self, verb: str, **kwargs) -> object:
         return self._command_handlers[verb](**kwargs)
 
+    def has_command(self, verb: str) -> bool:
+        return verb in self._command_handlers
+
     def take_snapshot(self) -> None:
         if self._snapshot_writer:
             self._snapshot_writer(self)

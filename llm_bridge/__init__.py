@@ -95,12 +95,7 @@ def attach_window(window) -> list[object]:
     window.register_command("toggle-chat-visible", window.toggle_chat_visible)
 
     # Active tab tracker.
-    # gui.md's `_on_tab_changed` already updates statusbar; we additionally
-    # write active.json by connecting to the same QTabWidget signal.
-    # NOTE: window._tabs は private だが、タブ変更シグナルの public API が
-    # ToolWindow にないため意図的にアクセスしている。LLM からの唯一の安定
-    # インタフェースは CLI verb であり、Python 公開 API ではない。
-    window._tabs.currentChanged.connect(lambda _i: _write_active(window))
+    window.tab_changed.connect(lambda _i: _write_active(window))
     _write_active(window)  # initial write
 
     # Command queue watcher (drains stale on startup, executes new arrivals).

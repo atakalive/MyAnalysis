@@ -123,11 +123,7 @@ def _execute(window, payload: dict) -> None:
             dispatcher = tab
         else:
             raise ValueError(f"unknown tier: {tier!r}")
-        # Separate verb lookup from handler execution. dispatch_command does
-        # `self._command_handlers[verb](**kwargs)` so a missing verb and a
-        # handler-internal KeyError are indistinguishable. Check existence
-        # first via _command_handlers to classify cleanly.
-        if verb not in dispatcher._command_handlers:
+        if not dispatcher.has_command(verb):
             status = "rejected"
             error = f"unknown verb: {verb!r}"
         else:
