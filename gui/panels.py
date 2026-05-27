@@ -69,6 +69,8 @@ class TrajectoryPanel(QWidget):
             )
         if highlights is not None:
             for i in highlights:
+                if not isinstance(i, int):
+                    raise ValueError(f"highlight index must be int, got {type(i).__name__}: {i}")
                 if not (0 <= i < N):
                     raise ValueError(f"highlight index out of range: {i}")
 
@@ -114,7 +116,7 @@ class ImagePanel(QWidget):
         layout.addWidget(self._view)
         self._notes: list[pg.TextItem] = []
 
-    def set_image(self, image) -> None:
+    def set_image(self, image: np.ndarray | Path | str) -> None:
         if isinstance(image, np.ndarray):
             self._view.setImage(image)
         elif isinstance(image, (Path, str)):

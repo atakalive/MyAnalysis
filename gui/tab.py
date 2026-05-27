@@ -48,6 +48,7 @@ class AnalysisTab(QWidget):
         self._panels[key] = widget
 
     def remove_panel(self, key: str) -> None:
+        """Remove and destroy a panel. Caller must disconnect signals before calling."""
         widget = self._panels.pop(key)
         widget.setParent(None)
         widget.deleteLater()
