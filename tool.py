@@ -59,7 +59,10 @@ def build_demo_tab() -> tuple[AnalysisTab, Callable[[], dict]]:
     sel.selectionChanged.connect(on_unit)
     traj.pointClicked.connect(on_point)
     render()
-    state_provider = lambda: {"unit": state["unit"], "iter": state["iter"]}
+
+    def state_provider() -> dict:
+        return {"unit": state["unit"], "iter": state["iter"]}
+
     return tab, state_provider
 
 
@@ -77,22 +80,23 @@ def main() -> None:
     load_env()
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--demo", action="store_true",
-                        help="Launch with a synthetic demo tab")
+    parser.add_argument(
+        "--demo", action="store_true", help="Launch with a synthetic demo tab"
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     apply_dark_theme(app)
     win = ToolWindow()
-    tab, state_provider = (build_demo_tab() if args.demo
-                            else build_placeholder_tab())
+    tab, state_provider = build_demo_tab() if args.demo else build_placeholder_tab()
     win.add_tab(tab)
 
     win.set_chat_widget(ChatWidget(get_backend(), make_dispatch(win)))
 
     _window_watchers = llm_bridge.attach_window(win)
-    _tab_watchers = (llm_bridge.attach_tab(tab, state_provider)
-                     if state_provider is not None else [])
+    _tab_watchers = (
+        llm_bridge.attach_tab(tab, state_provider) if state_provider is not None else []
+    )
 
     if state_provider is not None:
         tab.dispatch_command("refresh-state")

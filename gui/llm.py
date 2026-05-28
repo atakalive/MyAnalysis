@@ -3,6 +3,7 @@
 Initial implementation: OpenAI-compatible /v1/chat/completions client with
 SSE streaming. To add a backend: implement LLMBackend and extend get_backend().
 """
+
 from __future__ import annotations
 
 import datetime
@@ -65,22 +66,25 @@ class LLMBackend(Protocol):
     name: str
     model: str
 
-    def stream(self, messages: list[Message],
-               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
+    def stream(
+        self, messages: list[Message], tools: list | None = None
+    ) -> Iterator[TextDelta | ToolCallRequest]:
         """Yield TextDelta / ToolCallRequest events. Raises on transport error."""
         ...
 
 
 class OpenAICompatBackend:
-    def __init__(self, *, base_url: str, api_key: str, model: str,
-                 name: str = "openai-compat"):
+    def __init__(
+        self, *, base_url: str, api_key: str, model: str, name: str = "openai-compat"
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.name = name
 
-    def stream(self, messages: list[Message],
-               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
+    def stream(
+        self, messages: list[Message], tools: list | None = None
+    ) -> Iterator[TextDelta | ToolCallRequest]:
         body: dict = {
             "model": self.model,
             "messages": [m.to_payload() for m in messages],
@@ -101,11 +105,11 @@ class OpenAICompatBackend:
         try:
             resp = urllib.request.urlopen(req, timeout=30)
         except HTTPError as e:
-            body = e.read().decode("utf-8", errors="replace")
+            err_body = e.read().decode("utf-8", errors="replace")
             try:
-                detail = json.loads(body).get("error", {}).get("message", body)
+                detail = json.loads(err_body).get("error", {}).get("message", err_body)
             except (json.JSONDecodeError, AttributeError):
-                detail = body
+                detail = err_body
             raise RuntimeError(f"HTTP {e.code}: {detail}") from e
         tool_buffers: dict[int, dict] = {}
         with resp:
@@ -151,12 +155,16 @@ class OpenAICompatBackend:
                 try:
                     parsed = json.loads(raw_args)
                 except (json.JSONDecodeError, ValueError):
-                    args = {"__parse_error__": f"malformed JSON arguments: {raw_args!r}"}
+                    args = {
+                        "__parse_error__": f"malformed JSON arguments: {raw_args!r}"
+                    }
                 else:
                     if isinstance(parsed, dict):
                         args = parsed
                     else:
-                        args = {"__parse_error__": f"expected JSON object, got {type(parsed).__name__}: {raw_args!r}"}
+                        args = {
+                            "__parse_error__": f"expected JSON object, got {type(parsed).__name__}: {raw_args!r}"
+                        }
             yield ToolCallRequest(id=buf["id"], name=buf["name"], arguments=args)
 
 
@@ -167,6 +175,7 @@ class MockBackend:
     ストリーミング/スレッド/終了処理を確認するためのもの。
     原油価格のみ stooq.com から実取得(WTI先物連続)、その他はモック値。
     """
+
     name = "mock"
 
     _WEATHER = ["晴れ", "曇り", "雨", "雪", "快晴", "雷雨"]
@@ -176,8 +185,9 @@ class MockBackend:
     def __init__(self, *, model: str):
         self.model = model
 
-    def stream(self, messages: list[Message],
-               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
+    def stream(
+        self, messages: list[Message], tools: list | None = None
+    ) -> Iterator[TextDelta | ToolCallRequest]:
         today = datetime.date.today()
         now = datetime.datetime.now()
         rng = random.Random(today.toordinal())
@@ -192,7 +202,7 @@ class MockBackend:
             f"原油価格(WTI先物): {crude}\n"
         )
         for i in range(0, len(text), 3):
-            yield TextDelta(text=text[i:i + 3])
+            yield TextDelta(text=text[i : i + 3])
             time.sleep(0.03)
 
     @classmethod
