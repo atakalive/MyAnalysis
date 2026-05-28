@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from gui.tab import AnalysisTab
 
 RESERVED_WINDOW_VERBS = frozenset([
-    "add-tab", "close-tab", "set-active-tab",
+    "add-tab", "close-tab", "list-tabs", "set-active-tab",
     "toggle-chat-float",
 ])
 
@@ -69,6 +69,9 @@ class ToolWindow(QMainWindow):
                 self._tabs.setCurrentIndex(i)
                 return True
         return False
+
+    def tab_names(self) -> list[str]:
+        return [self._tabs.widget(i).name for i in range(self._tabs.count())]
 
     def set_chat_widget(self, widget: QWidget) -> None:
         self._chat_dock.setWidget(widget)

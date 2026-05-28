@@ -89,6 +89,7 @@ def attach_window(window) -> list[object]:
     window.register_command("add-tab", _make_add_tab_handler(window))
     window.register_command("close-tab",
         lambda name: window.close_tab(name))
+    window.register_command("list-tabs", lambda: window.tab_names())
     window.register_command("set-active-tab",
         lambda name: window.set_active_tab(name))
     window.register_command("toggle-chat-float", window.toggle_chat_floating)

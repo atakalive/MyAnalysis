@@ -1,17 +1,20 @@
 import argparse
 import sys
+from collections.abc import Callable
 
 from PySide6.QtWidgets import QApplication, QLabel
 
+import llm_bridge
 from common.env import load_env
 from gui import apply_dark_theme
 from gui.chat import ChatWidget
 from gui.llm import get_backend
 from gui.tab import AnalysisTab
+from gui.tools import make_dispatch
 from gui.window import ToolWindow
 
 
-def build_demo_tab() -> AnalysisTab:
+def build_demo_tab() -> tuple[AnalysisTab, Callable[[], dict]]:
     """合成データで全パネル種別を動かす検証用タブ。"""
     import numpy as np
 
@@ -56,17 +59,18 @@ def build_demo_tab() -> AnalysisTab:
     sel.selectionChanged.connect(on_unit)
     traj.pointClicked.connect(on_point)
     render()
-    return tab
+    state_provider = lambda: {"unit": state["unit"], "iter": state["iter"]}
+    return tab, state_provider
 
 
-def build_placeholder_tab() -> AnalysisTab:
+def build_placeholder_tab() -> tuple[AnalysisTab, Callable[[], dict] | None]:
     tab = AnalysisTab(name="(empty)")
     tab.add_panel(
         "msg",
         QLabel("No analyses defined yet. Try: python tool.py --demo"),
         "top",
     )
-    return tab
+    return tab, None
 
 
 def main() -> None:
@@ -80,9 +84,18 @@ def main() -> None:
     app = QApplication(sys.argv)
     apply_dark_theme(app)
     win = ToolWindow()
-    win.add_tab(build_demo_tab() if args.demo else build_placeholder_tab())
+    tab, state_provider = (build_demo_tab() if args.demo
+                            else build_placeholder_tab())
+    win.add_tab(tab)
 
-    win.set_chat_widget(ChatWidget(get_backend()))
+    win.set_chat_widget(ChatWidget(get_backend(), make_dispatch(win)))
+
+    _window_watchers = llm_bridge.attach_window(win)
+    _tab_watchers = (llm_bridge.attach_tab(tab, state_provider)
+                     if state_provider is not None else [])
+
+    if state_provider is not None:
+        tab.dispatch_command("refresh-state")
 
     win.show()
     sys.exit(app.exec())

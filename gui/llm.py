@@ -19,13 +19,28 @@ from urllib.error import HTTPError
 
 _log = logging.getLogger(__name__)
 
-_VALID_ROLES = frozenset({"system", "user", "assistant"})
+
+@dataclass
+class TextDelta:
+    text: str
+
+
+@dataclass
+class ToolCallRequest:
+    id: str
+    name: str
+    arguments: dict  # parsed JSON
+
+
+_VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
 @dataclass
 class Message:
-    role: str  # "system" | "user" | "assistant"
-    content: str
+    role: str  # "system" | "user" | "assistant" | "tool"
+    content: str | None = None
+    tool_calls: list | None = None
+    tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.role not in _VALID_ROLES:
@@ -33,13 +48,26 @@ class Message:
                 f"invalid role {self.role!r}, expected one of {sorted(_VALID_ROLES)}"
             )
 
+    def to_payload(self) -> dict:
+        d: dict = {"role": self.role}
+        if self.role == "tool":
+            d["tool_call_id"] = self.tool_call_id
+            d["content"] = self.content or ""
+        elif self.role == "assistant" and self.tool_calls:
+            d["content"] = self.content or ""
+            d["tool_calls"] = self.tool_calls
+        else:
+            d["content"] = self.content or ""
+        return d
+
 
 class LLMBackend(Protocol):
     name: str
     model: str
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
-        """Yield response text chunks. Raises on transport error."""
+    def stream(self, messages: list[Message],
+               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
+        """Yield TextDelta / ToolCallRequest events. Raises on transport error."""
         ...
 
 
@@ -51,12 +79,16 @@ class OpenAICompatBackend:
         self.model = model
         self.name = name
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
-        payload = json.dumps({
+    def stream(self, messages: list[Message],
+               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
+        body: dict = {
             "model": self.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": [m.to_payload() for m in messages],
             "stream": True,
-        }).encode("utf-8")
+        }
+        if tools:
+            body["tools"] = tools
+        payload = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=payload,
@@ -75,6 +107,7 @@ class OpenAICompatBackend:
             except (json.JSONDecodeError, AttributeError):
                 detail = body
             raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+        tool_buffers: dict[int, dict] = {}
         with resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -82,7 +115,7 @@ class OpenAICompatBackend:
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
-                    return
+                    break
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
@@ -91,9 +124,40 @@ class OpenAICompatBackend:
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta", {}).get("content")
-                if delta:
-                    yield delta
+                delta = choices[0].get("delta", {})
+                content = delta.get("content")
+                if content:
+                    yield TextDelta(text=content)
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    if idx not in tool_buffers:
+                        tool_buffers[idx] = {
+                            "id": tc.get("id", ""),
+                            "name": tc.get("function", {}).get("name", ""),
+                            "arguments_str": "",
+                        }
+                    buf = tool_buffers[idx]
+                    if tc.get("id"):
+                        buf["id"] = tc["id"]
+                    fn = tc.get("function", {})
+                    if fn.get("name"):
+                        buf["name"] = fn["name"]
+                    buf["arguments_str"] += fn.get("arguments", "")
+        for buf in tool_buffers.values():
+            raw_args = buf["arguments_str"]
+            if not raw_args.strip():
+                args = {}
+            else:
+                try:
+                    parsed = json.loads(raw_args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {"__parse_error__": f"malformed JSON arguments: {raw_args!r}"}
+                else:
+                    if isinstance(parsed, dict):
+                        args = parsed
+                    else:
+                        args = {"__parse_error__": f"expected JSON object, got {type(parsed).__name__}: {raw_args!r}"}
+            yield ToolCallRequest(id=buf["id"], name=buf["name"], arguments=args)
 
 
 class MockBackend:
@@ -112,7 +176,8 @@ class MockBackend:
     def __init__(self, *, model: str):
         self.model = model
 
-    def stream(self, messages: list[Message]) -> Iterator[str]:
+    def stream(self, messages: list[Message],
+               tools: list | None = None) -> Iterator[TextDelta | ToolCallRequest]:
         today = datetime.date.today()
         now = datetime.datetime.now()
         rng = random.Random(today.toordinal())
@@ -127,7 +192,7 @@ class MockBackend:
             f"原油価格(WTI先物): {crude}\n"
         )
         for i in range(0, len(text), 3):
-            yield text[i:i + 3]
+            yield TextDelta(text=text[i:i + 3])
             time.sleep(0.03)
 
     @classmethod
