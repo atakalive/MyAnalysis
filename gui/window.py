@@ -13,7 +13,7 @@ from gui.tab import AnalysisTab
 
 RESERVED_WINDOW_VERBS = frozenset([
     "add-tab", "close-tab", "set-active-tab",
-    "toggle-chat-float", "toggle-chat-visible",
+    "toggle-chat-float",
 ])
 
 
@@ -34,7 +34,6 @@ class ToolWindow(QMainWindow):
         self._chat_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
         self._chat_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea
@@ -77,20 +76,11 @@ class ToolWindow(QMainWindow):
     def set_chat_floating(self, floating: bool) -> None:
         self._chat_dock.setFloating(floating)
 
-    def set_chat_visible(self, visible: bool) -> None:
-        self._chat_dock.setVisible(visible)
-
     def is_chat_floating(self) -> bool:
         return self._chat_dock.isFloating()
 
-    def is_chat_visible(self) -> bool:
-        return self._chat_dock.isVisible()
-
     def toggle_chat_floating(self) -> None:
         self._chat_dock.setFloating(not self._chat_dock.isFloating())
-
-    def toggle_chat_visible(self) -> None:
-        self._chat_dock.setVisible(not self._chat_dock.isVisible())
 
     def register_command(
         self, verb: str, handler: Callable[..., object]

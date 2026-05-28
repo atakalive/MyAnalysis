@@ -92,7 +92,6 @@ def attach_window(window) -> list[object]:
     window.register_command("set-active-tab",
         lambda name: window.set_active_tab(name))
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
-    window.register_command("toggle-chat-visible", window.toggle_chat_visible)
 
     # Active tab tracker.
     window.tab_changed.connect(lambda _i: _write_active(window))

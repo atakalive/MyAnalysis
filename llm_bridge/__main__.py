@@ -111,7 +111,7 @@ def main() -> int:
         if args.name is None:
             print("window verbs (built-in by llm_bridge):")
             for v in ("add-tab", "close-tab", "set-active-tab",
-                      "toggle-chat-float", "toggle-chat-visible"):
+                      "toggle-chat-float"):
                 print(f"  {v}")
             return 0
         _check_analysis_exists(args.name)
