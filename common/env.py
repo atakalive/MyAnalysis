@@ -26,7 +26,9 @@ def load_env(path: Path | None = None) -> None:
         if "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key = key.strip().removeprefix("export").lstrip()
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].lstrip()
         if not key:
             continue
         val = val.strip()
