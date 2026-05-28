@@ -94,12 +94,9 @@ class OpenAICompatBackend:
 
 
 def get_backend() -> LLMBackend:
-    """Construct the configured backend. Raises RuntimeError if misconfigured."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+    """Construct the configured backend from environment variables."""
     return OpenAICompatBackend(
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        api_key=api_key,
-        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        base_url=os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+        api_key=os.environ.get("OPENAI_API_KEY") or "not-needed",
+        model=os.environ.get("OPENAI_MODEL") or "gpt-4o-mini",
     )

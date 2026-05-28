@@ -3,7 +3,10 @@ import sys
 
 from PySide6.QtWidgets import QApplication, QLabel
 
+from common.env import load_env
 from gui import apply_dark_theme
+from gui.chat import ChatWidget
+from gui.llm import get_backend
 from gui.tab import AnalysisTab
 from gui.window import ToolWindow
 
@@ -67,6 +70,8 @@ def build_placeholder_tab() -> AnalysisTab:
 
 
 def main() -> None:
+    load_env()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo", action="store_true",
                         help="Launch with a synthetic demo tab")
@@ -77,15 +82,7 @@ def main() -> None:
     win = ToolWindow()
     win.add_tab(build_demo_tab() if args.demo else build_placeholder_tab())
 
-    try:
-        from gui.chat import ChatWidget
-        from gui.llm import get_backend
-        backend = get_backend()
-        win.set_chat_widget(ChatWidget(backend))
-    except RuntimeError as e:
-        win.set_chat_widget(
-            QLabel(f"Chat disabled — {e}")
-        )
+    win.set_chat_widget(ChatWidget(get_backend()))
 
     win.show()
     sys.exit(app.exec())

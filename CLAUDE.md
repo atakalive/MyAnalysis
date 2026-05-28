@@ -27,7 +27,7 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
-- `.env` is gitignored. Currently empty; reserved for future secrets/local overrides.
+- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`), so non-secret config like dataset paths is fine to commit.
 
 ## State
