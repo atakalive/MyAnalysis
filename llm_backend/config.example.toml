@@ -1,0 +1,15 @@
+# LLM backend configuration. Copy to config.toml to activate.
+# config.toml is gitignored; this example is committed.
+
+[backend]
+name = "pi"          # "pi" | "openai" | "mock"
+
+[pi]
+# ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
+#   前方スラッシュか、リテラル文字列 '...' を使うこと。
+cwd  = '<repo>'   # 省略時はリポジトリ root
+bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
+model = ""           # 任意 --model
+provider = ""        # 任意 --provider
+tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
+                     #   "read,write"=許可リスト, "none"=--no-tools)

@@ -27,3 +27,11 @@ node_modules/
 .env.local
 
 data/
+
+# LLM backend config (copy from config.example.toml)
+llm_backend/config.toml
+
+# pi runtime artifacts — track only the committed skill
+/.pi/*
+!/.pi/skills/
+!/.pi/skills/**

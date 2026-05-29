@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from gui.llm import LLMBackend, Message, TextDelta, ToolCallRequest
+from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
 from gui.tools import TOOLS
 
 
@@ -180,7 +180,15 @@ class ChatWidget(QWidget):
         self._worker = None
 
     def _shutdown_worker(self) -> None:
-        """アプリ終了時にストリーミングスレッドを停止する。"""
+        """アプリ終了時にストリーミングスレッドを停止する。
+
+        ① backend の pi プロセスを kill → ② worker の requestInterruption →
+        ③ wait/terminate の順。worker の run() が backend.stream() をブロック中の
+        場合、先に pi プロセスを kill しないと proc.stdout 読取が EOF を返さず
+        ハングするため、cancel() を先頭に置く。
+        """
+        if hasattr(self._backend, "cancel"):
+            self._backend.cancel()
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
             if not self._worker.wait(5000):

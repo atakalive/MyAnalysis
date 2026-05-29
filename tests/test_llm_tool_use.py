@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from gui.llm import Message, TextDelta, ToolCallRequest
+from llm_backend.base import Message, TextDelta, ToolCallRequest
 
 
 # ---------------------------------------------------------------------------

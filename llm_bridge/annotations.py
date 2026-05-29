@@ -1,7 +1,7 @@
 """Annotation read/write + GUI-side file watcher."""
 import contextlib
-import fcntl
 import json
+from common.filelock import exclusive_lock
 from common.paths import state_dir
 
 
@@ -22,12 +22,8 @@ def _lock(name: str):
     calls) concurrently submit/clear annotations for the same tab.
     """
     lock_path = _path(name).with_suffix(".json.lock")
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    with exclusive_lock(lock_path):
+        yield
 
 
 def read(name: str) -> dict:

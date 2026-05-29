@@ -27,8 +27,31 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
-- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`). Copy `.env.example` to get started.
+- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `PI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`), so non-secret config like dataset paths is fine to commit.
+
+## LLM backends — `llm_backend/`
+
+Chat-dock LLM access goes through the `llm_backend/` package. Backends implement
+the `LLMBackend` Protocol in `llm_backend/base.py`; `get_backend()` selects one
+by name. Three backends ship: `openai` (OpenAI-compatible HTTP), `mock` (offline
+smoke test), `pi` (pi-coding-agent subprocess).
+
+- **Selection order**: env `LLM_BACKEND` → `[backend].name` in
+  `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
+- **Config file**: copy `llm_backend/config.example.toml` → `llm_backend/config.toml`
+  (gitignored). The `[pi]` section sets `cwd` (pi working directory), `bin`,
+  `model`, `provider`, `tools`.
+- **pi backend** runs `python -m llm_bridge` via the `.pi/skills/myanalysis-bridge`
+  skill to drive the GUI live. **External dependency**: Node + pi
+  (`npm i -g @mariozechner/pi-coding-agent`). On Windows pi additionally needs a
+  bash shell (Git Bash) for its tool execution.
+
+## llm_bridge — cross-platform
+
+`llm_bridge` (GUI ↔ CLI over the filesystem) works on Windows and POSIX. File
+locking is abstracted in `common/filelock.py` (`exclusive_lock`): `fcntl` on
+POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 
 ## State
 

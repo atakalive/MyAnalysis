@@ -1,10 +1,10 @@
 """Command queue (LLM → GUI). All tiers share data/llm_state/commands/."""
-import fcntl
 import json
 import sys
 import time
 import uuid
 from datetime import datetime
+from common.filelock import exclusive_lock
 from llm_bridge.paths import commands_queue_dir, command_log_path
 
 
@@ -96,13 +96,9 @@ def _append_log(entry: dict) -> None:
     """
     log = command_log_path()
     lock_path = log.with_suffix(".jsonl.lock")
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            with open(log, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    with exclusive_lock(lock_path):
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def _execute(window, payload: dict) -> None:

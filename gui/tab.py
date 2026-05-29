@@ -1,8 +1,11 @@
+import logging
 import math
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QSplitter, QVBoxLayout, QWidget
+
+_log = logging.getLogger(__name__)
 
 RESERVED_TAB_VERBS = frozenset(["set-split", "add-panel", "remove-panel"])
 
@@ -16,6 +19,7 @@ class AnalysisTab(QWidget):
         self._panels: dict[str, QWidget] = {}
         self._state_provider: Callable[[], dict] | None = None
         self._snapshot_writer: Callable[["AnalysisTab"], None] | None = None
+        self._annotations_handler: Callable[[dict], None] | None = None
         self._command_handlers: dict[str, Callable[..., object]] = {}
 
         outer = QVBoxLayout(self)
@@ -91,5 +95,12 @@ class AnalysisTab(QWidget):
         if self._snapshot_writer:
             self._snapshot_writer(self)
 
+    def connect_annotations(self, handler: Callable[[dict], None] | None) -> None:
+        self._annotations_handler = handler
+
     def apply_annotations(self, ann: dict) -> None:
-        pass
+        if self._annotations_handler is not None:
+            try:
+                self._annotations_handler(ann)
+            except Exception:
+                _log.warning("apply_annotations failed", exc_info=True)
