@@ -33,6 +33,11 @@ class SelectorPanel(QWidget):
     def current(self) -> str:
         return self._combo.currentText()
 
+    def set_current(self, name: str) -> None:
+        self._combo.blockSignals(True)
+        self._combo.setCurrentText(name)
+        self._combo.blockSignals(False)
+
 
 class TrajectoryPanel(QWidget):
     pointClicked = Signal(int)

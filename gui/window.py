@@ -3,8 +3,10 @@ from collections.abc import Callable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QTabWidget,
     QWidget,
 )
@@ -43,6 +45,25 @@ class ToolWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
 
         self._command_handlers: dict[str, Callable[..., object]] = {}
+
+        file_menu = self.menuBar().addMenu("ファイル(&F)")
+        open_action = file_menu.addAction("解析を開く…")
+        open_action.triggered.connect(self._open_analysis)
+        close_action = file_menu.addAction("タブを閉じる")
+        close_action.triggered.connect(self._close_current_tab)
+        file_menu.addSeparator()
+        quit_action = file_menu.addAction("終了")
+        quit_action.triggered.connect(self.close)
+
+        view_menu = self.menuBar().addMenu("表示(&V)")
+        chat_action = view_menu.addAction("チャットを切り離す/格納")
+        chat_action.triggered.connect(self.toggle_chat_floating)
+
+        help_menu = self.menuBar().addMenu("ヘルプ(&H)")
+        about_action = help_menu.addAction("バージョン情報")
+        about_action.triggered.connect(
+            lambda: QMessageBox.about(self, "MyAnalysis Tool", "MyAnalysis Tool v0.1")
+        )
 
     def add_tab(self, tab: AnalysisTab) -> None:
         for i in range(self._tabs.count()):
@@ -95,6 +116,40 @@ class ToolWindow(QMainWindow):
 
     def has_command(self, verb: str) -> bool:
         return verb in self._command_handlers
+
+    def _open_analysis(self) -> None:
+        from common.paths import analyses_root
+
+        root = analyses_root()
+        if root.is_dir():
+            names = sorted(
+                d.name
+                for d in root.glob("*")
+                if (d / "analysis.py").is_file()
+            )
+        else:
+            names = []
+        if not names:
+            QMessageBox.information(self, "解析を開く", "解析がありません")
+            return
+        name, ok = QInputDialog.getItem(
+            self, "解析を開く", "解析を選択:", names, 0, False
+        )
+        if not ok or not name:
+            return
+        if not self.has_command("add-tab"):
+            QMessageBox.critical(self, "エラー", "add-tab コマンドが未登録です")
+            return
+        try:
+            self.dispatch_command("add-tab", name=name)
+            self.set_active_tab(name)
+        except Exception as e:
+            QMessageBox.critical(self, "解析を開けません", str(e))
+
+    def _close_current_tab(self) -> None:
+        tab = self.active_tab()
+        if tab is not None:
+            self.close_tab(tab.name)
 
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)
