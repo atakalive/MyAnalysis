@@ -4,6 +4,7 @@ Usage: python -m export <analysis_name>
 
 Writes figures to data/analyses/<name>/batch/.
 """
+
 import argparse
 import sys
 
@@ -19,7 +20,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export analysis figures as headless PNG",
     )
-    parser.add_argument("name", help="analysis directory name (e.g. example_analysis)")
+    parser.add_argument(
+        "name", help="analysis directory name (e.g. example_analysis)"
+    )
     args = parser.parse_args()
     name: str = args.name
 
@@ -58,9 +61,16 @@ def main() -> None:
         print(f"error: {analysis_file} has no build_export_figs(data)", file=sys.stderr)
         sys.exit(1)
 
-    data = mod.load() if hasattr(mod, "load") else None
+    if not hasattr(mod, "load"):
+        print(f"error: {analysis_file} has no load()", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = mod.load()
+    except Exception as e:
+        print(f"error: failed to load analysis data: {e}", file=sys.stderr)
+        sys.exit(1)
     if data is None:
-        print(f"error: {analysis_file} has no load() or load() returned None", file=sys.stderr)
+        print(f"error: {analysis_file} load() returned None", file=sys.stderr)
         sys.exit(1)
     figs: dict[str, object] = mod.build_export_figs(data)
     out = batch_dir(name)
