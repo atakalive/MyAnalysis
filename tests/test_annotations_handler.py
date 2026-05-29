@@ -12,14 +12,12 @@ import pytest
 
 
 @pytest.fixture()
-def tab():
-    """Create a bare AnalysisTab. Skip if no display is available."""
-    try:
-        from PySide6.QtWidgets import QApplication
+def tab(monkeypatch):
+    """Create a bare AnalysisTab with offscreen rendering (no display needed)."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
 
-        app = QApplication.instance() or QApplication([])
-    except Exception:
-        pytest.skip("Qt display not available")
+    _app = QApplication.instance() or QApplication([])
     from gui.tab import AnalysisTab
 
     return AnalysisTab(name="test")
