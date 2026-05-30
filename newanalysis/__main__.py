@@ -46,7 +46,7 @@ def _validate(value: str, *, kind: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    if value in _WINDOWS_RESERVED:
+    if kind == "name" and value in _WINDOWS_RESERVED:
         print(
             f"error: invalid {kind}: {value!r} is a Windows reserved device name",
             file=sys.stderr,

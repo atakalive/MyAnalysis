@@ -117,6 +117,13 @@ def test_invalid_dataset_rejected(fake_roots, dataset):
         gen.main(["demo_probe", "--dataset", dataset])
 
 
+def test_dataset_reserved_name_accepted(fake_roots):
+    """Windows 予約名チェックは name のみ。dataset は文字列埋め込みなので con 等も受理する。"""
+    gen.main(["demo_probe", "--dataset", "con"])
+    text = (fake_roots / "demo_probe" / "analysis.py").read_text(encoding="utf-8")
+    assert 'DATASET = "con"' in text
+
+
 # ---- 重複防止 ----
 
 def test_duplicate_rejected(fake_roots):
