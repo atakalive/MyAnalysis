@@ -235,7 +235,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"created analyses/{name}/README.md")
     if dataset:
         print("# config.py に未登録なら追記してください:")
-        print(f'#   DATASETS["{dataset}"] = "<relative_path>"')
+        print(f'#   DATASETS["{dataset}"] = {{"<HOSTNAME>": r"<full_path>"}}')
 
 
 if __name__ == "__main__":

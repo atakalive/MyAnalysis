@@ -1,40 +1,37 @@
-"""Path configuration: per-host data root + named dataset registry.
+"""Path configuration: dataset registry with per-host full paths.
 
-Add a new PC → append to DATA_ROOTS.
-Add a new dataset → append to DATASETS (relative path under the root).
+各 dataset を「ホスト名 → その PC でのフルパス」で登録する。
+同じ cloud drive フォルダが PC ごとに別ドライブにマウントされるため。
+
+新しい dataset → DATASETS に追加。
+新しい PC → 使う各 dataset にそのホスト名のエントリを追加(キーは大文字)。
 """
 import socket
 from pathlib import Path
 
-DATA_ROOTS: dict[str, str] = {
-    "HOST_A": r"G:\同期\測定",
-    "HOST_B": r"H:\同期\測定",
+DATASETS: dict[str, dict[str, str]] = {
+    "dataset_a": {
+        "HOST_A": r"G:\同期\測定\000000\example",
+        "HOST_B": r"H:\同期\測定\000000\example",
+    },
 }
-
-DATASETS: dict[str, str] = {
-    "dataset_a": "000000/example",
-}
-
-
-def get_data_root() -> Path:
-    host = socket.gethostname()
-    try:
-        return Path(DATA_ROOTS[host])
-    except KeyError:
-        known = ", ".join(DATA_ROOTS) or "(none)"
-        raise RuntimeError(
-            f"No DATA_ROOT registered for hostname {host!r}. "
-            f"Add it to DATA_ROOTS in config.py. Known hosts: {known}"
-        )
 
 
 def get_dataset_dir(name: str) -> Path:
     try:
-        rel = DATASETS[name]
+        per_host = DATASETS[name]
     except KeyError:
         known = ", ".join(DATASETS) or "(none)"
         raise KeyError(
             f"Unknown dataset {name!r}. "
             f"Add it to DATASETS in config.py. Known datasets: {known}"
         )
-    return get_data_root() / rel
+    host = socket.gethostname().upper()
+    try:
+        return Path(per_host[host])
+    except KeyError:
+        known = ", ".join(per_host) or "(none)"
+        raise RuntimeError(
+            f"Dataset {name!r} has no path for hostname {host!r}. "
+            f"Add it to DATASETS[{name!r}] in config.py. Known hosts: {known}"
+        )

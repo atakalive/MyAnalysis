@@ -74,7 +74,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-`DATASETS` in `config.py` maps names → relative paths; dataset directories hold
+`DATASETS` in `config.py` maps names → per-host full paths (`{hostname: full_path}`); dataset directories hold
 session folders named `session_<yyyymmdd>_<hhmmss>_<id>`. You may write
 scratch output inside a dataset directory.
 

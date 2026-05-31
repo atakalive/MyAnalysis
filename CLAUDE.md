@@ -8,10 +8,7 @@ Experimental measurement data analysis project (Python). Data lives **outside th
 
 ## Data access — always go through `config.py`
 
-Raw measurement data is not in the repo. It lives at a per-host root (e.g. `G:\同期\測定` on PC `HOST_A`). Two-layer indirection:
-
-- `DATA_ROOTS[hostname]` → base directory (varies by PC, since the same cloud drive folder mounts at different paths on different machines)
-- `DATASETS[name]` → relative path under that root (same on all PCs)
+Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. `DATASETS` in [config.py](config.py) maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Host keys are uppercase; lookup normalises via `.upper()`.
 
 **Never hardcode `G:\...` or any absolute data path in analysis code.** Always:
 
@@ -20,7 +17,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-When adding work for a new measurement, add an entry to `DATASETS` in [config.py](config.py). When running on a new PC, add an entry to `DATA_ROOTS`. Unknown host or dataset raises a descriptive error pointing at `config.py`.
+When adding work for a new measurement, add an entry to `DATASETS` in [config.py](config.py). When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at `config.py`.
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
