@@ -8,6 +8,7 @@ from pathlib import Path
 
 DATA_ROOTS: dict[str, str] = {
     "HOST_A": r"G:\同期\測定",
+    "HOST_B": r"H:\同期\測定",
 }
 
 DATASETS: dict[str, str] = {
