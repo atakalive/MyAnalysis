@@ -1,11 +1,11 @@
 @echo off
-rem MyAnalysis GUI èµ·å‹•ç”¨ãƒ©ãƒ³ãƒãƒ£ãƒ¼
+rem MyAnalysis GUI ‹N“®—pƒ‰ƒ“ƒ`ƒƒ[
 setlocal
 
-rem ã“ã®ãƒãƒƒãƒãŒã‚ã‚‹ãƒ‡ã‚£ãƒ¬ã‚¯ãƒˆãƒªã¸ç§»å‹•(ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯èµ·å‹•ã§ã‚‚ç¢ºå®Ÿã«å‹•ãã‚ˆã†ã«)
+rem ‚±‚Ìƒoƒbƒ`‚ª‚ ‚éƒfƒBƒŒƒNƒgƒŠ‚ÖˆÚ“®(ƒ_ƒuƒ‹ƒNƒŠƒbƒN‹N“®‚Å‚àŠmŽÀ‚É“®‚­‚æ‚¤‚É)
 cd /d "%~dp0"
 
-rem .venv ãŒã‚ã‚Œã°æœ‰åŠ¹åŒ–ã€ç„¡ã‘ã‚Œã°ã‚°ãƒ­ãƒ¼ãƒãƒ« python ã‚’ä½¿ã†
+rem .venv ‚ª‚ ‚ê‚Î—LŒø‰»A–³‚¯‚ê‚ÎƒOƒ[ƒoƒ‹ python ‚ðŽg‚¤
 if exist ".venv\Scripts\activate.bat" (
     call ".venv\Scripts\activate.bat"
 )
@@ -13,10 +13,10 @@ if exist ".venv\Scripts\activate.bat" (
 python tool.py
 set EXITCODE=%ERRORLEVEL%
 
-rem ã‚¨ãƒ©ãƒ¼æ™‚ã¯ç”»é¢ã‚’æ®‹ã—ã¦åŽŸå› ãŒè¦‹ãˆã‚‹ã‚ˆã†ã«ã™ã‚‹
+rem ƒGƒ‰[Žž‚Í‰æ–Ê‚ðŽc‚µ‚ÄŒ´ˆö‚ªŒ©‚¦‚é‚æ‚¤‚É‚·‚é
 if not "%EXITCODE%"=="0" (
     echo.
-    echo [run.bat] tool.py ãŒçµ‚äº†ã‚³ãƒ¼ãƒ‰ %EXITCODE% ã§çµ‚äº†ã—ã¾ã—ãŸã€‚
+    echo [run.bat] tool.py ‚ªI—¹ƒR[ƒh %EXITCODE% ‚ÅI—¹‚µ‚Ü‚µ‚½B
     pause
 )
 
