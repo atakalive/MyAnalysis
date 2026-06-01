@@ -39,7 +39,7 @@ def _check_analysis_exists(name: str) -> None:
         raise SystemExit(f"error: no valid analysis.py for {name!r} under analyses/")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m llm_bridge")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -48,6 +48,7 @@ def main() -> int:
 
     sub.add_parser("active", help="Print currently active tab name")
     sub.add_parser("list-analyses", help="List analyses/ subdirs")
+    sub.add_parser("list-datasets", help="List registered dataset names")
 
     p_lc = sub.add_parser("list-commands", help="List registered verbs (informational)")
     p_lc.add_argument("name", nargs="?")
@@ -72,7 +73,7 @@ def main() -> int:
     p_clr.add_argument("name")
     p_clr.add_argument("kind", nargs="?", choices=["marker", "note"], default=None)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.cmd == "state":
         if args.name is None:
@@ -99,12 +100,20 @@ def main() -> int:
     if args.cmd == "list-analyses":
         root = analyses_root().resolve()
         for d in sorted(analyses_root().glob("*")):
+            if d.name.startswith("_"):
+                continue
             resolved = d.resolve()
             if not resolved.is_relative_to(root):
                 continue
             af = (resolved / "analysis.py").resolve()
             if resolved.is_dir() and af.is_relative_to(root) and af.is_file():
                 print(d.name)
+        return 0
+
+    if args.cmd == "list-datasets":
+        from config import DATASETS
+        for name in sorted(DATASETS):
+            print(name)
         return 0
 
     if args.cmd == "list-commands":

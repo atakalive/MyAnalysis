@@ -24,6 +24,7 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
+- `data/scratch/` is the designated output area for exploratory analysis (figures, code snippets, intermediates). Created on first use by `common.explore.save_fig()` / `save_code()`.
 - `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `PI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`), so non-secret config like dataset paths is fine to commit.
 
@@ -49,6 +50,16 @@ smoke test), `pi` (pi-coding-agent subprocess).
 `llm_bridge` (GUI ↔ CLI over the filesystem) works on Windows and POSIX. File
 locking is abstracted in `common/filelock.py` (`exclusive_lock`): `fcntl` on
 POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
+
+## Exploratory analysis — `common/explore.py`
+
+LLM agents analyse data via code execution + CLI, not just GUI remote control.
+`common/explore.py` provides a minimal surface: `load_dataset(name)` (config → loaders
+in one call), `save_fig(fig, label)` (saves to `data/scratch/figures/<label>.png`),
+`save_code(label, content)` (saves to `data/scratch/code/<label>.py`),
+`dataset_summary(name)` (columns, dtypes, row counts per session). Dataset directories
+are read-only; all output goes to `data/scratch/`. Use `python -m llm_bridge list-datasets`
+to discover registered dataset names.
 
 ## State
 

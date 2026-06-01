@@ -3,17 +3,17 @@ location determines repo root. Move this file → repo_root changes accordingly.
 from pathlib import Path
 
 
-def _validate_name(name: str) -> None:
+def validate_name(name: str) -> None:
     """Raise ValueError if name is not a simple directory name.
 
-    Rejects empty strings, path separators (/ \\), and relative-path
-    components (. and ..).  This prevents constructing paths outside
-    data/analyses/.
+    Rejects empty strings, path separators (/ \\), relative-path
+    components (. and ..), and NUL bytes.  This prevents constructing
+    paths outside data/analyses/.
     """
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
+    if not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
         raise ValueError(
-            f"name must be a simple directory name without path separators "
-            f"or relative components: {name!r}")
+            f"name must be a simple directory name without path separators, "
+            f"relative components, or NUL bytes: {name!r}")
 
 
 def repo_root() -> Path:
@@ -33,7 +33,7 @@ def analysis_out_dir(name: str) -> Path:
 
     name must be a simple directory name (no /, \\, ., or ..).
     """
-    _validate_name(name)
+    validate_name(name)
     p = repo_root() / "data" / "analyses" / name
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -49,5 +49,12 @@ def state_dir(name: str) -> Path:
 def batch_dir(name: str) -> Path:
     """Return data/analyses/<name>/batch/, creating it if missing."""
     p = analysis_out_dir(name) / "batch"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def scratch_dir() -> Path:
+    """Return data/scratch/, creating it if missing."""
+    p = repo_root() / "data" / "scratch"
     p.mkdir(parents=True, exist_ok=True)
     return p

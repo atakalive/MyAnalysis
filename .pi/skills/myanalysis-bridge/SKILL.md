@@ -65,6 +65,31 @@ python -m llm_bridge window add-tab name=example --wait
 
 Markers/notes appear live on the corresponding panels.
 
+## Exploratory analysis loop (headless, no GUI required)
+
+The primary analysis workflow is code execution, not GUI driving.
+
+1. **Discover**: `python -m llm_bridge list-datasets` → dataset names.
+   Names shown are from the global registry. If the current host has no path
+   registered for a dataset, `load_dataset` raises `RuntimeError` with a
+   message pointing at `config.py`.
+2. **Load**: `from common.explore import load_dataset; sessions = load_dataset("<name>")`
+3. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → columns, dtypes, row counts.
+4. **Compute**: arbitrary Python on the loaded DataFrames.
+5. **Plot**: `from common.explore import save_fig; save_fig(fig, "<label>")` → `data/scratch/figures/<label>.png`.
+6. **Observe**: open the saved PNG to check the result (if visual feedback is available).
+7. **Iterate**: repeat 4-6 until the question is answered.
+8. **Save code**: `from common.explore import save_code; save_code("<label>", code_str)` → `data/scratch/code/<label>.py`.
+9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate scratch code into `analyses/<name>/analysis.py`.
+
+Scratch output always goes to `data/scratch/` (gitignored via `data/`). Dataset
+directories are read-only — never write to them.
+
+### Visual feedback capability
+- Result: **not yet verified**
+- Verified: —
+- Environment: pi version=—, model=—, provider=—, images.blockImages=—
+
 ## Datasets
 
 Measurement data lives outside the repo. Always resolve paths through config:
@@ -74,9 +99,14 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-`DATASETS` in `config.py` maps names → per-host full paths (`{hostname: full_path}`); dataset directories hold
-session folders named `session_<yyyymmdd>_<hhmmss>_<id>`. You may write
-scratch output inside a dataset directory.
+`DATASETS` in `config.py` maps names → per-host full paths (`{hostname: full_path}`).
+Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-datasets`
+shows the full registry; datasets without a path entry for the current host will
+raise `RuntimeError` on `load_dataset()`.
+Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
+Dataset directories are **read-only** — never write to them.
+All scratch output goes to `data/scratch/` (use `save_fig()` / `save_code()` from
+`common.explore` for figures and code snippets).
 
 ## Authoring an analysis
 
