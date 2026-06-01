@@ -68,6 +68,7 @@ def save_code(label: str, content: str) -> Path:
     """ad-hocコードスニペットを data/scratch/code/<label>.py に保存し、パスを返す。
 
     label のバリデーション: common.paths.validate_name を使用。
+    label にファイル拡張子は含めない（.py は自動付与）。
     content は UTF-8 で書き出す。既存ファイルは上書き。
 
     Returns: 保存先の Path（絶対パス）。

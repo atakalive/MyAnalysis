@@ -117,15 +117,16 @@ def test_save_fig_overwrites(fake_roots):
     fig1.add_subplot(111).plot([0, 1], [0, 1])
     explore.save_fig(fig1, "dup")
 
+    expected = fake_roots / "data" / "scratch" / "figures" / "dup.png"
+    first_size = expected.stat().st_size
+
     fig2 = Figure(figsize=(8, 8))
     fig2.add_subplot(111).plot([0, 1], [1, 0])
     path = explore.save_fig(fig2, "dup")
 
-    expected = fake_roots / "data" / "scratch" / "figures" / "dup.png"
     assert path == expected
     assert expected.is_file()
-    # 2回目（大きい figsize）の方がファイルサイズが大きい → 上書きされた証拠。
-    assert expected.stat().st_size > 0
+    assert expected.stat().st_size > first_size
 
 
 # ---- save_code ----
