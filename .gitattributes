@@ -1,0 +1,3 @@
+# Windows batch scripts must always use CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

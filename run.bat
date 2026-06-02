@@ -1,11 +1,11 @@
 @echo off
-rem MyAnalysis GUI 起動用ランチャー
+rem MyAnalysis GUI launcher
 setlocal
 
-rem このバッチがあるディレクトリへ移動(ダブルクリック起動でも確実に動くように)
+rem Move to this script's directory so double-click launch works reliably
 cd /d "%~dp0"
 
-rem .venv があれば有効化、無ければグローバル python を使う
+rem Use .venv if present, otherwise fall back to global python
 if exist ".venv\Scripts\activate.bat" (
     call ".venv\Scripts\activate.bat"
 )
@@ -13,10 +13,10 @@ if exist ".venv\Scripts\activate.bat" (
 python tool.py
 set EXITCODE=%ERRORLEVEL%
 
-rem エラー時は画面を残して原因が見えるようにする
+rem On error, keep the window open so the message can be read
 if not "%EXITCODE%"=="0" (
     echo.
-    echo [run.bat] tool.py が終了コード %EXITCODE% で終了しました。
+    echo [run.bat] tool.py exited with code %EXITCODE%.
     pause
 )
 
