@@ -76,14 +76,17 @@ The primary analysis workflow is code execution, not GUI driving.
 2. **Load**: `from common.explore import load_dataset; sessions = load_dataset("<name>")`
 3. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → columns, dtypes, row counts.
 4. **Compute**: arbitrary Python on the loaded DataFrames.
-5. **Plot**: `from common.explore import save_fig; save_fig(fig, "<label>")` → `data/scratch/figures/<label>.png`.
+5. **Plot**: `from common.explore import save_fig; save_fig("<name>", fig, "<label>")` → `<work_dir>/figures/<label>.png`.
 6. **Observe**: open the saved PNG to check the result (if visual feedback is available).
 7. **Iterate**: repeat 4-6 until the question is answered.
-8. **Save code**: `from common.explore import save_code; save_code("<label>", code_str)` → `data/scratch/code/<label>.py`.
-9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate scratch code into `analyses/<name>/analysis.py`.
+8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
+9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate work_dir code into `analyses/<name>/analysis.py`.
 
-Scratch output always goes to `data/scratch/` (gitignored via `data/`). Dataset
-directories are read-only — never write to them.
+Analysis output goes to the dataset's `work_dir` (default `<dataset_dir>/_work`,
+configurable per dataset in `myanalysis.toml`). Measurement files (CSV etc.) are
+never modified; the tools only write the `myanalysis.toml` sidecar and files under
+`work_dir`. A hand-set `work_dir` may place new output (PNG/PY) in any subdirectory
+of the dataset dir.
 
 ### Visual feedback capability
 - Result: **not yet verified**
@@ -104,9 +107,10 @@ Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-da
 shows the full registry; datasets without a path entry for the current host will
 raise `RuntimeError` on `load_dataset()`.
 Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
-Dataset directories are **read-only** — never write to them.
-All scratch output goes to `data/scratch/` (use `save_fig()` / `save_code()` from
-`common.explore` for figures and code snippets).
+**Never modify measurement files (CSV etc.).** Analysis output is written by the
+tools to the dataset's `work_dir` (default `<dataset_dir>/_work`, set per dataset in
+`myanalysis.toml`); use `save_fig()` / `save_code()` from `common.explore` for figures
+and code snippets. The `myanalysis.toml` sidecar is generated on first save.
 
 ## Authoring an analysis
 

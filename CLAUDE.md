@@ -21,10 +21,14 @@ When adding work for a new measurement, add an entry to `DATASETS` in [config.py
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
+### Per-dataset settings — `myanalysis.toml`
+
+Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in `config.py`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
+
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
-- `data/scratch/` is the designated output area for exploratory analysis (figures, code snippets, intermediates). Created on first use by `common.explore.save_fig()` / `save_code()`.
+- Exploratory analysis output (figures, code snippets, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()`.
 - `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `PI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`), so non-secret config like dataset paths is fine to commit.
 
@@ -55,10 +59,13 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 
 LLM agents analyse data via code execution + CLI, not just GUI remote control.
 `common/explore.py` provides a minimal surface: `load_dataset(name)` (config → loaders
-in one call), `save_fig(fig, label)` (saves to `data/scratch/figures/<label>.png`),
-`save_code(label, content)` (saves to `data/scratch/code/<label>.py`),
-`dataset_summary(name)` (columns, dtypes, row counts per session). Dataset directories
-are read-only; all output goes to `data/scratch/`. Use `python -m llm_bridge list-datasets`
+in one call), `save_fig(name, fig, label)` (saves to `<work_dir>/figures/<label>.png`),
+`save_code(name, label, content)` (saves to `<work_dir>/code/<label>.py`),
+`dataset_summary(name)` (columns, dtypes, row counts per session). Output goes to the
+dataset's `work_dir` (default `<dataset_dir>/_work`, set in `myanalysis.toml`); the
+sidecar `myanalysis.toml` and `work_dir` are created on first save. Measurement files
+(CSV etc.) are never modified — but a hand-set `work_dir` may place new output files
+(PNG/PY) in any subdirectory of the dataset dir. Use `python -m llm_bridge list-datasets`
 to discover registered dataset names.
 
 ## State

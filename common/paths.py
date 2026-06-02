@@ -51,10 +51,3 @@ def batch_dir(name: str) -> Path:
     p = analysis_out_dir(name) / "batch"
     p.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def scratch_dir() -> Path:
-    """Return data/scratch/, creating it if missing."""
-    p = repo_root() / "data" / "scratch"
-    p.mkdir(parents=True, exist_ok=True)
-    return p

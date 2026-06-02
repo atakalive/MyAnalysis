@@ -13,7 +13,7 @@ import pytest
 
 import common.explore as explore
 import llm_bridge.__main__ as bridge_main
-from common.paths import scratch_dir, validate_name
+from common.paths import validate_name
 
 
 @pytest.fixture()
@@ -89,40 +89,43 @@ def test_load_dataset_empty_raises(monkeypatch, tmp_path):
 
 # ---- save_fig ----
 
-def test_save_fig_creates_file(fake_roots):
+def test_save_fig_creates_file(monkeypatch, tmp_path):
     from matplotlib.figure import Figure
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
     fig = Figure()
     fig.add_subplot(111).plot([0, 1], [0, 1])
 
-    path = explore.save_fig(fig, "test_out")
+    path = explore.save_fig("ds", fig, "test_out")
 
-    expected = fake_roots / "data" / "scratch" / "figures" / "test_out.png"
+    expected = tmp_path / "_work" / "figures" / "test_out.png"
     assert path == expected
     assert expected.is_file()
     assert expected.stat().st_size > 0
 
 
 @pytest.mark.parametrize("label", ["", "a/b", "a\\b", ".", "..", "has\0nul"])
-def test_save_fig_invalid_labels(fake_roots, label):
+def test_save_fig_invalid_labels(monkeypatch, tmp_path, label):
     from matplotlib.figure import Figure
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
     fig = Figure()
     with pytest.raises(ValueError):
-        explore.save_fig(fig, label)
+        explore.save_fig("ds", fig, label)
 
 
-def test_save_fig_overwrites(fake_roots):
+def test_save_fig_overwrites(monkeypatch, tmp_path):
     from matplotlib.figure import Figure
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
 
     fig1 = Figure(figsize=(2, 2))
     fig1.add_subplot(111).plot([0, 1], [0, 1])
-    explore.save_fig(fig1, "dup")
+    explore.save_fig("ds", fig1, "dup")
 
-    expected = fake_roots / "data" / "scratch" / "figures" / "dup.png"
+    expected = tmp_path / "_work" / "figures" / "dup.png"
     first_size = expected.stat().st_size
 
     fig2 = Figure(figsize=(8, 8))
     fig2.add_subplot(111).plot([0, 1], [1, 0])
-    path = explore.save_fig(fig2, "dup")
+    path = explore.save_fig("ds", fig2, "dup")
 
     assert path == expected
     assert expected.is_file()
@@ -131,18 +134,20 @@ def test_save_fig_overwrites(fake_roots):
 
 # ---- save_code ----
 
-def test_save_code_creates_file(fake_roots):
-    path = explore.save_code("snippet", "print('hello')")
-    expected = fake_roots / "data" / "scratch" / "code" / "snippet.py"
+def test_save_code_creates_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    path = explore.save_code("ds", "snippet", "print('hello')")
+    expected = tmp_path / "_work" / "code" / "snippet.py"
     assert path == expected
     assert expected.is_file()
     assert expected.read_text(encoding="utf-8") == "print('hello')"
 
 
 @pytest.mark.parametrize("label", ["", "a/b", "a\\b", ".", "..", "has\0nul"])
-def test_save_code_invalid_labels(fake_roots, label):
+def test_save_code_invalid_labels(monkeypatch, tmp_path, label):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
     with pytest.raises(ValueError):
-        explore.save_code(label, "x")
+        explore.save_code("ds", label, "x")
 
 
 # ---- dataset_summary ----
@@ -175,14 +180,6 @@ def test_dataset_summary_empty_raises(monkeypatch, tmp_path):
     monkeypatch.setattr("common.loaders.load_csv_per_subdir", lambda **kw: [])
     with pytest.raises(FileNotFoundError):
         explore.dataset_summary("test")
-
-
-# ---- scratch_dir ----
-
-def test_scratch_dir_creates(fake_roots):
-    p = scratch_dir()
-    assert p == fake_roots / "data" / "scratch"
-    assert p.is_dir()
 
 
 # ---- validate_name ----

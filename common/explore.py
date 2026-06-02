@@ -1,4 +1,4 @@
-"""Exploratory analysis helpers: load, summarise, and save scratch figures/code."""
+"""Exploratory analysis helpers: load, summarise, and save figures/code to a dataset's work_dir."""
 from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,28 +45,31 @@ def load_dataset(
     return sessions
 
 
-def save_fig(fig: Figure, label: str) -> Path:
-    """図を data/scratch/figures/<label>.png に保存し、パスを返す。
+def save_fig(name: str, fig: Figure, label: str) -> Path:
+    """図を <dataset work_dir>/figures/<label>.png に保存し、パスを返す。
 
+    work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。
     label のバリデーション: common.paths.validate_name を使用。
     figは save 後に close される（core/figures.save の仕様）。
 
     Returns: 保存先の Path（絶対パス）。
 
     Raises:
-        ValueError: label が不正。
+        ValueError: label が不正、または work_dir 設定が不正。
     """
-    from common.paths import scratch_dir, validate_name
+    from common.paths import validate_name
+    from dataset_config import get_work_dir
     from core.figures import save
     validate_name(label)
-    path = scratch_dir() / "figures" / f"{label}.png"
+    path = get_work_dir(name) / "figures" / f"{label}.png"
     save(fig, path)
     return path
 
 
-def save_code(label: str, content: str) -> Path:
-    """ad-hocコードスニペットを data/scratch/code/<label>.py に保存し、パスを返す。
+def save_code(name: str, label: str, content: str) -> Path:
+    """ad-hocコードスニペットを <dataset work_dir>/code/<label>.py に保存し、パスを返す。
 
+    work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。
     label のバリデーション: common.paths.validate_name を使用。
     label にファイル拡張子は含めない（.py は自動付与）。
     content は UTF-8 で書き出す。既存ファイルは上書き。
@@ -74,11 +77,12 @@ def save_code(label: str, content: str) -> Path:
     Returns: 保存先の Path（絶対パス）。
 
     Raises:
-        ValueError: label が不正。
+        ValueError: label が不正、または work_dir 設定が不正。
     """
-    from common.paths import scratch_dir, validate_name
+    from common.paths import validate_name
+    from dataset_config import get_work_dir
     validate_name(label)
-    path = scratch_dir() / "code" / f"{label}.py"
+    path = get_work_dir(name) / "code" / f"{label}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
