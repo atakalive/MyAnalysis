@@ -3,12 +3,29 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
-from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtGui import QPixmap, QResizeEvent
 
 
-_PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-            "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+_PALETTE = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+]
 
 
 class SelectorPanel(QWidget):
@@ -70,13 +87,13 @@ class TrajectoryPanel(QWidget):
             raise ValueError(f"len(x) != len(y): {len(x)} vs {len(y)}")
         N = len(x)
         if color_by is not None and len(color_by) != N:
-            raise ValueError(
-                f"len(color_by) != len(x): {len(color_by)} vs {N}"
-            )
+            raise ValueError(f"len(color_by) != len(x): {len(color_by)} vs {N}")
         if highlights is not None:
             for i in highlights:
                 if not isinstance(i, int):
-                    raise ValueError(f"highlight index must be int, got {type(i).__name__}: {i}")
+                    raise ValueError(
+                        f"highlight index must be int, got {type(i).__name__}: {i}"
+                    )
                 if not (0 <= i < N):
                     raise ValueError(f"highlight index out of range: {i}")
 
@@ -191,6 +208,6 @@ class FigurePanel(QWidget):
         )
         self._label.setPixmap(scaled)
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_display()

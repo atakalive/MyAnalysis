@@ -6,11 +6,16 @@ Public entry points (called from GUI side):
 
 Both return iterables of QFileSystemWatcher etc. — caller must hold references.
 """
+
 import importlib.util
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 from common.paths import analyses_root
+
+if TYPE_CHECKING:
+    from gui.window import ToolWindow
 from llm_bridge import state, snapshots, commands, annotations
 from llm_bridge.paths import active_state_path
 
@@ -26,7 +31,9 @@ def _write_active(window) -> None:
     name = tab.name if tab is not None else None
     p = active_state_path()
     tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"active_tab": name}, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(
+        json.dumps({"active_tab": name}, ensure_ascii=False), encoding="utf-8"
+    )
     tmp.replace(p)
 
 
@@ -53,6 +60,7 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
     reads large files. Analyses that want caching should memoize inside
     `load()` themselves.
     """
+
     def _add_tab(name: str) -> str:
         _validate_analysis_name(name)
         root = analyses_root().resolve()
@@ -81,10 +89,11 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         tab = mod.build_tab(window, data)
         window.add_tab(tab)
         return f"added:{name}"
+
     return _add_tab
 
 
-def _make_show_handler(window) -> Callable[..., str]:
+def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     """Build the `show` window verb handler.
 
     Displays an arbitrary image file (PNG etc.) in a generic viewer tab —
@@ -97,11 +106,15 @@ def _make_show_handler(window) -> Callable[..., str]:
     "figure" key is missing or a non-FigurePanel raises LookupError rather than
     being silently destroyed.
     """
+
     def _show(path: str, name: str = "viewer") -> str:
         p = Path(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
-        from gui.panels import FigurePanel  # 関数内 import（CLI に PySide6 を引き込まない）
+        from gui.panels import (
+            FigurePanel,
+        )  # 関数内 import（CLI に PySide6 を引き込まない）
+
         if window.set_active_tab(name):
             tab = window.active_tab()
             try:
@@ -111,22 +124,26 @@ def _make_show_handler(window) -> Callable[..., str]:
                     f"tab {name!r} exists but is not a show-viewer tab"
                 ) from None
             if not isinstance(fig, FigurePanel):
-                raise LookupError(
-                    f"tab {name!r} exists but is not a show-viewer tab"
-                )
+                raise LookupError(f"tab {name!r} exists but is not a show-viewer tab")
             fig.set_path(p)
             return f"updated:{name}"
-        from gui.tab import AnalysisTab  # 関数内 import（CLI に PySide6 を引き込まない）
+        from gui.tab import (
+            AnalysisTab,
+        )  # 関数内 import（CLI に PySide6 を引き込まない）
+
         tab = AnalysisTab(name)
         panel = FigurePanel()
         tab.add_panel("figure", panel, "left", stretch=1)
-        tab.register_command("set-split",
-            lambda left, right: tab.set_split_ratio(float(left), float(right)))
+        tab.register_command(
+            "set-split",
+            lambda left, right: tab.set_split_ratio(float(left), float(right)),
+        )
         tab.register_command("snapshot", lambda: None)
         window.add_tab(tab)
         window.set_active_tab(name)
         panel.set_path(p)
         return f"shown:{name}"
+
     return _show
 
 
@@ -134,11 +151,9 @@ def attach_window(window) -> list[object]:
     """Wire llm_bridge to a ToolWindow. Returns watchers to keep alive."""
     # Built-in window verbs.
     window.register_command("add-tab", _make_add_tab_handler(window))
-    window.register_command("close-tab",
-        lambda name: window.close_tab(name))
+    window.register_command("close-tab", lambda name: window.close_tab(name))
     window.register_command("list-tabs", lambda: window.tab_names())
-    window.register_command("set-active-tab",
-        lambda name: window.set_active_tab(name))
+    window.register_command("set-active-tab", lambda name: window.set_active_tab(name))
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
 
@@ -170,17 +185,22 @@ def attach_tab(tab, state_provider: Callable[[], dict]) -> list[object]:
     # If gui starts consuming `_state_provider` later, revisit this.
 
     # Built-in tab verbs
-    tab.register_command("set-split",
-        lambda left, right: tab.set_split_ratio(float(left), float(right)))
-    tab.register_command("snapshot",
-        lambda: tab.take_snapshot())
-    tab.register_command("refresh-state",
-        lambda: state_w(state_provider()))
+    tab.register_command(
+        "set-split", lambda left, right: tab.set_split_ratio(float(left), float(right))
+    )
+    tab.register_command("snapshot", lambda: tab.take_snapshot())
+    tab.register_command("refresh-state", lambda: state_w(state_provider()))
 
     # Annotations watcher
     ann_watcher = annotations.start_watcher(tab)
     return [ann_watcher]
 
 
-__all__ = ["state", "snapshots", "commands", "annotations",
-           "attach_window", "attach_tab"]
+__all__ = [
+    "state",
+    "snapshots",
+    "commands",
+    "annotations",
+    "attach_window",
+    "attach_tab",
+]
