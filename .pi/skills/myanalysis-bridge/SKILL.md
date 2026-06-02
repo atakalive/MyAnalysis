@@ -78,8 +78,21 @@ The primary analysis workflow is code execution, not GUI driving.
 3. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → columns, dtypes, row counts.
 4. **Compute**: arbitrary Python on the loaded DataFrames.
 5. **Plot**: `from common.explore import save_fig; save_fig("<name>", fig, "<label>")` → `<work_dir>/figures/<label>.png`.
-6. **Observe**: `python -m llm_bridge window show path=<save_fig の戻り値> --wait` でGUIのタブに表示。
-   または保存した PNG を直接開いて確認。
+6. **Observe** — save_fig の戻り値（絶対パス）で図を確認する。2 つの経路がある：
+   - **Self-view（推奨）**: vision 対応モデル、または pi-vision-proxy が有効なら、
+     `read <save_fig が返した絶対パス>` で図を視認できる（vision proxy 経由でテキストモデルにも説明が注入される）。
+     vision-proxy 導入時は `analyze_image` で領域クロップの再クエリも可
+     （ただし vision-proxy のファイルアクセス制約により、外部データセット配下のパスでは
+     失敗する場合がある。その場合 read による Self-view のみで運用する）。
+     **フォールバック判定**: read 後の自身の応答で図の既知特徴（傾き・ピーク位置等）を
+     具体的に説明できない場合、または非 vision 警告・エラーが出た場合は
+     vision が機能していないので Human-view に切り替える。
+   - **Human-view（フォールバック）**: vision 未設定または Self-view 失敗時は
+     `python -m llm_bridge window show path=<絶対パス> --wait` で GUI に表示し、
+     ユーザーに見てもらい判断を仰ぐ。
+   - **数値ダブルチェック**: vision による図の解釈はハルシネーションのリスクがある。
+     重要な判断には Compute ステップで統計量（最大値、最小値、平均値等）を数値出力し、
+     視覚的解釈と突合すること。
 7. **Iterate**: repeat 4-6 until the question is answered.
 8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
 9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate work_dir code into `analyses/<name>/analysis.py`.
@@ -90,10 +103,33 @@ never modified; the tools only write the `myanalysis.toml` sidecar and files und
 `work_dir`. A hand-set `work_dir` may place new output (PNG/PY) in any subdirectory
 of the dataset dir.
 
+### Visual feedback setup
+
+Self-view (step 6) requires one of:
+- **(a)** `[pi].model` が vision 対応モデルであること、**または**
+- **(b)** vision-proxy 拡張の導入:
+  `pi install npm:pi-vision-proxy`（pi の package 登録が必要なため `npm install -g` 単体では不可）
+  ＋ env `PI_VISION_PROXY_MODEL=provider/model-id` を設定。
+
+いずれの場合も：
+- そのモデルのプロバイダ API キーが **pi のモデルレジストリに登録済み**であること
+  （vision-proxy は鍵を別管理せず pi レジストリを使う）。
+- `read` ツールが有効であること（`tools=""` = 全ツール許可 = pi 既定で OK）。
+- vision-proxy 利用時は初回に **data-egress consent** が求められる場合がある。
+  consent 済みでない場合 Self-view は動作しない。
+- vision-proxy は既定で画像に加え直近会話コンテキストも vision provider に送信する。
+  測定データ由来の図を扱うため、必要に応じ `PI_VISION_PROXY_INCLUDE_CONTEXT=false` で
+  コンテキスト送信を無効化できる。
+
 ### Visual feedback capability
 - Result: **not yet verified**
-- Verified: —
-- Environment: pi version=—, model=—, provider=—, images.blockImages=—
+- pi version: —
+- Primary model: —  (provider/model-id)
+- Primary model vision: — (yes/no)
+- vision-proxy: — (installed: yes/no, mode=fallback|always|off, model=provider/model-id)
+- vision-proxy consent: — (granted: yes/no/not-required)
+- PI_VISION_PROXY_INCLUDE_CONTEXT: — (true/false)
+- Observation: — (verified: yes/no, what was correctly read)
 
 ## Datasets
 

@@ -49,6 +49,8 @@ smoke test), `pi` (pi-coding-agent subprocess).
   skill to drive the GUI live. **External dependency**: Node + pi
   (`npm i -g @mariozechner/pi-coding-agent`). On Windows pi additionally needs a
   bash shell (Git Bash) for its tool execution.
+- **Visual feedback** (chat self-view): requires a vision-capable `[pi].model`
+  or the pi-vision-proxy extension (`PI_VISION_PROXY_MODEL`).
 
 ## llm_bridge — cross-platform
 

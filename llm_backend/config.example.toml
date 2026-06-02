@@ -13,3 +13,9 @@ model = ""           # 任意 --model
 provider = ""        # 任意 --provider
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
                      #   "read,write"=許可リスト, "none"=--no-tools)
+
+# ── Visual feedback (Observe self-view) ──
+# 図の self-view には次のいずれかが必要:
+#   (a) model に vision 対応モデルを指定する
+#   (b) pi-vision-proxy を導入し PI_VISION_PROXY_MODEL を設定する
+# read ツールを無効化しないこと (画像視認に必要。tools="" で全許可=既定)。
