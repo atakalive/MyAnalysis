@@ -41,7 +41,8 @@ asynchronously.
 
 - `python -m llm_bridge window <verb> [k=v ...] [--wait]`
   Window verbs: `add-tab name=<analysis>`, `close-tab name=<tab>`,
-  `set-active-tab name=<tab>`, `toggle-chat-float`.
+  `set-active-tab name=<tab>`, `show path=<abs> [name=<tab>]`,
+  `toggle-chat-float`.
 - `python -m llm_bridge tab <name> <verb> [k=v ...] [--wait]`
   Built-in tab verbs: `set-split left=<n> right=<n>`, `snapshot`,
   `refresh-state`. Analyses may register more (`add-panel`, `remove-panel`, and
@@ -77,7 +78,8 @@ The primary analysis workflow is code execution, not GUI driving.
 3. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → columns, dtypes, row counts.
 4. **Compute**: arbitrary Python on the loaded DataFrames.
 5. **Plot**: `from common.explore import save_fig; save_fig("<name>", fig, "<label>")` → `<work_dir>/figures/<label>.png`.
-6. **Observe**: open the saved PNG to check the result (if visual feedback is available).
+6. **Observe**: `python -m llm_bridge window show path=<save_fig の戻り値> --wait` でGUIのタブに表示。
+   または保存した PNG を直接開いて確認。
 7. **Iterate**: repeat 4-6 until the question is answered.
 8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
 9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate work_dir code into `analyses/<name>/analysis.py`.

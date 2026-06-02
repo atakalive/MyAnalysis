@@ -9,6 +9,7 @@ Both return iterables of QFileSystemWatcher etc. — caller must hold references
 import importlib.util
 import json
 from collections.abc import Callable
+from pathlib import Path
 from common.paths import analyses_root
 from llm_bridge import state, snapshots, commands, annotations
 from llm_bridge.paths import active_state_path
@@ -83,6 +84,52 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
     return _add_tab
 
 
+def _make_show_handler(window) -> Callable[..., str]:
+    """Build the `show` window verb handler.
+
+    Displays an arbitrary image file (PNG etc.) in a generic viewer tab —
+    no analysis module required. The intended flow: Claude saves a figure
+    via `common.explore.save_fig` (→ absolute path) then `show`s that path.
+
+    Existing-tab handling is structure-based, not provenance-based: a tab is
+    treated as a show-viewer if it has a `FigurePanel` under key "figure".
+    Any such tab (even a normal analysis tab) is updated in place; a tab whose
+    "figure" key is missing or a non-FigurePanel raises LookupError rather than
+    being silently destroyed.
+    """
+    def _show(path: str, name: str = "viewer") -> str:
+        p = Path(path)
+        if not p.is_file():
+            raise LookupError(f"not a file: {path}")
+        from gui.panels import FigurePanel  # 関数内 import（CLI に PySide6 を引き込まない）
+        if window.set_active_tab(name):
+            tab = window.active_tab()
+            try:
+                fig = tab.panel("figure")
+            except KeyError:
+                raise LookupError(
+                    f"tab {name!r} exists but is not a show-viewer tab"
+                ) from None
+            if not isinstance(fig, FigurePanel):
+                raise LookupError(
+                    f"tab {name!r} exists but is not a show-viewer tab"
+                )
+            fig.set_path(p)
+            return f"updated:{name}"
+        from gui.tab import AnalysisTab  # 関数内 import（CLI に PySide6 を引き込まない）
+        tab = AnalysisTab(name)
+        panel = FigurePanel()
+        tab.add_panel("figure", panel, "left", stretch=1)
+        tab.register_command("set-split",
+            lambda left, right: tab.set_split_ratio(float(left), float(right)))
+        tab.register_command("snapshot", lambda: None)
+        window.add_tab(tab)
+        window.set_active_tab(name)
+        panel.set_path(p)
+        return f"shown:{name}"
+    return _show
+
+
 def attach_window(window) -> list[object]:
     """Wire llm_bridge to a ToolWindow. Returns watchers to keep alive."""
     # Built-in window verbs.
@@ -93,6 +140,7 @@ def attach_window(window) -> list[object]:
     window.register_command("set-active-tab",
         lambda name: window.set_active_tab(name))
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
+    window.register_command("show", _make_show_handler(window))
 
     # Active tab tracker.
     window.tab_changed.connect(lambda _i: _write_active(window))

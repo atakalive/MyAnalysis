@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "list-commands":
         if args.name is None:
             print("window verbs (built-in by llm_bridge):")
-            for v in ("add-tab", "close-tab", "set-active-tab",
+            for v in ("add-tab", "close-tab", "set-active-tab", "show",
                       "toggle-chat-float"):
                 print(f"  {v}")
             return 0

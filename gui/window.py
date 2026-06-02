@@ -15,7 +15,7 @@ from gui.tab import AnalysisTab
 
 RESERVED_WINDOW_VERBS = frozenset([
     "add-tab", "close-tab", "list-tabs", "set-active-tab",
-    "toggle-chat-float",
+    "show", "toggle-chat-float",
 ])
 
 

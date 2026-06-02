@@ -2,8 +2,9 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QPixmap
 
 
 _PALETTE = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
@@ -147,3 +148,49 @@ class ImagePanel(QWidget):
         for item in self._notes:
             view.removeItem(item)
         self._notes.clear()
+
+
+class FigurePanel(QWidget):
+    """汎用画像ビューア。任意の PNG 等を忠実フィット表示する（QLabel+QPixmap）。
+
+    軸付きの ImagePanel と違い、チャート PNG を転置・反転せず原寸比で表示。
+    Pillow/pyqtgraph/numpy 不要 — 依存は PySide6 のみ。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        self._label = QLabel()
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
+        self._label.setMinimumSize(1, 1)
+        layout.addWidget(self._label)
+        self._pixmap: QPixmap | None = None
+
+    def set_path(self, path: str | Path) -> None:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            self._label.setText(f"Cannot load: {path}")
+            self._pixmap = None
+            return
+        self._pixmap = pixmap
+        self._update_display()
+
+    def _update_display(self) -> None:
+        if self._pixmap is None:
+            return
+        size = self._label.size()
+        if size.width() < 2 or size.height() < 2:
+            return
+        scaled = self._pixmap.scaled(
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._label.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_display()
