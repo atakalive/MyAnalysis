@@ -107,7 +107,8 @@ def register_dataset(
     if config_path is None:
         config_path = Path(__file__)
 
-    source = config_path.read_text(encoding="utf-8")
+    with open(config_path, encoding="utf-8", newline="") as f:
+        source = f.read()
     tree = ast.parse(source)
 
     node = None
@@ -136,13 +137,15 @@ def register_dataset(
 
     block = _serialize_datasets(registry, annotation)
 
+    newline = "\r\n" if "\r\n" in source else "\n"
     lines = source.splitlines(keepends=True)
-    new_lines = [l + "\n" for l in block.splitlines()]
+    new_lines = [l + newline for l in block.splitlines()]
     # ast line numbers are 1-based; slice is 0-based.
     lines[node.lineno - 1 : node.end_lineno] = new_lines
 
     tmp = config_path.with_suffix(".py.tmp")
-    tmp.write_text("".join(lines), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(lines))
     tmp.replace(config_path)
 
     return {"name": name, "host": host, "path": path, "created": created}

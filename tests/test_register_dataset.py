@@ -168,6 +168,22 @@ def test_reserved_name_accepted_for_dataset(cfg):
     assert data["con"] == {"H1": r"G:\foo"}
 
 
+def test_crlf_line_endings_preserved(tmp_path):
+    crlf_source = _TEMPLATE.replace("\n", "\r\n")
+    p = tmp_path / "config.py"
+    p.write_bytes(crlf_source.encode("utf-8"))
+    config.register_dataset("foo", r"G:\foo", host="H1", config_path=p)
+    result = p.read_bytes()
+    assert b"\r\n" in result
+    assert b"\n" not in result.replace(b"\r\n", b"")
+
+
+def test_lf_line_endings_preserved(cfg):
+    config.register_dataset("foo", r"G:\foo", host="H1", config_path=cfg)
+    result = cfg.read_bytes()
+    assert b"\r\n" not in result
+
+
 def test_does_not_mutate_global_datasets(cfg):
     before = {k: dict(v) for k, v in config.DATASETS.items()}
     config.register_dataset("brand_new_xyz", r"G:\foo", host="H1", config_path=cfg)

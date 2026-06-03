@@ -56,8 +56,6 @@ class ToolWindow(QMainWindow):
         open_action.triggered.connect(self._open_analysis)
         register_action = file_menu.addAction("データセット登録…")
         register_action.triggered.connect(self._register_dataset)
-        close_action = file_menu.addAction("タブを閉じる")
-        close_action.triggered.connect(self._close_current_tab)
         file_menu.addSeparator()
         quit_action = file_menu.addAction("終了")
         quit_action.triggered.connect(self.close)
@@ -226,11 +224,6 @@ class ToolWindow(QMainWindow):
         QMessageBox.information(
             self, "登録完了", f"データセット '{name}' を登録しました。"
         )
-
-    def _close_current_tab(self) -> None:
-        tab = self.active_tab()
-        if tab is not None:
-            self.close_tab(tab.name)
 
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)
