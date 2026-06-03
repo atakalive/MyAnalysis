@@ -14,6 +14,10 @@ DATASETS: dict[str, dict[str, str]] = {
         "HOST_A": r"G:\同期\測定\000000\example",
         "HOST_B": r"H:\同期\測定\000000\example",
     },
+    "dataset_b": {
+        "HOST_A": r"G:\同期\測定\000000",
+        "HOST_B": r"H:\同期\測定\000000",
+    },
 }
 
 
