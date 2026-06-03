@@ -1,7 +1,9 @@
 """CLI for LLM operation: python -m llm_bridge <subcommand> ..."""
 import argparse
 import json
+import socket
 import sys
+from pathlib import Path
 
 from common.paths import analyses_root
 from llm_bridge import state, annotations, commands
@@ -49,6 +51,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("active", help="Print currently active tab name")
     sub.add_parser("list-analyses", help="List analyses/ subdirs")
     sub.add_parser("list-datasets", help="List registered dataset names")
+
+    p_reg = sub.add_parser("register-dataset", help="Register a dataset in config.py")
+    p_reg.add_argument("name", help="Dataset name (identifier format)")
+    p_reg.add_argument("path", help="Absolute path to dataset directory")
+    p_reg.add_argument("--host", default=None, help="Hostname (default: current host)")
+    p_reg.add_argument(
+        "--with-analysis", nargs="?", const="", default=None,
+        metavar="ANALYSIS_NAME",
+        help="Also create analysis scaffold (default name = dataset name)",
+    )
 
     p_lc = sub.add_parser("list-commands", help="List registered verbs (informational)")
     p_lc.add_argument("name", nargs="?")
@@ -114,6 +126,42 @@ def main(argv: list[str] | None = None) -> int:
         from config import DATASETS
         for name in sorted(DATASETS):
             print(name)
+        return 0
+
+    if args.cmd == "register-dataset":
+        from config import register_dataset
+
+        try:
+            result = register_dataset(name=args.name, path=args.path, host=args.host)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+        is_current_host = (
+            args.host is None
+            or args.host.upper() == socket.gethostname().upper()
+        )
+        if is_current_host and not Path(args.path).exists():
+            print(
+                f"warning: path does not exist on this host: {args.path}",
+                file=sys.stderr,
+            )
+
+        if args.with_analysis is not None:
+            from newanalysis.__main__ import create_analysis
+
+            analysis_name = args.with_analysis or args.name
+            try:
+                create_analysis(analysis_name, dataset=args.name)
+                print(f"created analyses/{analysis_name}/")
+            except (ValueError, FileExistsError) as e:
+                print(f"error creating analysis: {e}", file=sys.stderr)
+
+        verb = "registered" if result["created"] else "updated"
+        print(
+            f"{verb} dataset {result['name']!r} for host "
+            f"{result['host']!r}: {result['path']}"
+        )
         return 0
 
     if args.cmd == "list-commands":

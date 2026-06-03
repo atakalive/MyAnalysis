@@ -15,43 +15,11 @@
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import sys
+from pathlib import Path
 
-from common.paths import analyses_root
-
-# 英小文字始まり + 英小文字・数字・アンダースコアのみ。
-# コードインジェクション・Windows 予約文字・`.`/`_` 始まり・空白・パス区切りを排除する。
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-
-# Windows 予約デバイス名 (大文字小文字を区別しないため小文字でも拒否)。
-_WINDOWS_RESERVED = frozenset(
-    {
-        "con", "prn", "aux", "nul",
-        "com1", "com2", "com3", "com4", "com5",
-        "com6", "com7", "com8", "com9",
-        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
-        "lpt6", "lpt7", "lpt8", "lpt9",
-    }
-)
-
-
-def _validate(value: str, *, kind: str) -> None:
-    """Validate name/dataset; print to stderr + sys.exit(1) on failure."""
-    if not _NAME_RE.match(value):
-        print(
-            f"error: invalid {kind}: {value!r} "
-            f"(must match ^[a-z][a-z0-9_]*$)",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    if kind == "name" and value in _WINDOWS_RESERVED:
-        print(
-            f"error: invalid {kind}: {value!r} is a Windows reserved device name",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+from common.paths import analyses_root, validate_identifier_name
 
 
 _ANALYSIS_TEMPLATE = '''\
@@ -195,6 +163,38 @@ def _render_readme(name: str) -> str:
     return _README_TEMPLATE.replace("__GEN_NAME__", name)
 
 
+def create_analysis(
+    name: str, dataset: str | None = None,
+) -> tuple[Path, Path]:
+    """Create analysis scaffold. Returns (analysis_py_path, readme_path).
+
+    Raises ValueError (invalid name/dataset), FileExistsError (already exists).
+    Rolls back partial creation on any exception.
+    """
+    validate_identifier_name(name, check_reserved=True)
+    if dataset is not None:
+        validate_identifier_name(dataset, check_reserved=False)
+
+    target_dir = analyses_root() / name
+    if target_dir.exists():
+        raise FileExistsError(f"analyses/{name}/ already exists")
+
+    target_dir.mkdir(parents=True)
+    try:
+        analysis_path = target_dir / "analysis.py"
+        readme_path = target_dir / "README.md"
+        analysis_path.write_text(_render_analysis(name, dataset), encoding="utf-8")
+        readme_path.write_text(_render_readme(name), encoding="utf-8")
+    except BaseException:
+        # 不完全な生成物が残ると次回の「already exists」チェックを妨げる。
+        # ignore_errors=True はロールバック自体の失敗 (ファイルロック等) で
+        # クラッシュしないための防御。削除対象は今回作成した analyses/<name>/ のみ。
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+
+    return analysis_path, readme_path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m newanalysis",
@@ -209,27 +209,11 @@ def main(argv: list[str] | None = None) -> None:
     name: str = args.name.strip()
     dataset: str | None = args.dataset
 
-    _validate(name, kind="name")
-    if dataset is not None:
-        _validate(dataset, kind="dataset")
-
-    target_dir = analyses_root() / name
-    if target_dir.exists():
-        print(f"error: analyses/{name}/ already exists", file=sys.stderr)
-        sys.exit(1)
-
-    target_dir.mkdir(parents=True)
     try:
-        analysis_path = target_dir / "analysis.py"
-        readme_path = target_dir / "README.md"
-        analysis_path.write_text(_render_analysis(name, dataset), encoding="utf-8")
-        readme_path.write_text(_render_readme(name), encoding="utf-8")
-    except BaseException:
-        # 不完全な生成物が残ると次回の「already exists」チェックを妨げる。
-        # ignore_errors=True はロールバック自体の失敗 (ファイルロック等) で
-        # クラッシュしないための防御。削除対象は今回作成した analyses/<name>/ のみ。
-        shutil.rmtree(target_dir, ignore_errors=True)
-        raise
+        create_analysis(name, dataset)
+    except (ValueError, FileExistsError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"created analyses/{name}/analysis.py")
     print(f"created analyses/{name}/README.md")

@@ -3,6 +3,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget,
+    QFileDialog,
     QInputDialog,
     QLabel,
     QMainWindow,
@@ -53,6 +54,10 @@ class ToolWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("ファイル(&F)")
         open_action = file_menu.addAction("解析を開く…")
         open_action.triggered.connect(self._open_analysis)
+        register_action = file_menu.addAction("データセット登録…")
+        register_action.triggered.connect(self._register_dataset)
+        close_action = file_menu.addAction("タブを閉じる")
+        close_action.triggered.connect(self._close_current_tab)
         file_menu.addSeparator()
         quit_action = file_menu.addAction("終了")
         quit_action.triggered.connect(self.close)
@@ -161,6 +166,71 @@ class ToolWindow(QMainWindow):
         close_action = menu.addAction("タブを閉じる")
         close_action.triggered.connect(lambda: self.close_tab(name))
         menu.exec(tab_bar.mapToGlobal(pos))
+
+    def _register_dataset(self) -> None:
+        import socket
+
+        import config
+        from common.paths import validate_identifier_name
+        from newanalysis.__main__ import create_analysis
+
+        name, ok = QInputDialog.getText(self, "データセット登録", "データセット名:")
+        if not ok or not name:
+            return
+        try:
+            validate_identifier_name(name, check_reserved=False)
+        except ValueError as e:
+            QMessageBox.critical(self, "登録エラー", str(e))
+            return
+
+        path = QFileDialog.getExistingDirectory(self, "データセットディレクトリを選択")
+        if not path:
+            return
+
+        try:
+            config.register_dataset(name, path)
+        except Exception as e:
+            QMessageBox.critical(self, "登録エラー", str(e))
+            return
+
+        # 成功時のみメモリ poke: 直後に「解析を開く」しても get_dataset_dir が成功する。
+        host = socket.gethostname().upper()
+        config.DATASETS.setdefault(name, {})[host] = path
+
+        reply = QMessageBox.question(
+            self, "解析雛形の作成", "解析雛形も作成しますか?"
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            analysis_name, ok = QInputDialog.getText(
+                self, "解析雛形の作成", "解析名:", text=name
+            )
+            if ok and analysis_name:
+                try:
+                    create_analysis(analysis_name, dataset=name)
+                except (ValueError, FileExistsError) as e:
+                    QMessageBox.warning(
+                        self,
+                        "解析雛形の作成に失敗",
+                        f"データセット '{name}' の登録は完了しました。\n"
+                        f"解析雛形の作成に失敗しました: {e}",
+                    )
+                    return
+                QMessageBox.information(
+                    self,
+                    "登録完了",
+                    f"データセット '{name}' を登録し、"
+                    f"解析雛形 '{analysis_name}' を作成しました。",
+                )
+                return
+
+        QMessageBox.information(
+            self, "登録完了", f"データセット '{name}' を登録しました。"
+        )
+
+    def _close_current_tab(self) -> None:
+        tab = self.active_tab()
+        if tab is not None:
+            self.close_tab(tab.name)
 
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)

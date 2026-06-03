@@ -146,3 +146,59 @@ def test_rollback_removes_dir_on_write_failure(fake_roots, monkeypatch):
     assert not (fake_roots / "demo_probe").exists()
     # 親 analyses/ は削除されない。
     assert fake_roots.exists()
+
+
+# ---- create_analysis 非終了コア ----
+
+def test_create_analysis_returns_paths(fake_roots):
+    analysis_path, readme_path = gen.create_analysis("demo_probe")
+    assert analysis_path.is_file()
+    assert readme_path.is_file()
+    assert analysis_path == fake_roots / "demo_probe" / "analysis.py"
+    assert readme_path == fake_roots / "demo_probe" / "README.md"
+
+
+def test_create_analysis_dataset_none_ok(fake_roots):
+    # dataset=None で TypeError なく正常完了する。
+    analysis_path, _ = gen.create_analysis("demo_probe")
+    assert 'DATASET = ""' in analysis_path.read_text(encoding="utf-8")
+
+
+def test_create_analysis_invalid_name_raises(fake_roots):
+    with pytest.raises(ValueError):
+        gen.create_analysis("Bad")
+    with pytest.raises(ValueError):
+        gen.create_analysis("con")
+
+
+def test_create_analysis_duplicate_raises(fake_roots):
+    gen.create_analysis("demo_probe")
+    with pytest.raises(FileExistsError):
+        gen.create_analysis("demo_probe")
+
+
+# ---- validate_identifier_name ----
+
+def test_validate_identifier_name_ok():
+    from common.paths import validate_identifier_name
+
+    validate_identifier_name("dataset_a")
+    validate_identifier_name("con", check_reserved=False)
+
+
+@pytest.mark.parametrize("name", ["con", "CON", "nul", "com1", "lpt9"])
+def test_validate_identifier_name_reserved(name):
+    from common.paths import validate_identifier_name
+
+    with pytest.raises(ValueError):
+        validate_identifier_name(name, check_reserved=True)
+    # check_reserved=False では予約名も regex を満たせば受理。
+    validate_identifier_name(name.lower(), check_reserved=False)
+
+
+@pytest.mark.parametrize("name", ["Bad", "9x", "_x", "has space", "a-b", "foo\n", ""])
+def test_validate_identifier_name_regex(name):
+    from common.paths import validate_identifier_name
+
+    with pytest.raises(ValueError):
+        validate_identifier_name(name, check_reserved=False)
