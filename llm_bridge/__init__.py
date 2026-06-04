@@ -123,7 +123,7 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     rather than being silently destroyed.
     """
 
-    def _show(path: str, name: str = "viewer", slot=None) -> str:
+    def _show(path: str, name: str = "viewer", slot: str | None = None) -> str:
         p = Path(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
