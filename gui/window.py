@@ -1,11 +1,12 @@
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget,
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QTabWidget,
     QWidget,
@@ -30,6 +31,9 @@ class ToolWindow(QMainWindow):
         self._tabs = QTabWidget()
         self.setCentralWidget(self._tabs)
         self._tabs.currentChanged.connect(self._on_tab_changed)
+        tab_bar = self._tabs.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
         self.statusBar()
 
         self._chat_dock = QDockWidget("Chat", self)
@@ -49,8 +53,6 @@ class ToolWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("ファイル(&F)")
         open_action = file_menu.addAction("解析を開く…")
         open_action.triggered.connect(self._open_analysis)
-        close_action = file_menu.addAction("タブを閉じる")
-        close_action.triggered.connect(self._close_current_tab)
         file_menu.addSeparator()
         quit_action = file_menu.addAction("終了")
         quit_action.triggered.connect(self.close)
@@ -146,10 +148,19 @@ class ToolWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "解析を開けません", str(e))
 
-    def _close_current_tab(self) -> None:
-        tab = self.active_tab()
-        if tab is not None:
-            self.close_tab(tab.name)
+    def _on_tab_context_menu(self, pos: QPoint) -> None:
+        tab_bar = self._tabs.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index < 0:  # タブ以外（空き領域）を右クリックした場合は何もしない
+            return
+        widget = self._tabs.widget(index)
+        if widget is None:
+            return
+        name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
+        menu = QMenu(self)
+        close_action = menu.addAction("タブを閉じる")
+        close_action.triggered.connect(lambda: self.close_tab(name))
+        menu.exec(tab_bar.mapToGlobal(pos))
 
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)
