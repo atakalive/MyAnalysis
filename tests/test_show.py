@@ -293,3 +293,23 @@ def test_cli_list_commands_viewer(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "set-split" in out
     assert called["n"] == 0
+
+
+def test_show_update_marks_dirty(win, png_path, tmp_path, qapp, monkeypatch):
+    """show-update with dataset= must mark the window dirty (reviewer R1 P1)."""
+    import config
+    monkeypatch.setattr(config, "DATASETS", {"myds": {}})
+    monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
+    win.set_session_saver(lambda: ([], []))
+    win.clear_session_dirty()
+
+    win.dispatch_command("show", path=str(png_path), name="v", dataset="myds")
+    win.clear_session_dirty()
+    assert not win.is_session_dirty()
+
+    from PySide6.QtGui import QPixmap
+    p2 = tmp_path / "updated.png"
+    QPixmap(20, 20).save(str(p2))
+    result = win.dispatch_command("show", path=str(p2), name="v", dataset="myds")
+    assert result == "updated:v"
+    assert win.is_session_dirty()

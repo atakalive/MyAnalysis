@@ -195,11 +195,13 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                     ds = str(dataset)
                     tab.session_spec = {"kind": "figure", "name": name, "dataset": ds, "figure": str(p)}
                     session.note_dataset(ds)
+                    window.mark_session_dirty()
                 else:
                     inferred = session.infer_dataset(str(p))
                     if inferred is not None:
                         tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                         session.note_dataset(inferred)
+                        window.mark_session_dirty()
             return f"updated:{name}"
         from gui.tab import (
             AnalysisTab,
