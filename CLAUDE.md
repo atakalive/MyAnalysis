@@ -25,6 +25,11 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 
 Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in `config.py`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
 
+## Git workflow
+
+**`main` ブランチに直接コミットする。feature ブランチを切ってはならない。**
+このリポジトリは `dev` ブランチを持たない `main` 直接運用。review tool の automerge も main に対して動作する。`feat/issue-N-xxx` 等のブランチを作ると automerge 後にゴミとして残る。
+
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
