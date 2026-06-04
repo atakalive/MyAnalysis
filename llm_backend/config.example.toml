@@ -2,7 +2,7 @@
 # config.toml is gitignored; this example is committed.
 
 [backend]
-name = "pi"          # "pi" | "openai" | "mock"
+name = "pi"          # "claude" | "pi" | "openai" | "mock"
 
 [pi]
 # ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
@@ -13,6 +13,25 @@ model = ""           # 任意 --model
 provider = ""        # 任意 --provider
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
                      #   "read,write"=許可リスト, "none"=--no-tools)
+
+[claude_code]
+# Reuses the VS Code Claude Code extension's bundled engine (the `claude`
+# binary under ~/.vscode/extensions/anthropic.claude-code-*/resources/
+# native-binary/). Shares your VS Code login/sessions via ~/.claude.
+# Driven in stream-json mode (NOT `claude -p`), with multi-turn --resume.
+bin = ""             # 省略時は VS Code 拡張同梱バイナリを自動検出
+                     #   (env CLAUDE_CODE_BIN でも上書き可)
+model = ""           # 任意 --model(省略時は ~/.claude の既定モデル)
+permission_mode = "bypassPermissions"
+                     # default|acceptEdits|plan|bypassPermissions
+                     # GUI 駆動(Bash で python -m llm_bridge)を無人実行するため
+                     #   既定は bypassPermissions。絞るなら allowed_tools も設定。
+allowed_tools = ""   # 任意 --allowedTools 許可リスト(空白/カンマ区切り)
+# cwd 省略 → ~/.myanalysis/agent_home(リポジトリ外)。
+#   リポジトリ直下を cwd にすると開発者向け CLAUDE.md を読み込み「アプリ開発役」に
+#   なってしまうため、既定では外に出して「データ解析役」に保つ。リポジトリ自体は
+#   --add-dir + PYTHONPATH で参照可能。明示上書きしたい場合のみ↓を有効化:
+# cwd = '<repo>'
 
 # ── Visual feedback (Observe self-view) ──
 # 図の self-view には次のいずれかが必要:

@@ -37,14 +37,34 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 Chat-dock LLM access goes through the `llm_backend/` package. Backends implement
 the `LLMBackend` Protocol in `llm_backend/base.py`; `get_backend()` selects one
-by name. Three backends ship: `openai` (OpenAI-compatible HTTP), `mock` (offline
-smoke test), `pi` (pi-coding-agent subprocess).
+by name. Four backends ship: `claude` (VS Code Claude Code engine), `openai`
+(OpenAI-compatible HTTP), `mock` (offline smoke test), `pi` (pi-coding-agent
+subprocess).
 
 - **Selection order**: env `LLM_BACKEND` → `[backend].name` in
   `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
 - **Config file**: copy `llm_backend/config.example.toml` → `llm_backend/config.toml`
   (gitignored). The `[pi]` section sets `cwd` (pi working directory), `bin`,
   `model`, `provider`, `tools`.
+- **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
+  **VS Code Claude Code extension's own bundled engine** — the `claude` binary
+  at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`
+  (auto-detected; override via `[claude_code].bin` or `CLAUDE_CODE_BIN`). It is
+  driven exactly as the extension drives it: spawned in bidirectional stream-json
+  mode (`--output-format stream-json --input-format stream-json --verbose
+  --include-partial-messages`), **not** `claude -p`. Auth/history/settings are
+  shared via `~/.claude`, so whoever is logged into VS Code answers here. Turns
+  continue via `--resume <session_id>`; the engine's own Bash tool runs
+  `python -m llm_bridge` to drive the GUI — no separate skill needed. **cwd is a
+  neutral dir outside the repo** (`~/.myanalysis/agent_home`, override via
+  `[claude_code].cwd`) so the engine is framed as a *data analyst*, not a
+  developer of this repo: CLAUDE.md is auto-discovered by walking cwd upward, so
+  any cwd inside the repo loads this developer-oriented file. The repo stays
+  reachable via `--add-dir` + `PYTHONPATH` for `common/explore.py` and
+  `llm_bridge`. `[claude_code].permission_mode` defaults to `bypassPermissions` so
+  GUI-driving tool calls run unattended (stdin is closed after the prompt, so an
+  interactive permission prompt would deadlock); tighten with `allowed_tools`.
+  **External dependency**: the VS Code Claude Code extension installed + logged in.
 - **pi backend** runs `python -m llm_bridge` via the `.pi/skills/myanalysis-bridge`
   skill to drive the GUI live. **External dependency**: Node + pi
   (`npm i -g @mariozechner/pi-coding-agent`). On Windows pi additionally needs a

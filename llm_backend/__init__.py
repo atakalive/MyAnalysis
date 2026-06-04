@@ -59,10 +59,17 @@ def _make_pi() -> LLMBackend:
     return PiCodingAgentBackend(backend_config().get("pi", {}))
 
 
+def _make_claude() -> LLMBackend:
+    from llm_backend.claude_code import ClaudeCodeBackend
+
+    return ClaudeCodeBackend(backend_config().get("claude_code", {}))
+
+
 _BACKENDS: dict[str, Callable[[], LLMBackend]] = {
     "openai": _make_openai,
     "mock": _make_mock,
     "pi": _make_pi,
+    "claude": _make_claude,
 }
 
 
