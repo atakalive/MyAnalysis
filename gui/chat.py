@@ -83,7 +83,12 @@ class _StreamWorker(QThread):
                                             content=result))
             self.failed.emit(f"tool loop exceeded {_MAX_TOOL_TURNS} turns")
         except Exception as e:
-            self.failed.emit(repr(e))
+            # A user-initiated stop interrupts/kills the engine, which can
+            # surface here as an exception — treat it as a clean stop.
+            if self.isInterruptionRequested():
+                self.done.emit()
+            else:
+                self.failed.emit(repr(e))
 
 
 class ChatWidget(QWidget):
@@ -96,6 +101,7 @@ class ChatWidget(QWidget):
         ]
         self._worker: _StreamWorker | None = None
         self._assistant_buffer = ""
+        self._stopped = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -118,6 +124,10 @@ class ChatWidget(QWidget):
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row.addWidget(self._status)
         row.addStretch(1)
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_stop)
+        row.addWidget(self._stop_btn)
         self._send_btn = QPushButton("Send")
         self._send_btn.clicked.connect(self._on_send)
         row.addWidget(self._send_btn)
@@ -128,6 +138,10 @@ class ChatWidget(QWidget):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(80)
         self._spin_timer.timeout.connect(self._tick_spinner)
+        # Single-shot escalation: if a graceful stop doesn't end the turn, kill.
+        self._kill_timer = QTimer(self)
+        self._kill_timer.setSingleShot(True)
+        self._kill_timer.timeout.connect(self._force_kill)
 
         self._append_system_line(f"backend: {backend.name} / model: {backend.model}")
 
@@ -158,6 +172,8 @@ class ChatWidget(QWidget):
         self._assistant_buffer = ""
         self._append_block("assistant", "")
         self._send_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._stopped = False
         self._spin_idx = 0
         self._status.setText(f"{_SPINNER[0]} waiting…")
         self._spin_timer.start()
@@ -166,6 +182,9 @@ class ChatWidget(QWidget):
         self._worker.chunk.connect(self._on_chunk)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
+        # Delete the QThread only after run() fully returns (finished) — never
+        # from _finalize, where the worker may still be reaping the engine.
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_chunk(self, piece: str) -> None:
@@ -178,8 +197,12 @@ class ChatWidget(QWidget):
 
     def _on_done(self) -> None:
         self._history.append(Message(role="assistant", content=self._assistant_buffer))
+        stopped = self._stopped
         self._finalize()
-        self._show_usage()
+        if stopped:
+            self._append_system_line("[stopped]")
+        else:
+            self._show_usage()
 
     def _on_failed(self, msg: str) -> None:
         cursor = QTextCursor(self._log.document())
@@ -190,12 +213,35 @@ class ChatWidget(QWidget):
         self._history.append(Message(role="assistant", content=self._assistant_buffer))
         self._finalize()
 
+    def _on_stop(self) -> None:
+        """Interrupt the running turn, VS Code CC style: set the worker's
+        interruption flag, ask the backend to send the `interrupt` control
+        request, and arm a short hard-kill escalation as a guarantee."""
+        worker = self._worker
+        if worker is None or not worker.isRunning():
+            return
+        self._stopped = True
+        self._stop_btn.setEnabled(False)
+        self._spin_timer.stop()
+        self._status.setText("stopping…")
+        worker.requestInterruption()
+        if hasattr(self._backend, "cancel"):
+            self._backend.cancel()        # graceful interrupt (VS Code CC 準拠)
+        self._kill_timer.start(2000)       # escalate to hard kill if not done
+
+    def _force_kill(self) -> None:
+        if self._worker is not None and self._worker.isRunning() \
+                and hasattr(self._backend, "kill"):
+            self._backend.kill()
+
     def _finalize(self) -> None:
+        self._kill_timer.stop()
         self._spin_timer.stop()
         self._status.setText("")
         self._send_btn.setEnabled(True)
-        if self._worker is not None:
-            self._worker.deleteLater()
+        self._stop_btn.setEnabled(False)
+        # Drop our ref only; the QThread deletes itself via finished→deleteLater.
+        # (Deleting it here could destroy a thread still reaping the engine.)
         self._worker = None
 
     def _tick_spinner(self) -> None:
