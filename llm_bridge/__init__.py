@@ -16,7 +16,7 @@ from common.paths import analyses_root
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
-from llm_bridge import state, snapshots, commands, annotations
+from llm_bridge import state, snapshots, commands, annotations, session
 from llm_bridge.paths import active_state_path
 
 
@@ -88,6 +88,11 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         data = mod.load() if hasattr(mod, "load") else None
         tab = mod.build_tab(window, data)
         window.add_tab(tab)
+        import config
+        ds = getattr(mod, "DATASET", None) or name
+        if ds in config.DATASETS:
+            tab.session_spec = {"kind": "analysis", "name": name, "module": name, "dataset": ds}
+            session.note_dataset(ds)
         return f"added:{name}"
 
     return _add_tab
@@ -123,8 +128,13 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     rather than being silently destroyed.
     """
 
-    def _show(path: str, name: str = "viewer", slot: str | None = None) -> str:
-        p = Path(path)
+    def _show(
+        path: str,
+        name: str = "viewer",
+        slot: str | None = None,
+        dataset: str | None = None,
+    ) -> str:
+        p = Path(path).resolve()
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
         if slot not in _SLOT_MAP:
@@ -180,6 +190,16 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                 tab.set_split_ratio(1, 1)
             if orientation is None:
                 tab.set_pane_visible("right", False)
+            if panel_key == "figure":
+                if dataset is not None:
+                    ds = str(dataset)
+                    tab.session_spec = {"kind": "figure", "name": name, "dataset": ds, "figure": str(p)}
+                    session.note_dataset(ds)
+                else:
+                    inferred = session.infer_dataset(str(p))
+                    if inferred is not None:
+                        tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
+                        session.note_dataset(inferred)
             return f"updated:{name}"
         from gui.tab import (
             AnalysisTab,
@@ -201,6 +221,16 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         window.add_tab(tab)
         window.set_active_tab(name)
         panel.set_path(p)
+        if panel_key == "figure":
+            if dataset is not None:
+                ds = str(dataset)
+                tab.session_spec = {"kind": "figure", "name": name, "dataset": ds, "figure": str(p)}
+                session.note_dataset(ds)
+            else:
+                inferred = session.infer_dataset(str(p))
+                if inferred is not None:
+                    tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
+                    session.note_dataset(inferred)
         return f"shown:{name}"
 
     return _show
@@ -215,10 +245,15 @@ def attach_window(window) -> list[object]:
     window.register_command("set-active-tab", lambda name: window.set_active_tab(name))
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
+    window.register_command("open-dataset", lambda name: session.open_dataset(window, name))
 
     # Active tab tracker.
     window.tab_changed.connect(lambda _i: _write_active(window))
     _write_active(window)  # initial write
+
+    # Session saver wiring.
+    window.set_session_saver(lambda: session.save_all(window))
+    window.clear_session_dirty()  # 起動時のプレースホルダ追加等を clean ベースライン化
 
     # Command queue watcher (drains stale on startup, executes new arrivals).
     cmd_watcher = commands.start_watcher(window)
@@ -260,6 +295,7 @@ __all__ = [
     "snapshots",
     "commands",
     "annotations",
+    "session",
     "attach_window",
     "attach_tab",
 ]

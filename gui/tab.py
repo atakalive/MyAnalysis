@@ -21,6 +21,7 @@ class AnalysisTab(QWidget):
         self._snapshot_writer: Callable[["AnalysisTab"], None] | None = None
         self._annotations_handler: Callable[[dict], None] | None = None
         self._command_handlers: dict[str, Callable[..., object]] = {}
+        self.session_spec: dict | None = None
 
         outer = QVBoxLayout(self)
         self._top_row = QHBoxLayout()

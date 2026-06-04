@@ -91,6 +91,15 @@ sidecar `myanalysis.toml` and `work_dir` are created on first save. Measurement 
 (PNG/PY) in any subdirectory of the dataset dir. Use `python -m llm_bridge list-datasets`
 to discover registered dataset names.
 
+## Session save/restore
+
+データセット単位のセッション（開いていたタブ構成・アクティブタブ）を `<work_dir>/session.json` に保存・復元する。repo-local のグローバル last-session は無い。
+
+- 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
+- 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。
+- `llm_bridge/session.py` が中核。`show` verb の `dataset=` 引数でタブ→データセット紐付け。
+- 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
+
 ## State
 
 Greenfield as of 2026-05-27 — no build system, dependencies, tests, or package layout yet. When introducing those (pyproject.toml, requirements, test runner, src/ layout), update this file with the resulting commands.
