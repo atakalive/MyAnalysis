@@ -69,8 +69,33 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "show",
+            "description": "Display an image file in a viewer tab. "
+            "Default (no slot) is full-width single pane; re-showing without slot "
+            "collapses any existing split back to single pane. "
+            "Use slot to place a second image alongside "
+            "(left/right for horizontal, top/bottom for vertical split).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to image file"},
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "slot": {
+                        "type": "string",
+                        "enum": ["left", "right", "top", "bottom"],
+                        "description": "Pane position. Omit for default (primary/full-width).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "set_split",
-            "description": "Set left/right panel split ratio for the named tab. "
+            "description": "Set left/right panel split ratio for the named tab "
+            "(including viewer tabs). "
             "Values are relative weights (e.g. left=3, right=7 gives "
             "30%/70%). The ratio left:(left+right) determines the split. "
             "Both must be positive.",
@@ -149,6 +174,13 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         return _via_bridge(
             "tab", args["name"], "snapshot", {}, timeout=30.0, cancelled=cancelled
         )
+    if name == "show":
+        kwargs = {"path": args["path"]}
+        if "name" in args:
+            kwargs["name"] = args["name"]
+        if "slot" in args:
+            kwargs["slot"] = args["slot"]
+        return _via_bridge("window", None, "show", kwargs, cancelled=cancelled)
     if name == "set_split":
         return _via_bridge(
             "tab",

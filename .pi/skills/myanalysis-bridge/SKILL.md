@@ -41,12 +41,19 @@ asynchronously.
 
 - `python -m llm_bridge window <verb> [k=v ...] [--wait]`
   Window verbs: `add-tab name=<analysis>`, `close-tab name=<tab>`,
-  `set-active-tab name=<tab>`, `show path=<abs> [name=<tab>]`,
+  `set-active-tab name=<tab>`,
+  `show path=<abs> [name=<tab>] [slot=left|right|top|bottom]`,
   `toggle-chat-float`.
+  `show` default is a full-width single pane. `slot` splits automatically by
+  axis: `left|right` → horizontal, `top|bottom` → vertical, placing a second
+  figure in the opposite pane. `slot=left|top` keeps the split while updating
+  the primary figure; `show` without `slot` collapses back to a single
+  full-width pane.
 - `python -m llm_bridge tab <name> <verb> [k=v ...] [--wait]`
   Built-in tab verbs: `set-split left=<n> right=<n>`, `snapshot`,
-  `refresh-state`. Analyses may register more (`add-panel`, `remove-panel`, and
-  analysis-specific verbs) at runtime — see the analysis source.
+  `refresh-state`. These work on any open tab, including viewer tabs (e.g.
+  `tab viewer set-split left=3 right=1`). Analyses may register
+  analysis-specific verbs at runtime — see the analysis source.
 
 `k=v` values are coerced int → float → str.
 
@@ -89,7 +96,8 @@ The primary analysis workflow is code execution, not GUI driving.
      vision が機能していないので Human-view に切り替える。
    - **Human-view（フォールバック）**: vision 未設定または Self-view 失敗時は
      `python -m llm_bridge window show path=<絶対パス> --wait` で GUI に表示し、
-     ユーザーに見てもらい判断を仰ぐ。
+     ユーザーに見てもらい判断を仰ぐ。2 枚を並べて見せたいときは
+     `slot=left|right|top|bottom` を付けると自動で split される。
    - **数値ダブルチェック**: vision による図の解釈はハルシネーションのリスクがある。
      重要な判断には Compute ステップで統計量（最大値、最小値、平均値等）を数値出力し、
      視覚的解釈と突合すること。

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 
 _log = logging.getLogger(__name__)
 
-RESERVED_TAB_VERBS = frozenset(["set-split", "add-panel", "remove-panel"])
+RESERVED_TAB_VERBS = frozenset(["set-split"])
 
 
 class AnalysisTab(QWidget):
@@ -59,6 +59,23 @@ class AnalysisTab(QWidget):
 
     def panel(self, key: str) -> QWidget:
         return self._panels[key]
+
+    def set_pane_visible(self, position: str, visible: bool) -> None:
+        if position == "left":
+            container = self._left_container
+        elif position == "right":
+            container = self._right_container
+        else:
+            raise ValueError(f"unknown position: {position!r}")
+        container.setVisible(visible)
+
+    def set_split_orientation(self, orient: str) -> None:
+        if orient == "horizontal":
+            self._splitter.setOrientation(Qt.Orientation.Horizontal)
+        elif orient == "vertical":
+            self._splitter.setOrientation(Qt.Orientation.Vertical)
+        else:
+            raise ValueError(f"unknown orientation: {orient!r}")
 
     def set_split_ratio(self, left: float, right: float) -> None:
         if not (math.isfinite(left) and math.isfinite(right)):

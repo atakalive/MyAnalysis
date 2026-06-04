@@ -93,6 +93,17 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
     return _add_tab
 
 
+# slot → (panel key, container position, split orientation or None).
+# None (no slot) = primary pane, single full-width pane (no split axis).
+_SLOT_MAP = {
+    None: ("figure", "left", None),
+    "left": ("figure", "left", "horizontal"),
+    "top": ("figure", "left", "vertical"),
+    "right": ("figure-2", "right", "horizontal"),
+    "bottom": ("figure-2", "right", "vertical"),
+}
+
+
 def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     """Build the `show` window verb handler.
 
@@ -100,40 +111,88 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     no analysis module required. The intended flow: Claude saves a figure
     via `common.explore.save_fig` (→ absolute path) then `show`s that path.
 
+    Default (no `slot`) = single full-width pane. Passing
+    `slot=left|right|top|bottom` places a second figure in the opposite pane and
+    splits horizontally (left/right) or vertically (top/bottom). Re-showing
+    without `slot` collapses any existing split back to a single full-width pane.
+
     Existing-tab handling is structure-based, not provenance-based: a tab is
-    treated as a show-viewer if it has a `FigurePanel` under key "figure".
-    Any such tab (even a normal analysis tab) is updated in place; a tab whose
-    "figure" key is missing or a non-FigurePanel raises LookupError rather than
-    being silently destroyed.
+    treated as a show-viewer if it has a `FigurePanel` under key "figure" or
+    "figure-2". Any such tab (even a normal analysis tab) is updated in place; a
+    tab with neither key (or a non-FigurePanel under them) raises LookupError
+    rather than being silently destroyed.
     """
 
-    def _show(path: str, name: str = "viewer") -> str:
+    def _show(path: str, name: str = "viewer", slot=None) -> str:
         p = Path(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
+        if slot not in _SLOT_MAP:
+            raise ValueError(f"invalid slot: {slot!r}")
+        panel_key, container_position, orientation = _SLOT_MAP[slot]
         from gui.panels import (
             FigurePanel,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
         if window.set_active_tab(name):
             tab = window.active_tab()
-            try:
-                fig = tab.panel("figure")
-            except KeyError:
+            is_viewer = any(
+                isinstance(tab._panels.get(k), FigurePanel)
+                for k in ("figure", "figure-2")
+            )
+            if not is_viewer:
                 raise LookupError(
                     f"tab {name!r} exists but is not a show-viewer tab"
-                ) from None
-            if not isinstance(fig, FigurePanel):
-                raise LookupError(f"tab {name!r} exists but is not a show-viewer tab")
-            fig.set_path(p)
+                )
+            pane_restored = False
+            new_panel_added = False
+            if panel_key in tab._panels:
+                fig = tab.panel(panel_key)
+                if not isinstance(fig, FigurePanel):
+                    raise LookupError(
+                        f"tab {name!r} exists but is not a show-viewer tab"
+                    )
+                fig.set_path(p)
+                if orientation is not None:
+                    container = (
+                        tab._left_container
+                        if container_position == "left"
+                        else tab._right_container
+                    )
+                    if container.isHidden():
+                        tab.set_pane_visible(container_position, True)
+                        pane_restored = True
+            else:
+                panel = FigurePanel()
+                tab.add_panel(panel_key, panel, container_position, stretch=1)
+                panel.set_path(p)
+                tab.set_pane_visible(container_position, True)
+                new_panel_added = True
+            if orientation is not None:
+                tab.set_split_orientation(orientation)
+            both_visible = (
+                not tab._left_container.isHidden()
+                and not tab._right_container.isHidden()
+            )
+            if orientation is not None and both_visible and (
+                new_panel_added or pane_restored
+            ):
+                tab.set_split_ratio(1, 1)
+            if orientation is None:
+                tab.set_pane_visible("right", False)
             return f"updated:{name}"
         from gui.tab import (
             AnalysisTab,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
         tab = AnalysisTab(name)
+        tab.set_pane_visible("left", False)
+        tab.set_pane_visible("right", False)
         panel = FigurePanel()
-        tab.add_panel("figure", panel, "left", stretch=1)
+        tab.add_panel(panel_key, panel, container_position, stretch=1)
+        tab.set_pane_visible(container_position, True)
+        if orientation is not None:
+            tab.set_split_orientation(orientation)
         tab.register_command(
             "set-split",
             lambda left, right: tab.set_split_ratio(float(left), float(right)),

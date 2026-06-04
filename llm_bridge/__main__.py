@@ -27,6 +27,11 @@ def _parse_kvs(kvs: list[str]) -> dict:
     return out
 
 
+def _check_tab_name(name: str) -> None:
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise SystemExit(f"error: invalid tab name: {name!r}")
+
+
 def _check_analysis_exists(name: str) -> None:
     if not name or "/" in name or "\\" in name or name in (".", ".."):
         raise SystemExit(f"error: invalid analysis name: {name!r}")
@@ -171,15 +176,14 @@ def main(argv: list[str] | None = None) -> int:
                       "toggle-chat-float"):
                 print(f"  {v}")
             return 0
-        _check_analysis_exists(args.name)
+        _check_tab_name(args.name)
         print("tab verbs (built-in by llm_bridge):")
         for v in ("set-split", "snapshot", "refresh-state"):
             print(f"  {v}")
-        print("tab verbs (reserved by gui.md, registered by analysis at runtime):")
-        for v in ("add-panel", "remove-panel"):
-            print(f"  {v}")
-        print(f"(analysis-specific verbs also registered at runtime by "
-              f"analyses/{args.name}/analysis.py — see its source)")
+        print("(analysis-specific verbs also registered at runtime — "
+              "see analysis source)")
+        print("Viewer tabs: use `show slot=left|right|top|bottom` for "
+              "side-by-side layout.")
         return 0
 
     if args.cmd == "window":
@@ -196,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "tab":
-        _check_analysis_exists(args.target)
+        _check_tab_name(args.target)
         kwargs = _parse_kvs(args.kvs)
         cmd_id = commands.submit("tab", args.target, args.verb, kwargs)
         if args.wait is not None:
