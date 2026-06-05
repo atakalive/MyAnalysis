@@ -25,3 +25,8 @@ def command_log_path() -> Path:
 def active_state_path() -> Path:
     """Return data/llm_state/active.json (file may not exist yet)."""
     return global_state_dir() / "active.json"
+
+
+def ui_prefs_path() -> Path:
+    """Return data/llm_state/ui_prefs.json (file may not exist yet)."""
+    return global_state_dir() / "ui_prefs.json"

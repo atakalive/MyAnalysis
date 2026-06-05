@@ -5,13 +5,16 @@ import html
 import json
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QKeyEvent, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (
+    QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextCharFormat, QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
+from llm_bridge.paths import ui_prefs_path
 from gui.tools import TOOLS
 
 
@@ -29,6 +32,43 @@ _MAX_TOOL_TURNS = 8
 
 # Braille spinner frames for the "waiting" indicator.
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Chat font zoom bounds (effective point size). _zoom is an integer pt delta on
+# top of each widget's base size; clamping happens on the effective size so the
+# user can immediately step back from a bound.
+_MIN_PT, _MAX_PT = 6.0, 48.0
+
+
+def _load_chat_zoom() -> int:
+    """Read the persisted chat font zoom (pt delta). Returns 0 on any problem —
+    missing file, bad JSON, missing/non-int key. Must never raise."""
+    try:
+        data = json.loads(ui_prefs_path().read_text(encoding="utf-8"))
+        value = data.get("chat_zoom", 0)
+        return value if isinstance(value, int) else 0
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return 0
+
+
+def _save_chat_zoom(n: int) -> None:
+    """Persist chat font zoom into ui_prefs.json, preserving sibling keys.
+    Atomic (temp + replace), best-effort: never raises on IO error."""
+    try:
+        path = ui_prefs_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {}
+        data["chat_zoom"] = n
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        tmp.replace(path)
+    except OSError:
+        pass
 
 
 class _StreamWorker(QThread):
@@ -149,6 +189,26 @@ class ChatWidget(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self._shutdown_worker)
 
+        # ----- font zoom (Ctrl +/-/0) -----
+        # Capture each widget's base point size (via QFontInfo so a pixel-sized
+        # font still yields a positive effective pt). _apply_zoom sets the font
+        # to base + _zoom each time, so reset/restore can't drift.
+        self._log_base_pt = QFontInfo(self._log.font()).pointSizeF()
+        self._input_base_pt = QFontInfo(self._input.font()).pointSizeF()
+
+        def _add_sc(seq, slot):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
+
+        for seq in ("Ctrl++", "Ctrl+="):  # cover JIS '+'(Shift+;) and '='(Shift+-)
+            _add_sc(seq, self._zoom_in)
+        _add_sc("Ctrl+-", self._zoom_out)
+        _add_sc("Ctrl+0", self._zoom_reset)
+
+        self._zoom = _load_chat_zoom()
+        self._apply_zoom()
+
     def eventFilter(self, obj, ev) -> bool:
         if obj is self._input and isinstance(ev, QKeyEvent) \
                 and ev.type() == QKeyEvent.Type.KeyPress \
@@ -157,6 +217,34 @@ class ChatWidget(QWidget):
             self._on_send()
             return True
         return super().eventFilter(obj, ev)
+
+    # ----- font zoom -----
+
+    def _apply_zoom(self) -> None:
+        """Set log + input fonts to base size + current zoom (pt), clamped."""
+        for w, base in ((self._log, self._log_base_pt),
+                        (self._input, self._input_base_pt)):
+            f = w.font()
+            f.setPointSizeF(min(_MAX_PT, max(_MIN_PT, base + self._zoom)))
+            w.setFont(f)
+
+    def _save_zoom(self) -> None:
+        _save_chat_zoom(self._zoom)
+
+    def _zoom_in(self) -> None:
+        self._zoom += 1
+        self._apply_zoom()
+        self._save_zoom()
+
+    def _zoom_out(self) -> None:
+        self._zoom -= 1
+        self._apply_zoom()
+        self._save_zoom()
+
+    def _zoom_reset(self) -> None:
+        self._zoom = 0
+        self._apply_zoom()
+        self._save_zoom()
 
     # ----- send / receive -----
 
