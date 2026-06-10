@@ -143,6 +143,14 @@ def test_invalid_hostname(cfg, host):
         config.register_dataset("foo", r"G:\foo", host=host, config_path=cfg)
 
 
+def test_nonascii_host_accepted(cfg):
+    # 非ASCII の PC 名 (例: ドイツ語) も .upper() 後に受理される。
+    result = config.register_dataset("foo", r"G:\foo", host="müller-pc", config_path=cfg)
+    assert result["host"] == "MÜLLER-PC"
+    data = _datasets_from(cfg)
+    assert data["foo"]["MÜLLER-PC"] == r"G:\foo"
+
+
 def test_relative_path_rejected(cfg):
     with pytest.raises(ValueError):
         config.register_dataset("foo", "relative/path", host="H1", config_path=cfg)

@@ -14,7 +14,10 @@ from pathlib import Path
 
 from common.paths import validate_identifier_name
 
-_HOST_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
+# ホスト名は照合前に .upper() 済み。先頭は英数字 (非ASCII の文字も可)、以降は
+# 英数字・'_'・'.'・'-'。パス区切り・空白・記号・制御文字は拒否する。
+# \w は Unicode 既定で非ASCII 文字にマッチするため、ドイツ語等の PC 名も許可。
+_HOST_RE = re.compile(r"^[^\W_][\w.\-]*$")
 
 DATASETS: dict[str, dict[str, str]] = {
     "dataset_a": {
