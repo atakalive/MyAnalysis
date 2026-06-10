@@ -30,11 +30,13 @@ class ToolWindow(QMainWindow):
         self.resize(1400, 800)
 
         self._tabs = QTabWidget()
+        self._tabs.setMovable(True)
         self.setCentralWidget(self._tabs)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         tab_bar = self._tabs.tabBar()
         tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
+        tab_bar.tabMoved.connect(lambda *_: self.mark_session_dirty())
         self.statusBar()
 
         self._chat_dock = QDockWidget("Chat", self)
