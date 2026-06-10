@@ -132,8 +132,9 @@ def test_unrelated_lines_unchanged(cfg):
 
 
 def test_invalid_dataset_name(cfg):
+    # 大文字/ハイフン等は許可されたので、汎用ハイジーン違反 (空白) で拒否を確認。
     with pytest.raises(ValueError):
-        config.register_dataset("Bad", r"G:\foo", host="H1", config_path=cfg)
+        config.register_dataset("bad name", r"G:\foo", host="H1", config_path=cfg)
 
 
 @pytest.mark.parametrize("host", ['ba"d', "ba\\d", "bad\n", "-lead"])

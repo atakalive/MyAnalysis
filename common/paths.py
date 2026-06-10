@@ -1,11 +1,9 @@
 """Filesystem path helpers. All paths are derived from __file__ so the module
 location determines repo root. Move this file → repo_root changes accordingly."""
-import re
 from pathlib import Path
 
-# 英小文字始まり + 英小文字・数字・アンダースコアのみ。
-# コードインジェクション・Windows 予約文字・`.`/`_` 始まり・空白・パス区切りを排除する。
-_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+# Windows のファイル名に使えない文字。パス区切り (/ \) と制御文字は別途・汎用で拒否。
+_WINDOWS_FORBIDDEN = set('<>:"|?*')
 
 # Windows 予約デバイス名 (大文字小文字を区別しないため小文字でも拒否)。
 _WINDOWS_RESERVED = frozenset(
@@ -20,19 +18,39 @@ _WINDOWS_RESERVED = frozenset(
 
 
 def validate_identifier_name(name: str, *, check_reserved: bool = True) -> None:
-    """Raise ValueError if name is not a valid identifier.
+    """Raise ValueError if name is unsafe as a dataset / analysis name.
 
-    check_reserved=True: regex + Windows reserved name check (for analysis name).
-    check_reserved=False: regex only (for dataset name).
+    拒否リスト方式。英大小文字・非ASCII (日本語等)・任意位置の数字・'-'・'_'
+    は許可し、本当に危険なものだけ拒否する。
+
+    check_reserved=True は解析名用 = analyses/<name>/ という実フォルダになるため、
+    汎用ハイジーンに加えて Windows のファイル名規則 (禁止文字・末尾ドット・予約
+    デバイス名) も適用する。
+    check_reserved=False はデータセット名用 = DATASETS の dict キーにしかならず
+    パスにならないので、汎用ハイジーンのみ。
     """
-    if not _NAME_RE.fullmatch(name):
-        raise ValueError(
-            f"invalid name: {name!r} (must match ^[a-z][a-z0-9_]*$)"
-        )
-    if check_reserved and name.lower() in _WINDOWS_RESERVED:
-        raise ValueError(
-            f"invalid name: {name!r} is a Windows reserved device name"
-        )
+    if not name:
+        raise ValueError("名前を入力してください。")
+    if "/" in name or "\\" in name:
+        raise ValueError(f"名前にパス区切り文字 (/ \\) は使えません: {name!r}")
+    if name in (".", "..") or name.startswith("."):
+        raise ValueError(f"名前を '.' で始めることはできません: {name!r}")
+    for c in name:
+        if c.isspace():
+            raise ValueError(f"名前に空白文字は使えません: {name!r}")
+        if ord(c) < 32 or ord(c) == 127:
+            raise ValueError(f"名前に制御文字は使えません: {name!r}")
+    if check_reserved:
+        bad = sorted(set(name) & _WINDOWS_FORBIDDEN)
+        if bad:
+            raise ValueError(
+                f"名前に Windows のファイル名で使えない文字 {''.join(bad)} "
+                f"が含まれています: {name!r}"
+            )
+        if name.endswith("."):
+            raise ValueError(f"名前を '.' で終えることはできません: {name!r}")
+        if name.lower() in _WINDOWS_RESERVED:
+            raise ValueError(f"{name!r} は Windows の予約デバイス名のため使えません。")
 
 
 def validate_name(name: str) -> None:

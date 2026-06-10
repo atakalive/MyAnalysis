@@ -99,10 +99,12 @@ def test_runnable_empty_gui(fake_roots, qapp, monkeypatch, tmp_path):
 
 # ---- バリデーション拒否 (name) ----
 
+# 解析名 = analyses/<name>/ という実フォルダ。予約名・空白・空・先頭ドット・
+# パス区切り・Windows 禁止文字・末尾ドットは拒否（大文字/数字始まり/'-'/'_' は許可）。
 @pytest.mark.parametrize(
     "name",
-    ["_hidden", "con", "CON", "nul", "com1", "lpt9", "123abc", "my analysis", "", ".",
-     "a/b", "a\\b", "Bad"],
+    ["con", "CON", "nul", "com1", "lpt9", "my analysis", "", ".",
+     "a/b", "a\\b", "a:b", "a*b", "foo."],
 )
 def test_invalid_name_rejected(fake_roots, name):
     with pytest.raises(SystemExit):
@@ -111,7 +113,9 @@ def test_invalid_name_rejected(fake_roots, name):
 
 # ---- バリデーション拒否 (dataset) ----
 
-@pytest.mark.parametrize("dataset", ["bad-key", "BadKey", "has space", "_x", "9x", ""])
+# データセット名 = dict キー。パスにならないので汎用ハイジーンのみ拒否
+# （'-'/大文字/数字始まり/先頭'_' は許可。bad-key 等はもう拒否しない）。
+@pytest.mark.parametrize("dataset", ["has space", "", "a/b", "a\\b", ".", "..", ".hidden"])
 def test_invalid_dataset_rejected(fake_roots, dataset):
     with pytest.raises(SystemExit):
         gen.main(["demo_probe", "--dataset", dataset])
@@ -166,7 +170,7 @@ def test_create_analysis_dataset_none_ok(fake_roots):
 
 def test_create_analysis_invalid_name_raises(fake_roots):
     with pytest.raises(ValueError):
-        gen.create_analysis("Bad")
+        gen.create_analysis("a:b")  # 解析名にはフォルダ名禁止文字を使えない。
     with pytest.raises(ValueError):
         gen.create_analysis("con")
 
@@ -192,13 +196,41 @@ def test_validate_identifier_name_reserved(name):
 
     with pytest.raises(ValueError):
         validate_identifier_name(name, check_reserved=True)
-    # check_reserved=False では予約名も regex を満たせば受理。
+    # check_reserved=False では予約名チェックをしないため受理。
     validate_identifier_name(name.lower(), check_reserved=False)
 
 
-@pytest.mark.parametrize("name", ["Bad", "9x", "_x", "has space", "a-b", "foo\n", ""])
-def test_validate_identifier_name_regex(name):
+# 両モードで拒否される汎用の危険入力。
+@pytest.mark.parametrize(
+    "name", ["", "has space", "foo\n", "a/b", "a\\b", ".", "..", ".hidden"]
+)
+def test_validate_identifier_name_denylist(name):
     from common.paths import validate_identifier_name
 
     with pytest.raises(ValueError):
         validate_identifier_name(name, check_reserved=False)
+
+
+# データセット名 (check_reserved=False) では従来 NG だった名前も許可される。
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Bad", "9x", "_x", "a-b",
+        "dataset_l", "analysis_c", "ピークシフター_000000", "a:b",
+    ],
+)
+def test_validate_identifier_name_allows(name):
+    from common.paths import validate_identifier_name
+
+    validate_identifier_name(name, check_reserved=False)  # 例外が出ないこと。
+
+
+# 解析名 (check_reserved=True) は実フォルダになるため Windows 規則で追加拒否。
+# 同じ名前でもデータセット名 (False) なら受理される非対称を固定する。
+@pytest.mark.parametrize("name", ["a:b", "a*b", "a?b", 'a"b', "foo."])
+def test_validate_identifier_name_dirname_strict(name):
+    from common.paths import validate_identifier_name
+
+    with pytest.raises(ValueError):
+        validate_identifier_name(name, check_reserved=True)
+    validate_identifier_name(name, check_reserved=False)  # dict キーとしては可。
