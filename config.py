@@ -28,6 +28,12 @@ DATASETS: dict[str, dict[str, str]] = {
         "HOST_A": r"G:\同期\測定\000000",
         "HOST_B": r"H:\同期\測定\000000",
     },
+    "dataset_c": {
+        "HOST_A": r"G:\同期\測定\dataset_l\dataset_c3",
+    },
+    "analysis_c": {
+        "HOST_A": r"<repo>/data/analyses/dataset_c2",
+    },
 }
 
 
