@@ -313,3 +313,23 @@ def test_show_update_marks_dirty(win, png_path, tmp_path, qapp, monkeypatch):
     result = win.dispatch_command("show", path=str(p2), name="v", dataset="myds")
     assert result == "updated:v"
     assert win.is_session_dirty()
+
+
+def test_show_figure2_does_not_clobber_primary_spec(
+    win, png_path, png_path2, tmp_path, qapp, monkeypatch
+):
+    """slot=right (figure-2) must NOT overwrite the primary session_spec
+    (figure/dataset) — reviewer R5 P2 regression guard."""
+    import config
+    monkeypatch.setattr(config, "DATASETS", {"ds": {}})
+    monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
+
+    win.dispatch_command("show", path=str(png_path), name="viewer", dataset="ds")
+    tab = win.active_tab()
+    spec_before = dict(tab.session_spec)
+    assert spec_before["figure"] == str(png_path.resolve())
+    assert spec_before["dataset"] == "ds"
+
+    win.dispatch_command("show", path=str(png_path2), name="viewer", slot="right")
+    assert tab.session_spec["figure"] == str(png_path.resolve())
+    assert tab.session_spec["dataset"] == "ds"

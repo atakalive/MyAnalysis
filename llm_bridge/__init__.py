@@ -87,12 +87,14 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
             )
         data = mod.load() if hasattr(mod, "load") else None
         tab = mod.build_tab(window, data)
-        window.add_tab(tab)
+        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
+        # that add_tab fires sees the final spec (→ chat gets the right dataset).
         import config
         ds = getattr(mod, "DATASET", None) or name
         if ds in config.DATASETS:
             tab.session_spec = {"kind": "analysis", "name": name, "module": name, "dataset": ds}
             session.note_dataset(ds)
+        window.add_tab(tab)
         return f"added:{name}"
 
     return _add_tab
@@ -144,8 +146,13 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
             FigurePanel,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
-        if window.set_active_tab(name):
-            tab = window.active_tab()
+        # Locate an existing tab by name WITHOUT activating it — separating the
+        # existence check from activation so that, when we finally activate, the
+        # currentChanged it fires sees the NEW session_spec (avoiding a stale
+        # dataset push to the chat widget). See Issue #26 (reviewer R4 / reviewer R4).
+        existing = next((t for t in window.tabs() if t.name == name), None)
+        if existing is not None:
+            tab = existing
             is_viewer = any(
                 isinstance(tab._panels.get(k), FigurePanel)
                 for k in ("figure", "figure-2")
@@ -190,6 +197,8 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                 tab.set_split_ratio(1, 1)
             if orientation is None:
                 tab.set_pane_visible("right", False)
+            # session_spec is only touched for the primary pane ("figure").
+            # figure-2 (slot=right/bottom) must NOT overwrite the primary spec.
             if panel_key == "figure":
                 if dataset is not None:
                     ds = str(dataset)
@@ -202,6 +211,11 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                         tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                         session.note_dataset(inferred)
                         window.mark_session_dirty()
+            # Activate now — spec is final, so this currentChanged pushes the
+            # right dataset to the chat widget.
+            window.set_active_tab(name)
+            # Backstop when the tab was already current (no currentChanged fired).
+            getattr(window, "notify_chat_dataset", lambda: None)()
             return f"updated:{name}"
         from gui.tab import (
             AnalysisTab,
@@ -220,9 +234,8 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
             lambda left, right: tab.set_split_ratio(float(left), float(right)),
         )
         tab.register_command("snapshot", lambda: None)
-        window.add_tab(tab)
-        window.set_active_tab(name)
-        panel.set_path(p)
+        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
+        # that add_tab/set_active_tab fires sees the final spec.
         if panel_key == "figure":
             if dataset is not None:
                 ds = str(dataset)
@@ -233,6 +246,9 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                 if inferred is not None:
                     tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                     session.note_dataset(inferred)
+        window.add_tab(tab)
+        window.set_active_tab(name)
+        panel.set_path(p)
         return f"shown:{name}"
 
     return _show

@@ -3,19 +3,27 @@ from __future__ import annotations
 
 import html
 import json
+import time
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QTextBrowser, QVBoxLayout, QWidget,
+    QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QTabBar, QTextBrowser, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
+from llm_bridge import chat_store
+from llm_bridge.chat_store import ChatSession
 from llm_bridge.paths import ui_prefs_path
 from gui.tools import TOOLS
+
+
+# Sentinel distinguishing "no pending dataset switch" from a real None dataset.
+_UNSET = object()
 
 
 _SYSTEM_PROMPT = (
@@ -136,15 +144,38 @@ class ChatWidget(QWidget):
         super().__init__(parent)
         self._backend = backend
         self._dispatch = dispatch
-        self._history: list[Message] = [
-            Message(role="system", content=_SYSTEM_PROMPT)
+        self._window = None
+        self._sessions: list[ChatSession] = [
+            chat_store.new_session(backend.name, _SYSTEM_PROMPT)
         ]
+        self._active: ChatSession = self._sessions[0]
+        self._current_dataset: str | None = None
+        self._pending_dataset = _UNSET
+        self._deleted: set[tuple[str, str]] = set()
         self._worker: _StreamWorker | None = None
         self._assistant_buffer = ""
         self._stopped = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+
+        # ----- session tab bar (top of dock) -----
+        header = QHBoxLayout()
+        self._tab_bar = QTabBar()
+        self._tab_bar.setExpanding(False)
+        self._tab_bar.setUsesScrollButtons(True)
+        self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tab_bar.setTabsClosable(True)
+        self._tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tab_bar.currentChanged.connect(self._on_switch_session)
+        self._tab_bar.tabCloseRequested.connect(self._on_delete_session)
+        self._tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
+        header.addWidget(self._tab_bar, stretch=1)
+        self._new_btn = QToolButton()
+        self._new_btn.setText("+")
+        self._new_btn.clicked.connect(self._on_new_session)
+        header.addWidget(self._new_btn)
+        layout.insertLayout(0, header)
 
         self._log = QTextBrowser()
         self._log.setOpenExternalLinks(True)
@@ -183,7 +214,8 @@ class ChatWidget(QWidget):
         self._kill_timer.setSingleShot(True)
         self._kill_timer.timeout.connect(self._force_kill)
 
-        self._append_system_line(f"backend: {backend.name} / model: {backend.model}")
+        self._rebuild_tab_bar()
+        self._render_session(self._active)
 
         app = QApplication.instance()
         if app is not None:
@@ -246,6 +278,241 @@ class ChatWidget(QWidget):
         self._apply_zoom()
         self._save_zoom()
 
+    # ----- window binding / dirty -----
+
+    def bind_window(self, window) -> None:
+        self._window = window
+
+    def _mark_chat_dirty(self) -> None:
+        if self._window is not None:
+            self._window.mark_chat_dirty()
+
+    # ----- persistence accessors -----
+
+    def sessions_for_persistence(self) -> list:
+        return list(self._sessions)
+
+    def deleted_sessions(self) -> list:
+        return list(self._deleted)
+
+    def clear_deleted(self, applied) -> None:
+        self._deleted.difference_update(applied)
+
+    # ----- backend session swap (duck-typed on _session_id) -----
+
+    def _load_backend_session(self, sess: ChatSession) -> None:
+        """Point the singleton backend at this session's resume token before a
+        turn starts. Only claude/pi expose _session_id; cross-backend tokens are
+        cleared (None) so a stale token isn't passed to --resume."""
+        b = self._backend
+        if not hasattr(b, "_session_id"):
+            return
+        if sess.backend_name == b.name:
+            b._session_id = sess.backend_session_id
+        else:
+            b._session_id = None
+
+    def _capture_backend_session(self, sess: ChatSession) -> None:
+        """After a turn, harvest the backend's (already-updated) _session_id back
+        into this session — only when the backend name still matches."""
+        b = self._backend
+        if not hasattr(b, "_session_id"):
+            return
+        if sess.backend_name == b.name:
+            sess.backend_session_id = b._session_id
+
+    def _prime_backend_for(self, sess: ChatSession) -> None:
+        """Align the backend's resume token to `sess` on a (non-running) switch."""
+        self._load_backend_session(sess)
+
+    # ----- helpers -----
+
+    @staticmethod
+    def _has_history(sess: ChatSession) -> bool:
+        """True if the session holds any non-system message (i.e. real history)."""
+        return len(sess.messages) > 1
+
+    def _visible_sessions(self) -> list[ChatSession]:
+        """Sessions shown for the current dataset: dataset match or scratch
+        (None), sorted by `updated` descending."""
+        vis = [
+            s for s in self._sessions
+            if s.dataset in (self._current_dataset, None)
+        ]
+        vis.sort(key=lambda s: s.updated or 0.0, reverse=True)
+        return vis
+
+    def _set_session_controls_enabled(self, enabled: bool) -> None:
+        self._tab_bar.setEnabled(enabled)
+        self._new_btn.setEnabled(enabled)
+
+    # ----- transcript render -----
+
+    def _render_session(self, sess: ChatSession) -> None:
+        """Repaint the transcript for `sess`: clear stale usage + log, draw the
+        backend/model system line, then replay user / non-empty assistant blocks
+        (system / tool / tool-call-only messages are not drawn — matches live)."""
+        self._status.setText("")
+        self._log.clear()
+        self._append_system_line(
+            f"backend: {self._backend.name} / model: {self._backend.model}"
+        )
+        for m in sess.messages:
+            if m.role == "user":
+                self._append_block("user", m.content or "")
+            elif m.role == "assistant" and m.content:
+                self._append_block("assistant", m.content)
+
+    # ----- tab bar -----
+
+    def _rebuild_tab_bar(self) -> None:
+        """Rebuild tabs from the visible session set. Blocks currentChanged to
+        avoid spurious _on_switch_session during programmatic rebuild."""
+        with QSignalBlocker(self._tab_bar):
+            while self._tab_bar.count():
+                self._tab_bar.removeTab(0)
+            active_idx = 0
+            for i, sess in enumerate(self._visible_sessions()):
+                self._tab_bar.addTab(sess.title)
+                self._tab_bar.setTabData(i, sess.id)
+                if sess.id == self._active.id:
+                    active_idx = i
+            if self._tab_bar.count():
+                self._tab_bar.setCurrentIndex(active_idx)
+
+    def _session_by_id(self, sid) -> ChatSession | None:
+        if sid is None:
+            return None
+        for s in self._sessions:
+            if s.id == sid:
+                return s
+        return None
+
+    def _on_switch_session(self, index: int) -> None:
+        if index < 0:
+            return
+        sess = self._session_by_id(self._tab_bar.tabData(index))
+        if sess is None:
+            return
+        self._active = sess
+        self._render_session(sess)
+        self._prime_backend_for(sess)
+
+    def _on_new_session(self) -> None:
+        sess = chat_store.new_session(
+            self._backend.name, _SYSTEM_PROMPT, dataset=self._current_dataset
+        )
+        self._sessions.append(sess)
+        self._active = sess
+        self._rebuild_tab_bar()
+        self._render_session(sess)
+        self._prime_backend_for(sess)
+
+    def _on_tab_context_menu(self, pos) -> None:
+        index = self._tab_bar.tabAt(pos)
+        if index < 0:
+            return
+        sess = self._session_by_id(self._tab_bar.tabData(index))
+        if sess is None:
+            return
+        menu = QMenu(self)
+        rename_action = menu.addAction("名前変更")
+        rename_action.triggered.connect(lambda: self._on_rename_session(sess))
+        menu.exec(self._tab_bar.mapToGlobal(pos))
+
+    def _on_rename_session(self, sess: ChatSession) -> None:
+        new_title, ok = QInputDialog.getText(
+            self, "名前変更", "チャット名:", text=sess.title
+        )
+        if not ok or not new_title:
+            return
+        sess.title = new_title
+        for i in range(self._tab_bar.count()):
+            if self._tab_bar.tabData(i) == sess.id:
+                self._tab_bar.setTabText(i, new_title)
+                break
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+
+    def _on_delete_session(self, index: int) -> None:
+        sess = self._session_by_id(self._tab_bar.tabData(index))
+        if sess is None:
+            return
+        reply = QMessageBox.question(
+            self, "チャットを削除", f"「{sess.title}」を削除しますか？"
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._sessions.remove(sess)
+        if sess.dataset is not None:
+            # Defer physical delete to save_all via a tombstone.
+            self._deleted.add((sess.dataset, sess.id))
+            self._mark_chat_dirty()
+        if not self._sessions:
+            self._sessions.append(
+                chat_store.new_session(
+                    self._backend.name, _SYSTEM_PROMPT,
+                    dataset=self._current_dataset,
+                )
+            )
+        if self._active is sess:
+            self._active = self._visible_sessions()[0] if self._visible_sessions() \
+                else self._sessions[0]
+        self._rebuild_tab_bar()
+        self._render_session(self._active)
+        self._prime_backend_for(self._active)
+
+    # ----- dataset binding -----
+
+    def set_current_dataset(self, ds: str | None) -> None:
+        """Called from the window when the active analysis tab's dataset changes.
+        Adopts a history-bearing scratch session and re-selects a visible one."""
+        if self._worker is not None:
+            # Don't repoint _active mid-turn; defer until the turn finalizes.
+            self._pending_dataset = ds
+            return
+        self._current_dataset = ds
+        # Adoption: a history-bearing scratch session takes on the current ds.
+        if ds is not None and self._active.dataset is None \
+                and self._has_history(self._active):
+            self._active.dataset = ds
+            self._mark_chat_dirty()
+        # Active transition: keep _active if it's visible, else pick the most
+        # recent visible session, else mint a fresh one.
+        if self._active.dataset not in (ds, None):
+            vis = self._visible_sessions()
+            if vis:
+                self._active = vis[0]
+            else:
+                sess = chat_store.new_session(
+                    self._backend.name, _SYSTEM_PROMPT, dataset=ds
+                )
+                self._sessions.append(sess)
+                self._active = sess
+        self._rebuild_tab_bar()
+        self._render_session(self._active)
+        self._prime_backend_for(self._active)
+
+    def merge_dataset_sessions(self, dataset: str, incoming: list) -> None:
+        """Merge sessions loaded from `dataset`'s work_dir into the pool."""
+        # Stamp each with the owning dataset (file location is the truth).
+        for s in incoming:
+            s.dataset = dataset
+        # Don't resurrect tombstoned (deleted-but-not-yet-saved) sessions.
+        incoming = [s for s in incoming if (dataset, s.id) not in self._deleted]
+        # Protect an in-flight active session from being swapped mid-turn.
+        if self._worker is not None:
+            incoming = [s for s in incoming if s.id != self._active.id]
+        new_pool = chat_store.merge_sessions(self._sessions, incoming)
+        # Re-point _active at its (possibly replaced) instance in the new pool.
+        for s in new_pool:
+            if s.id == self._active.id:
+                self._active = s
+                break
+        self._sessions = new_pool
+        if self._current_dataset == dataset:
+            self._rebuild_tab_bar()
+
     # ----- send / receive -----
 
     def _on_send(self) -> None:
@@ -255,17 +522,42 @@ class ChatWidget(QWidget):
         if not text.strip():
             return
         self._input.clear()
-        self._history.append(Message(role="user", content=text))
+        # Live-reference the current dataset from the window so a late
+        # session_spec assignment (currentChanged fired before spec was set)
+        # can't leave us with a stale cached _current_dataset.
+        if self._window is not None and hasattr(self._window, "current_chat_dataset"):
+            ds = self._window.current_chat_dataset()
+            if ds is not None:
+                self._current_dataset = ds
+        self._active.messages.append(Message(role="user", content=text))
+        # Auto-title from the first non-empty line of the first user message.
+        if self._active.title == "新しいチャット":
+            first = next(
+                (ln.strip() for ln in text.splitlines() if ln.strip()), ""
+            )[:20]
+            if first:
+                self._active.title = first
+                idx = self._tab_bar.currentIndex()
+                if idx >= 0:
+                    self._tab_bar.setTabText(idx, first)
+                if self._active.dataset is not None:
+                    self._mark_chat_dirty()
+        # Adopt the current dataset into an as-yet-unbound scratch session.
+        if self._current_dataset is not None and self._active.dataset is None:
+            self._active.dataset = self._current_dataset
+            self._mark_chat_dirty()
         self._append_block("user", text)
         self._assistant_buffer = ""
         self._append_block("assistant", "")
+        self._load_backend_session(self._active)
+        self._set_session_controls_enabled(False)
         self._send_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._stopped = False
         self._spin_idx = 0
         self._status.setText(f"{_SPINNER[0]} waiting…")
         self._spin_timer.start()
-        self._worker = _StreamWorker(self._backend, list(self._history),
+        self._worker = _StreamWorker(self._backend, list(self._active.messages),
                                       self._dispatch, self)
         self._worker.chunk.connect(self._on_chunk)
         self._worker.done.connect(self._on_done)
@@ -284,7 +576,15 @@ class ChatWidget(QWidget):
         self._scroll_to_bottom()
 
     def _on_done(self) -> None:
-        self._history.append(Message(role="assistant", content=self._assistant_buffer))
+        self._active.messages.append(
+            Message(role="assistant", content=self._assistant_buffer)
+        )
+        # (1) capture token BEFORE _finalize (which may swap _active via pending
+        # dataset), (2) bump updated + dirty, (3) finalize.
+        self._capture_backend_session(self._active)
+        self._active.updated = time.time()
+        if self._active.dataset is not None:
+            self._mark_chat_dirty()
         stopped = self._stopped
         self._finalize()
         if stopped:
@@ -298,7 +598,15 @@ class ChatWidget(QWidget):
         cursor.setCharFormat(QTextCharFormat())
         cursor.insertText(f"\n\n[error: {msg}]")
         self._scroll_to_bottom()
-        self._history.append(Message(role="assistant", content=self._assistant_buffer))
+        self._active.messages.append(
+            Message(role="assistant", content=self._assistant_buffer)
+        )
+        # Capture token (do NOT reset on failure — preserve resume context);
+        # bump updated + dirty BEFORE _finalize swaps _active.
+        self._capture_backend_session(self._active)
+        self._active.updated = time.time()
+        if self._active.dataset is not None:
+            self._mark_chat_dirty()
         self._finalize()
 
     def _on_stop(self) -> None:
@@ -328,9 +636,15 @@ class ChatWidget(QWidget):
         self._status.setText("")
         self._send_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
+        self._set_session_controls_enabled(True)
         # Drop our ref only; the QThread deletes itself via finished→deleteLater.
         # (Deleting it here could destroy a thread still reaping the engine.)
         self._worker = None
+        # Apply a dataset switch that arrived while the turn was running.
+        if self._pending_dataset is not _UNSET:
+            pd = self._pending_dataset
+            self._pending_dataset = _UNSET
+            self.set_current_dataset(pd)
 
     def _tick_spinner(self) -> None:
         self._spin_idx = (self._spin_idx + 1) % len(_SPINNER)

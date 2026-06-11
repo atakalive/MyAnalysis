@@ -20,6 +20,7 @@ from pathlib import Path
 
 import config
 import dataset_config
+from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
 
@@ -170,67 +171,155 @@ def save_all(window) -> tuple[list[str], list[str]]:
             _log.warning("save_all: failed to save session for %r", ds, exc_info=True)
             failed.append(ds)
 
+    # Chat persistence ride-along — fully independent of the tab-save loop above.
+    # Side-effect only: never touches `saved`/`failed` or the dirty-clear gate
+    # (the existing tests assert those exactly). All chat access is duck-typed so
+    # the headless _FakeWindow / CLI skip it entirely.
+    _save_chat_sessions(window)
+
     if not failed:
         window.clear_session_dirty()
     return saved, failed
 
 
+def _save_chat_sessions(window) -> None:
+    """Persist dataset-bound chat sessions and apply delete tombstones.
+
+    Independent of tab saving. Each dataset is isolated in its own try/except so
+    one work_dir failure can't cascade. Best-effort: failures only warn.
+    """
+    sessions = getattr(window, "chat_sessions", lambda: [])()
+    deleted = getattr(window, "chat_deleted_sessions", lambda: [])()
+
+    # Group dataset-bound, non-empty live sessions by dataset.
+    live_by_ds: dict[str, list] = {}
+    for sess in sessions:
+        if sess.dataset is None:
+            continue
+        if len(sess.messages) <= 1:  # system-only → nothing worth saving
+            continue
+        live_by_ds.setdefault(sess.dataset, []).append(sess)
+
+    # Build tombstone lookup: dataset → set of ids to delete.
+    tomb_ids_by_ds: dict[str, set] = {}
+    for (d, sid) in deleted:
+        tomb_ids_by_ds.setdefault(d, set()).add(sid)
+
+    applied: list = []
+    for ds in set(live_by_ds) | set(tomb_ids_by_ds):
+        try:
+            work_dir = dataset_config.get_work_dir(ds)
+            tomb_ids = tomb_ids_by_ds.get(ds, set())
+            # (a) physical deletes first; collect those confirmed absent.
+            for sid in tomb_ids:
+                if chat_store.delete_session_file(work_dir, sid):
+                    applied.append((ds, sid))
+            # (b) live writes (skip any id under a tombstone — tombstone wins).
+            for sess in live_by_ds.get(ds, []):
+                if sess.id in tomb_ids:
+                    continue
+                chat_store.write_session_file(work_dir, sess)
+        except Exception:
+            _log.warning(
+                "save_all: failed to persist chat for %r", ds, exc_info=True
+            )
+
+    getattr(window, "chat_clear_deleted", lambda a: None)(applied)
+
+
 def open_dataset(window, dataset: str) -> str:
-    """Restore a dataset's tabs from its session.json. Returns a summary string."""
+    """Restore a dataset's tabs + chat sessions. Returns a summary string.
+
+    Chat persistence is independent of tab persistence, so a dataset may have
+    chat_sessions/ but no session.json (opened, chatted, saved). Chat restore +
+    the final current-dataset push therefore run on every non-`error:` path
+    (including `no-session:`), not just `restored:N`.
+    """
     was_dirty = window.is_session_dirty()
+    cw = getattr(window, "chat_widget", lambda: None)()
+    resolved = False
+    work_dir = None
+    result = f"error:{dataset}"
     window.set_suppress_dirty(True)
     try:
         try:
             work_dir = _resolve_work_dir_readonly(dataset)
+            resolved = True
         except Exception:
             return f"error:{dataset}"
 
         sess = read_session(dataset)
         if sess is None:
-            return f"no-session:{dataset}"
-
-        restored = 0
-        for entry in sess.get("tabs", []):
-            try:
-                kind = entry.get("kind")
-                if kind == "figure":
-                    fig = entry.get("figure")
-                    fp = Path(fig)
-                    abs_path = fp if fp.is_absolute() else work_dir / fp
-                    if not abs_path.is_file():
-                        _log.warning(
-                            "open_dataset: missing figure %s (tab %r)",
-                            abs_path,
-                            entry.get("name"),
+            result = f"no-session:{dataset}"
+        else:
+            restored = 0
+            for entry in sess.get("tabs", []):
+                try:
+                    kind = entry.get("kind")
+                    if kind == "figure":
+                        fig = entry.get("figure")
+                        fp = Path(fig)
+                        abs_path = fp if fp.is_absolute() else work_dir / fp
+                        if not abs_path.is_file():
+                            _log.warning(
+                                "open_dataset: missing figure %s (tab %r)",
+                                abs_path,
+                                entry.get("name"),
+                            )
+                            continue
+                        window.dispatch_command(
+                            "show",
+                            path=str(abs_path),
+                            name=entry.get("name"),
+                            dataset=dataset,
                         )
-                        continue
-                    window.dispatch_command(
-                        "show",
-                        path=str(abs_path),
-                        name=entry.get("name"),
-                        dataset=dataset,
+                        restored += 1
+                    elif kind == "analysis":
+                        window.dispatch_command("add-tab", name=entry.get("module"))
+                        restored += 1
+                except Exception:
+                    _log.warning(
+                        "open_dataset: failed to restore tab %r", entry,
+                        exc_info=True,
                     )
-                    restored += 1
-                elif kind == "analysis":
-                    window.dispatch_command("add-tab", name=entry.get("module"))
-                    restored += 1
+
+            active_tab = sess.get("active_tab")
+            if active_tab is not None:
+                window.set_active_tab(active_tab)
+
+            if restored >= 1:
+                window.close_tab("(empty)")
+
+            result = f"restored:{restored}"
+
+        # Chat restore (best-effort, exception-isolated from tab restore).
+        if cw is not None:
+            try:
+                cw.merge_dataset_sessions(
+                    dataset, chat_store.load_dataset_sessions(work_dir)
+                )
             except Exception:
                 _log.warning(
-                    "open_dataset: failed to restore tab %r", entry, exc_info=True
+                    "open_dataset: failed to restore chat for %r", dataset,
+                    exc_info=True,
                 )
-
-        active_tab = sess.get("active_tab")
-        if active_tab is not None:
-            window.set_active_tab(active_tab)
-
-        if restored >= 1:
-            window.close_tab("(empty)")
-
-        return f"restored:{restored}"
     finally:
         window.set_suppress_dirty(False)
         if was_dirty:
             window.mark_session_dirty()
+
+    # Final current-dataset push (after suppress is lifted) — establishes the
+    # current dataset / adoption on no-session / restored:0 paths where no
+    # currentChanged fired. Idempotent no-op on restored:N≥1.
+    if resolved and cw is not None:
+        try:
+            cw.set_current_dataset(dataset)
+        except Exception:
+            _log.warning(
+                "open_dataset: failed to notify chat dataset for %r", dataset,
+                exc_info=True,
+            )
+    return result
 
 
 def infer_dataset(abs_path: str) -> str | None:

@@ -50,6 +50,7 @@ class ToolWindow(QMainWindow):
         )
         self._chat_dock.setWidget(QLabel("(chat panel: not wired yet)"))
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
+        self._chat_widget = None
 
         self._command_handlers: dict[str, Callable[..., object]] = {}
 
@@ -125,6 +126,15 @@ class ToolWindow(QMainWindow):
             return
         self._session_dirty = True
 
+    def mark_chat_dirty(self) -> None:
+        """Mark dirty for a chat state change, bypassing suppress_dirty.
+
+        Chat adoption / turn completion / rename / delete are real state
+        changes, not the restore-echo that suppress_dirty is meant to ignore,
+        so they must dirty the session even inside open_dataset's restore loop.
+        """
+        self._session_dirty = True
+
     def clear_session_dirty(self) -> None:
         self._session_dirty = False
 
@@ -136,6 +146,43 @@ class ToolWindow(QMainWindow):
 
     def set_chat_widget(self, widget: QWidget) -> None:
         self._chat_dock.setWidget(widget)
+        self._chat_widget = widget
+        if hasattr(widget, "bind_window"):
+            widget.bind_window(self)
+        # Push the initial dataset (the active tab's dataset, if any).
+        if hasattr(widget, "set_current_dataset"):
+            widget.set_current_dataset(self._active_tab_dataset())
+
+    def chat_widget(self):
+        return self._chat_widget
+
+    def chat_sessions(self) -> list:
+        if self._chat_widget is None:
+            return []
+        return self._chat_widget.sessions_for_persistence()
+
+    def chat_deleted_sessions(self) -> list:
+        if self._chat_widget is None:
+            return []
+        return self._chat_widget.deleted_sessions()
+
+    def chat_clear_deleted(self, applied) -> None:
+        if self._chat_widget is not None:
+            self._chat_widget.clear_deleted(applied)
+
+    def current_chat_dataset(self) -> str | None:
+        return self._active_tab_dataset()
+
+    def notify_chat_dataset(self) -> None:
+        if self._chat_widget is not None:
+            self._chat_widget.set_current_dataset(self._active_tab_dataset())
+
+    def _active_tab_dataset(self) -> str | None:
+        tab = self.active_tab()
+        if tab is None:
+            return None
+        spec = getattr(tab, "session_spec", None)
+        return spec.get("dataset") if isinstance(spec, dict) else None
 
     def set_chat_floating(self, floating: bool) -> None:
         self._chat_dock.setFloating(floating)
@@ -319,6 +366,11 @@ class ToolWindow(QMainWindow):
         host = socket.gethostname().upper()
         config.DATASETS.setdefault(name, {})[host] = path
 
+        # Registration creates no tab (no currentChanged), so notify the chat
+        # widget explicitly → "register → adopt" (Q2) gets wired.
+        if self._chat_widget is not None:
+            self._chat_widget.set_current_dataset(name)
+
         reply = QMessageBox.question(
             self, "解析雛形の作成", "解析雛形も作成しますか?"
         )
@@ -355,3 +407,5 @@ class ToolWindow(QMainWindow):
             self.statusBar().showMessage(f"Active: {tab.name}")
         self.tab_changed.emit(idx)
         self.mark_session_dirty()
+        if self._chat_widget is not None:
+            self._chat_widget.set_current_dataset(self._active_tab_dataset())
