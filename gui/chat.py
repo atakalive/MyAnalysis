@@ -456,8 +456,18 @@ class ChatWidget(QWidget):
                 )
             )
         if self._active is sess:
-            self._active = self._visible_sessions()[0] if self._visible_sessions() \
-                else self._sessions[0]
+            vis = self._visible_sessions()
+            if vis:
+                self._active = vis[0]
+            else:
+                # No visible session left for this dataset — create one instead
+                # of falling back to a hidden session from another dataset.
+                new = chat_store.new_session(
+                    self._backend.name, _SYSTEM_PROMPT,
+                    dataset=self._current_dataset,
+                )
+                self._sessions.append(new)
+                self._active = new
         self._rebuild_tab_bar()
         self._render_session(self._active)
         self._prime_backend_for(self._active)
