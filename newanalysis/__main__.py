@@ -20,6 +20,31 @@ import sys
 from pathlib import Path
 
 from common.paths import analyses_root, validate_identifier_name
+from dataset_config import KNOWN_FORMATS
+
+
+_LOAD_COMMENT_CSV = '''\
+    # TODO: 実データの読み込みに差し替えてください。例:
+    # from config import get_dataset_dir
+    # from common.loaders import load_csv_per_subdir
+    # sessions = load_csv_per_subdir(
+    #     root=get_dataset_dir("<your_dataset_key>"),
+    #     subdir_pattern="<pattern>",
+    #     csv_name="<filename>.csv",
+    # )
+    # return {"sessions": sessions}'''
+
+_LOAD_COMMENT_CUSTOM = '''\
+    # TODO: データセット固有の読み込み処理を実装してください。
+    # このデータセットは format="custom" です。load_dataset() は使用できません。
+    # from config import get_dataset_dir
+    # root = get_dataset_dir(DATASET)
+    # 以下にデータ読み込みを実装:'''
+
+_LOAD_COMMENTS = {
+    "csv_per_subdir": _LOAD_COMMENT_CSV,
+    "custom": _LOAD_COMMENT_CUSTOM,
+}
 
 
 _ANALYSIS_TEMPLATE = '''\
@@ -51,15 +76,7 @@ def load() -> dict[str, Any]:
     キャッシュが必要ならこの関数内で自前のメモ化を実装すること。
     GUI 依存の副作用を入れないこと (export が壊れる)。
     """
-    # TODO: 実データの読み込みに差し替えてください。例:
-    # from config import get_dataset_dir
-    # from common.loaders import load_csv_per_subdir
-    # sessions = load_csv_per_subdir(
-    #     root=get_dataset_dir("<your_dataset_key>"),
-    #     subdir_pattern="<pattern>",
-    #     csv_name="<filename>.csv",
-    # )
-    # return {"sessions": sessions}
+__GEN_LOAD_COMMENT__
     return {"rows": []}
 
 
@@ -147,15 +164,22 @@ TODO: tab.register_command で登録するカスタムコマンドを記述し�
 '''
 
 
-def _render_analysis(name: str, dataset: str | None) -> str:
+def _render_analysis(name: str, dataset: str | None, fmt: str = "csv_per_subdir") -> str:
+    if fmt not in KNOWN_FORMATS:
+        raise ValueError(
+            f"unknown format {fmt!r}; known formats: {KNOWN_FORMATS}"
+        )
     if dataset:
         dataset_line = f'DATASET = "{dataset}"'
     else:
         dataset_line = (
             'DATASET = ""  # TODO: config.DATASETS のキーを設定してください'
         )
-    return _ANALYSIS_TEMPLATE.replace("__GEN_DATASET_LINE__", dataset_line).replace(
-        "__GEN_NAME__", name
+    return (
+        _ANALYSIS_TEMPLATE
+        .replace("__GEN_LOAD_COMMENT__", _LOAD_COMMENTS[fmt])
+        .replace("__GEN_DATASET_LINE__", dataset_line)
+        .replace("__GEN_NAME__", name)
     )
 
 
@@ -164,7 +188,7 @@ def _render_readme(name: str) -> str:
 
 
 def create_analysis(
-    name: str, dataset: str | None = None,
+    name: str, dataset: str | None = None, fmt: str = "csv_per_subdir",
 ) -> tuple[Path, Path]:
     """Create analysis scaffold. Returns (analysis_py_path, readme_path).
 
@@ -183,7 +207,7 @@ def create_analysis(
     try:
         analysis_path = target_dir / "analysis.py"
         readme_path = target_dir / "README.md"
-        analysis_path.write_text(_render_analysis(name, dataset), encoding="utf-8")
+        analysis_path.write_text(_render_analysis(name, dataset, fmt), encoding="utf-8")
         readme_path.write_text(_render_readme(name), encoding="utf-8")
     except BaseException:
         # 不完全な生成物が残ると次回の「already exists」チェックを妨げる。
@@ -204,13 +228,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--dataset", default=None, help="config.DATASETS のキー文字列 (任意)"
     )
+    parser.add_argument(
+        "--format", default="csv_per_subdir",
+        choices=("csv_per_subdir", "custom"),
+        help="Dataset format (default: csv_per_subdir)",
+    )
     args = parser.parse_args(argv)
 
     name: str = args.name.strip()
     dataset: str | None = args.dataset
 
     try:
-        create_analysis(name, dataset)
+        create_analysis(name, dataset, fmt=args.format)
     except (ValueError, FileExistsError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)

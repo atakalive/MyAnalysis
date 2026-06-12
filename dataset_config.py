@@ -11,12 +11,15 @@ dir — never the measurement files themselves.
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path, PureWindowsPath
 
 CONFIG_FILENAME = "myanalysis.toml"
 
-_DEFAULTS = {"work_dir": "_work"}
+KNOWN_FORMATS: tuple[str, ...] = ("csv_per_subdir", "custom")
+
+_DEFAULTS = {"work_dir": "_work", "format": "csv_per_subdir"}
 
 _TEMPLATE = """\
 # MyAnalysis per-dataset settings (written by the tools; safe to hand-edit).
@@ -28,6 +31,10 @@ _TEMPLATE = """\
 #   '..', Windows drive-relative ("C:foo") and root-relative ("\\foo") paths are
 #   rejected.
 work_dir = "_work"
+# format: データセットの読み込み形式。load_dataset() のディスパッチに使用。
+#   - "csv_per_subdir" (既定): subdir_pattern/csv_name で glob → pd.read_csv
+#   - "custom": analysis module の load() で固有実装。load_dataset() は使用不可
+format = "csv_per_subdir"
 """
 
 
@@ -55,7 +62,45 @@ def load_config(name: str) -> dict:
             f"work_dir must be a string, got {type(cfg['work_dir']).__name__}: "
             f"{cfg['work_dir']!r}"
         )
+    cfg.setdefault("format", _DEFAULTS["format"])
+    if not isinstance(cfg["format"], str):
+        raise ValueError(
+            f"format must be a string, got {type(cfg['format']).__name__}: "
+            f"{cfg['format']!r}"
+        )
+    if cfg["format"] not in KNOWN_FORMATS:
+        raise ValueError(
+            f"unknown format {cfg['format']!r}; known formats: {KNOWN_FORMATS}"
+        )
     return cfg
+
+
+def set_format(name: str, fmt: str) -> None:
+    """myanalysis.toml の format 値を更新する（原子的に書き換える）。
+
+    既存の format 行（ダブル/シングルクォート、行頭インデント許容）を検出して
+    置換する。検出できなければ末尾に追記する（改行を保証してから）。
+
+    Raises:
+        ValueError: fmt が KNOWN_FORMATS に含まれない。
+    """
+    if fmt not in KNOWN_FORMATS:
+        raise ValueError(
+            f"unknown format {fmt!r}; known formats: {KNOWN_FORMATS}"
+        )
+    config_path = ensure_config(name)
+    text = config_path.read_text(encoding="utf-8")
+    new_line = f'format = "{fmt}"'
+    pattern = re.compile(r"""^\s*format\s*=\s*(?:"[^"]*"|'[^']*')""", re.MULTILINE)
+    if pattern.search(text):
+        text = pattern.sub(new_line, text, count=1)
+    else:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += new_line + "\n"
+    tmp = config_path.with_suffix(".toml.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(config_path)
 
 
 def ensure_config(name: str) -> Path:

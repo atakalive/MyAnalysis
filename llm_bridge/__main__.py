@@ -55,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("active", help="Print active tab name and currently open dataset")
     sub.add_parser("list-analyses", help="List analyses/ subdirs")
-    sub.add_parser("list-datasets", help="List registered dataset names")
+    p_lds = sub.add_parser("list-datasets", help="List registered dataset names")
+    p_lds.add_argument("--json", action="store_true", dest="json_out", default=False,
+                        help="Output as JSON with format and path info")
 
     p_reg = sub.add_parser("register-dataset", help="Register a dataset in config.py")
     p_reg.add_argument("name", help="Dataset name (identifier format)")
@@ -65,6 +67,11 @@ def main(argv: list[str] | None = None) -> int:
         "--with-analysis", nargs="?", const="", default=None,
         metavar="ANALYSIS_NAME",
         help="Also create analysis scaffold (default name = dataset name)",
+    )
+    p_reg.add_argument(
+        "--format", default="csv_per_subdir",
+        choices=("csv_per_subdir", "custom"),
+        help="Dataset format (default: csv_per_subdir)",
     )
     p_reg.add_argument(
         "--no-open", action="store_true", default=False,
@@ -133,8 +140,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "list-datasets":
         from config import DATASETS
+        if not args.json_out:
+            for name in sorted(DATASETS):
+                print(name)
+            return 0
+        from dataset_config import load_config
+        host = socket.gethostname().upper()
+        result = []
         for name in sorted(DATASETS):
-            print(name)
+            entry = {"name": name}
+            per_host = DATASETS[name]
+            entry["path"] = per_host.get(host)
+            try:
+                entry["format"] = load_config(name).get("format", "csv_per_subdir")
+            except Exception as e:
+                entry["format"] = None
+                print(f"warning: could not read format for {name!r}: {e}", file=sys.stderr)
+            result.append(entry)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     if args.cmd == "register-dataset":
@@ -156,12 +179,25 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+        # register_dataset() は "file write only, no in-memory mutation" なので、
+        # set_format → ensure_config → get_dataset_dir が新規データセットを
+        # in-memory DATASETS で参照できるよう、先に reload する。
+        from config import reload_datasets
+        reload_datasets()
+
+        if is_current_host and Path(args.path).exists():
+            try:
+                from dataset_config import set_format
+                set_format(args.name, args.format)
+            except Exception as e:
+                print(f"warning: could not set format in myanalysis.toml: {e}", file=sys.stderr)
+
         if args.with_analysis is not None:
             from newanalysis.__main__ import create_analysis
 
             analysis_name = args.with_analysis or args.name
             try:
-                create_analysis(analysis_name, dataset=args.name)
+                create_analysis(analysis_name, dataset=args.name, fmt=args.format)
                 print(f"created analyses/{analysis_name}/")
             except (ValueError, FileExistsError) as e:
                 print(f"error creating analysis: {e}", file=sys.stderr)

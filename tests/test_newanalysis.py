@@ -234,3 +234,23 @@ def test_validate_identifier_name_dirname_strict(name):
     with pytest.raises(ValueError):
         validate_identifier_name(name, check_reserved=True)
     validate_identifier_name(name, check_reserved=False)  # dict キーとしては可。
+
+
+# ---- format template dispatch (#27) ----
+
+def test_custom_format_template(fake_roots):
+    analysis_path, _ = gen.create_analysis("cust", dataset="ds", fmt="custom")
+    text = analysis_path.read_text(encoding="utf-8")
+    assert "load_csv_per_subdir" not in text
+    assert 'format="custom"' in text
+
+
+def test_default_format_template(fake_roots):
+    analysis_path, _ = gen.create_analysis("deflt", dataset="ds")
+    text = analysis_path.read_text(encoding="utf-8")
+    assert "load_csv_per_subdir" in text
+
+
+def test_unknown_format_raises(fake_roots):
+    with pytest.raises(ValueError):
+        gen.create_analysis("badfmt", dataset="ds", fmt="unknown")

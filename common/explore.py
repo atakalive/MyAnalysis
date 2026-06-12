@@ -27,22 +27,35 @@ def load_dataset(
         RuntimeError: 現ホストのパスが DATASETS に未登録。
         FileNotFoundError: dataset ディレクトリが存在しない、
                            またはマッチするセッションが0件。
+        NotImplementedError: format="custom"（対応する analysis module の
+                             load() を使用すること）。
+        ValueError: 未知の format。
     """
     from config import get_dataset_dir
-    from common.loaders import load_csv_per_subdir
+    import dataset_config
     root = get_dataset_dir(name)
-    sessions = load_csv_per_subdir(
-        root=root,
-        subdir_pattern=subdir_pattern,
-        csv_name=csv_name,
-        encoding=encoding,
-    )
-    if not sessions:
-        raise FileNotFoundError(
-            f"no sessions found under {root} "
-            f"(pattern={subdir_pattern!r}, csv={csv_name!r})"
+    fmt = dataset_config.load_config(name)["format"]
+    if fmt == "csv_per_subdir":
+        from common.loaders import load_csv_per_subdir
+        sessions = load_csv_per_subdir(
+            root=root,
+            subdir_pattern=subdir_pattern,
+            csv_name=csv_name,
+            encoding=encoding,
         )
-    return sessions
+        if not sessions:
+            raise FileNotFoundError(
+                f"no sessions found under {root} "
+                f"(pattern={subdir_pattern!r}, csv={csv_name!r})"
+            )
+        return sessions
+    if fmt == "custom":
+        raise NotImplementedError(
+            f"dataset {name!r} uses format='custom'. Use the corresponding "
+            "analysis module's load() function instead "
+            "(see 'python -m llm_bridge list-analyses')."
+        )
+    raise ValueError(f"unknown format {fmt!r} for dataset {name!r}")
 
 
 def save_fig(name: str, fig: Figure, label: str) -> Path:
@@ -112,32 +125,50 @@ def dataset_summary(
             ]
         }
 
-    Raises: load_dataset と同じ例外（0件時 FileNotFoundError 含む）。
+    format="custom" の場合は CSV 詳細ではなくメタ情報のみの dict を返す
+    （FileNotFoundError は送出しない）。
+
+    Raises:
+        load_dataset と同じ例外（csv_per_subdir で0件時 FileNotFoundError 含む）。
+        ValueError: 未知の format。
     """
     from config import get_dataset_dir
-    from common.loaders import load_csv_per_subdir
+    import dataset_config
     root = get_dataset_dir(name)
-    sessions = load_csv_per_subdir(
-        root=root,
-        subdir_pattern=subdir_pattern,
-        csv_name=csv_name,
-        encoding=encoding,
-    )
-    if not sessions:
-        raise FileNotFoundError(
-            f"no sessions found under {root} "
-            f"(pattern={subdir_pattern!r}, csv={csv_name!r})"
+    fmt = dataset_config.load_config(name)["format"]
+    if fmt == "csv_per_subdir":
+        from common.loaders import load_csv_per_subdir
+        sessions = load_csv_per_subdir(
+            root=root,
+            subdir_pattern=subdir_pattern,
+            csv_name=csv_name,
+            encoding=encoding,
         )
-    return {
-        "name": name,
-        "path": str(root),
-        "sessions": [
-            {
-                "name": s["name"],
-                "rows": len(s["df"]),
-                "columns": list(s["df"].columns),
-                "dtypes": {c: str(s["df"][c].dtype) for c in s["df"].columns},
-            }
-            for s in sessions
-        ],
-    }
+        if not sessions:
+            raise FileNotFoundError(
+                f"no sessions found under {root} "
+                f"(pattern={subdir_pattern!r}, csv={csv_name!r})"
+            )
+        return {
+            "name": name,
+            "path": str(root),
+            "format": "csv_per_subdir",
+            "sessions": [
+                {
+                    "name": s["name"],
+                    "rows": len(s["df"]),
+                    "columns": list(s["df"].columns),
+                    "dtypes": {c: str(s["df"][c].dtype) for c in s["df"].columns},
+                }
+                for s in sessions
+            ],
+        }
+    if fmt == "custom":
+        return {
+            "name": name,
+            "path": str(root),
+            "format": "custom",
+            "note": "load_dataset() 不可。対応する analysis module の load() を"
+                    "使用してください (python -m llm_bridge list-analyses で確認)。",
+        }
+    raise ValueError(f"unknown format {fmt!r} for dataset {name!r}")

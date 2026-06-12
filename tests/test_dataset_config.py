@@ -129,3 +129,101 @@ def test_load_config_propagates_parse_error(ds_dir):
     )
     with pytest.raises(tomllib.TOMLDecodeError):
         dataset_config.load_config("ds")
+
+
+# ---- (i) format metadata (#27) ----
+
+def test_load_config_default_format(ds_dir):
+    # no toml → default format.
+    assert dataset_config.load_config("ds")["format"] == "csv_per_subdir"
+
+
+def test_load_config_reads_format(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"\nformat = "custom"\n', encoding="utf-8"
+    )
+    assert dataset_config.load_config("ds")["format"] == "custom"
+
+
+def test_load_config_reads_format_single_quote(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        "work_dir = '_work'\nformat = 'custom'\n", encoding="utf-8"
+    )
+    assert dataset_config.load_config("ds")["format"] == "custom"
+
+
+def test_load_config_rejects_non_string_format(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"\nformat = 123\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError):
+        dataset_config.load_config("ds")
+
+
+def test_load_config_rejects_unknown_format(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"\nformat = "unknown"\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError):
+        dataset_config.load_config("ds")
+
+
+def test_set_format_creates_and_sets(ds_dir):
+    dataset_config.set_format("ds", "custom")
+    assert dataset_config.load_config("ds")["format"] == "custom"
+
+
+def test_set_format_updates_existing_double_quote(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"\nformat = "csv_per_subdir"\n', encoding="utf-8"
+    )
+    dataset_config.set_format("ds", "custom")
+    text = (ds_dir / "myanalysis.toml").read_text(encoding="utf-8")
+    assert 'format = "custom"' in text
+    assert text.count("format =") == 1
+
+
+def test_set_format_updates_existing_single_quote(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        "work_dir = '_work'\nformat = 'csv_per_subdir'\n", encoding="utf-8"
+    )
+    dataset_config.set_format("ds", "custom")
+    text = (ds_dir / "myanalysis.toml").read_text(encoding="utf-8")
+    assert 'format = "custom"' in text
+    assert text.count("format =") == 1
+
+
+def test_set_format_updates_existing_indented(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"\n  format = "csv_per_subdir"\n', encoding="utf-8"
+    )
+    dataset_config.set_format("ds", "custom")
+    text = (ds_dir / "myanalysis.toml").read_text(encoding="utf-8")
+    assert 'format = "custom"' in text
+    assert text.count("format =") == 1
+    assert dataset_config.load_config("ds")["format"] == "custom"
+
+
+def test_set_format_preserves_work_dir(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "results"\nformat = "csv_per_subdir"\n', encoding="utf-8"
+    )
+    dataset_config.set_format("ds", "custom")
+    assert dataset_config.load_config("ds")["work_dir"] == "results"
+
+
+def test_set_format_rejects_unknown(ds_dir):
+    with pytest.raises(ValueError):
+        dataset_config.set_format("ds", "unknown")
+
+
+def test_set_format_handles_no_trailing_newline(ds_dir):
+    (ds_dir / "myanalysis.toml").write_text(
+        'work_dir = "_work"', encoding="utf-8"
+    )
+    dataset_config.set_format("ds", "custom")
+    text = (ds_dir / "myanalysis.toml").read_text(encoding="utf-8")
+    # no line concatenation: work_dir and format on separate lines, parseable.
+    assert 'work_dir = "_work"format' not in text
+    assert dataset_config.load_config("ds")["format"] == "custom"
+    assert dataset_config.load_config("ds")["work_dir"] == "_work"

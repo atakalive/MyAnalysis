@@ -222,3 +222,123 @@ def test_list_analyses_excludes_underscore(fake_roots, capsys):
     names = capsys.readouterr().out.splitlines()
     assert "_viewer" not in names
     assert "real_one" in names
+
+
+# ---- load_dataset / dataset_summary: format dispatch (#27) ----
+
+def test_load_dataset_custom_format_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    monkeypatch.setattr(
+        "dataset_config.load_config", lambda name: {"work_dir": "_work", "format": "custom"}
+    )
+    with pytest.raises(NotImplementedError) as ei:
+        explore.load_dataset("test")
+    assert "list-analyses" in str(ei.value)
+
+
+def test_load_dataset_unknown_format_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    monkeypatch.setattr(
+        "dataset_config.load_config", lambda name: {"work_dir": "_work", "format": "weird"}
+    )
+    with pytest.raises(ValueError):
+        explore.load_dataset("test")
+
+
+def test_dataset_summary_custom_format(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    monkeypatch.setattr(
+        "dataset_config.load_config", lambda name: {"work_dir": "_work", "format": "custom"}
+    )
+    summary = explore.dataset_summary("test")
+    assert summary["format"] == "custom"
+    assert "note" in summary
+    assert summary["name"] == "test"
+
+
+def test_dataset_summary_csv_includes_format(monkeypatch, tmp_path):
+    import pandas as pd
+
+    df = pd.DataFrame({"i": [1, 2]})
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / "root")
+    monkeypatch.setattr(
+        "common.loaders.load_csv_per_subdir",
+        lambda **kw: [{"name": "s0", "dir": tmp_path, "df": df}],
+    )
+    summary = explore.dataset_summary("test")
+    assert summary["format"] == "csv_per_subdir"
+
+
+# ---- CLI: list-datasets --json (#27) ----
+
+def test_list_datasets_json_structure(monkeypatch, capsys):
+    monkeypatch.setattr("config.DATASETS", {"alpha": {}, "beta": {}})
+    monkeypatch.setattr(
+        "dataset_config.load_config",
+        lambda name: {"work_dir": "_work", "format": "csv_per_subdir"},
+    )
+    rc = bridge_main.main(["list-datasets", "--json"])
+    assert rc == 0
+    import json
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, list)
+    for entry in data:
+        assert set(entry) == {"name", "path", "format"}
+
+
+def test_list_datasets_json_format_null_on_error(monkeypatch, capsys):
+    monkeypatch.setattr("config.DATASETS", {"good": {}, "broken": {}})
+
+    def fake_load_config(name):
+        if name == "broken":
+            raise ValueError("corrupt toml")
+        return {"work_dir": "_work", "format": "csv_per_subdir"}
+
+    monkeypatch.setattr("dataset_config.load_config", fake_load_config)
+    rc = bridge_main.main(["list-datasets", "--json"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    import json
+    data = json.loads(captured.out)
+    by_name = {e["name"]: e for e in data}
+    assert by_name["good"]["format"] == "csv_per_subdir"
+    assert by_name["broken"]["format"] is None
+    assert "warning" in captured.err
+
+
+def test_list_datasets_plain_unchanged(monkeypatch, capsys):
+    monkeypatch.setattr("config.DATASETS", {"zeta": {}, "alpha": {}})
+    rc = bridge_main.main(["list-datasets"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.splitlines() == ["alpha", "zeta"]
+
+
+def test_register_dataset_format_custom_new(monkeypatch, capsys):
+    calls = []
+
+    def fake_register_dataset(name, path, host):
+        calls.append(("register", name))
+        return {"created": True, "name": name, "host": "HOST", "path": path}
+
+    def fake_reload():
+        calls.append(("reload", None))
+
+    def fake_set_format(name, fmt):
+        calls.append(("set_format", name, fmt))
+
+    monkeypatch.setattr("config.register_dataset", fake_register_dataset)
+    monkeypatch.setattr("config.reload_datasets", fake_reload)
+    monkeypatch.setattr("dataset_config.set_format", fake_set_format)
+
+    import os
+    existing_path = os.getcwd()  # an existing path on this host
+    rc = bridge_main.main([
+        "register-dataset", "newds", existing_path, "--format", "custom", "--no-open",
+    ])
+    assert rc == 0
+    # order: register → reload → set_format
+    kinds = [c[0] for c in calls]
+    assert kinds.index("register") < kinds.index("reload") < kinds.index("set_format")
+    sf = [c for c in calls if c[0] == "set_format"][0]
+    assert sf[1] == "newds" and sf[2] == "custom"
