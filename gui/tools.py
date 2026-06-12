@@ -26,7 +26,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_active_tab",
-            "description": "Return the name of the currently focused tab, or null.",
+            "description": "Return the currently focused tab name and the currently open dataset (null if none).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },

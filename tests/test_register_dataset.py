@@ -198,3 +198,36 @@ def test_does_not_mutate_global_datasets(cfg):
     config.register_dataset("brand_new_xyz", r"G:\foo", host="H1", config_path=cfg)
     assert config.DATASETS == before
     assert "brand_new_xyz" not in config.DATASETS
+
+
+def test_reload_datasets_inplace(tmp_path, monkeypatch):
+    """reload_datasets preserves dict identity (id(DATASETS) unchanged)."""
+    import config
+
+    # config.py の最小限コピーを tmp_path に作成
+    tmp_config = tmp_path / "config.py"
+    tmp_config.write_text(
+        'DATASETS: dict[str, dict[str, str]] = {"test_ds": {"HOST": "/tmp"}}\n',
+        encoding="utf-8",
+    )
+    original_id = id(config.DATASETS)
+    original_content = dict(config.DATASETS)
+    try:
+        config.reload_datasets(config_path=tmp_config)
+        assert id(config.DATASETS) == original_id
+        assert "test_ds" in config.DATASETS
+    finally:
+        # 復元: monkeypatch ではなく直接 clear/update で戻す
+        config.DATASETS.clear()
+        config.DATASETS.update(original_content)
+
+
+def test_reload_datasets_rejects_non_dict(tmp_path):
+    """reload_datasets raises TypeError if DATASETS is not a dict."""
+    import config
+
+    tmp_config = tmp_path / "config.py"
+    tmp_config.write_text('DATASETS = [1, 2, 3]\n', encoding="utf-8")
+    import pytest
+    with pytest.raises(TypeError, match="must be a dict"):
+        config.reload_datasets(config_path=tmp_config)

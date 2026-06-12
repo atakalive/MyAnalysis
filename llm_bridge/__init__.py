@@ -29,10 +29,12 @@ def _validate_analysis_name(name: str) -> None:
 def _write_active(window) -> None:
     tab = window.active_tab()
     name = tab.name if tab is not None else None
+    ds = getattr(window, "current_dataset", None)
     p = active_state_path()
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(
-        json.dumps({"active_tab": name}, ensure_ascii=False), encoding="utf-8"
+        json.dumps({"active_tab": name, "dataset": ds}, ensure_ascii=False),
+        encoding="utf-8",
     )
     tmp.replace(p)
 
@@ -91,6 +93,11 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         # that add_tab fires sees the final spec (→ chat gets the right dataset).
         import config
         ds = getattr(mod, "DATASET", None) or name
+        if ds not in config.DATASETS:
+            try:
+                config.reload_datasets()
+            except Exception:
+                pass
         if ds in config.DATASETS:
             tab.session_spec = {"kind": "analysis", "name": name, "module": name, "dataset": ds}
             session.note_dataset(ds)
@@ -267,6 +274,8 @@ def attach_window(window) -> list[object]:
 
     # Active tab tracker.
     window.tab_changed.connect(lambda _i: _write_active(window))
+    if hasattr(window, "dataset_changed"):
+        window.dataset_changed.connect(lambda _ds: _write_active(window))
     _write_active(window)  # initial write
 
     # Session saver wiring.

@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     p_state = sub.add_parser("state", help="Print state.json for an analysis")
     p_state.add_argument("name", nargs="?")
 
-    sub.add_parser("active", help="Print currently active tab name")
+    sub.add_parser("active", help="Print active tab name and currently open dataset")
     sub.add_parser("list-analyses", help="List analyses/ subdirs")
     sub.add_parser("list-datasets", help="List registered dataset names")
 
@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         "--with-analysis", nargs="?", const="", default=None,
         metavar="ANALYSIS_NAME",
         help="Also create analysis scaffold (default name = dataset name)",
+    )
+    p_reg.add_argument(
+        "--no-open", action="store_true", default=False,
+        help="Don't auto-open the dataset in a running GUI (skip the 10s wait)",
     )
 
     p_lc = sub.add_parser("list-commands", help="List registered verbs (informational)")
@@ -138,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             result = register_dataset(name=args.name, path=args.path, host=args.host)
-        except ValueError as e:
+        except (ValueError, SyntaxError, TypeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
 
@@ -167,6 +171,41 @@ def main(argv: list[str] | None = None) -> int:
             f"{verb} dataset {result['name']!r} for host "
             f"{result['host']!r}: {result['path']}"
         )
+
+        # Auto-open in a running GUI (best-effort).
+        # Path(args.path).exists() は判定に使わない — Windows/WSL 混在環境では
+        # WSL 上で Windows パスが常に False になり、サイレントスキップになるため。
+        # パスの実在確認は GUI 側の open_dataset 内で行われる（dataset_dir.is_dir()）。
+        if not getattr(args, "no_open", False) and is_current_host:
+            try:
+                cmd_id = commands.submit("window", None, "open-dataset", {"name": args.name})
+                result = commands.wait_for(cmd_id, timeout=10.0)
+                if result is None:
+                    print(
+                        "GUI からの応答なし（GUI 未起動、または復元処理中の可能性）。\n"
+                        "GUI 側で python -m llm_bridge window open-dataset "
+                        f"name={args.name} --wait で開けます。",
+                        file=sys.stderr,
+                    )
+                elif result.get("status") == "ok":
+                    r = result.get("result", "")
+                    if isinstance(r, str) and r.startswith("error:"):
+                        print(f"registered but could not open: {r}", file=sys.stderr)
+                    elif isinstance(r, str) and r.startswith("no-session:"):
+                        print(f"opened (no saved session)")
+                    elif isinstance(r, str) and r.startswith("restored:"):
+                        n = r.split(":", 1)[1]
+                        print(f"opened (restored {n} tab(s))")
+                    else:
+                        print(f"opened: {r}")
+                else:
+                    # status != "ok" (error, rejected, stale, malformed, etc.)
+                    print(
+                        f"registered but could not open dataset: {result}",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"auto-open failed: {e}", file=sys.stderr)
         return 0
 
     if args.cmd == "list-commands":

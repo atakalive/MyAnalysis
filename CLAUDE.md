@@ -17,7 +17,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [ANALYSIS_NAME]]`) or GUI (File → データセット登録…). Both methods rewrite `config.py` in place (ast-based, atomic). Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
+When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [ANALYSIS_NAME]]`) or GUI (File → データセット登録…). Both methods rewrite `config.py` in place (ast-based, atomic). GUI 起動中なら登録と同時に自動オープンされる（`--no-open` でスキップ可）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
@@ -98,7 +98,7 @@ to discover registered dataset names.
 
 ## Session save/restore
 
-データセット単位のセッション（開いていたタブ構成・アクティブタブ）を `<work_dir>/session.json` に保存・復元する。repo-local のグローバル last-session は無い。
+データセット単位のセッション（開いていたタブ構成・アクティブタブ）を `<work_dir>/session.json` に保存・復元する。repo-local のグローバル last-session は無い。現在開いているデータセットは `python -m llm_bridge active` の `dataset` フィールドで取得できる（null なら未オープン）。
 
 - 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
 - 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。

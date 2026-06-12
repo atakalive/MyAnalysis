@@ -93,6 +93,67 @@ def _serialize_datasets(registry: dict, annotation: str | None) -> str:
     return "\n".join(lines)
 
 
+def _parse_registry(
+    config_path: Path | None = None,
+) -> tuple[ast.AST, dict, str | None, str]:
+    """Parse config.py and extract the DATASETS registry.
+
+    Returns (node, registry, annotation, source) where:
+      - node: the ast.AnnAssign or ast.Assign node for DATASETS
+      - registry: the parsed dict (via ast.literal_eval)
+      - annotation: the unparsed type annotation string, or None
+      - source: the raw file source text
+
+    Raises TypeError if the parsed DATASETS value is not a dict.
+    """
+    if config_path is None:
+        config_path = Path(__file__)
+
+    with open(config_path, encoding="utf-8", newline="") as f:
+        source = f.read()
+    tree = ast.parse(source)
+
+    node = None
+    for stmt in tree.body:
+        if isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name) and stmt.target.id == "DATASETS":
+                node = stmt
+                break
+        elif isinstance(stmt, ast.Assign):
+            if any(
+                isinstance(t, ast.Name) and t.id == "DATASETS" for t in stmt.targets
+            ):
+                node = stmt
+                break
+    if node is None:
+        raise ValueError(f"DATASETS assignment not found in {config_path}")
+
+    registry = ast.literal_eval(ast.get_source_segment(source, node.value))
+    if not isinstance(registry, dict):
+        raise TypeError(
+            f"DATASETS registry must be a dict, got {type(registry).__name__}"
+        )
+
+    annotation = None
+    if isinstance(node, ast.AnnAssign):
+        annotation = ast.unparse(node.annotation)
+
+    return node, registry, annotation, source
+
+
+def reload_datasets(config_path: Path | None = None) -> None:
+    """Re-read DATASETS from config.py and update the module-level dict in place.
+
+    In-place clear/update preserves dict identity — code that imported
+    ``from config import DATASETS`` or holds a reference to the dict object
+    sees the refreshed data without re-importing.
+    """
+    _, registry, _, _ = _parse_registry(config_path)
+    # _parse_registry guarantees registry is a dict (TypeError otherwise).
+    DATASETS.clear()
+    DATASETS.update(registry)
+
+
 def register_dataset(
     name: str,
     path: str,
@@ -119,30 +180,7 @@ def register_dataset(
     if config_path is None:
         config_path = Path(__file__)
 
-    with open(config_path, encoding="utf-8", newline="") as f:
-        source = f.read()
-    tree = ast.parse(source)
-
-    node = None
-    for stmt in tree.body:
-        if isinstance(stmt, ast.AnnAssign):
-            if isinstance(stmt.target, ast.Name) and stmt.target.id == "DATASETS":
-                node = stmt
-                break
-        elif isinstance(stmt, ast.Assign):
-            if any(
-                isinstance(t, ast.Name) and t.id == "DATASETS" for t in stmt.targets
-            ):
-                node = stmt
-                break
-    if node is None:
-        raise ValueError(f"DATASETS assignment not found in {config_path}")
-
-    registry = ast.literal_eval(ast.get_source_segment(source, node.value))
-
-    annotation = None
-    if isinstance(node, ast.AnnAssign):
-        annotation = ast.unparse(node.annotation)
+    node, registry, annotation, source = _parse_registry(config_path)
 
     created = name not in registry
     registry.setdefault(name, {})[host] = path

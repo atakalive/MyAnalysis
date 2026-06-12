@@ -243,8 +243,20 @@ def open_dataset(window, dataset: str) -> str:
     window.set_suppress_dirty(True)
     try:
         try:
+            import config
+            config.reload_datasets()
+        except Exception:
+            pass  # best-effort; proceed to existing error path
+        try:
             work_dir = _resolve_work_dir_readonly(dataset)
             resolved = True
+            # Verify dataset_dir actually exists on this host.
+            dataset_dir = config.get_dataset_dir(dataset)
+            if not dataset_dir.is_dir():
+                _log.warning(
+                    "open_dataset: dataset dir does not exist: %s", dataset_dir,
+                )
+                return f"error:{dataset}"
         except Exception:
             return f"error:{dataset}"
 
@@ -311,14 +323,24 @@ def open_dataset(window, dataset: str) -> str:
     # Final current-dataset push (after suppress is lifted) — establishes the
     # current dataset / adoption on no-session / restored:0 paths where no
     # currentChanged fired. Idempotent no-op on restored:N≥1.
-    if resolved and cw is not None:
-        try:
-            cw.set_current_dataset(dataset)
-        except Exception:
-            _log.warning(
-                "open_dataset: failed to notify chat dataset for %r", dataset,
-                exc_info=True,
-            )
+    if resolved:
+        note = getattr(window, "note_current_dataset", None)
+        if note is not None:
+            try:
+                note(dataset)
+            except Exception:
+                _log.warning(
+                    "open_dataset: failed to notify window dataset for %r", dataset,
+                    exc_info=True,
+                )
+        elif cw is not None:
+            try:
+                cw.set_current_dataset(dataset)
+            except Exception:
+                _log.warning(
+                    "open_dataset: failed to notify chat dataset for %r", dataset,
+                    exc_info=True,
+                )
     return result
 
 

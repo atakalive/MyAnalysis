@@ -8,6 +8,8 @@ unregistered host / missing dataset.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import config
@@ -219,6 +221,10 @@ class _DispatchWindow(_FakeWindow):
         super().__init__([], active=None)
         self._dirty = False
         self._suppress = False
+        self.noted_datasets: list[str | None] = []
+
+    def note_current_dataset(self, name):
+        self.noted_datasets.append(name)
 
     def dispatch_command(self, verb, **kwargs):
         pass  # no-op; don't actually try to create tabs
@@ -277,3 +283,130 @@ def test_open_dataset_all_figures_missing_no_touched(ds_env):
     result = session.open_dataset(win, "ds_a")
     assert result == "restored:0"
     assert "ds_a" not in session._touched
+
+
+def test_open_dataset_calls_note_current_dataset(ds_env, monkeypatch):
+    """(a) no-session 経路で note_current_dataset が呼ばれる。"""
+    import config
+    monkeypatch.setattr(config, "reload_datasets", lambda config_path=None: None)
+    session._touched.clear()
+    win = _DispatchWindow()
+    result = session.open_dataset(win, "ds_a")
+    assert result.startswith("no-session:")
+    assert win.noted_datasets == ["ds_a"]
+
+
+def test_open_dataset_error_skips_note(ds_env, monkeypatch):
+    """(b) error 経路で note_current_dataset が呼ばれない。"""
+    import config as config_mod
+    monkeypatch.setattr(config_mod, "reload_datasets", lambda config_path=None: None)
+    session._touched.clear()
+    win = _DispatchWindow()
+    # config.get_dataset_dir を差し替えて _resolve_work_dir_readonly を失敗させる。
+    # _resolve_work_dir_readonly は config.get_dataset_dir(dataset) を呼ぶ（session.py:51）。
+    monkeypatch.setattr(
+        config_mod, "get_dataset_dir",
+        lambda name: (_ for _ in ()).throw(KeyError(f"unknown: {name}")),
+    )
+    result = session.open_dataset(win, "ds_a")
+    assert result.startswith("error:")
+    assert win.noted_datasets == []
+
+
+class _LegacyWindow:
+    """Window without note_current_dataset (pre-upgrade compatibility test).
+
+    Independent class (not inheriting _DispatchWindow) — delattr on inherited
+    attributes raises AttributeError.
+    """
+    def __init__(self):
+        self._tabs_list = []
+        self._active = None
+        self.dirty_cleared = False
+        self._dirty = False
+        self._suppress = False
+        self._cw = None
+
+    def tabs(self):
+        return self._tabs_list
+
+    def active_tab(self):
+        return self._active
+
+    def clear_session_dirty(self):
+        self.dirty_cleared = True
+
+    def dispatch_command(self, verb, **kwargs):
+        pass
+
+    def is_session_dirty(self):
+        return self._dirty
+
+    def set_suppress_dirty(self, b):
+        self._suppress = b
+
+    def mark_session_dirty(self):
+        if not self._suppress:
+            self._dirty = True
+
+    def set_active_tab(self, name):
+        return False
+
+    def close_tab(self, name):
+        return False
+
+    def chat_widget(self):
+        return self._cw
+
+
+def test_open_dataset_no_note_method_fallback(ds_env, monkeypatch):
+    """(c) note_current_dataset 無し window でフォールバック（cw.set_current_dataset）。"""
+    import config
+    monkeypatch.setattr(config, "reload_datasets", lambda config_path=None: None)
+    session._touched.clear()
+
+    class _FakeCW:
+        def __init__(self):
+            self.datasets = []
+        def set_current_dataset(self, ds):
+            self.datasets.append(ds)
+        def merge_dataset_sessions(self, ds, sessions):
+            pass
+
+    cw = _FakeCW()
+    win = _LegacyWindow()
+    win._cw = cw
+    result = session.open_dataset(win, "ds_a")
+    assert result.startswith("no-session:")
+    assert cw.datasets == ["ds_a"]
+
+
+def test_open_dataset_reload_called(ds_env, monkeypatch):
+    """(d) open_dataset は無条件で reload_datasets を呼ぶ。"""
+    import config
+    reload_calls = []
+
+    def tracking_reload(config_path=None):
+        reload_calls.append(1)
+
+    monkeypatch.setattr(config, "reload_datasets", tracking_reload)
+    session._touched.clear()
+    win = _DispatchWindow()
+    session.open_dataset(win, "ds_a")
+    assert len(reload_calls) == 1
+
+
+def test_open_dataset_nonexistent_dir_returns_error(ds_env, monkeypatch):
+    """(e) dataset_dir が存在しない場合は error を返す。"""
+    import config
+    monkeypatch.setattr(config, "reload_datasets", lambda config_path=None: None)
+    # get_dataset_dir が存在しないパスを返すようにする
+    monkeypatch.setattr(
+        config, "get_dataset_dir",
+        lambda name: Path("/nonexistent/dataset/path"),
+    )
+    session._touched.clear()
+    win = _DispatchWindow()
+    result = session.open_dataset(win, "ds_a")
+    assert result.startswith("error:")
+    assert win.noted_datasets == []

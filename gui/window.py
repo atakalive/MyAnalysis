@@ -23,11 +23,13 @@ RESERVED_WINDOW_VERBS = frozenset([
 
 class ToolWindow(QMainWindow):
     tab_changed = Signal(int)
+    dataset_changed = Signal(object)  # str | None
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("MyAnalysis Tool")
         self.resize(1400, 800)
+        self._current_dataset: str | None = None
 
         self._tabs = QTabWidget()
         self._tabs.setMovable(True)
@@ -174,6 +176,7 @@ class ToolWindow(QMainWindow):
         return self._active_tab_dataset()
 
     def notify_chat_dataset(self) -> None:
+        self._sync_current_from_active_tab()
         if self._chat_widget is not None:
             self._chat_widget.set_current_dataset(self._active_tab_dataset())
 
@@ -183,6 +186,36 @@ class ToolWindow(QMainWindow):
             return None
         spec = getattr(tab, "session_spec", None)
         return spec.get("dataset") if isinstance(spec, dict) else None
+
+    @property
+    def current_dataset(self) -> str | None:
+        """The currently open dataset (sticky — survives dataset-less tab switches)."""
+        return self._current_dataset
+
+    def _set_current_dataset(self, ds: str | None) -> None:
+        if ds != self._current_dataset:
+            self._current_dataset = ds
+            self.dataset_changed.emit(ds)
+
+    def _sync_current_from_active_tab(self) -> None:
+        ds = self._active_tab_dataset()
+        if ds is not None:
+            self._set_current_dataset(ds)
+
+    def note_current_dataset(self, name: str | None) -> None:
+        """Set the current dataset and push to the chat widget.
+
+        Unlike ``_set_current_dataset``, the chat push runs even when *name*
+        equals the current value — a same-dataset re-open must still trigger
+        the chat's adoption machinery.
+
+        Not to be confused with ``llm_bridge.session.note_dataset``, which
+        records a dataset in the save-target set (_touched) but does not
+        touch the window or chat widget.
+        """
+        self._set_current_dataset(name)
+        if self._chat_widget is not None:
+            self._chat_widget.set_current_dataset(name)
 
     def set_chat_floating(self, floating: bool) -> None:
         self._chat_dock.setFloating(floating)
@@ -235,6 +268,10 @@ class ToolWindow(QMainWindow):
 
     def _open_dataset(self) -> None:
         import config
+        try:
+            config.reload_datasets()
+        except Exception:
+            pass  # best-effort; proceed with current DATASETS
         names = sorted(config.DATASETS.keys())
         if not names:
             QMessageBox.information(self, "データセットを開く", "データセットが登録されていません")
@@ -366,10 +403,9 @@ class ToolWindow(QMainWindow):
         host = socket.gethostname().upper()
         config.DATASETS.setdefault(name, {})[host] = path
 
-        # Registration creates no tab (no currentChanged), so notify the chat
-        # widget explicitly → "register → adopt" (Q2) gets wired.
-        if self._chat_widget is not None:
-            self._chat_widget.set_current_dataset(name)
+        # Sticky dataset + chat push. GUI 登録はセッション復元しない — ユーザは
+        # File → データセットを開く… で明示的に復元できる。
+        self.note_current_dataset(name)
 
         reply = QMessageBox.question(
             self, "解析雛形の作成", "解析雛形も作成しますか?"
@@ -407,5 +443,6 @@ class ToolWindow(QMainWindow):
             self.statusBar().showMessage(f"Active: {tab.name}")
         self.tab_changed.emit(idx)
         self.mark_session_dirty()
+        self._sync_current_from_active_tab()
         if self._chat_widget is not None:
             self._chat_widget.set_current_dataset(self._active_tab_dataset())

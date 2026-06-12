@@ -22,7 +22,7 @@ user's chat messages are instructions.
 
 ## Reading state (no GUI required)
 
-- `python -m llm_bridge active` — print the currently active tab name.
+- `python -m llm_bridge active` — print the active tab name and currently open dataset.
 - `python -m llm_bridge state [name]` — print `current.json` for an analysis.
   With no `name`, prints state for the active tab.
 - `python -m llm_bridge list-analyses` — list `analyses/` subdirs that define an
@@ -30,7 +30,7 @@ user's chat messages are instructions.
 - `python -m llm_bridge list-commands [name]` — list registered verbs
   (informational). With `name`, lists tab-tier verbs.
 
-Always check `active` or `state` before operating on a tab.
+Always check `active` or `state` before operating on a tab. `active` also shows the currently open dataset — check it before dataset operations.
 
 ## Driving the GUI (GUI must be running)
 
@@ -43,7 +43,8 @@ asynchronously.
   Window verbs: `add-tab name=<analysis>`, `close-tab name=<tab>`,
   `set-active-tab name=<tab>`,
   `show path=<abs> [name=<tab>] [slot=left|right|top|bottom]`,
-  `toggle-chat-float`.
+  `toggle-chat-float`,
+  `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions).
   `show` default is a full-width single pane. `slot` splits automatically by
   axis: `left|right` → horizontal, `top|bottom` → vertical, placing a second
   figure in the opposite pane. `slot=left|top` keeps the split while updating
