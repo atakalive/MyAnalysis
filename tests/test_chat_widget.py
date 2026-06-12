@@ -23,11 +23,14 @@ class _FakeBackend:
 
 
 @pytest.fixture()
-def widget(monkeypatch):
+def qapp(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
 
-    _app = QApplication.instance() or QApplication([])
+
+@pytest.fixture()
+def widget(qapp, monkeypatch):
     from gui.chat import ChatWidget
 
     w = ChatWidget(_FakeBackend(), dispatch=lambda *a, **k: None)
