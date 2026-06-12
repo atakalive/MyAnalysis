@@ -27,6 +27,7 @@ def ds_env(monkeypatch, tmp_path):
     mapping = {"ds_a": a_dir, "ds_b": b_dir}
     monkeypatch.setattr(config, "DATASETS", {"ds_a": {}, "ds_b": {}})
     monkeypatch.setattr(config, "get_dataset_dir", lambda name: mapping[name])
+    monkeypatch.setattr(config, "reload_datasets", lambda config_path=None: None)
     return mapping
 
 
