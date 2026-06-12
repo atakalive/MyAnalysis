@@ -83,7 +83,7 @@ class _StreamWorker(QThread):
     failed = Signal(str, str)   # (session_id, error_msg)
 
     def __init__(self, session_id: str, backend: LLMBackend, messages: list[Message],
-                 dispatch, parent=None):
+                 dispatch: Callable, parent: QWidget | None = None):
         super().__init__(parent)
         self._sid = session_id
         self._backend = backend
@@ -154,7 +154,7 @@ class _Turn:
 
 
 class ChatWidget(QWidget):
-    def __init__(self, backend_factory: Callable[[], LLMBackend], dispatch, parent=None):
+    def __init__(self, backend_factory: Callable[[], LLMBackend], dispatch: Callable, parent: QWidget | None = None):
         super().__init__(parent)
         self._backend_factory = backend_factory
         # Prototype instance: name/model display + new_session backend_name.
