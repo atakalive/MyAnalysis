@@ -33,7 +33,7 @@ def qapp(monkeypatch):
 def widget(qapp, monkeypatch):
     from gui.chat import ChatWidget
 
-    w = ChatWidget(_FakeBackend(), dispatch=lambda *a, **k: None)
+    w = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)
     w.bind_window(MagicMock())
     return w
 

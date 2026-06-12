@@ -4,6 +4,8 @@ from __future__ import annotations
 import html
 import json
 import time
+from functools import partial
+from typing import Callable
 
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, Signal
 from PySide6.QtGui import (
@@ -20,10 +22,6 @@ from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
 from llm_bridge.paths import ui_prefs_path
 from gui.tools import TOOLS
-
-
-# Sentinel distinguishing "no pending dataset switch" from a real None dataset.
-_UNSET = object()
 
 
 _SYSTEM_PROMPT = (
@@ -80,13 +78,14 @@ def _save_chat_zoom(n: int) -> None:
 
 
 class _StreamWorker(QThread):
-    chunk = Signal(str)
-    done = Signal()
-    failed = Signal(str)
+    chunk  = Signal(str, str)   # (session_id, text)
+    done   = Signal(str)        # (session_id,)
+    failed = Signal(str, str)   # (session_id, error_msg)
 
-    def __init__(self, backend: LLMBackend, messages: list[Message],
+    def __init__(self, session_id: str, backend: LLMBackend, messages: list[Message],
                  dispatch, parent=None):
         super().__init__(parent)
+        self._sid = session_id
         self._backend = backend
         self._messages = messages
         self._dispatch = dispatch
@@ -96,21 +95,21 @@ class _StreamWorker(QThread):
         try:
             for _turn in range(_MAX_TOOL_TURNS):
                 if self.isInterruptionRequested():
-                    self.done.emit()
+                    self.done.emit(self._sid)
                     return
                 text_buf = ""
                 pending_calls: list[ToolCallRequest] = []
                 for event in self._backend.stream(messages, tools=TOOLS):
                     if self.isInterruptionRequested():
-                        self.done.emit()
+                        self.done.emit(self._sid)
                         return
                     if isinstance(event, TextDelta):
                         text_buf += event.text
-                        self.chunk.emit(event.text)  # live: stream as it arrives
+                        self.chunk.emit(self._sid, event.text)  # live: stream as it arrives
                     elif isinstance(event, ToolCallRequest):
                         pending_calls.append(event)
                 if not pending_calls:
-                    self.done.emit()
+                    self.done.emit(self._sid)
                     return
                 messages.append(Message(
                     role="assistant",
@@ -122,39 +121,56 @@ class _StreamWorker(QThread):
                 ))
                 for c in pending_calls:
                     if self.isInterruptionRequested():
-                        self.done.emit()
+                        self.done.emit(self._sid)
                         return
                     result = self._dispatch(
                         c.name, c.arguments,
                         cancelled=self.isInterruptionRequested)
                     messages.append(Message(role="tool", tool_call_id=c.id,
                                             content=result))
-            self.failed.emit(f"tool loop exceeded {_MAX_TOOL_TURNS} turns")
+            self.failed.emit(self._sid, f"tool loop exceeded {_MAX_TOOL_TURNS} turns")
         except Exception as e:
             # A user-initiated stop interrupts/kills the engine, which can
             # surface here as an exception — treat it as a clean stop.
             if self.isInterruptionRequested():
-                self.done.emit()
+                self.done.emit(self._sid)
             else:
-                self.failed.emit(repr(e))
+                self.failed.emit(self._sid, repr(e))
+
+
+class _Turn:
+    """Per-session in-flight turn state. Not a QObject — timers/worker are
+    owned by ChatWidget so they live on the GUI thread."""
+    __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped")
+
+    def __init__(self, session: ChatSession, backend: LLMBackend,
+                 worker: _StreamWorker, kill_timer: QTimer):
+        self.session = session
+        self.backend = backend
+        self.worker = worker
+        self.kill_timer = kill_timer
+        self.buffer = ""
+        self.stopped = False
 
 
 class ChatWidget(QWidget):
-    def __init__(self, backend: LLMBackend, dispatch, parent=None):
+    def __init__(self, backend_factory: Callable[[], LLMBackend], dispatch, parent=None):
         super().__init__(parent)
-        self._backend = backend
+        self._backend_factory = backend_factory
+        # Prototype instance: name/model display + new_session backend_name.
+        # Never used for streaming (per-session backends handle that).
+        self._backend = backend_factory()
         self._dispatch = dispatch
         self._window = None
         self._sessions: list[ChatSession] = [
-            chat_store.new_session(backend.name, _SYSTEM_PROMPT)
+            chat_store.new_session(self._backend.name, _SYSTEM_PROMPT)
         ]
         self._active: ChatSession = self._sessions[0]
         self._current_dataset: str | None = None
-        self._pending_dataset = _UNSET
         self._deleted: set[tuple[str, str]] = set()
-        self._worker: _StreamWorker | None = None
-        self._assistant_buffer = ""
-        self._stopped = False
+        self._turns: dict[str, _Turn] = {}
+        self._session_backends: dict[str, LLMBackend] = {}
+        self._turn_notes: dict[str, str] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -209,10 +225,6 @@ class ChatWidget(QWidget):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(80)
         self._spin_timer.timeout.connect(self._tick_spinner)
-        # Single-shot escalation: if a graceful stop doesn't end the turn, kill.
-        self._kill_timer = QTimer(self)
-        self._kill_timer.setSingleShot(True)
-        self._kill_timer.timeout.connect(self._force_kill)
 
         self._rebuild_tab_bar()
         self._render_session(self._active)
@@ -300,30 +312,24 @@ class ChatWidget(QWidget):
 
     # ----- backend session swap (duck-typed on _session_id) -----
 
-    def _load_backend_session(self, sess: ChatSession) -> None:
-        """Point the singleton backend at this session's resume token before a
-        turn starts. Only claude/pi expose _session_id; cross-backend tokens are
-        cleared (None) so a stale token isn't passed to --resume."""
-        b = self._backend
-        if not hasattr(b, "_session_id"):
+    def _load_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
+        """Point this session's backend at its resume token before a turn starts.
+        Only claude/pi expose _session_id; cross-backend tokens are cleared (None)
+        so a stale token isn't passed to --resume."""
+        if not hasattr(backend, "_session_id"):
             return
-        if sess.backend_name == b.name:
-            b._session_id = sess.backend_session_id
+        if sess.backend_name == backend.name:
+            backend._session_id = sess.backend_session_id
         else:
-            b._session_id = None
+            backend._session_id = None
 
-    def _capture_backend_session(self, sess: ChatSession) -> None:
+    def _capture_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
         """After a turn, harvest the backend's (already-updated) _session_id back
         into this session — only when the backend name still matches."""
-        b = self._backend
-        if not hasattr(b, "_session_id"):
+        if not hasattr(backend, "_session_id"):
             return
-        if sess.backend_name == b.name:
-            sess.backend_session_id = b._session_id
-
-    def _prime_backend_for(self, sess: ChatSession) -> None:
-        """Align the backend's resume token to `sess` on a (non-running) switch."""
-        self._load_backend_session(sess)
+        if sess.backend_name == backend.name:
+            sess.backend_session_id = backend._session_id
 
     # ----- helpers -----
 
@@ -342,10 +348,6 @@ class ChatWidget(QWidget):
         vis.sort(key=lambda s: s.updated or 0.0, reverse=True)
         return vis
 
-    def _set_session_controls_enabled(self, enabled: bool) -> None:
-        self._tab_bar.setEnabled(enabled)
-        self._new_btn.setEnabled(enabled)
-
     # ----- transcript render -----
 
     def _render_session(self, sess: ChatSession) -> None:
@@ -362,8 +364,28 @@ class ChatWidget(QWidget):
                 self._append_block("user", m.content or "")
             elif m.role == "assistant" and m.content:
                 self._append_block("assistant", m.content)
+        # If a turn is in-flight for this session, show assistant placeholder +
+        # partial buffer. Condition is `is not None` (not `turn.buffer`) so an
+        # empty-buffer turn still gets the assistant header — later _on_chunk
+        # inserts into that block correctly after a tab switch back.
+        turn = self._turns.get(sess.id)
+        if turn is not None:
+            self._append_block("assistant", turn.buffer)
+        # Show stashed completion note from a background-finished turn.
+        note = self._turn_notes.pop(sess.id, None)
+        if note:
+            self._append_system_line(note)
 
     # ----- tab bar -----
+
+    def _tab_text(self, sess: ChatSession) -> str:
+        return ("● " if sess.id in self._turns else "") + sess.title
+
+    def _refresh_tab_for(self, sess: ChatSession) -> None:
+        for i in range(self._tab_bar.count()):
+            if self._tab_bar.tabData(i) == sess.id:
+                self._tab_bar.setTabText(i, self._tab_text(sess))
+                break
 
     def _rebuild_tab_bar(self) -> None:
         """Rebuild tabs from the visible session set. Blocks currentChanged to
@@ -373,7 +395,7 @@ class ChatWidget(QWidget):
                 self._tab_bar.removeTab(0)
             active_idx = 0
             for i, sess in enumerate(self._visible_sessions()):
-                self._tab_bar.addTab(sess.title)
+                self._tab_bar.addTab(self._tab_text(sess))
                 self._tab_bar.setTabData(i, sess.id)
                 if sess.id == self._active.id:
                     active_idx = i
@@ -396,7 +418,7 @@ class ChatWidget(QWidget):
             return
         self._active = sess
         self._render_session(sess)
-        self._prime_backend_for(sess)
+        self._update_turn_ui()
 
     def _on_new_session(self) -> None:
         sess = chat_store.new_session(
@@ -406,7 +428,7 @@ class ChatWidget(QWidget):
         self._active = sess
         self._rebuild_tab_bar()
         self._render_session(sess)
-        self._prime_backend_for(sess)
+        self._update_turn_ui()
 
     def _on_tab_context_menu(self, pos) -> None:
         index = self._tab_bar.tabAt(pos)
@@ -433,7 +455,7 @@ class ChatWidget(QWidget):
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         for i in range(self._tab_bar.count()):
             if self._tab_bar.tabData(i) == sess.id:
-                self._tab_bar.setTabText(i, new_title)
+                self._tab_bar.setTabText(i, self._tab_text(sess))
                 break
         if sess.dataset is not None:
             self._mark_chat_dirty()
@@ -442,11 +464,21 @@ class ChatWidget(QWidget):
         sess = self._session_by_id(self._tab_bar.tabData(index))
         if sess is None:
             return
-        reply = QMessageBox.question(
-            self, "チャットを削除", f"「{sess.title}」を削除しますか？"
-        )
+        prompt = f"「{sess.title}」を削除しますか？"
+        if sess.id in self._turns:
+            prompt += "\n生成中のターンは停止されます。"
+        reply = QMessageBox.question(self, "チャットを削除", prompt)
         if reply != QMessageBox.StandardButton.Yes:
             return
+        # Stop an in-flight turn but leave it in _turns — it finishes as an
+        # orphan in the background; _on_done/_on_failed's orphan guard cleans up.
+        turn = self._turns.get(sess.id)
+        if turn is not None:
+            turn.stopped = True
+            turn.worker.requestInterruption()
+            if hasattr(turn.backend, "cancel"):
+                turn.backend.cancel()
+            turn.kill_timer.start(2000)
         self._sessions.remove(sess)
         if sess.dataset is not None:
             # Defer physical delete to save_all via a tombstone.
@@ -472,23 +504,24 @@ class ChatWidget(QWidget):
                 )
                 self._sessions.append(new)
                 self._active = new
+        self._session_backends.pop(sess.id, None)
+        self._turn_notes.pop(sess.id, None)
         self._rebuild_tab_bar()
         self._render_session(self._active)
-        self._prime_backend_for(self._active)
+        self._update_turn_ui()
 
     # ----- dataset binding -----
 
     def set_current_dataset(self, ds: str | None) -> None:
         """Called from the window when the active analysis tab's dataset changes.
         Adopts a history-bearing scratch session and re-selects a visible one."""
-        if self._worker is not None:
-            # Don't repoint _active mid-turn; defer until the turn finalizes.
-            self._pending_dataset = ds
-            return
         self._current_dataset = ds
         # Adoption: a history-bearing scratch session takes on the current ds.
+        # Skip if a turn is in-flight — don't bind a generating session to an
+        # unrelated dataset.
         if ds is not None and self._active.dataset is None \
-                and self._has_history(self._active):
+                and self._has_history(self._active) \
+                and self._active.id not in self._turns:
             self._active.dataset = ds
             self._mark_chat_dirty()
         # Active transition: keep _active if it's visible, else pick the most
@@ -505,7 +538,7 @@ class ChatWidget(QWidget):
                 self._active = sess
         self._rebuild_tab_bar()
         self._render_session(self._active)
-        self._prime_backend_for(self._active)
+        self._update_turn_ui()
 
     def merge_dataset_sessions(self, dataset: str, incoming: list) -> None:
         """Merge sessions loaded from `dataset`'s work_dir into the pool."""
@@ -514,9 +547,8 @@ class ChatWidget(QWidget):
             s.dataset = dataset
         # Don't resurrect tombstoned (deleted-but-not-yet-saved) sessions.
         incoming = [s for s in incoming if (dataset, s.id) not in self._deleted]
-        # Protect an in-flight active session from being swapped mid-turn.
-        if self._worker is not None:
-            incoming = [s for s in incoming if s.id != self._active.id]
+        # Protect all in-flight sessions' reference identity from being swapped.
+        incoming = [s for s in incoming if s.id not in self._turns]
         new_pool = chat_store.merge_sessions(self._sessions, incoming)
         # Re-point _active at its (possibly replaced) instance in the new pool.
         for s in new_pool:
@@ -530,12 +562,13 @@ class ChatWidget(QWidget):
     # ----- send / receive -----
 
     def _on_send(self) -> None:
-        if self._worker is not None:
+        if self._active.id in self._turns:
             return
         text = self._input.toPlainText()
         if not text.strip():
             return
         self._input.clear()
+        sess = self._active
         # Live-reference the current dataset from the window so a late
         # session_spec assignment (currentChanged fired before spec was set)
         # can't leave us with a stale cached _current_dataset.
@@ -543,132 +576,175 @@ class ChatWidget(QWidget):
             ds = self._window.current_chat_dataset()
             if ds is not None:
                 self._current_dataset = ds
-        self._active.messages.append(Message(role="user", content=text))
+        sess.messages.append(Message(role="user", content=text))
         # Auto-title from the first non-empty line of the first user message.
-        if self._active.title == "新しいチャット":
+        if sess.title == "新しいチャット":
             first = next(
                 (ln.strip() for ln in text.splitlines() if ln.strip()), ""
             )[:20]
             if first:
-                self._active.title = first
+                sess.title = first
                 idx = self._tab_bar.currentIndex()
                 if idx >= 0:
-                    self._tab_bar.setTabText(idx, first)
-                if self._active.dataset is not None:
+                    self._tab_bar.setTabText(idx, self._tab_text(sess))
+                if sess.dataset is not None:
                     self._mark_chat_dirty()
         # Adopt the current dataset into an as-yet-unbound scratch session.
-        if self._current_dataset is not None and self._active.dataset is None:
-            self._active.dataset = self._current_dataset
+        if self._current_dataset is not None and sess.dataset is None:
+            sess.dataset = self._current_dataset
             self._mark_chat_dirty()
         self._append_block("user", text)
-        self._assistant_buffer = ""
         self._append_block("assistant", "")
-        self._load_backend_session(self._active)
-        self._set_session_controls_enabled(False)
-        self._send_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        self._stopped = False
-        self._spin_idx = 0
-        self._status.setText(f"{_SPINNER[0]} waiting…")
-        self._spin_timer.start()
-        self._worker = _StreamWorker(self._backend, list(self._active.messages),
-                                      self._dispatch, self)
-        self._worker.chunk.connect(self._on_chunk)
-        self._worker.done.connect(self._on_done)
-        self._worker.failed.connect(self._on_failed)
-        # Delete the QThread only after run() fully returns (finished) — never
-        # from _finalize, where the worker may still be reaping the engine.
-        self._worker.finished.connect(self._worker.deleteLater)
-        self._worker.start()
+        backend = self._session_backends.setdefault(sess.id, self._backend_factory())
+        self._load_backend_session(backend, sess)
+        kill_timer = QTimer(self)
+        kill_timer.setSingleShot(True)
+        kill_timer.timeout.connect(partial(self._force_kill, sess.id))
+        worker = _StreamWorker(sess.id, backend, list(sess.messages),
+                               self._dispatch, self)
+        self._turns[sess.id] = _Turn(sess, backend, worker, kill_timer)
+        worker.chunk.connect(self._on_chunk)
+        worker.done.connect(self._on_done)
+        worker.failed.connect(self._on_failed)
+        # Delete the QThread only after run() fully returns (finished).
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        self._update_turn_ui()
+        self._refresh_tab_for(sess)
+        if not self._spin_timer.isActive():
+            self._spin_idx = 0
+            self._spin_timer.start()
 
-    def _on_chunk(self, piece: str) -> None:
-        self._assistant_buffer += piece
-        cursor = QTextCursor(self._log.document())
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.setCharFormat(QTextCharFormat())
-        cursor.insertText(piece)
-        self._scroll_to_bottom()
+    def _on_chunk(self, sid: str, piece: str) -> None:
+        turn = self._turns.get(sid)
+        if turn is None:
+            return
+        turn.buffer += piece
+        if sid == self._active.id:
+            cursor = QTextCursor(self._log.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.setCharFormat(QTextCharFormat())
+            cursor.insertText(piece)
+            self._scroll_to_bottom()
 
-    def _on_done(self) -> None:
-        self._active.messages.append(
-            Message(role="assistant", content=self._assistant_buffer)
+    def _on_done(self, sid: str) -> None:
+        turn = self._turns.pop(sid, None)
+        if turn is None:
+            return
+        turn.kill_timer.stop()
+        turn.kill_timer.deleteLater()
+        sess = turn.session
+        # Orphan check: session was deleted while turn was running.
+        if sess not in self._sessions:
+            self._stop_spin_if_idle()
+            return
+        sess.messages.append(
+            Message(role="assistant", content=turn.buffer)
         )
-        # (1) capture token BEFORE _finalize (which may swap _active via pending
-        # dataset), (2) bump updated + dirty, (3) finalize.
-        self._capture_backend_session(self._active)
-        self._active.updated = time.time()
-        if self._active.dataset is not None:
+        self._capture_backend_session(turn.backend, sess)
+        sess.updated = time.time()
+        if sess.dataset is not None:
             self._mark_chat_dirty()
-        stopped = self._stopped
-        self._finalize()
-        if stopped:
-            self._append_system_line("[stopped]")
+        if sid == self._active.id:
+            self._update_turn_ui()
+            if turn.stopped:
+                self._append_system_line("[stopped]")
+            else:
+                self._show_usage(turn.backend)
         else:
-            self._show_usage()
+            # Non-visible session: stash note for display on next switch.
+            if turn.stopped:
+                self._turn_notes[sid] = "[stopped]"
+            else:
+                note = self._format_usage(turn.backend)
+                if note:
+                    self._turn_notes[sid] = note
+        self._refresh_tab_for(sess)
+        self._stop_spin_if_idle()
 
-    def _on_failed(self, msg: str) -> None:
-        cursor = QTextCursor(self._log.document())
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.setCharFormat(QTextCharFormat())
-        cursor.insertText(f"\n\n[error: {msg}]")
-        self._scroll_to_bottom()
-        self._active.messages.append(
-            Message(role="assistant", content=self._assistant_buffer)
+    def _on_failed(self, sid: str, msg: str) -> None:
+        turn = self._turns.pop(sid, None)
+        if turn is None:
+            return
+        turn.kill_timer.stop()
+        turn.kill_timer.deleteLater()
+        sess = turn.session
+        if sess not in self._sessions:
+            self._stop_spin_if_idle()
+            return
+        sess.messages.append(
+            Message(role="assistant", content=turn.buffer)
         )
-        # Capture token (do NOT reset on failure — preserve resume context);
-        # bump updated + dirty BEFORE _finalize swaps _active.
-        self._capture_backend_session(self._active)
-        self._active.updated = time.time()
-        if self._active.dataset is not None:
+        self._capture_backend_session(turn.backend, sess)
+        sess.updated = time.time()
+        if sess.dataset is not None:
             self._mark_chat_dirty()
-        self._finalize()
+        error_text = f"\n\n[error: {msg}]"
+        if sid == self._active.id:
+            cursor = QTextCursor(self._log.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.setCharFormat(QTextCharFormat())
+            cursor.insertText(error_text)
+            self._scroll_to_bottom()
+            self._update_turn_ui()
+        else:
+            self._turn_notes[sid] = error_text.strip()
+        self._refresh_tab_for(sess)
+        self._stop_spin_if_idle()
 
     def _on_stop(self) -> None:
-        """Interrupt the running turn, VS Code CC style: set the worker's
-        interruption flag, ask the backend to send the `interrupt` control
+        """Interrupt the visible session's running turn, VS Code CC style: set the
+        worker's interruption flag, ask the backend to send the `interrupt` control
         request, and arm a short hard-kill escalation as a guarantee."""
-        worker = self._worker
-        if worker is None or not worker.isRunning():
+        turn = self._turns.get(self._active.id)
+        if turn is None or turn.stopped:
             return
-        self._stopped = True
-        self._stop_btn.setEnabled(False)
-        self._spin_timer.stop()
-        self._status.setText("stopping…")
-        worker.requestInterruption()
-        if hasattr(self._backend, "cancel"):
-            self._backend.cancel()        # graceful interrupt (VS Code CC 準拠)
-        self._kill_timer.start(2000)       # escalate to hard kill if not done
+        turn.stopped = True
+        turn.worker.requestInterruption()
+        if hasattr(turn.backend, "cancel"):
+            turn.backend.cancel()         # graceful interrupt (VS Code CC 準拠)
+        turn.kill_timer.start(2000)        # escalate to hard kill if not done
+        self._update_turn_ui()
 
-    def _force_kill(self) -> None:
-        if self._worker is not None and self._worker.isRunning() \
-                and hasattr(self._backend, "kill"):
-            self._backend.kill()
+    def _force_kill(self, sid: str) -> None:
+        turn = self._turns.get(sid)
+        if turn is not None and turn.worker.isRunning() \
+                and hasattr(turn.backend, "kill"):
+            turn.backend.kill()
 
-    def _finalize(self) -> None:
-        self._kill_timer.stop()
-        self._spin_timer.stop()
-        self._status.setText("")
-        self._send_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        self._set_session_controls_enabled(True)
-        # Drop our ref only; the QThread deletes itself via finished→deleteLater.
-        # (Deleting it here could destroy a thread still reaping the engine.)
-        self._worker = None
-        # Apply a dataset switch that arrived while the turn was running.
-        if self._pending_dataset is not _UNSET:
-            pd = self._pending_dataset
-            self._pending_dataset = _UNSET
-            self.set_current_dataset(pd)
+    def _stop_spin_if_idle(self) -> None:
+        if not self._turns:
+            self._spin_timer.stop()
+
+    def _update_turn_ui(self) -> None:
+        """Update Send/Stop/status for the currently visible session's turn state."""
+        turn = self._turns.get(self._active.id)
+        has_turn = turn is not None
+        self._send_btn.setEnabled(not has_turn)
+        if has_turn and turn.stopped:
+            self._stop_btn.setEnabled(False)
+            self._status.setText("stopping…")
+        elif has_turn:
+            self._stop_btn.setEnabled(True)
+        else:
+            self._stop_btn.setEnabled(False)
+            self._status.setText("")
 
     def _tick_spinner(self) -> None:
-        self._spin_idx = (self._spin_idx + 1) % len(_SPINNER)
-        self._status.setText(f"{_SPINNER[self._spin_idx]} waiting…")
-
-    def _show_usage(self) -> None:
-        """Render the latest turn's token/cost usage in the status label."""
-        u = getattr(self._backend, "last_usage", None)
-        if not u:
+        turn = self._turns.get(self._active.id)
+        if turn is None:
             return
+        self._spin_idx = (self._spin_idx + 1) % len(_SPINNER)
+        if turn.stopped:
+            self._status.setText("stopping…")
+        else:
+            self._status.setText(f"{_SPINNER[self._spin_idx]} waiting…")
+
+    def _format_usage(self, backend: LLMBackend) -> str:
+        """Build the usage summary string without setting the status label."""
+        u = getattr(backend, "last_usage", None)
+        if not u:
+            return ""
 
         def h(n: float) -> str:
             n = int(n)
@@ -689,23 +765,32 @@ class ChatWidget(QWidget):
         if cost is not None:
             tail = f" (total ${total:.3f})" if total else ""
             parts.append(f"${cost:.3f}{tail}")
-        self._status.setText("🪙 " + " · ".join(parts))
+        return "🪙 " + " · ".join(parts)
+
+    def _show_usage(self, backend: LLMBackend) -> None:
+        text = self._format_usage(backend)
+        if text:
+            self._status.setText(text)
 
     def _shutdown_worker(self) -> None:
-        """アプリ終了時にストリーミングスレッドを停止する。
+        """アプリ終了時に全ストリーミングスレッドを停止する。
 
         ① backend の pi プロセスを kill → ② worker の requestInterruption →
         ③ wait/terminate の順。worker の run() が backend.stream() をブロック中の
         場合、先に pi プロセスを kill しないと proc.stdout 読取が EOF を返さず
         ハングするため、cancel() を先頭に置く。
         """
-        if hasattr(self._backend, "cancel"):
-            self._backend.cancel()
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.requestInterruption()
-            if not self._worker.wait(5000):
-                self._worker.terminate()
-                self._worker.wait(1000)
+        turns = list(self._turns.values())
+        # Cancel all backends first (unblock pipe reads).
+        for turn in turns:
+            if hasattr(turn.backend, "cancel"):
+                turn.backend.cancel()
+        for turn in turns:
+            if turn.worker.isRunning():
+                turn.worker.requestInterruption()
+                if not turn.worker.wait(2000):
+                    turn.worker.terminate()
+                    turn.worker.wait(1000)
 
     # ----- display helpers -----
     # 追記専用の QTextCursor 操作。ストリーミング中は末尾への insertText のみ

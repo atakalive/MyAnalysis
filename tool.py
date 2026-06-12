@@ -115,7 +115,7 @@ def main() -> None:
     )
     win.add_tab(tab)
 
-    win.set_chat_widget(ChatWidget(get_backend(), make_dispatch(win)))
+    win.set_chat_widget(ChatWidget(get_backend, make_dispatch(win)))
 
     _window_watchers = llm_bridge.attach_window(win)
     # connect_annotations must run before attach_tab: attach_tab's annotations
