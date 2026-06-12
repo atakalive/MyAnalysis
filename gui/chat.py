@@ -424,9 +424,13 @@ class ChatWidget(QWidget):
         new_title, ok = QInputDialog.getText(
             self, "名前変更", "チャット名:", text=sess.title
         )
-        if not ok or not new_title:
+        if not ok:
+            return
+        new_title = new_title.strip()
+        if not new_title or new_title == sess.title:
             return
         sess.title = new_title
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         for i in range(self._tab_bar.count()):
             if self._tab_bar.tabData(i) == sess.id:
                 self._tab_bar.setTabText(i, new_title)
