@@ -27,10 +27,18 @@ from PySide6.QtCore import QByteArray, QObject, QTimer
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
-import llm_bridge
 from devtools import hotreload
-from llm_bridge import commands, session, state
-from llm_bridge.paths import reload_manifest_path
+
+
+def _m(name: str):
+    """Resolve a repo module from sys.modules at call time.
+
+    devtools is excluded from purge_project_modules, so after a Tier 3 rebuild
+    top-level import references would be stale. Resolving at call time ensures
+    we always use the current (post-rebuild) module objects.
+    """
+    return sys.modules[name]
+
 
 # Durable references to live main windows. After a Tier 3 rebuild the old
 # main()-scope local still points at the OLD window, so the rebuilt window has
@@ -43,6 +51,7 @@ _live_windows: set = set()
 # Reload context (passed to module __on_reload__ hooks)
 # ---------------------------------------------------------------------------
 
+
 class ReloadContext:
     def __init__(self, window, old=None):
         self.window = window
@@ -52,6 +61,7 @@ class ReloadContext:
 # ---------------------------------------------------------------------------
 # View (viewbox / splitter) capture + restore — best-effort, panel duck-typed
 # ---------------------------------------------------------------------------
+
 
 def _capture_view(tab) -> dict:
     out: dict = {"panels": {}, "splitter": None}
@@ -96,6 +106,7 @@ def _restore_view(tab, view: dict) -> None:
 # Manifest (Tier 3/4)
 # ---------------------------------------------------------------------------
 
+
 def _hex(qba: QByteArray) -> str:
     return bytes(qba.toHex().data()).decode("ascii")
 
@@ -120,7 +131,7 @@ def write_manifest(window) -> None:
         ),
         "view_state": {tab.name: _capture_view(tab) for tab in window.tabs()},
     }
-    reload_manifest_path().write_text(
+    _m("llm_bridge.paths").reload_manifest_path().write_text(
         json.dumps(data, ensure_ascii=False), encoding="utf-8"
     )
 
@@ -133,7 +144,7 @@ def consume_manifest(window) -> bool:
     removed so a stale one can't drive an unintended restore on the next plain
     launch.
     """
-    path = reload_manifest_path()
+    path = _m("llm_bridge.paths").reload_manifest_path()
     try:
         raw = path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
@@ -203,6 +214,7 @@ def _restore_from_manifest(window, data: dict) -> None:
 # Controller
 # ---------------------------------------------------------------------------
 
+
 class HotReloadController(QObject):
     def __init__(self, window):
         super().__init__(window)
@@ -236,7 +248,7 @@ class HotReloadController(QObject):
             return busy
         from common.paths import analyses_root
 
-        af = (analyses_root() / name / "analysis.py")
+        af = analyses_root() / name / "analysis.py"
         if not af.is_file():
             return f"reload-tab-error:no analysis named {name!r}"
         try:
@@ -249,28 +261,27 @@ class HotReloadController(QObject):
         if old_tab is None:
             return f"reload-tab-error:no open tab named {name!r}"
 
-        captured_state = state.read(name)
+        captured_state = _m("llm_bridge.state").read(name)
         view = _capture_view(old_tab)
         sandbox = QWidget()
         try:
-            new_tab, mod = llm_bridge._build_analysis(sandbox, name)
+            new_tab, mod = _m("llm_bridge")._build_analysis(sandbox, name)
         except Exception as e:  # noqa: BLE001 — keep old tab on any build failure
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            _m("llm_bridge.state").writer(name)(captured_state)
             return f"reload-tab-error:build failed: {e!r} (old tab retained)"
         if new_tab.name != name:
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            _m("llm_bridge.state").writer(name)(captured_state)
             return (
                 f"reload-tab-error:tab name mismatch: expected {name!r}, "
                 f"got {new_tab.name!r} (old tab retained)"
             )
-        if not llm_bridge._sync_new_tab_state(new_tab, mod, name, captured_state):
+        if not _m("llm_bridge")._sync_new_tab_state(new_tab, mod, name, captured_state):
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            _m("llm_bridge.state").writer(name)(captured_state)
             return (
-                "reload-tab-error:apply_state / refresh-state failed "
-                "(old tab retained)"
+                "reload-tab-error:apply_state / refresh-state failed (old tab retained)"
             )
         # All good — swap the old tab for the new one.
         new_tab.setParent(None)
@@ -312,16 +323,24 @@ class HotReloadController(QObject):
                 except SyntaxError as e:
                     errs.append(f"{e.filename}:{e.lineno}: {e.msg}")
             if errs:
-                self._log_reload_result(cmd_id, "failed", 3, error="syntax: " + "; ".join(errs))
-                QMessageBox.critical(old_window, "再構築中止（構文エラー）", "\n".join(errs))
+                self._log_reload_result(
+                    cmd_id, "failed", 3, error="syntax: " + "; ".join(errs)
+                )
+                QMessageBox.critical(
+                    old_window, "再構築中止（構文エラー）", "\n".join(errs)
+                )
                 return
 
             # 2. flush all state (abort if any dataset fails to save).
-            _saved, failed = session.save_all(old_window)
+            _saved, failed = _m("llm_bridge.session").save_all(old_window)
             if failed:
-                self._log_reload_result(cmd_id, "failed", 3, error=f"save_all failed: {failed}")
+                self._log_reload_result(
+                    cmd_id, "failed", 3, error=f"save_all failed: {failed}"
+                )
                 QMessageBox.critical(
-                    old_window, "再構築中止", "セッション保存に失敗: " + ", ".join(failed)
+                    old_window,
+                    "再構築中止",
+                    "セッション保存に失敗: " + ", ".join(failed),
                 )
                 return
 
@@ -362,7 +381,7 @@ class HotReloadController(QObject):
                     pass
             hotreload.purge_project_modules()
             sys.modules.update(saved_modules)
-            reload_manifest_path().unlink(missing_ok=True)
+            _m("llm_bridge.paths").reload_manifest_path().unlink(missing_ok=True)
             self._recover_old_watcher(old_window)
             try:
                 old_window.show()
@@ -385,10 +404,14 @@ class HotReloadController(QObject):
         from common.paths import repo_root
 
         window = self._window
-        _saved, failed = session.save_all(window)
+        _saved, failed = _m("llm_bridge.session").save_all(window)
         if failed:
-            self._log_reload_result(cmd_id, "failed", 4, error=f"save_all failed: {failed}")
-            QMessageBox.critical(window, "再起動中止", "セッション保存に失敗: " + ", ".join(failed))
+            self._log_reload_result(
+                cmd_id, "failed", 4, error=f"save_all failed: {failed}"
+            )
+            QMessageBox.critical(
+                window, "再起動中止", "セッション保存に失敗: " + ", ".join(failed)
+            )
             return
         write_manifest(window)
         self._teardown_watchers(window)
@@ -422,25 +445,34 @@ class HotReloadController(QObject):
         # _teardown_watchers cleared the list (incl. the dead command watcher);
         # regenerate a command watcher so the old window keeps accepting CLI.
         try:
-            cmd_watcher = commands.start_watcher(window)
+            cmd_watcher = _m("llm_bridge.commands").start_watcher(window)
             window._bridge_watchers = [cmd_watcher]
         except Exception:
             window._bridge_watchers = []
 
-    def _log_reload_result(self, cmd_id, status: str, tier: int, error: str | None = None) -> None:
+    def _log_reload_result(
+        self, cmd_id, status: str, tier: int, error: str | None = None
+    ) -> None:
         now = datetime.now().isoformat(timespec="milliseconds")
         entry = {
-            "id": cmd_id, "ts": now, "verb": "reload-result", "status": status,
-            "tier": tier, "target": None, "args": {}, "completed_at": now,
+            "id": cmd_id,
+            "ts": now,
+            "verb": "reload-result",
+            "status": status,
+            "tier": tier,
+            "target": None,
+            "args": {},
+            "completed_at": now,
         }
         if error is not None:
             entry["error"] = error
-        commands._append_log(entry)
+        _m("llm_bridge.commands")._append_log(entry)
 
 
 # ---------------------------------------------------------------------------
 # Install (verb + menu)
 # ---------------------------------------------------------------------------
+
 
 def install_hotreload(window) -> HotReloadController:
     """Register the `reload` verb + 開発 menu. Returns the controller.
