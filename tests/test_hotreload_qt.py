@@ -20,7 +20,17 @@ def qapp(monkeypatch):
 
 
 @pytest.fixture()
-def window(qapp):
+def window(qapp, monkeypatch, tmp_path):
+    from llm_bridge import paths
+
+    llm_state = tmp_path / "llm_state"
+
+    def _fake_global_state_dir():
+        llm_state.mkdir(parents=True, exist_ok=True)
+        return llm_state
+
+    monkeypatch.setattr(paths, "global_state_dir", _fake_global_state_dir)
+
     import tool
 
     win = tool.create_main_window(qapp)
@@ -67,7 +77,17 @@ def test_busy_guard_blocks_reload(window, monkeypatch):
     assert result.startswith("reload-busy:")
 
 
-def test_tier1_patch_reflects_new_code(qapp, probe):
+def test_tier1_patch_reflects_new_code(qapp, probe, monkeypatch, tmp_path):
+    from llm_bridge import paths
+
+    llm_state = tmp_path / "llm_state"
+
+    def _fake_global_state_dir():
+        llm_state.mkdir(parents=True, exist_ok=True)
+        return llm_state
+
+    monkeypatch.setattr(paths, "global_state_dir", _fake_global_state_dir)
+
     import tool
 
     name, path, mod = probe
