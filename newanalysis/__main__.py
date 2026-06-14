@@ -123,6 +123,18 @@ def build_tab(parent: QWidget | None, data: dict[str, Any]) -> AnalysisTab:
     tab._watchers = llm_bridge.attach_tab(tab, _get_state)
     tab.dispatch_command("refresh-state")
     return tab
+
+
+# ホットリロード Tier 2 (reload scope=tab) の状態復元フック (任意)。
+# 実装すると、リロード時に旧タブの state (current.json) を新タブへ復元できる。
+# 未実装なら build_tab の初期状態で表示される (state.json と UI は常に一致)。
+# 実装する場合はコメントを外し、viewbox/selection 等の復元ロジックを書くこと:
+#
+# def apply_state(tab, state):
+#     """旧タブの捕捉 state を新タブへ適用する。例外を出すと旧タブが保持される。"""
+#     sel = state.get("selection")
+#     if sel is not None:
+#         ...  # tab のパネルに選択を反映
 '''
 
 

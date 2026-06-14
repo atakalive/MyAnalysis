@@ -105,6 +105,24 @@ to discover registered dataset names.
 - `llm_bridge/session.py` が中核。`show` verb の `dataset=` 引数でタブ→データセット紐付け。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
 
+## ホットリロード — `devtools/`
+
+走行中の GUI に修正コードを注入し、開いていたタブ・プロット・チャット文脈を破壊せず新コードを有効化する。トリガーは**手動のみ**（CLI verb + 開発(&D) メニュー、自動 file-watch なし）。リロード実行時は作業静止が前提（チャット応答中・モーダル表示中は `reload-busy:...` で拒否）。
+
+**エージェントの使い方**: repo コードを編集したら `python -m llm_bridge window reload --wait`。警告（「scope=app 推奨」）が出たら `python -m llm_bridge window reload scope=app --wait` → `command_log.jsonl` を `id==<送信id>` かつ `verb=="reload-result"` でポーリング（30秒）。
+
+4 段階エスカレーション:
+
+| scope | 対象 | 機構 |
+|---|---|---|
+| `patch`（既定） | sys.modules 内の repo モジュール | superreload 式 in-place パッチ（関数は `__code__` 移植、クラスは `__dict__` 更新）。表示状態は無傷 |
+| `tab` | `analyses/<name>/analysis.py` | 単一 sandbox ビルド → 成功後に旧タブ close → 新タブ採用。`target=<tab名>` 必須 |
+| `app` | 構造変更（`__init__`/Signal/`__bases__`/watcher closure 等、Tier 1 が警告するもの） | blue-green: 状態 flush → repo モジュール全パージ → 新コードで ToolWindow 再構築 → manifest 復元。失敗時は旧ウィンドウが無傷で残る |
+| `restart` | tool.py 自体・PySide6 更新・Tier 3 失敗後 | プロセス再起動 + `--resume-session` 自動復元 |
+
+- 中核は Qt 非依存の [devtools/hotreload.py](devtools/hotreload.py)（superreload, AST 名抽出, purge）と Qt 配線の [devtools/qt_integration.py](devtools/qt_integration.py)（4 tier, manifest, verb, メニュー）。
+- 既知の限界: stale 名除去は dict 除去のみで Qt signal 接続・closure 捕捉等の外部参照は旧コードを保持し続ける（→ 警告で scope=app 推奨）。dataclass 既存インスタンスに新フィールドは生えない。`__main__`（= `python tool.py` の tool.py）と `devtools.*` は Tier 1 対象外。
+
 ## State
 
-Greenfield as of 2026-05-27 — no build system, dependencies, tests, or package layout yet. When introducing those (pyproject.toml, requirements, test runner, src/ layout), update this file with the resulting commands.
+Greenfield as of 2026-05-27 — no build system, dependencies, or package layout yet (no pyproject.toml/requirements, loose-directory layout). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.

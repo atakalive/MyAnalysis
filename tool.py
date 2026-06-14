@@ -98,6 +98,62 @@ def build_placeholder_tab() -> tuple[
     return tab, None, None
 
 
+def create_main_window(
+    app: QApplication,
+    *,
+    demo: bool = False,
+    watcher_resume_after: float | None = None,
+    resume_session: bool = False,
+) -> ToolWindow:
+    """Build the ToolWindow, wire the bridge, and return it (not yet shown).
+
+    Extracted from ``main()`` so the hot-reload Tier 3 (blue-green) path can
+    rebuild a fresh window in-process. The command/tab watchers are kept alive
+    on ``win._bridge_watchers`` (was a local in main(), which made teardown
+    impossible).
+
+    ``watcher_resume_after`` is passed transparently to ``attach_window`` →
+    ``commands.start_watcher`` so commands queued after a rebuild epoch are not
+    dropped as stale.
+
+    ``resume_session`` requests consuming the reload manifest (Tier 3/4
+    restore). When the manifest is absent / corrupt / missing required keys,
+    falls back to ordinary startup (placeholder tab).
+    """
+    win = ToolWindow()
+    tab, state_provider, ann_handler = (
+        build_demo_tab() if demo else build_placeholder_tab()
+    )
+    win.add_tab(tab)
+
+    win.set_chat_widget(ChatWidget(get_backend, make_dispatch(win)))
+
+    watchers = list(
+        llm_bridge.attach_window(win, watcher_resume_after=watcher_resume_after)
+    )
+    # connect_annotations must run before attach_tab: attach_tab's annotations
+    # watcher calls tab.apply_annotations(read(...)) initially, which no-ops if
+    # the handler is not yet connected.
+    if ann_handler is not None:
+        tab.connect_annotations(ann_handler)
+    if state_provider is not None:
+        watchers += llm_bridge.attach_tab(tab, state_provider)
+        tab.dispatch_command("refresh-state")
+
+    win._bridge_watchers = watchers
+
+    from devtools.qt_integration import install_hotreload
+
+    win._hotreload = install_hotreload(win)
+
+    if resume_session:
+        from devtools.qt_integration import consume_manifest
+
+        consume_manifest(win)
+
+    return win
+
+
 def main() -> None:
     load_env()
 
@@ -105,31 +161,18 @@ def main() -> None:
     parser.add_argument(
         "--demo", action="store_true", help="Launch with a synthetic demo tab"
     )
+    parser.add_argument(
+        "--resume-session",
+        action="store_true",
+        help="Restore window/tabs/chat from the reload manifest (Tier 4 restart)",
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     apply_dark_theme(app)
-    win = ToolWindow()
-    tab, state_provider, ann_handler = (
-        build_demo_tab() if args.demo else build_placeholder_tab()
+    win = create_main_window(
+        app, demo=args.demo, resume_session=args.resume_session
     )
-    win.add_tab(tab)
-
-    win.set_chat_widget(ChatWidget(get_backend, make_dispatch(win)))
-
-    _window_watchers = llm_bridge.attach_window(win)
-    # connect_annotations must run before attach_tab: attach_tab's annotations
-    # watcher calls tab.apply_annotations(read(...)) initially, which no-ops if
-    # the handler is not yet connected.
-    if ann_handler is not None:
-        tab.connect_annotations(ann_handler)
-    _tab_watchers = (
-        llm_bridge.attach_tab(tab, state_provider) if state_provider is not None else []
-    )
-
-    if state_provider is not None:
-        tab.dispatch_command("refresh-state")
-
     win.show()
     sys.exit(app.exec())
 

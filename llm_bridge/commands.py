@@ -123,6 +123,10 @@ def _execute(window, payload: dict) -> None:
             status = "rejected"
             error = f"unknown verb: {verb!r}"
         else:
+            # Expose the executing command id so the `reload` verb (Tier 3/4)
+            # can correlate its deferred `reload-result` log entry with the
+            # command the agent is --wait'ing on.
+            setattr(window, "_active_command_id", payload.get("id"))
             result = dispatcher.dispatch_command(verb, **args)
             result_repr = _summarize(result)
     except Exception as e:
@@ -153,7 +157,7 @@ def _summarize(value) -> object:
         return repr(value)
 
 
-def start_watcher(window) -> object:
+def start_watcher(window, *, resume_after: float | None = None) -> object:
     """Watch commands_queue_dir, dispatch each new file, then delete it.
 
     Returns the QFileSystemWatcher (caller must hold reference).
@@ -164,6 +168,12 @@ def start_watcher(window) -> object:
     deleted. A previous-session crash that left 50 pending commands does
     not result in 50 commands running on the next launch. See
     `_drain_stale()` below for the per-category rationale.
+
+    ``resume_after`` (wall-clock epoch, ``time.time()`` domain): committed
+    `*.json` whose mtime is ``>= resume_after`` are NOT treated as stale —
+    they were queued during a Tier 3 rebuild and must still run. After
+    `_drain_stale`, an explicit `_drain()` processes them (QFileSystemWatcher
+    does not fire directoryChanged for files that already existed).
     """
     from PySide6.QtCore import QFileSystemWatcher
     qd = commands_queue_dir()
@@ -210,6 +220,12 @@ def start_watcher(window) -> object:
           CLI submit between write_text and replace). Delete if older.
         """
         for f in sorted(qd.glob("*.json")):
+            if resume_after is not None:
+                try:
+                    if f.stat().st_mtime >= resume_after:
+                        continue  # queued during a rebuild — keep for _drain()
+                except OSError:
+                    pass
             try:
                 payload = json.loads(f.read_text(encoding="utf-8"))
                 base = {k: payload.get(k) for k in ("id", "ts", "tier", "target", "verb", "args")}
@@ -245,4 +261,8 @@ def start_watcher(window) -> object:
 
     watcher.directoryChanged.connect(lambda _: _drain())
     _drain_stale()
+    if resume_after is not None:
+        # Files skipped by _drain_stale (queued during the rebuild) won't trigger
+        # directoryChanged since they already exist — process them explicitly.
+        _drain()
     return watcher

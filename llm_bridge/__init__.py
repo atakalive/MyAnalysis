@@ -39,6 +39,75 @@ def _write_active(window) -> None:
     tmp.replace(p)
 
 
+def _resolve_analysis_file(name: str):
+    """Validate `name` and resolve analyses/<name>/analysis.py, or raise."""
+    _validate_analysis_name(name)
+    root = analyses_root().resolve()
+    analysis_dir = (analyses_root() / name).resolve()
+    analysis_file = (analysis_dir / "analysis.py").resolve()
+    if not analysis_dir.is_relative_to(root):
+        raise ValueError(f"analysis directory escapes analyses/: {name!r}")
+    if not analysis_file.is_relative_to(root):
+        raise ValueError(f"analysis.py escapes analyses/: {name!r}")
+    if not analysis_file.is_file():
+        raise LookupError(f"no analysis named {name!r} under analyses/")
+    return analysis_file
+
+
+def _build_analysis(parent, name: str):
+    """Fresh-import analyses/<name>/analysis.py, run load() + build_tab(parent),
+    and assign session_spec. Returns ``(tab, mod)``.
+
+    Shared by the `add-tab` verb and the hot-reload Tier 2 `reload_tab` path.
+    `parent` is the Qt parent widget for the constructed tab (the live window
+    for add-tab, a sandbox QWidget when reloading so a failed build can be
+    discarded as a unit).
+
+    Does NOT call `window.add_tab` or `session.note_dataset` — those are
+    side effects the caller applies only AFTER a successful insert, so a build
+    failure can't leave a stale `_touched` entry that makes `save_all`
+    overwrite a dataset's session with empty tabs.
+
+    Re-import behavior: the analysis module is NOT registered in sys.modules.
+    Each call re-executes the file and re-runs `load()`. Analyses that want
+    caching should memoize inside `load()` themselves.
+    """
+    analysis_file = _resolve_analysis_file(name)
+    spec = importlib.util.spec_from_file_location(
+        f"_llm_bridge_analysis_{name}", analysis_file
+    )
+    if spec is None:
+        raise ImportError(f"could not build module spec for {analysis_file}")
+    mod = importlib.util.module_from_spec(spec)
+    # Compile + exec from source bytes directly rather than spec.loader.exec_module:
+    # the loader may read a stale .pyc when an edit and a reload land in the same
+    # filesystem-mtime second (the exact agent edit-then-reload pattern). The
+    # module is never registered in sys.modules, so it's always a fresh build.
+    source = analysis_file.read_text(encoding="utf-8")
+    code = compile(source, str(analysis_file), "exec")
+    exec(code, mod.__dict__)
+    if not hasattr(mod, "build_tab"):
+        raise AttributeError(
+            f"analyses/{name}/analysis.py has no build_tab(parent, data)"
+        )
+    data = mod.load() if hasattr(mod, "load") else None
+    tab = mod.build_tab(parent, data)
+    # Assign session_spec BEFORE the tab is inserted so the currentChanged that
+    # add_tab fires sees the final spec (→ chat gets the right dataset).
+    import config
+    ds = getattr(mod, "DATASET", None) or name
+    if ds not in config.DATASETS:
+        try:
+            config.reload_datasets()
+        except Exception:
+            pass
+    if ds in config.DATASETS:
+        tab.session_spec = {
+            "kind": "analysis", "name": name, "module": name, "dataset": ds,
+        }
+    return tab, mod
+
+
 def _make_add_tab_handler(window) -> Callable[..., str]:
     """Build the `add-tab` window verb handler.
 
@@ -54,57 +123,72 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
 
     Idempotent: if a tab with `name` is already present, focuses it and returns
     `"already-present:<name>"` instead of constructing a duplicate.
-
-    Re-import behavior: the analysis module is NOT registered in sys.modules.
-    Each successful add-tab (i.e. when the tab is not already present)
-    re-executes the file and re-runs `load()`. For close → add cycles, this
-    means `load()` runs again — fine for small data, can be slow if `load()`
-    reads large files. Analyses that want caching should memoize inside
-    `load()` themselves.
     """
 
     def _add_tab(name: str) -> str:
-        _validate_analysis_name(name)
-        root = analyses_root().resolve()
-        analysis_dir = (analyses_root() / name).resolve()
-        analysis_file = (analysis_dir / "analysis.py").resolve()
-        if not analysis_dir.is_relative_to(root):
-            raise ValueError(f"analysis directory escapes analyses/: {name!r}")
-        if not analysis_file.is_relative_to(root):
-            raise ValueError(f"analysis.py escapes analyses/: {name!r}")
-        if not analysis_file.is_file():
-            raise LookupError(f"no analysis named {name!r} under analyses/")
+        # Resolve/validate up front so a bad name reports before any build.
+        _resolve_analysis_file(name)
         if window.set_active_tab(name):
             return f"already-present:{name}"
-        spec = importlib.util.spec_from_file_location(
-            f"_llm_bridge_analysis_{name}", analysis_file
-        )
-        if spec is None or spec.loader is None:
-            raise ImportError(f"could not build module spec for {analysis_file}")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        if not hasattr(mod, "build_tab"):
-            raise AttributeError(
-                f"analyses/{name}/analysis.py has no build_tab(parent, data)"
+        from PySide6.QtWidgets import QWidget
+
+        # Build under a sandbox parent so a partially-constructed tab (and any
+        # watchers it spawned) are tracked as the sandbox's children and torn
+        # down as a unit on failure. build_tab side-effects state.json (via its
+        # internal refresh-state), so capture the prior state to restore on any
+        # failure / no-op path — the real UI read-back is the source of truth.
+        captured_state = state.read(name)
+        sandbox = QWidget()
+        try:
+            new_tab, mod = _build_analysis(sandbox, name)
+        except Exception:
+            sandbox.deleteLater()
+            state.writer(name)(captured_state)
+            raise
+        if new_tab.name != name:
+            sandbox.deleteLater()
+            state.writer(name)(captured_state)
+            raise ValueError(
+                f"tab name mismatch: expected {name!r}, got {new_tab.name!r}"
             )
-        data = mod.load() if hasattr(mod, "load") else None
-        tab = mod.build_tab(window, data)
-        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
-        # that add_tab fires sees the final spec (→ chat gets the right dataset).
-        import config
-        ds = getattr(mod, "DATASET", None) or name
-        if ds not in config.DATASETS:
-            try:
-                config.reload_datasets()
-            except Exception:
-                pass
-        if ds in config.DATASETS:
-            tab.session_spec = {"kind": "analysis", "name": name, "module": name, "dataset": ds}
-            session.note_dataset(ds)
-        window.add_tab(tab)
+        if not _sync_new_tab_state(new_tab, mod, name, captured_state):
+            sandbox.deleteLater()
+            state.writer(name)(captured_state)
+            raise RuntimeError(
+                f"could not establish state for {name!r} (apply_state / "
+                f"refresh-state failed); tab not inserted"
+            )
+        new_tab.setParent(None)
+        sandbox.deleteLater()
+        window.add_tab(new_tab)
+        # note_dataset only AFTER a successful insert (see _build_analysis doc).
+        spec = getattr(new_tab, "session_spec", None)
+        if spec and spec.get("dataset"):
+            session.note_dataset(spec["dataset"])
         return f"added:{name}"
 
     return _add_tab
+
+
+def _sync_new_tab_state(tab, mod, name: str, captured_state: dict) -> bool:
+    """Apply optional `apply_state` then sync the real UI state into state.json.
+
+    Returns True on success, False if apply_state or refresh-state raised (the
+    caller then discards the tab and restores captured_state). The read-back
+    from refresh-state — not captured_state — is always the truth on success:
+      - apply_state present & restores state → state.json = captured = UI
+      - apply_state no-op / absent          → state.json = fresh   = UI
+    """
+    if hasattr(mod, "apply_state"):
+        try:
+            mod.apply_state(tab, captured_state)
+        except Exception:
+            return False
+    try:
+        tab.dispatch_command("refresh-state")
+    except Exception:
+        return False
+    return True
 
 
 # slot → (panel key, container position, split orientation or None).
@@ -261,9 +345,19 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     return _show
 
 
-def attach_window(window) -> list[object]:
-    """Wire llm_bridge to a ToolWindow. Returns watchers to keep alive."""
-    # Built-in window verbs.
+def _rewire_window(window) -> None:
+    """(Re)register the window-tier verbs + session saver.
+
+    Pulled out of attach_window so the hot-reload `__on_reload__` hook can
+    re-run JUST the verb registration (which captures freshly-reloaded handler
+    closures) without re-running the one-time wiring that attach_window also
+    does. Deliberately EXCLUDES:
+      - `tab_changed`/`dataset_changed` connects (re-connecting double-fires;
+        the existing lambdas resolve `_write_active` via module globals, so they
+        self-heal after a Tier 1 reload — no re-connect needed).
+      - `clear_session_dirty()` (would drop a pending dirty flag).
+      - `commands.start_watcher` (a second watcher would double-drain).
+    """
     window.register_command("add-tab", _make_add_tab_handler(window))
     window.register_command("close-tab", lambda name: window.close_tab(name))
     window.register_command("list-tabs", lambda: window.tab_names())
@@ -271,6 +365,28 @@ def attach_window(window) -> list[object]:
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
     window.register_command("open-dataset", lambda name: session.open_dataset(window, name))
+    window.set_session_saver(lambda: session.save_all(window))
+
+
+def __on_reload__(ctx) -> None:
+    """Hot-reload (Tier 1) hook: re-register window verbs with freshly-reloaded
+    handler closures.
+
+    The registered `_add_tab` / `_show` closures are nested inside
+    `_make_add_tab_handler` / `_make_show_handler`. Patching those factories'
+    `__code__` does NOT update the already-registered closures (only the
+    module-level functions they call via globals self-heal). Re-running
+    `_rewire_window` rebuilds the closures from the new code.
+    """
+    window = getattr(ctx, "window", None)
+    if window is not None:
+        _rewire_window(window)
+
+
+def attach_window(window, *, watcher_resume_after: float | None = None) -> list[object]:
+    """Wire llm_bridge to a ToolWindow. Returns watchers to keep alive."""
+    # Built-in window verbs + session saver (re-runnable on hot reload).
+    _rewire_window(window)
 
     # Active tab tracker.
     window.tab_changed.connect(lambda _i: _write_active(window))
@@ -278,12 +394,11 @@ def attach_window(window) -> list[object]:
         window.dataset_changed.connect(lambda _ds: _write_active(window))
     _write_active(window)  # initial write
 
-    # Session saver wiring.
-    window.set_session_saver(lambda: session.save_all(window))
     window.clear_session_dirty()  # 起動時のプレースホルダ追加等を clean ベースライン化
 
     # Command queue watcher (drains stale on startup, executes new arrivals).
-    cmd_watcher = commands.start_watcher(window)
+    # Single call site so a Tier 3 rebuild can't double-start the watcher.
+    cmd_watcher = commands.start_watcher(window, resume_after=watcher_resume_after)
     return [cmd_watcher]
 
 

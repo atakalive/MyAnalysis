@@ -299,6 +299,32 @@ class ChatWidget(QWidget):
         if self._window is not None:
             self._window.mark_chat_dirty()
 
+    # ----- hot-reload accessors -----
+
+    def is_busy(self) -> bool:
+        """True if any session has an in-flight (streaming) turn."""
+        return bool(self._turns)
+
+    def input_draft(self) -> str:
+        """Current unsent message text."""
+        return self._input.toPlainText()
+
+    def set_input_draft(self, text: str) -> None:
+        self._input.setPlainText(text or "")
+
+    def active_session_id(self) -> str:
+        return self._active.id
+
+    def set_active_session_by_id(self, sid) -> None:
+        """Re-select the active session by id (best-effort; no-op if unknown)."""
+        sess = self._session_by_id(sid)
+        if sess is None:
+            return
+        self._active = sess
+        self._rebuild_tab_bar()
+        self._render_session(sess)
+        self._update_turn_ui()
+
     # ----- persistence accessors -----
 
     def sessions_for_persistence(self) -> list:

@@ -85,7 +85,11 @@ def start_watcher(tab) -> object:
     if not p.exists():
         _write(tab.name, _empty())
     parent_dir = str(p.parent)
-    watcher = QFileSystemWatcher([parent_dir])
+    # Parent the watcher to `tab` so it is destroyed when the tab is (Tier 2/3
+    # teardown + close_tab). Unparented, the closure keeps `tab` alive and a
+    # later state_dir change fires _on_dir_changed on a deleted C++ object →
+    # RuntimeError. See Issue #31 (pre-existing bug).
+    watcher = QFileSystemWatcher([parent_dir], tab)
     last_mtime_ns = [p.stat().st_mtime_ns if p.exists() else 0]
 
     def _on_dir_changed(_dir_str: str) -> None:

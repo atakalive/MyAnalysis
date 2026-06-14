@@ -27,6 +27,9 @@ class ToolWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Object names let saveState()/restoreState() match docks across a
+        # blue-green rebuild (Tier 3) and a restart (Tier 4).
+        self.setObjectName("ToolWindow")
         self.setWindowTitle("MyAnalysis Tool")
         self.resize(1400, 800)
         self._current_dataset: str | None = None
@@ -42,6 +45,7 @@ class ToolWindow(QMainWindow):
         self.statusBar()
 
         self._chat_dock = QDockWidget("Chat", self)
+        self._chat_dock.setObjectName("ChatDock")
         self._chat_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetFloatable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable

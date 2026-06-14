@@ -30,3 +30,12 @@ def active_state_path() -> Path:
 def ui_prefs_path() -> Path:
     """Return data/llm_state/ui_prefs.json (file may not exist yet)."""
     return global_state_dir() / "ui_prefs.json"
+
+
+def reload_manifest_path() -> Path:
+    """Return data/llm_state/reload_manifest.json (file may not exist yet).
+
+    Written by hot-reload Tier 3/4 and consumed (then deleted) by the rebuilt
+    window / restarted process.
+    """
+    return global_state_dir() / "reload_manifest.json"

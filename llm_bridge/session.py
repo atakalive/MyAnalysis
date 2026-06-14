@@ -32,6 +32,11 @@ SCHEMA_VERSION = 1
 # handlers), never by open_dataset.
 _touched: set[str] = set()
 
+# Hot-reload (Tier 1): preserve `_touched` across a re-exec of this module so a
+# patch doesn't drop pending empty-tabs persistence. Under Tier 3 the set is
+# already flushed empty by save_all, so this is consistent there too.
+__hot_preserve__ = ["_touched"]
+
 
 def note_dataset(name: str) -> None:
     """Record that `name` has (or had) a tracked tab. Called from show/add-tab."""
