@@ -372,11 +372,22 @@ def test_simplify_t5_hidden_three_calls():
     assert "🔧 3 tool calls" in out.split("\n")
 
 
-def test_simplify_t6_false_positive_fixed():
-    """T6: a code line that looks like a tool line is (intentionally) folded."""
+def test_simplify_t6_false_positive_in_code_block():
+    """T6: marker-like lines INSIDE a fenced code block are (intentionally,
+    documented limitation) misclassified as tool lines and folded/dropped.
+    Pin the lossy behavior so it stays deliberate, not accidental."""
     from gui.chat import _simplify_tool_text
-    text = "🔧 A\n   ↳ rA"
-    assert _simplify_tool_text(text, "hidden") == "🔧 1 tool calls"
+    text = "Here is code:\n```\n🔧 not_really_a_tool\n   ↳ also_not\n```"
+    # hidden: the in-fence marker lines are folded into a summary (false positive)
+    hidden_lines = _simplify_tool_text(text, "hidden").split("\n")
+    assert "🔧 not_really_a_tool" not in hidden_lines
+    assert "   ↳ also_not" not in hidden_lines
+    assert "🔧 1 tool calls" in hidden_lines
+    assert "```" in hidden_lines  # surrounding fence survives; content corrupted
+    # compact: the result line is dropped, the call-shaped line kept
+    compact_lines = _simplify_tool_text(text, "compact").split("\n")
+    assert "   ↳ also_not" not in compact_lines
+    assert "🔧 not_really_a_tool" in compact_lines
 
 
 def test_simplify_t7_degenerate_run_results_only():
@@ -387,4 +398,18 @@ def test_simplify_t7_degenerate_run_results_only():
         out = _simplify_tool_text(text, mode)
         lines = out.split("\n")
         assert RES_A in lines and RES_B in lines
-        assert not any("tool calls" in l for l in lines)
+        assert not any("tool calls" in ln for ln in lines)
+
+
+def test_load_tool_display_invalid_types_never_raise(monkeypatch):
+    """reviewer P1: a hand-edited / corrupt ui_prefs `tool_display` of any type —
+    including unhashable JSON array/object — must normalize to 'full' without
+    raising (the helper's contract is 'Must never raise')."""
+    import llm_bridge.paths as paths
+    from gui.chat import _load_tool_display
+    for bad in ([], {}, ["full"], {"x": 1}, 0, 1.5, True, None, "bogus", ""):
+        monkeypatch.setattr(paths, "read_ui_pref", lambda *a, **k: bad)
+        assert _load_tool_display() == "full"
+    for good in ("full", "compact", "hidden"):
+        monkeypatch.setattr(paths, "read_ui_pref", lambda *a, _g=good, **k: _g)
+        assert _load_tool_display() == good

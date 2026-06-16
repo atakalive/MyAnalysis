@@ -73,7 +73,9 @@ def _load_tool_display() -> str:
     problem (missing / wrong type / invalid value). Must never raise."""
     from llm_bridge.paths import read_ui_pref
     v = read_ui_pref("tool_display", "full")
-    return v if v in _TOOL_DISPLAY_MODES else "full"
+    # isinstance guard first: a hand-edited prefs file can hold an unhashable
+    # value (JSON array/object), and `[] in frozenset` would raise TypeError.
+    return v if isinstance(v, str) and v in _TOOL_DISPLAY_MODES else "full"
 
 
 def _save_tool_display(mode: str) -> None:
@@ -107,7 +109,7 @@ def _simplify_tool_text(content: str, mode: str) -> str:
     if not content:
         return content
     lines = content.split("\n")
-    if not any(_is_tool_line(l) for l in lines):
+    if not any(_is_tool_line(ln) for ln in lines):
         return content
     out: list[str] = []
     i, n = 0, len(lines)
@@ -116,13 +118,15 @@ def _simplify_tool_text(content: str, mode: str) -> str:
             acc, j = [], i                         # run の蓄積。内部空行を吸収
             while j < n:
                 if _is_tool_line(lines[j]):
-                    acc.append(lines[j]); j += 1
+                    acc.append(lines[j])
+                    j += 1
                 elif lines[j] == "":
                     k = j
                     while k < n and lines[k] == "":
                         k += 1
                     if k < n and _is_tool_line(lines[k]):   # 空行は run 内部 → 吸収
-                        acc.extend(lines[j:k]); j = k
+                        acc.extend(lines[j:k])
+                        j = k
                     else:
                         break                                 # 末尾/区切りの空行は run 外
                 else:
@@ -352,8 +356,9 @@ class ChatWidget(QWidget):
         _save_chat_zoom(self._zoom)
 
     def _render_active_preserving_status(self) -> None:
-        """ズーム再描画用。usage/コスト行は status ラベルにしか無く、ズームでは
-        stale でないため、_render_session の status クリアから保全する。"""
+        """ズーム・ツール表示モード切替の再描画用。usage/コスト行は status ラベルに
+        しか無く、これらの操作では stale でないため、_render_session の status
+        クリアから保全する（退避 → 再描画 → 復元）。"""
         saved = self._status.text()
         self._render_session(self._active)
         self._status.setText(saved)
@@ -513,15 +518,17 @@ class ChatWidget(QWidget):
             return
         self._tool_display_default = mode
         _save_tool_display(mode)
-        self._render_session(self._active)
+        # preserve the usage/cost line (status-only) across the re-render.
+        self._render_active_preserving_status()
 
-    def _set_session_tool_display(self, sess: ChatSession, value) -> None:
+    def _set_session_tool_display(self, sess: ChatSession, value: str | None) -> None:
         sess.tool_display = value
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         if sess.dataset is not None:
             self._mark_chat_dirty()
         if sess is self._active:
-            self._render_session(sess)
+            # preserve the usage/cost line (status-only) across the re-render.
+            self._render_active_preserving_status()
 
     # ----- transcript render -----
 
