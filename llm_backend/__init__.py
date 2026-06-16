@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 from common.paths import repo_root
 from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
+from llm_backend.model_settings import merged_settings
 
 __all__ = [
     "TextDelta",
@@ -39,11 +40,15 @@ def backend_config() -> dict:
 def _make_openai() -> LLMBackend:
     from llm_backend.openai_compat import OpenAICompatBackend
 
+    settings = merged_settings("openai", backend_config().get("openai", {}))
+    # models.toml [openai].model is canonical; OPENAI_MODEL env is a back-compat
+    # fallback. base_url / api_key are endpoint/secret → stay in env.
+    model = settings.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
     base_url = os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
     return OpenAICompatBackend(
         base_url=base_url,
         api_key=os.environ.get("OPENAI_API_KEY") or "not-needed",
-        model=os.environ.get("OPENAI_MODEL") or "gpt-4o-mini",
+        model=model,
     )
 
 
@@ -56,13 +61,17 @@ def _make_mock() -> LLMBackend:
 def _make_pi() -> LLMBackend:
     from llm_backend.pi import PiCodingAgentBackend
 
-    return PiCodingAgentBackend(backend_config().get("pi", {}))
+    return PiCodingAgentBackend(
+        merged_settings("pi", backend_config().get("pi", {}))
+    )
 
 
 def _make_claude() -> LLMBackend:
     from llm_backend.claude_code import ClaudeCodeBackend
 
-    return ClaudeCodeBackend(backend_config().get("claude_code", {}))
+    return ClaudeCodeBackend(
+        merged_settings("claude_code", backend_config().get("claude_code", {}))
+    )
 
 
 _BACKENDS: dict[str, Callable[[], LLMBackend]] = {

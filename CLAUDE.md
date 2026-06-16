@@ -49,8 +49,19 @@ subprocess).
 - **Selection order**: env `LLM_BACKEND` → `[backend].name` in
   `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
 - **Config file**: copy `llm_backend/config.example.toml` → `llm_backend/config.toml`
-  (gitignored). The `[pi]` section sets `cwd` (pi working directory), `bin`,
-  `model`, `provider`, `tools`.
+  (gitignored). Holds operational/transport settings — e.g. the `[pi]` section
+  sets `cwd` (pi working directory), `bin`, `tools`.
+- **Model settings**: copy `llm_backend/models.example.toml` →
+  `llm_backend/models.toml` (gitignored). One `[<backend>]` section per backend
+  with the conventional knobs `model` / `thinking` / `effort` / `provider`; each
+  backend maps them to its own CLI/API ([model_settings.py](llm_backend/model_settings.py),
+  `merged_settings()`). `models.toml` is canonical and overlays the matching
+  `config.toml` section (a legacy `model` left in `config.toml` still works as a
+  fallback; for `openai`, `OPENAI_MODEL` env is the fallback). Adding a new
+  backend = add a section here + wrap its config with `merged_settings(key, …)`.
+  For the claude engine, `effort = "ultracode"` expands to
+  `--effort xhigh --settings '{"ultracode": true}'`. Both files load once — restart
+  to pick up edits.
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`

@@ -1,0 +1,26 @@
+# Per-backend model settings. Copy to models.toml to activate.
+# models.toml is gitignored; this example is committed.
+#
+# Model-selection knobs only (which model / how much thinking / effort /
+# provider). Operational settings (bin, cwd, permission_mode, tools, ...) stay
+# in config.toml. Each backend reads its own [<backend>] section and maps the
+# conventional keys to its CLI/API; keys a backend doesn't use are ignored.
+#
+# Conventional keys: model / thinking / effort / provider.
+# Edits require a process restart to take effect (loaded once).
+
+[claude_code]
+# Reuses the VS Code Claude Code engine (stream-json mode).
+model    = ""   # --model  ("opus"/"sonnet" alias or full name; empty = ~/.claude default)
+thinking = ""   # --thinking: enabled | adaptive | disabled  (empty = CLI default; true/false also accepted)
+effort   = ""   # --effort: low | medium | high | xhigh | max | ultracode  (empty = CLI default)
+                #   ultracode => --effort xhigh --settings '{"ultracode": true}'
+                #   (high token use; needs an ultracode-capable model)
+
+[pi]
+model    = ""   # --model
+provider = ""   # --provider
+
+[openai]
+model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)
+                #   OPENAI_BASE_URL / OPENAI_API_KEY stay in .env (endpoint/secret).

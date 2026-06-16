@@ -88,6 +88,40 @@ _VER_RE = re.compile(r"claude-code-(\d+)\.(\d+)\.(\d+)")
 # Salient input keys, in priority order, for one-line tool-call summaries.
 _TOOL_INPUT_KEYS = ("command", "file_path", "path", "pattern", "query", "url", "name")
 
+# Valid --thinking modes; anything else is ignored (CLI default).
+_THINKING_MODES = frozenset({"enabled", "adaptive", "disabled"})
+
+
+def _generation_flags(config: dict) -> list[str]:
+    """Map model/thinking/effort settings to `claude` CLI flags.
+
+    These are global `claude` flags, so they apply in stream-json mode too.
+    Invalid values are silently skipped (fall back to the engine's default).
+    Settings come from models.toml (overlaid onto config.toml) — see
+    llm_backend/model_settings.py.
+    """
+    flags: list[str] = []
+
+    model = config.get("model")
+    if model:
+        flags += ["--model", model]
+
+    thinking = config.get("thinking")
+    if isinstance(thinking, bool):  # true/false → enabled/disabled (back-compat)
+        thinking = "enabled" if thinking else "disabled"
+    if isinstance(thinking, str) and thinking in _THINKING_MODES:
+        flags += ["--thinking", thinking]
+
+    effort = config.get("effort")
+    if isinstance(effort, str) and effort.strip():
+        ev = effort.strip()
+        if ev == "ultracode":  # xhigh + dynamic-workflow orchestration
+            flags += ["--effort", "xhigh", "--settings", '{"ultracode": true}']
+        else:
+            flags += ["--effort", ev]
+
+    return flags
+
 
 class ClaudeCodeBackend:
     name = "claude-code"
@@ -133,9 +167,7 @@ class ClaudeCodeBackend:
         perm = config.get("permission_mode") or _DEFAULT_PERMISSION_MODE
         if perm:
             cmd += ["--permission-mode", perm]
-        model = config.get("model", "")
-        if model:
-            cmd += ["--model", model]
+        cmd += _generation_flags(config)
         allowed = config.get("allowed_tools", "")
         if allowed:
             # space/comma-separated allowlist → variadic --allowedTools

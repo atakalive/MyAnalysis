@@ -31,6 +31,9 @@ data/
 # LLM backend config (copy from config.example.toml)
 llm_backend/config.toml
 
+# LLM backend per-backend model settings (copy from models.example.toml)
+llm_backend/models.toml
+
 # pi runtime artifacts — track only the committed skill
 /.pi/*
 !/.pi/skills/
