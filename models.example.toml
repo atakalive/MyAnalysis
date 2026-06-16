@@ -11,16 +11,16 @@
 
 [claude_code]
 # Reuses the VS Code Claude Code engine (stream-json mode).
-model    = ""   # --model  ("opus"/"sonnet" alias or full name; empty = ~/.claude default)
-thinking = ""   # --thinking: enabled | adaptive | disabled  (empty = CLI default; true/false also accepted)
-effort   = ""   # --effort: low | medium | high | xhigh | max | ultracode  (empty = CLI default)
-                #   ultracode => --effort xhigh --settings '{"ultracode": true}'
-                #   (high token use; needs an ultracode-capable model)
+model    = "opus"     # --model  ("opus"/"sonnet" alias or full name; empty = ~/.claude default)
+thinking = "enabled"  # --thinking: enabled | adaptive | disabled  (empty = CLI default; true/false also accepted)
+effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode  (empty = CLI default)
+                      #   ultracode => --effort xhigh --settings '{"ultracode": true}'
+                      #   (high token use; needs an ultracode-capable model)
 
 [pi]
-model    = ""   # --model
-provider = ""   # --provider
+provider = "openai-codex"  # --provider
+model    = "gpt-5.5"       # --model
 
-[openai]
+[openai-compat]
 model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)
                 #   OPENAI_BASE_URL / OPENAI_API_KEY stay in .env (endpoint/secret).

@@ -121,7 +121,7 @@ class TestGenerationFlags:
 
 class TestOpenAIResolution:
     def test_models_toml_wins(self, fake_models, monkeypatch):
-        fake_models({"openai": {"model": "from-toml"}})
+        fake_models({"openai-compat": {"model": "from-toml"}})
         monkeypatch.setattr(llm_backend, "backend_config", lambda: {})
         monkeypatch.setenv("OPENAI_MODEL", "from-env")
         backend = llm_backend._make_openai()

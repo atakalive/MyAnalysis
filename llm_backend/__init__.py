@@ -40,9 +40,11 @@ def backend_config() -> dict:
 def _make_openai() -> LLMBackend:
     from llm_backend.openai_compat import OpenAICompatBackend
 
-    settings = merged_settings("openai", backend_config().get("openai", {}))
-    # models.toml [openai].model is canonical; OPENAI_MODEL env is a back-compat
-    # fallback. base_url / api_key are endpoint/secret → stay in env.
+    settings = merged_settings(
+        "openai-compat", backend_config().get("openai-compat", {})
+    )
+    # models.toml [openai-compat].model is canonical; OPENAI_MODEL env is a
+    # back-compat fallback. base_url / api_key are endpoint/secret → stay in env.
     model = settings.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
     base_url = os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
     return OpenAICompatBackend(

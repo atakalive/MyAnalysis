@@ -57,7 +57,7 @@ subprocess).
   backend maps them to its own CLI/API ([model_settings.py](llm_backend/model_settings.py),
   `merged_settings()`). `models.toml` is canonical and overlays the matching
   `config.toml` section (a legacy `model` left in `config.toml` still works as a
-  fallback; for `openai`, `OPENAI_MODEL` env is the fallback). Adding a new
+  fallback; for the `openai-compat` backend, `OPENAI_MODEL` env is the fallback). Adding a new
   backend = add a section here + wrap its config with `merged_settings(key, …)`.
   For the claude engine, `effort = "ultracode"` expands to
   `--effort xhigh --settings '{"ultracode": true}'`. Both files load once — restart
