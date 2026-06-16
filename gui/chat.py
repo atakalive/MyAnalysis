@@ -201,7 +201,7 @@ class ChatWidget(QWidget):
 
         self._input = QPlainTextEdit()
         self._input.setPlaceholderText(
-            "Message... (Shift+Enter to send, Enter for newline)"
+            "Message... (Ctrl+Enter to send, Enter for newline)"
         )
         self._input.setFixedHeight(80)
         self._input.installEventFilter(self)
@@ -259,7 +259,7 @@ class ChatWidget(QWidget):
         if obj is self._input and isinstance(ev, QKeyEvent) \
                 and ev.type() == QKeyEvent.Type.KeyPress \
                 and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
-                and (ev.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                and (ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self._on_send()
             return True
         return super().eventFilter(obj, ev)
