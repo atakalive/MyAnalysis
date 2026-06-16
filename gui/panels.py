@@ -2,16 +2,20 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QGraphicsTextItem,
+    QGraphicsView,
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtGui import QPixmap, QResizeEvent
+from PySide6.QtGui import QPainter, QPixmap, QResizeEvent, QShowEvent, QWheelEvent
 
 
 _PALETTE = [
@@ -167,47 +171,125 @@ class ImagePanel(QWidget):
         self._notes.clear()
 
 
-class FigurePanel(QWidget):
-    """汎用画像ビューア。任意の PNG 等を忠実フィット表示する（QLabel+QPixmap）。
+class FigurePanel(QGraphicsView):
+    """汎用画像ビューア。任意の PNG 等を忠実フィット表示する（QGraphicsView）。
 
     軸付きの ImagePanel と違い、チャート PNG を転置・反転せず原寸比で表示。
+    ホイール=カーソル中心に拡縮、左ドラッグ=パン。縮小はフィットで止まる。
     Pillow/pyqtgraph/numpy 不要 — 依存は PySide6 のみ。
     """
 
+    MAX_ABS_SCALE = 40.0
+    ZOOM_IN = 1.25
+    ZOOM_OUT = 0.8
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        self._label = QLabel()
-        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
-        )
-        self._label.setMinimumSize(1, 1)
-        layout.addWidget(self._label)
+        # 状態属性を scene/view 設定より前に初期化（resize/show 配送順に非依存）。
         self._pixmap: QPixmap | None = None
+        self._user_zoomed = False
+        self._text_item: QGraphicsTextItem | None = None
+
+        self._scene = QGraphicsScene(self)
+        self._item = QGraphicsPixmapItem()
+        self._scene.addItem(self._item)
+        self.setScene(self._scene)
+
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setRenderHints(
+            QPainter.RenderHint.SmoothPixmapTransform
+            | QPainter.RenderHint.Antialiasing
+        )
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self._item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        # 親テーマと同じ背景色にして暗テーマで画像周囲が白く浮くのを防ぐ。
+        self.setBackgroundBrush(self.palette().window())
+        self.setMinimumSize(0, 0)
+
+    def minimumSizeHint(self) -> QSize:
+        # splitter が比を自由配分できるよう 0 を返す（QAbstractScrollArea 既定の
+        # 非ゼロヒントを上書き）。
+        return QSize(0, 0)
 
     def set_path(self, path: str | Path) -> None:
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
-            self._label.setText(f"Cannot load: {path}")
             self._pixmap = None
+            self._item.setPixmap(QPixmap())
+            # エラー表示を必ず中央可視にする（旧変換を引き継がない）。
+            self.resetTransform()
+            self._user_zoomed = False
+            if self._text_item is None:
+                self._text_item = QGraphicsTextItem()
+                self._text_item.setDefaultTextColor(
+                    self.palette().windowText().color()
+                )
+                self._scene.addItem(self._text_item)
+            self._text_item.setVisible(True)
+            self._text_item.setPlainText(f"Cannot load: {path}")
+            self._text_item.setPos(0, 0)
+            self.setSceneRect(self._text_item.boundingRect())
+            self.centerOn(self._text_item)
             return
+        if self._text_item is not None:
+            self._text_item.setVisible(False)
         self._pixmap = pixmap
-        self._update_display()
+        self._item.setPixmap(pixmap)
+        self.setSceneRect(self._item.boundingRect())
+        self._user_zoomed = False
+        self._fit()
 
-    def _update_display(self) -> None:
+    def _fit(self) -> None:
         if self._pixmap is None:
             return
-        size = self._label.size()
-        if size.width() < 2 or size.height() < 2:
+        vp = self.viewport().size()
+        if vp.width() < 2 or vp.height() < 2:
             return
-        scaled = self._pixmap.scaled(
-            size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._label.setPixmap(scaled)
+        self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
+        self._user_zoomed = False
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._update_display()
+        if not self._user_zoomed:
+            self._fit()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._user_zoomed:
+            self._fit()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        if self._pixmap is None:
+            return
+        dy = event.angleDelta().y()
+        if dy == 0:
+            return
+        factor = self.ZOOM_IN if dy > 0 else self.ZOOM_OUT
+
+        # 縮小下限 fit はその場で解析計算（手動ズーム中のリサイズでも陳腐化しない）。
+        br = self._item.boundingRect()
+        if br.width() == 0 or br.height() == 0:
+            return
+        vp = self.viewport().size()
+        if vp.width() < 2 or vp.height() < 2:
+            return
+        fit = min(vp.width() / br.width(), vp.height() / br.height())
+
+        # m11() をスケールとして使えるのは回転/反転/せん断を一切かけない前提
+        # （本パネルは scale と平行移動のみ）。将来 回転/反転を足すとこの前提は崩れる。
+        current = self.transform().m11()
+        hi = max(fit, self.MAX_ABS_SCALE)
+        target = min(max(current * factor, fit), hi)
+        applied = target / current
+        if abs(applied - 1) >= 1e-9:
+            self.scale(applied, applied)
+
+        if self.transform().m11() <= fit * (1 + 1e-6):
+            self._user_zoomed = False
+        else:
+            self._user_zoomed = True
+        event.accept()
