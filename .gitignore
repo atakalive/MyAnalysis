@@ -32,7 +32,7 @@ data/
 llm_backend/config.toml
 
 # LLM backend per-backend model settings (copy from models.example.toml)
-llm_backend/models.toml
+/models.toml
 
 # pi runtime artifacts — track only the committed skill
 /.pi/*

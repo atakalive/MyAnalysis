@@ -1,4 +1,4 @@
-"""Per-backend model settings, loaded from ``llm_backend/models.toml``.
+"""Per-backend model settings, loaded from ``models.toml`` at the repo root.
 
 Model-selection knobs (which model / how much thinking / effort / provider) live
 here, separate from the operational/transport config in ``config.toml`` (bin,
@@ -21,8 +21,8 @@ from common.paths import repo_root
 
 @functools.lru_cache(maxsize=1)
 def model_config() -> dict:
-    """Load ``llm_backend/models.toml`` once. Restart to pick up edits."""
-    p = repo_root() / "llm_backend" / "models.toml"
+    """Load ``models.toml`` (repo root) once. Restart to pick up edits."""
+    p = repo_root() / "models.toml"
     try:
         with open(p, "rb") as f:
             return tomllib.load(f)

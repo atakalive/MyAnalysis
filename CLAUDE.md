@@ -51,8 +51,8 @@ subprocess).
 - **Config file**: copy `llm_backend/config.example.toml` → `llm_backend/config.toml`
   (gitignored). Holds operational/transport settings — e.g. the `[pi]` section
   sets `cwd` (pi working directory), `bin`, `tools`.
-- **Model settings**: copy `llm_backend/models.example.toml` →
-  `llm_backend/models.toml` (gitignored). One `[<backend>]` section per backend
+- **Model settings**: copy `models.example.toml` → `models.toml` (repo root,
+  gitignored — user-edited config lives at the root). One `[<backend>]` section per backend
   with the conventional knobs `model` / `thinking` / `effort` / `provider`; each
   backend maps them to its own CLI/API ([model_settings.py](llm_backend/model_settings.py),
   `merged_settings()`). `models.toml` is canonical and overlays the matching
