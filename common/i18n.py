@@ -23,7 +23,7 @@ def _load_catalogs() -> None:
             try:
                 with open(p, "rb") as f:
                     raw = tomllib.load(f)
-            except (OSError, tomllib.TOMLDecodeError):
+            except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
                 cats[p.stem] = {}
                 continue
             cats[p.stem] = {

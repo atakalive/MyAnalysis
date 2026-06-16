@@ -88,6 +88,23 @@ def test_never_raise_when_dir_missing(tmp_path, monkeypatch):
     assert i18n.available_languages() == []
 
 
+def test_never_raise_on_non_utf8_catalog(tmp_path, monkeypatch):
+    import common.i18n as i18n
+    d = tmp_path / "i18n"
+    d.mkdir()
+    (d / "en.toml").write_text('"k" = "EN"\n', encoding="utf-8")
+    # non-UTF-8 bytes (Shift_JIS) → tomllib raises UnicodeDecodeError on load;
+    # _load_catalogs must absorb it and treat the file as an empty catalog.
+    (d / "ja.toml").write_bytes('"k" = "日本語"\n'.encode("shift_jis"))
+    _patch_dir(monkeypatch, d)
+    i18n._load_catalogs()               # must not raise
+    i18n._active = "ja"
+    assert i18n.tr("k") == "EN"          # broken ja → {} → fall back to en
+    assert i18n.available_languages() == ["en", "ja"]  # file still listed
+    i18n.init_language()                # must not raise with the bad file present
+    assert i18n.tr("k") == "EN"
+
+
 @pytest.mark.parametrize("ja_body", [
     '"good" = "OK"\n',                                  # all-str catalog
     '"good" = "OK"\n"k.bad" = 123\n[section]\nx = "y"\n',  # mixed bad types

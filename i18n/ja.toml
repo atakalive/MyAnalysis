@@ -55,17 +55,17 @@
 "err.template_failed.title"   = "解析雛形の作成に失敗"
 
 # --- status ---
-"status.active"               = "Active: {name}"
+"status.active"               = "アクティブ: {name}"
 
 # --- chat ---
-"chat.input.placeholder"      = "Message... (Ctrl+Enter to send, Enter for newline)"
+"chat.input.placeholder"      = "メッセージ...（Ctrl+Enter で送信、Enter で改行）"
 "chat.btn.stop"               = "Stop"
 "chat.btn.send"               = "Send"
 "chat.menu.rename"            = "名前変更"
 "chat.delete.confirm"         = "「{title}」を削除しますか？"
 "chat.delete.in_flight"       = "\n生成中のターンは停止されます。"
-"chat.status.stopping"        = "stopping…"
-"chat.status.waiting"         = "{spinner} waiting…"
+"chat.status.stopping"        = "停止中…"
+"chat.status.waiting"         = "{spinner} 待機中…"
 "chat.untitled"               = "新しいチャット"
 
 # --- validate (common/paths.py) ---
