@@ -366,15 +366,53 @@ class ChatWidget(QWidget):
         """True if the session holds any non-system message (i.e. real history)."""
         return len(sess.messages) > 1
 
+    def _acquire_blank_session(self) -> ChatSession:
+        """Return a no-history 'blank' session to show when the current dataset
+        has no chat of its own. Blanks are kept dataset-agnostic (dataset=None)
+        so a single one serves every dataset — opening datasets must NOT keep
+        spawning empty tabs. Prefer reusing the active session (if blank),
+        then any existing scratch, and only mint a fresh scratch as a last
+        resort."""
+        if not self._has_history(self._active) and self._active.id not in self._turns:
+            self._active.dataset = None
+            return self._active
+        for s in self._sessions:
+            if (s.dataset is None and not self._has_history(s)
+                    and s.id not in self._turns):
+                return s
+        sess = chat_store.new_session(
+            self._backend.name, _SYSTEM_PROMPT, dataset=None
+        )
+        self._sessions.append(sess)
+        return sess
+
     def _visible_sessions(self) -> list[ChatSession]:
-        """Sessions shown for the current dataset: dataset match or scratch
-        (None). Order follows `self._sessions` list position (the explicit,
-        user-controlled tab order) — new sessions append to the end and
-        drag-and-drop reorders the backing list, so no sort is applied here."""
-        return [
-            s for s in self._sessions
-            if s.dataset in (self._current_dataset, None)
-        ]
+        """Sessions shown for the current dataset, in `self._sessions` list order
+        (the explicit, user-controlled tab order; no sort).
+
+        A session is shown when it is bound to the current dataset, or it is an
+        unbound scratch (None). BUT when the current dataset already has chats of
+        its own, an EMPTY unbound blank is hidden — opening a dataset that has
+        chats must not show a stray "新しいチャット" tab. A history-bearing scratch
+        (an unsaved conversation) is always shown; explicit [+] chats are bound
+        to the dataset and so are always shown too."""
+        ds = self._current_dataset
+        matched = [s for s in self._sessions if s.dataset in (ds, None)]
+        has_bound = ds is not None and any(s.dataset == ds for s in matched)
+        if not has_bound:
+            return matched
+        return [s for s in matched if s.dataset == ds or self._has_history(s)]
+
+    def _sync_active_to_visible(self) -> None:
+        """Make `self._active` a visible session for the current dataset. Pick the
+        first visible one if the active is hidden; create a single blank only when
+        nothing at all is visible (the zero-tabs case). Must NOT be called from
+        delete, where `self._active` may still point at a just-removed session."""
+        vis = self._visible_sessions()
+        if not vis:
+            self._active = self._acquire_blank_session()
+        elif all(s.id != self._active.id for s in vis):
+            self._active = vis[0]
 
     # ----- transcript render -----
 
@@ -460,10 +498,8 @@ class ChatWidget(QWidget):
         new_ids = [self._tab_bar.tabData(i) for i in range(self._tab_bar.count())]
         by_id = {s.id: s for s in self._sessions}
         new_visible = [by_id[i] for i in new_ids if i in by_id]
-        slots = [
-            k for k, s in enumerate(self._sessions)
-            if s.dataset in (self._current_dataset, None)
-        ]
+        vis_ids = {s.id for s in self._visible_sessions()}
+        slots = [k for k, s in enumerate(self._sessions) if s.id in vis_ids]
         if len(new_visible) != len(slots):
             self._rebuild_tab_bar()
             return
@@ -538,10 +574,11 @@ class ChatWidget(QWidget):
             self._deleted.add((sess.dataset, sess.id))
             self._mark_chat_dirty()
         if not self._sessions:
+            # Blanks stay dataset-agnostic (dataset=None) so a single one serves
+            # every dataset and opening datasets never accumulates empty tabs.
             self._sessions.append(
                 chat_store.new_session(
-                    self._backend.name, _SYSTEM_PROMPT,
-                    dataset=self._current_dataset,
+                    self._backend.name, _SYSTEM_PROMPT, dataset=None,
                 )
             )
         if self._active is sess:
@@ -549,11 +586,10 @@ class ChatWidget(QWidget):
             if vis:
                 self._active = vis[0]
             else:
-                # No visible session left for this dataset — create one instead
-                # of falling back to a hidden session from another dataset.
+                # No visible session left — fall back to a dataset-agnostic
+                # blank rather than minting a per-dataset empty tab.
                 new = chat_store.new_session(
-                    self._backend.name, _SYSTEM_PROMPT,
-                    dataset=self._current_dataset,
+                    self._backend.name, _SYSTEM_PROMPT, dataset=None,
                 )
                 self._sessions.append(new)
                 self._active = new
@@ -577,18 +613,10 @@ class ChatWidget(QWidget):
                 and self._active.id not in self._turns:
             self._active.dataset = ds
             self._mark_chat_dirty()
-        # Active transition: keep _active if it's visible, else pick the most
-        # recent visible session, else mint a fresh one.
-        if self._active.dataset not in (ds, None):
-            vis = self._visible_sessions()
-            if vis:
-                self._active = vis[0]
-            else:
-                sess = chat_store.new_session(
-                    self._backend.name, _SYSTEM_PROMPT, dataset=ds
-                )
-                self._sessions.append(sess)
-                self._active = sess
+        # Re-select a visible active for this dataset. Never mint a per-dataset
+        # empty tab: a blank is created only when the dataset has nothing to show
+        # at all (handled by _sync_active_to_visible).
+        self._sync_active_to_visible()
         self._rebuild_tab_bar()
         self._render_session(self._active)
         self._update_turn_ui()
@@ -610,6 +638,8 @@ class ChatWidget(QWidget):
                 break
         self._sessions = new_pool
         if self._current_dataset == dataset:
+            # Newly merged-in chats should hide a stray blank and take focus.
+            self._sync_active_to_visible()
             self._rebuild_tab_bar()
 
     # ----- send / receive -----

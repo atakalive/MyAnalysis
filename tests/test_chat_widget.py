@@ -176,19 +176,19 @@ def test_tab_moved_reorders_backing_list(widget):
     hidden = chat_store.new_session("mock", "sys", dataset="other", title="隠し")
     a = chat_store.new_session("mock", "sys", dataset="ds", title="A")
     b = chat_store.new_session("mock", "sys", dataset="ds", title="B")
-    # Pool: [scratch(None), hidden(other), A(ds), B(ds)]
-    widget._sessions = [widget._sessions[0], hidden, a, b]
+    c = chat_store.new_session("mock", "sys", dataset="ds", title="C")
+    # Pool: [hidden(other), A(ds), B(ds), C(ds)]
+    widget._sessions = [hidden, a, b, c]
     widget._current_dataset = "ds"
     widget._active = a
     widget._rebuild_tab_bar()
-    # Visible tabs (ds + scratch): [scratch, A, B] at indices 0,1,2.
-    # Drag B (index 2) to the front (index 0) → fires tabMoved → _on_tab_moved.
+    # Visible tabs (ds): [A, B, C] at indices 0,1,2 (hidden belongs to "other").
+    # Drag C (index 2) to the front (index 0) → fires tabMoved → _on_tab_moved.
     widget._tab_bar.moveTab(2, 0)
 
-    vis = [s for s in widget._sessions if s.dataset in ("ds", None)]
-    assert [s.title for s in vis] == ["B", "新しいチャット", "A"]
+    assert [s.title for s in widget._visible_sessions()] == ["C", "A", "B"]
     # The hidden other-dataset session keeps its absolute pool position.
-    assert widget._sessions[1] is hidden
+    assert widget._sessions[0] is hidden
 
 
 def test_tab_moved_unresolvable_id_falls_back(widget):
@@ -205,3 +205,85 @@ def test_tab_moved_unresolvable_id_falls_back(widget):
     assert widget._tab_bar.count() == 2
     ids = {widget._tab_bar.tabData(i) for i in range(2)}
     assert ids == {widget._sessions[0].id, a.id}
+
+
+# ---- opening datasets must not accumulate empty chat tabs ----
+
+
+def test_open_chatless_datasets_does_not_accumulate_tabs(widget):
+    from llm_bridge import chat_store
+    from llm_backend.base import Message
+
+    # A history-bearing chat bound to dataset A is active (mimics: user opened A
+    # and chatted, so the original scratch was adopted).
+    a = chat_store.new_session("mock", "sys", dataset="A", title="chatA")
+    a.messages.append(Message(role="user", content="hi"))
+    widget._sessions = [a]
+    widget._active = a
+    widget._current_dataset = "A"
+    widget._rebuild_tab_bar()
+
+    # Open B (no chats): one dataset-agnostic blank is created, NOT bound to B.
+    widget.set_current_dataset("B")
+    after_b = list(widget._sessions)
+    assert len(after_b) == 2
+    blank = widget._active
+    assert blank is not a
+    assert blank.dataset is None
+
+    # Open C, then D (no chats): the same blank is reused — no new tabs.
+    widget.set_current_dataset("C")
+    widget.set_current_dataset("D")
+    assert widget._sessions == after_b
+    assert widget._active is blank
+
+
+def test_open_dataset_reuses_empty_foreign_active(widget):
+    """An empty session bound to another dataset (e.g. left over from a delete)
+    is reused on open and rebound to None, not duplicated."""
+    from llm_bridge import chat_store
+
+    blank_a = chat_store.new_session("mock", "sys", dataset="A", title="新しいチャット")
+    widget._sessions = [blank_a]
+    widget._active = blank_a
+    widget._current_dataset = "A"
+    widget._rebuild_tab_bar()
+
+    widget.set_current_dataset("B")
+
+    assert widget._sessions == [blank_a]  # no new session minted
+    assert widget._active is blank_a
+    assert blank_a.dataset is None  # rebound to a universal blank
+
+
+def test_open_dataset_with_chats_hides_empty_blank(widget):
+    """Opening a dataset that has its own chats must not show a stray empty
+    'new chat' tab — only the dataset's chats."""
+    from llm_bridge import chat_store
+
+    c1 = chat_store.new_session("mock", "sys", dataset="A", title="chat1")
+    # Pool: [scratch(None, empty), C1(A)]
+    widget._sessions = [widget._sessions[0], c1]
+
+    widget.set_current_dataset("A")
+
+    assert [s.title for s in widget._visible_sessions()] == ["chat1"]
+    assert widget._active.id == c1.id
+
+
+def test_nonactive_history_scratch_visible_with_bound_chats(widget):
+    """An unsaved (history-bearing) scratch is never hidden, even when the
+    dataset has bound chats — only EMPTY blanks are suppressed."""
+    from llm_bridge import chat_store
+    from llm_backend.base import Message
+
+    scratch = chat_store.new_session("mock", "sys", dataset=None, title="未保存")
+    scratch.messages.append(Message(role="user", content="x"))  # has history, unbound
+    c1 = chat_store.new_session("mock", "sys", dataset="A", title="chat1")
+    widget._sessions = [c1, scratch]
+    widget._active = c1
+    widget._current_dataset = "A"
+
+    vis_ids = {s.id for s in widget._visible_sessions()}
+    assert scratch.id in vis_ids
+    assert c1.id in vis_ids
