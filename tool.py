@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 
 import llm_bridge
 from common.env import load_env
+from common.i18n import init_language
 from gui import apply_dark_theme
 from gui.chat import ChatWidget
 from llm_backend import get_backend
@@ -156,6 +157,7 @@ def create_main_window(
 
 def main() -> None:
     load_env()
+    init_language()
 
     parser = argparse.ArgumentParser()
     parser.add_argument(

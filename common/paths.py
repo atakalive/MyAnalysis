@@ -29,28 +29,28 @@ def validate_identifier_name(name: str, *, check_reserved: bool = True) -> None:
     check_reserved=False はデータセット名用 = DATASETS の dict キーにしかならず
     パスにならないので、汎用ハイジーンのみ。
     """
+    from common.i18n import tr
     if not name:
-        raise ValueError("名前を入力してください。")
+        raise ValueError(tr("validate.empty"))
     if "/" in name or "\\" in name:
-        raise ValueError(f"名前にパス区切り文字 (/ \\) は使えません: {name!r}")
+        raise ValueError(tr("validate.path_sep", name=name))
     if name in (".", "..") or name.startswith("."):
-        raise ValueError(f"名前を '.' で始めることはできません: {name!r}")
+        raise ValueError(tr("validate.leading_dot", name=name))
     for c in name:
         if c.isspace():
-            raise ValueError(f"名前に空白文字は使えません: {name!r}")
+            raise ValueError(tr("validate.whitespace", name=name))
         if ord(c) < 32 or ord(c) == 127:
-            raise ValueError(f"名前に制御文字は使えません: {name!r}")
+            raise ValueError(tr("validate.control_char", name=name))
     if check_reserved:
         bad = sorted(set(name) & _WINDOWS_FORBIDDEN)
         if bad:
             raise ValueError(
-                f"名前に Windows のファイル名で使えない文字 {''.join(bad)} "
-                f"が含まれています: {name!r}"
+                tr("validate.forbidden_char", chars="".join(bad), name=name)
             )
         if name.endswith("."):
-            raise ValueError(f"名前を '.' で終えることはできません: {name!r}")
+            raise ValueError(tr("validate.trailing_dot", name=name))
         if name.lower() in _WINDOWS_RESERVED:
-            raise ValueError(f"{name!r} は Windows の予約デバイス名のため使えません。")
+            raise ValueError(tr("validate.reserved_name", name=name))
 
 
 def validate_name(name: str) -> None:
@@ -60,10 +60,9 @@ def validate_name(name: str) -> None:
     components (. and ..), and NUL bytes.  This prevents constructing
     paths outside data/analyses/.
     """
+    from common.i18n import tr
     if not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
-        raise ValueError(
-            f"name must be a simple directory name without path separators, "
-            f"relative components, or NUL bytes: {name!r}")
+        raise ValueError(tr("validate.simple_name", name=name))
 
 
 def repo_root() -> Path:
@@ -72,6 +71,11 @@ def repo_root() -> Path:
     Layout invariant: common/paths.py lives at <repo>/common/paths.py.
     """
     return Path(__file__).resolve().parent.parent
+
+
+def i18n_dir() -> Path:
+    """Return <repo>/i18n/ (committed catalogs; not created)."""
+    return repo_root() / "i18n"
 
 
 def analyses_root() -> Path:

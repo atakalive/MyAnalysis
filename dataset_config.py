@@ -15,6 +15,8 @@ import re
 import tomllib
 from pathlib import Path, PureWindowsPath
 
+from common.i18n import tr
+
 CONFIG_FILENAME = "myanalysis.toml"
 
 KNOWN_FORMATS: tuple[str, ...] = ("csv_per_subdir", "custom")
@@ -145,21 +147,15 @@ def get_work_dir(name: str) -> Path:
         # PureWindowsPath is OS-independent, so these Windows-specific danger
         # patterns are rejected on POSIX too (where Path("C:foo").drive == "").
         if pw.drive:
-            raise ValueError(
-                f"work_dir にドライブ相対パスは使えません: {work_dir!r}"
-            )
+            raise ValueError(tr("workdir.drive_rel", work_dir=work_dir))
         if pw.root:
-            raise ValueError(
-                f"work_dir にルート相対パスは使えません: {work_dir!r}"
-            )
+            raise ValueError(tr("workdir.root_rel", work_dir=work_dir))
         if ".." in pw.parts:
-            raise ValueError(f"work_dir に '..' は使えません: {work_dir!r}")
+            raise ValueError(tr("workdir.dotdot", work_dir=work_dir))
         dataset_dir = get_dataset_dir(name)
         resolved = dataset_dir / p
         # defense-in-depth: re-check containment after resolution.
         if not resolved.resolve().is_relative_to(dataset_dir.resolve()):
-            raise ValueError(
-                f"work_dir が dataset dir 外に解決されました: {resolved}"
-            )
+            raise ValueError(tr("workdir.escape", resolved=resolved))
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved

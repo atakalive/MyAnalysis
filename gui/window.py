@@ -1,6 +1,7 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -13,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from common import i18n
+from common.i18n import tr
 from gui.tab import AnalysisTab
 
 RESERVED_WINDOW_VERBS = frozenset([
@@ -44,7 +47,7 @@ class ToolWindow(QMainWindow):
         tab_bar.tabMoved.connect(lambda *_: self.mark_session_dirty())
         self.statusBar()
 
-        self._chat_dock = QDockWidget("Chat", self)
+        self._chat_dock = QDockWidget(tr("dock.chat"), self)
         self._chat_dock.setObjectName("ChatDock")
         self._chat_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetFloatable
@@ -64,31 +67,68 @@ class ToolWindow(QMainWindow):
         self._suppress_dirty = False
         self._session_saver: Callable[[], object] | None = None
 
-        file_menu = self.menuBar().addMenu("ファイル(&F)")
-        open_action = file_menu.addAction("解析を開く…")
-        open_action.triggered.connect(self._open_analysis)
-        open_dataset_action = file_menu.addAction("データセットを開く…")
-        open_dataset_action.triggered.connect(self._open_dataset)
-        register_action = file_menu.addAction("データセット登録…")
-        register_action.triggered.connect(self._register_dataset)
-        file_menu.addSeparator()
-        save_session_action = file_menu.addAction("セッションを保存")
-        save_session_action.triggered.connect(self._save_session)
-        save_quit_action = file_menu.addAction("保存して終了")
-        save_quit_action.triggered.connect(self._save_and_quit)
-        file_menu.addSeparator()
-        quit_action = file_menu.addAction("終了")
-        quit_action.triggered.connect(self.close)
+        self._file_menu = self.menuBar().addMenu(tr("menu.file"))
+        self._open_action = self._file_menu.addAction(tr("menu.file.open"))
+        self._open_action.triggered.connect(self._open_analysis)
+        self._open_dataset_action = self._file_menu.addAction(tr("menu.file.open_dataset"))
+        self._open_dataset_action.triggered.connect(self._open_dataset)
+        self._register_action = self._file_menu.addAction(tr("menu.file.register"))
+        self._register_action.triggered.connect(self._register_dataset)
+        self._file_menu.addSeparator()
+        self._save_session_action = self._file_menu.addAction(tr("menu.file.save_session"))
+        self._save_session_action.triggered.connect(self._save_session)
+        self._save_quit_action = self._file_menu.addAction(tr("menu.file.save_quit"))
+        self._save_quit_action.triggered.connect(self._save_and_quit)
+        self._file_menu.addSeparator()
+        self._quit_action = self._file_menu.addAction(tr("menu.file.quit"))
+        self._quit_action.triggered.connect(self.close)
 
-        view_menu = self.menuBar().addMenu("表示(&V)")
-        chat_action = view_menu.addAction("チャットを切り離す/格納")
-        chat_action.triggered.connect(self.toggle_chat_floating)
+        self._view_menu = self.menuBar().addMenu(tr("menu.view"))
+        self._chat_action = self._view_menu.addAction(tr("menu.view.toggle_chat"))
+        self._chat_action.triggered.connect(self.toggle_chat_floating)
 
-        help_menu = self.menuBar().addMenu("ヘルプ(&H)")
-        about_action = help_menu.addAction("バージョン情報")
-        about_action.triggered.connect(
+        self._language_menu = self._view_menu.addMenu(tr("menu.view.language"))
+        self._language_group = QActionGroup(self)
+        self._language_group.setExclusive(True)
+        self._language_actions: dict[str, object] = {}
+        for code in i18n.available_languages():
+            act = self._language_menu.addAction(i18n.language_display_name(code))
+            act.setCheckable(True)
+            act.setChecked(code == i18n.current_language())
+            act.triggered.connect(lambda _checked=False, c=code: self._on_set_language(c))
+            self._language_group.addAction(act)
+            self._language_actions[code] = act
+
+        self._help_menu = self.menuBar().addMenu(tr("menu.help"))
+        self._about_action = self._help_menu.addAction(tr("menu.help.about"))
+        self._about_action.triggered.connect(
             lambda: QMessageBox.about(self, "MyAnalysis Tool", "MyAnalysis Tool v0.1")
         )
+
+    def retranslate(self) -> None:
+        self._file_menu.setTitle(tr("menu.file"))
+        self._open_action.setText(tr("menu.file.open"))
+        self._open_dataset_action.setText(tr("menu.file.open_dataset"))
+        self._register_action.setText(tr("menu.file.register"))
+        self._save_session_action.setText(tr("menu.file.save_session"))
+        self._save_quit_action.setText(tr("menu.file.save_quit"))
+        self._quit_action.setText(tr("menu.file.quit"))
+        self._view_menu.setTitle(tr("menu.view"))
+        self._chat_action.setText(tr("menu.view.toggle_chat"))
+        self._language_menu.setTitle(tr("menu.view.language"))
+        self._help_menu.setTitle(tr("menu.help"))
+        self._about_action.setText(tr("menu.help.about"))
+        self._chat_dock.setWindowTitle(tr("dock.chat"))
+        cur = i18n.current_language()
+        for code, act in self._language_actions.items():
+            act.setChecked(code == cur)   # autonym は言語非依存なので setText 不要
+        cw = self.chat_widget()
+        if cw is not None and hasattr(cw, "retranslate"):
+            cw.retranslate()
+
+    def _on_set_language(self, code: str) -> None:
+        i18n.set_language(code)
+        self.retranslate()
 
     def add_tab(self, tab: AnalysisTab) -> None:
         for i in range(self._tabs.count()):
@@ -254,21 +294,24 @@ class ToolWindow(QMainWindow):
         else:
             names = []
         if not names:
-            QMessageBox.information(self, "解析を開く", "解析がありません")
+            QMessageBox.information(
+                self, tr("dlg.open_analysis.title"), tr("dlg.open_analysis.empty")
+            )
             return
         name, ok = QInputDialog.getItem(
-            self, "解析を開く", "解析を選択:", names, 0, False
+            self, tr("dlg.open_analysis.title"), tr("dlg.open_analysis.label"),
+            names, 0, False
         )
         if not ok or not name:
             return
         if not self.has_command("add-tab"):
-            QMessageBox.critical(self, "エラー", "add-tab コマンドが未登録です")
+            QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_add_tab"))
             return
         try:
             self.dispatch_command("add-tab", name=name)
             self.set_active_tab(name)
         except Exception as e:
-            QMessageBox.critical(self, "解析を開けません", str(e))
+            QMessageBox.critical(self, tr("err.open_analysis.title"), str(e))
 
     def _open_dataset(self) -> None:
         import config
@@ -278,53 +321,58 @@ class ToolWindow(QMainWindow):
             pass  # best-effort; proceed with current DATASETS
         names = sorted(config.DATASETS.keys())
         if not names:
-            QMessageBox.information(self, "データセットを開く", "データセットが登録されていません")
+            QMessageBox.information(
+                self, tr("dlg.open_dataset.title"), tr("dlg.open_dataset.empty")
+            )
             return
         name, ok = QInputDialog.getItem(
-            self, "データセットを開く", "データセットを選択:", names, 0, False
+            self, tr("dlg.open_dataset.title"), tr("dlg.open_dataset.label"),
+            names, 0, False
         )
         if not ok or not name:
             return
         if not self.has_command("open-dataset"):
-            QMessageBox.critical(self, "エラー", "open-dataset コマンドが未登録です")
+            QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
             return
         try:
             self.dispatch_command("open-dataset", name=name)
         except Exception as e:
-            QMessageBox.critical(self, "データセットを開けません", str(e))
+            QMessageBox.critical(self, tr("err.open_dataset.title"), str(e))
 
     def _save_session(self) -> None:
         if self._session_saver is None:
-            QMessageBox.information(self, "セッションを保存", "保存機構が未配線です")
+            QMessageBox.information(
+                self, tr("dlg.save_session.title"), tr("err.no_saver")
+            )
             return
         try:
             result = self._session_saver()
         except Exception as e:
-            QMessageBox.critical(self, "保存エラー", str(e))
+            QMessageBox.critical(self, tr("err.save.title"), str(e))
             return
         saved, failed = result
         if failed:
             QMessageBox.warning(
                 self,
-                "一部のデータセットを保存できません",
-                "保存に失敗したデータセット:\n" + "\n".join(failed),
+                tr("err.save_partial.title"),
+                tr("err.save_partial.body", datasets="\n".join(failed)),
             )
 
     def _save_and_quit(self) -> None:
         if self._session_saver is None:
-            QMessageBox.critical(self, "保存エラー", "保存機構が未配線です")
+            QMessageBox.critical(self, tr("err.save.title"), tr("err.no_saver"))
             return
         try:
             result = self._session_saver()
         except Exception as e:
-            QMessageBox.critical(self, "保存エラー", str(e))
+            QMessageBox.critical(self, tr("err.save.title"), str(e))
             return
         saved, failed = result
         if failed:
             QMessageBox.warning(
                 self,
-                "一部のデータセットを保存できません",
-                "保存に失敗したデータセット:\n" + "\n".join(failed),
+                tr("err.save_partial.title"),
+                tr("err.save_partial.body", datasets="\n".join(failed)),
             )
             return
         self.close()
@@ -335,8 +383,8 @@ class ToolWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self,
-            "セッション未保存",
-            "セッションを保存しますか？",
+            tr("dlg.unsaved.title"),
+            tr("dlg.unsaved.body"),
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No
             | QMessageBox.StandardButton.Cancel,
@@ -345,15 +393,15 @@ class ToolWindow(QMainWindow):
             try:
                 result = self._session_saver()
             except Exception as e:
-                QMessageBox.critical(self, "保存エラー", str(e))
+                QMessageBox.critical(self, tr("err.save.title"), str(e))
                 event.ignore()
                 return
             saved, failed = result
             if failed:
                 QMessageBox.warning(
                     self,
-                    "一部のデータセットを保存できません",
-                    "保存に失敗したデータセット:\n" + "\n".join(failed),
+                    tr("err.save_partial.title"),
+                    tr("err.save_partial.body", datasets="\n".join(failed)),
                 )
                 event.ignore()
                 return
@@ -373,7 +421,7 @@ class ToolWindow(QMainWindow):
             return
         name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
         menu = QMenu(self)
-        close_action = menu.addAction("タブを閉じる")
+        close_action = menu.addAction(tr("menu.tab.close"))
         close_action.triggered.connect(lambda: self.close_tab(name))
         menu.exec(tab_bar.mapToGlobal(pos))
 
@@ -384,23 +432,25 @@ class ToolWindow(QMainWindow):
         from common.paths import validate_identifier_name
         from newanalysis.__main__ import create_analysis
 
-        name, ok = QInputDialog.getText(self, "データセット登録", "データセット名:")
+        name, ok = QInputDialog.getText(
+            self, tr("dlg.register.title"), tr("dlg.register.label")
+        )
         if not ok or not name:
             return
         try:
             validate_identifier_name(name, check_reserved=False)
         except ValueError as e:
-            QMessageBox.critical(self, "登録エラー", str(e))
+            QMessageBox.critical(self, tr("err.register.title"), str(e))
             return
 
-        path = QFileDialog.getExistingDirectory(self, "データセットディレクトリを選択")
+        path = QFileDialog.getExistingDirectory(self, tr("dlg.register_dir.title"))
         if not path:
             return
 
         try:
             config.register_dataset(name, path)
         except Exception as e:
-            QMessageBox.critical(self, "登録エラー", str(e))
+            QMessageBox.critical(self, tr("err.register.title"), str(e))
             return
 
         # 成功時のみメモリ poke: 直後に「解析を開く」しても get_dataset_dir が成功する。
@@ -412,11 +462,12 @@ class ToolWindow(QMainWindow):
         self.note_current_dataset(name)
 
         reply = QMessageBox.question(
-            self, "解析雛形の作成", "解析雛形も作成しますか?"
+            self, tr("dlg.create_template.title"), tr("dlg.create_template.body")
         )
         if reply == QMessageBox.StandardButton.Yes:
             analysis_name, ok = QInputDialog.getText(
-                self, "解析雛形の作成", "解析名:", text=name
+                self, tr("dlg.create_template.title"),
+                tr("dlg.create_template.label"), text=name
             )
             if ok and analysis_name:
                 try:
@@ -424,27 +475,26 @@ class ToolWindow(QMainWindow):
                 except (ValueError, FileExistsError) as e:
                     QMessageBox.warning(
                         self,
-                        "解析雛形の作成に失敗",
-                        f"データセット '{name}' の登録は完了しました。\n"
-                        f"解析雛形の作成に失敗しました: {e}",
+                        tr("err.template_failed.title"),
+                        tr("register.template_failed", name=name, error=e),
                     )
                     return
                 QMessageBox.information(
                     self,
-                    "登録完了",
-                    f"データセット '{name}' を登録し、"
-                    f"解析雛形 '{analysis_name}' を作成しました。",
+                    tr("dlg.register_done.title"),
+                    tr("register.done_with_template",
+                       name=name, analysis=analysis_name),
                 )
                 return
 
         QMessageBox.information(
-            self, "登録完了", f"データセット '{name}' を登録しました。"
+            self, tr("dlg.register_done.title"), tr("register.done", name=name)
         )
 
     def _on_tab_changed(self, idx: int) -> None:
         tab = self._tabs.widget(idx)
         if tab is not None:
-            self.statusBar().showMessage(f"Active: {tab.name}")
+            self.statusBar().showMessage(tr("status.active", name=tab.name))
         self.tab_changed.emit(idx)
         self.mark_session_dirty()
         self._sync_current_from_active_tab()

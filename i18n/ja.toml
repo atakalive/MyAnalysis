@@ -1,0 +1,91 @@
+# MyAnalysis 翻訳カタログ（日本語）。フラットなクォート付きドットキー。
+# en.toml と同一キー集合・同一プレースホルダを保つこと。
+"_lang.name"                  = "日本語"
+
+# --- menu ---
+"menu.file"                   = "ファイル(&F)"
+"menu.file.open"              = "解析を開く…"
+"menu.file.open_dataset"      = "データセットを開く…"
+"menu.file.register"          = "データセット登録…"
+"menu.file.save_session"      = "セッションを保存"
+"menu.file.save_quit"         = "保存して終了"
+"menu.file.quit"              = "終了"
+"menu.view"                   = "表示(&V)"
+"menu.view.toggle_chat"       = "チャットを切り離す/格納"
+"menu.view.language"          = "言語 / Language"
+"menu.help"                   = "ヘルプ(&H)"
+"menu.help.about"             = "バージョン情報"
+"menu.tab.close"              = "タブを閉じる"
+
+# --- dock ---
+"dock.chat"                   = "Chat"
+
+# --- dialogs ---
+"dlg.open_analysis.title"     = "解析を開く"
+"dlg.open_analysis.empty"     = "解析がありません"
+"dlg.open_analysis.label"     = "解析を選択:"
+"dlg.open_dataset.title"      = "データセットを開く"
+"dlg.open_dataset.empty"      = "データセットが登録されていません"
+"dlg.open_dataset.label"      = "データセットを選択:"
+"dlg.save_session.title"      = "セッションを保存"
+"dlg.unsaved.title"           = "セッション未保存"
+"dlg.unsaved.body"            = "セッションを保存しますか？"
+"dlg.register.title"          = "データセット登録"
+"dlg.register.label"          = "データセット名:"
+"dlg.register_dir.title"      = "データセットディレクトリを選択"
+"dlg.create_template.title"   = "解析雛形の作成"
+"dlg.create_template.body"    = "解析雛形も作成しますか?"
+"dlg.create_template.label"   = "解析名:"
+"dlg.register_done.title"     = "登録完了"
+"dlg.rename.title"            = "名前変更"
+"dlg.rename.label"            = "チャット名:"
+"dlg.delete.title"            = "チャットを削除"
+
+# --- errors ---
+"err.generic.title"           = "エラー"
+"err.no_add_tab"              = "add-tab コマンドが未登録です"
+"err.open_analysis.title"     = "解析を開けません"
+"err.no_open_dataset"         = "open-dataset コマンドが未登録です"
+"err.open_dataset.title"      = "データセットを開けません"
+"err.no_saver"                = "保存機構が未配線です"
+"err.save.title"              = "保存エラー"
+"err.save_partial.title"      = "一部のデータセットを保存できません"
+"err.save_partial.body"       = "保存に失敗したデータセット:\n{datasets}"
+"err.register.title"          = "登録エラー"
+"err.template_failed.title"   = "解析雛形の作成に失敗"
+
+# --- status ---
+"status.active"               = "Active: {name}"
+
+# --- chat ---
+"chat.input.placeholder"      = "Message... (Ctrl+Enter to send, Enter for newline)"
+"chat.btn.stop"               = "Stop"
+"chat.btn.send"               = "Send"
+"chat.menu.rename"            = "名前変更"
+"chat.delete.confirm"         = "「{title}」を削除しますか？"
+"chat.delete.in_flight"       = "\n生成中のターンは停止されます。"
+"chat.status.stopping"        = "stopping…"
+"chat.status.waiting"         = "{spinner} waiting…"
+"chat.untitled"               = "新しいチャット"
+
+# --- validate (common/paths.py) ---
+"validate.empty"              = "名前を入力してください。"
+"validate.path_sep"           = "名前にパス区切り文字 (/ \\) は使えません: {name!r}"
+"validate.leading_dot"        = "名前を '.' で始めることはできません: {name!r}"
+"validate.whitespace"         = "名前に空白文字は使えません: {name!r}"
+"validate.control_char"       = "名前に制御文字は使えません: {name!r}"
+"validate.forbidden_char"     = "名前に Windows のファイル名で使えない文字 {chars} が含まれています: {name!r}"
+"validate.trailing_dot"       = "名前を '.' で終えることはできません: {name!r}"
+"validate.reserved_name"      = "{name!r} は Windows の予約デバイス名のため使えません。"
+"validate.simple_name"        = "名前はパス区切り文字・相対パス要素・NUL バイトを含まない単純なディレクトリ名にしてください: {name!r}"
+
+# --- workdir (dataset_config.py) ---
+"workdir.drive_rel"           = "work_dir にドライブ相対パスは使えません: {work_dir!r}"
+"workdir.root_rel"            = "work_dir にルート相対パスは使えません: {work_dir!r}"
+"workdir.dotdot"              = "work_dir に '..' は使えません: {work_dir!r}"
+"workdir.escape"              = "work_dir が dataset dir 外に解決されました: {resolved}"
+
+# --- register completion messages ---
+"register.done"               = "データセット '{name}' を登録しました。"
+"register.done_with_template" = "データセット '{name}' を登録し、解析雛形 '{analysis}' を作成しました。"
+"register.template_failed"    = "データセット '{name}' の登録は完了しました。\n解析雛形の作成に失敗しました: {error}"

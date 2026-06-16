@@ -7,6 +7,8 @@ import time
 from functools import partial
 from typing import Callable
 
+from common.i18n import tr
+
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextCharFormat, QTextCursor,
@@ -20,7 +22,6 @@ from PySide6.QtWidgets import (
 from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
-from llm_bridge.paths import ui_prefs_path
 from gui.tools import TOOLS
 
 
@@ -46,35 +47,18 @@ _MIN_PT, _MAX_PT = 6.0, 48.0
 
 
 def _load_chat_zoom() -> int:
-    """Read the persisted chat font zoom (pt delta). Returns 0 on any problem —
-    missing file, bad JSON, missing/non-int key. Must never raise."""
-    try:
-        data = json.loads(ui_prefs_path().read_text(encoding="utf-8"))
-        value = data.get("chat_zoom", 0)
-        return value if isinstance(value, int) else 0
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-        return 0
+    """Read the persisted chat font zoom (pt delta). Returns 0 on any problem.
+    Goes through the shared ui_prefs read helper. Must never raise."""
+    from llm_bridge.paths import read_ui_pref
+    v = read_ui_pref("chat_zoom", 0)
+    return v if isinstance(v, int) else 0
 
 
 def _save_chat_zoom(n: int) -> None:
     """Persist chat font zoom into ui_prefs.json, preserving sibling keys.
-    Atomic (temp + replace), best-effort: never raises on IO error."""
-    try:
-        path = ui_prefs_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            data = {}
-        data["chat_zoom"] = n
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp.replace(path)
-    except OSError:
-        pass
+    Goes through the shared ui_prefs update helper (atomic, best-effort)."""
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_zoom", n)
 
 
 class _StreamWorker(QThread):
@@ -200,9 +184,7 @@ class ChatWidget(QWidget):
         layout.addWidget(self._log, stretch=1)
 
         self._input = QPlainTextEdit()
-        self._input.setPlaceholderText(
-            "Message... (Ctrl+Enter to send, Enter for newline)"
-        )
+        self._input.setPlaceholderText(tr("chat.input.placeholder"))
         self._input.setFixedHeight(80)
         self._input.installEventFilter(self)
         layout.addWidget(self._input)
@@ -213,11 +195,11 @@ class ChatWidget(QWidget):
         self._status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row.addWidget(self._status)
         row.addStretch(1)
-        self._stop_btn = QPushButton("Stop")
+        self._stop_btn = QPushButton(tr("chat.btn.stop"))
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop)
         row.addWidget(self._stop_btn)
-        self._send_btn = QPushButton("Send")
+        self._send_btn = QPushButton(tr("chat.btn.send"))
         self._send_btn.clicked.connect(self._on_send)
         row.addWidget(self._send_btn)
         layout.addLayout(row)
@@ -444,14 +426,30 @@ class ChatWidget(QWidget):
 
     # ----- tab bar -----
 
+    def _display_title(self, sess: ChatSession) -> str:
+        """表示用タイトル。未命名（正準センチネル）なら現在言語に訳出。"""
+        if sess.title == chat_store._DEFAULT_TITLE:
+            return tr("chat.untitled")
+        return sess.title
+
     def _tab_text(self, sess: ChatSession) -> str:
-        return ("● " if sess.id in self._turns else "") + sess.title
+        return ("● " if sess.id in self._turns else "") + self._display_title(sess)
 
     def _refresh_tab_for(self, sess: ChatSession) -> None:
         for i in range(self._tab_bar.count()):
             if self._tab_bar.tabData(i) == sess.id:
                 self._tab_bar.setTabText(i, self._tab_text(sess))
                 break
+
+    def retranslate(self) -> None:
+        self._input.setPlaceholderText(tr("chat.input.placeholder"))
+        self._stop_btn.setText(tr("chat.btn.stop"))
+        self._send_btn.setText(tr("chat.btn.send"))
+        # 非破壊: 既存タブのテキストだけ訳し直す（_rebuild_tab_bar は使わない）
+        for i in range(self._tab_bar.count()):
+            sess = self._session_by_id(self._tab_bar.tabData(i))
+            if sess is not None:
+                self._tab_bar.setTabText(i, self._tab_text(sess))
 
     def _rebuild_tab_bar(self) -> None:
         """Rebuild tabs from the visible session set. Blocks currentChanged to
@@ -527,17 +525,28 @@ class ChatWidget(QWidget):
         if sess is None:
             return
         menu = QMenu(self)
-        rename_action = menu.addAction("名前変更")
+        rename_action = menu.addAction(tr("chat.menu.rename"))
         rename_action.triggered.connect(lambda: self._on_rename_session(sess))
         menu.exec(self._tab_bar.mapToGlobal(pos))
 
     def _on_rename_session(self, sess: ChatSession) -> None:
+        """チャットをリネームする。
+
+        未命名セッションで pre-fill 訳語をそのまま確定した場合のみ正準センチネル
+        へ巻き戻す。ユーザーが未命名ラベルそのもの（en の "New chat" 等）を未命名
+        セッションへ明示入力した稀なケースでは未命名扱いに戻り、次発言の auto-title
+        で上書きされ得る — 許容する縁ケース。"""
         new_title, ok = QInputDialog.getText(
-            self, "名前変更", "チャット名:", text=sess.title
+            self, tr("dlg.rename.title"), tr("dlg.rename.label"),
+            text=self._display_title(sess)
         )
         if not ok:
             return
         new_title = new_title.strip()
+        # 未命名セッションの pre-fill 訳語をそのまま確定したケースに限定して
+        # 正準センチネルへ戻す（命名済みチャットの "New chat" 改名は破壊しない）。
+        if sess.title == chat_store._DEFAULT_TITLE and new_title == tr("chat.untitled"):
+            new_title = chat_store._DEFAULT_TITLE
         if not new_title or new_title == sess.title:
             return
         sess.title = new_title
@@ -553,10 +562,10 @@ class ChatWidget(QWidget):
         sess = self._session_by_id(self._tab_bar.tabData(index))
         if sess is None:
             return
-        prompt = f"「{sess.title}」を削除しますか？"
+        prompt = tr("chat.delete.confirm", title=self._display_title(sess))
         if sess.id in self._turns:
-            prompt += "\n生成中のターンは停止されます。"
-        reply = QMessageBox.question(self, "チャットを削除", prompt)
+            prompt += tr("chat.delete.in_flight")
+        reply = QMessageBox.question(self, tr("dlg.delete.title"), prompt)
         if reply != QMessageBox.StandardButton.Yes:
             return
         # Stop an in-flight turn but leave it in _turns — it finishes as an
@@ -661,7 +670,7 @@ class ChatWidget(QWidget):
                 self._current_dataset = ds
         sess.messages.append(Message(role="user", content=text))
         # Auto-title from the first non-empty line of the first user message.
-        if sess.title == "新しいチャット":
+        if sess.title == chat_store._DEFAULT_TITLE:
             first = next(
                 (ln.strip() for ln in text.splitlines() if ln.strip()), ""
             )[:20]
@@ -806,7 +815,7 @@ class ChatWidget(QWidget):
         self._send_btn.setEnabled(not has_turn)
         if has_turn and turn.stopped:
             self._stop_btn.setEnabled(False)
-            self._status.setText("stopping…")
+            self._status.setText(tr("chat.status.stopping"))
         elif has_turn:
             self._stop_btn.setEnabled(True)
         else:
@@ -819,9 +828,11 @@ class ChatWidget(QWidget):
             return
         self._spin_idx = (self._spin_idx + 1) % len(_SPINNER)
         if turn.stopped:
-            self._status.setText("stopping…")
+            self._status.setText(tr("chat.status.stopping"))
         else:
-            self._status.setText(f"{_SPINNER[self._spin_idx]} waiting…")
+            self._status.setText(
+                tr("chat.status.waiting", spinner=_SPINNER[self._spin_idx])
+            )
 
     def _format_usage(self, backend: LLMBackend) -> str:
         """Build the usage summary string without setting the status label."""
