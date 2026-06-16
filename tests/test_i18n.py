@@ -90,6 +90,7 @@ def test_never_raise_when_dir_missing(tmp_path, monkeypatch):
 
 def test_never_raise_on_non_utf8_catalog(tmp_path, monkeypatch):
     import common.i18n as i18n
+    import llm_bridge.paths as lp
     d = tmp_path / "i18n"
     d.mkdir()
     (d / "en.toml").write_text('"k" = "EN"\n', encoding="utf-8")
@@ -97,6 +98,8 @@ def test_never_raise_on_non_utf8_catalog(tmp_path, monkeypatch):
     # _load_catalogs must absorb it and treat the file as an empty catalog.
     (d / "ja.toml").write_bytes('"k" = "日本語"\n'.encode("shift_jis"))
     _patch_dir(monkeypatch, d)
+    # init_language() reads ui_prefs → keep it hermetic (no real data/ access).
+    monkeypatch.setattr(lp, "ui_prefs_path", lambda: tmp_path / "ui_prefs.json")
     i18n._load_catalogs()               # must not raise
     i18n._active = "ja"
     assert i18n.tr("k") == "EN"          # broken ja → {} → fall back to en
