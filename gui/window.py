@@ -1,7 +1,7 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QActionGroup
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
@@ -99,6 +99,21 @@ class ToolWindow(QMainWindow):
             self._language_group.addAction(act)
             self._language_actions[code] = act
 
+        self._tool_display_menu = self._view_menu.addMenu(tr("menu.view.tool_display"))
+        self._tool_display_group = QActionGroup(self)
+        self._tool_display_group.setExclusive(True)
+        self._tool_display_actions: dict[str, QAction] = {
+            "full": self._tool_display_menu.addAction(tr("menu.view.tool_display.full")),
+            "compact": self._tool_display_menu.addAction(tr("menu.view.tool_display.compact")),
+            "hidden": self._tool_display_menu.addAction(tr("menu.view.tool_display.hidden")),
+        }
+        for mode, act in self._tool_display_actions.items():
+            act.setCheckable(True)
+            act.triggered.connect(
+                lambda _checked=False, m=mode: self._set_tool_display_default(m)
+            )
+            self._tool_display_group.addAction(act)
+
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
         self._about_action = self._help_menu.addAction(tr("menu.help.about"))
         self._about_action.triggered.connect(
@@ -116,6 +131,10 @@ class ToolWindow(QMainWindow):
         self._view_menu.setTitle(tr("menu.view"))
         self._chat_action.setText(tr("menu.view.toggle_chat"))
         self._language_menu.setTitle(tr("menu.view.language"))
+        self._tool_display_menu.setTitle(tr("menu.view.tool_display"))
+        self._tool_display_actions["full"].setText(tr("menu.view.tool_display.full"))
+        self._tool_display_actions["compact"].setText(tr("menu.view.tool_display.compact"))
+        self._tool_display_actions["hidden"].setText(tr("menu.view.tool_display.hidden"))
         self._help_menu.setTitle(tr("menu.help"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
@@ -129,6 +148,11 @@ class ToolWindow(QMainWindow):
     def _on_set_language(self, code: str) -> None:
         i18n.set_language(code)
         self.retranslate()
+
+    def _set_tool_display_default(self, mode: str) -> None:
+        if self._chat_widget is not None \
+                and hasattr(self._chat_widget, "set_tool_display_default"):
+            self._chat_widget.set_tool_display_default(mode)
 
     def add_tab(self, tab: AnalysisTab) -> None:
         for i in range(self._tabs.count()):
@@ -198,6 +222,12 @@ class ToolWindow(QMainWindow):
         # Push the initial dataset (the active tab's dataset, if any).
         if hasattr(widget, "set_current_dataset"):
             widget.set_current_dataset(self._active_tab_dataset())
+        # Sync the View-menu tool-display radio to the widget's current default.
+        if hasattr(widget, "tool_display_default"):
+            cur = widget.tool_display_default()
+            act = self._tool_display_actions.get(cur)
+            if act is not None:
+                act.setChecked(True)
 
     def chat_widget(self):
         return self._chat_widget

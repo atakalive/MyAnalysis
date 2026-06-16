@@ -40,6 +40,7 @@ class ChatSession:
     created: float
     updated: float
     order: float = 0.0  # explicit tab position; persisted, lower = leftmost
+    tool_display: str | None = None  # per-session display override; None = follow default
 
 
 # ----- Message ⇄ dict -----
@@ -84,6 +85,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "created": sess.created,
         "updated": sess.updated,
         "order": sess.order,
+        "tool_display": sess.tool_display,
     }
 
 
@@ -99,6 +101,9 @@ def session_from_dict(data: dict) -> ChatSession:
     if not isinstance(raw_messages, list):
         raise TypeError("chat session 'messages' must be a list")
     messages = [message_from_dict(m) for m in raw_messages]
+    tool_display = data.get("tool_display")
+    if tool_display not in (None, "full", "compact", "hidden"):
+        tool_display = None
     return ChatSession(
         id=data.get("id"),
         title=data.get("title", _DEFAULT_TITLE),
@@ -109,6 +114,7 @@ def session_from_dict(data: dict) -> ChatSession:
         created=data.get("created"),
         updated=data.get("updated"),
         order=data.get("order", 0.0),
+        tool_display=tool_display,
     )
 
 

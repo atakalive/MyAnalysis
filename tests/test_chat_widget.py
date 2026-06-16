@@ -287,3 +287,104 @@ def test_nonactive_history_scratch_visible_with_bound_chats(widget):
     vis_ids = {s.id for s in widget._visible_sessions()}
     assert scratch.id in vis_ids
     assert c1.id in vis_ids
+
+
+# ---- _simplify_tool_text (Issue #35, pure function — Qt not required) ----
+
+CALL_A = "🔧 read_file  path=a.py"
+RES_A = "   ↳ ok"
+CALL_B = "🔧 write_file  path=b.py"
+RES_B = "   ↳ done"
+
+
+def test_simplify_t1_prose_only_unchanged():
+    """T1: prose with no tool lines is byte-identical in every mode."""
+    from gui.chat import _simplify_tool_text
+    text = "Hello world.\n\nThis is a paragraph.\n- a\n- b"
+    for mode in ("full", "compact", "hidden"):
+        assert _simplify_tool_text(text, mode) == text
+
+
+def test_simplify_t2_empty():
+    from gui.chat import _simplify_tool_text
+    for mode in ("full", "compact", "hidden"):
+        assert _simplify_tool_text("", mode) == ""
+
+
+def test_simplify_t1c_codeblock_preserved():
+    """T1c: tool-line-free code block with blank lines is byte-identical."""
+    from gui.chat import _simplify_tool_text
+    text = (
+        "```python\n"
+        "def a():\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def b():\n"
+        "    pass\n"
+        "```"
+    )
+    for mode in ("full", "compact", "hidden"):
+        assert _simplify_tool_text(text, mode) == text
+
+
+def test_simplify_t1b_full_tool_lines_separated():
+    """T1b: full keeps all tool lines, each as a blank-separated paragraph."""
+    from gui.chat import _simplify_tool_text
+    text = f"intro\n{CALL_A}\n{RES_A}\n\n{CALL_B}\n{RES_B}\noutro"
+    out = _simplify_tool_text(text, "full")
+    lines = out.split("\n")
+    assert lines.count(CALL_A) == 1 and lines.count(CALL_B) == 1
+    assert lines.count(RES_A) == 1 and lines.count(RES_B) == 1
+    # every tool line is flanked by blank lines (independent paragraph)
+    for i, ln in enumerate(lines):
+        if ln in (CALL_A, RES_A, CALL_B, RES_B):
+            assert i > 0 and lines[i - 1] == ""
+            assert i + 1 < len(lines) and lines[i + 1] == ""
+
+
+def test_simplify_t3_compact_drops_results():
+    """T3: compact keeps 🔧 lines, drops ↳/✗, each blank-separated."""
+    from gui.chat import _simplify_tool_text
+    text = f"intro\n{CALL_A}\n{RES_A}\n\n{CALL_B}\n{RES_B}\noutro"
+    out = _simplify_tool_text(text, "compact")
+    lines = out.split("\n")
+    assert lines.count(CALL_A) == 1 and lines.count(CALL_B) == 1
+    assert RES_A not in lines and RES_B not in lines
+    for i, ln in enumerate(lines):
+        if ln in (CALL_A, CALL_B):
+            assert lines[i - 1] == "" and lines[i + 1] == ""
+
+
+def test_simplify_t4_hidden_folds_run():
+    """T4: hidden folds a run (incl. absorbed blank) into one summary line,
+    flanked by blank lines, prose preserved."""
+    from gui.chat import _simplify_tool_text
+    text = "prose\n🔧 A\n   ↳ rA\n\n🔧 B\n   ↳ rB\nprose2"
+    out = _simplify_tool_text(text, "hidden")
+    assert out == "prose\n\n🔧 2 tool calls\n\nprose2"
+
+
+def test_simplify_t5_hidden_three_calls():
+    from gui.chat import _simplify_tool_text
+    text = "🔧 A\n   ↳ rA\n🔧 B\n   ↳ rB\n🔧 C\n   ↳ rC"
+    out = _simplify_tool_text(text, "hidden")
+    assert "🔧 3 tool calls" in out.split("\n")
+
+
+def test_simplify_t6_false_positive_fixed():
+    """T6: a code line that looks like a tool line is (intentionally) folded."""
+    from gui.chat import _simplify_tool_text
+    text = "🔧 A\n   ↳ rA"
+    assert _simplify_tool_text(text, "hidden") == "🔧 1 tool calls"
+
+
+def test_simplify_t7_degenerate_run_results_only():
+    """T7: a run with only result lines (no 🔧) keeps them verbatim in all modes."""
+    from gui.chat import _simplify_tool_text
+    text = f"intro\n{RES_A}\n{RES_B}\noutro"
+    for mode in ("full", "compact", "hidden"):
+        out = _simplify_tool_text(text, mode)
+        lines = out.split("\n")
+        assert RES_A in lines and RES_B in lines
+        assert not any("tool calls" in l for l in lines)

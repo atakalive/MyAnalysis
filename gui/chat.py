@@ -11,7 +11,8 @@ from common.i18n import tr
 
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, Signal
 from PySide6.QtGui import (
-    QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextCharFormat, QTextCursor,
+    QActionGroup, QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextBlockFormat,
+    QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
@@ -19,7 +20,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
+from llm_backend.base import (
+    LLMBackend, Message, TextDelta, ToolCallRequest,
+    TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
+)
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
 from gui.tools import TOOLS
@@ -59,6 +63,93 @@ def _save_chat_zoom(n: int) -> None:
     Goes through the shared ui_prefs update helper (atomic, best-effort)."""
     from llm_bridge.paths import update_ui_pref
     update_ui_pref("chat_zoom", n)
+
+
+_TOOL_DISPLAY_MODES = frozenset({"full", "compact", "hidden"})
+
+
+def _load_tool_display() -> str:
+    """Read the persisted global tool-call display mode. Returns 'full' on any
+    problem (missing / wrong type / invalid value). Must never raise."""
+    from llm_bridge.paths import read_ui_pref
+    v = read_ui_pref("tool_display", "full")
+    return v if v in _TOOL_DISPLAY_MODES else "full"
+
+
+def _save_tool_display(mode: str) -> None:
+    """Persist the global tool-call display mode into ui_prefs.json, preserving
+    sibling keys (atomic, best-effort)."""
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("tool_display", mode)
+
+
+def _is_tool_call(line: str) -> bool:
+    return line.startswith(TOOL_CALL_MARKER + " ")
+
+
+def _is_tool_result(line: str) -> bool:
+    return (line.startswith(TOOL_RESULT_INDENT + TOOL_RESULT_MARKER + " ")
+            or line.startswith(TOOL_RESULT_INDENT + TOOL_ERROR_MARKER + " "))
+
+
+def _is_tool_line(line: str) -> bool:
+    return _is_tool_call(line) or _is_tool_result(line)
+
+
+def _simplify_tool_text(content: str, mode: str) -> str:
+    """Display-only transform of tool-call lines in `content` per `mode`.
+
+    Pure / Qt-free. The stored text is always the full raw stream, so this is
+    fully reversible (switch mode back to full to see everything). Body prose and
+    code blocks are left verbatim in all modes; only contiguous tool runs are
+    rewritten, and each emitted tool line is separated by a blank line so the
+    Markdown renderer (which space-joins single newlines) keeps the layout."""
+    if not content:
+        return content
+    lines = content.split("\n")
+    if not any(_is_tool_line(l) for l in lines):
+        return content
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if _is_tool_line(lines[i]):
+            acc, j = [], i                         # run の蓄積。内部空行を吸収
+            while j < n:
+                if _is_tool_line(lines[j]):
+                    acc.append(lines[j]); j += 1
+                elif lines[j] == "":
+                    k = j
+                    while k < n and lines[k] == "":
+                        k += 1
+                    if k < n and _is_tool_line(lines[k]):   # 空行は run 内部 → 吸収
+                        acc.extend(lines[j:k]); j = k
+                    else:
+                        break                                 # 末尾/区切りの空行は run 外
+                else:
+                    break
+            tool_lines = [r for r in acc if _is_tool_line(r)]
+            calls = sum(1 for r in tool_lines if _is_tool_call(r))
+            if calls == 0:                                       # 退化 run: 内容を消さず保持
+                block = tool_lines
+            elif mode == "hidden":
+                block = [f"{TOOL_CALL_MARKER} {calls} tool calls"]
+            elif mode == "compact":
+                block = [r for r in tool_lines if _is_tool_call(r)]
+            else:  # full
+                block = tool_lines
+            if out and out[-1] != "":               # ① 先行区切り
+                out.append("")
+            for idx, bl in enumerate(block):
+                if idx > 0:                          # ② block 内行間の区切り
+                    out.append("")
+                out.append(bl)
+            i = j
+        else:
+            if lines[i] != "" and out and _is_tool_line(out[-1]):   # ③ tool block 直後の本文を分離
+                out.append("")
+            out.append(lines[i])                    # 本文行（空行含む）は verbatim
+            i += 1
+    return "\n".join(out)
 
 
 class _StreamWorker(QThread):
@@ -155,6 +246,7 @@ class ChatWidget(QWidget):
         self._turns: dict[str, _Turn] = {}
         self._session_backends: dict[str, LLMBackend] = {}
         self._turn_notes: dict[str, str] = {}
+        self._tool_display_default = _load_tool_display()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -259,20 +351,30 @@ class ChatWidget(QWidget):
     def _save_zoom(self) -> None:
         _save_chat_zoom(self._zoom)
 
+    def _render_active_preserving_status(self) -> None:
+        """ズーム再描画用。usage/コスト行は status ラベルにしか無く、ズームでは
+        stale でないため、_render_session の status クリアから保全する。"""
+        saved = self._status.text()
+        self._render_session(self._active)
+        self._status.setText(saved)
+
     def _zoom_in(self) -> None:
         self._zoom += 1
         self._apply_zoom()
         self._save_zoom()
+        self._render_active_preserving_status()
 
     def _zoom_out(self) -> None:
         self._zoom -= 1
         self._apply_zoom()
         self._save_zoom()
+        self._render_active_preserving_status()
 
     def _zoom_reset(self) -> None:
         self._zoom = 0
         self._apply_zoom()
         self._save_zoom()
+        self._render_active_preserving_status()
 
     # ----- window binding / dirty -----
 
@@ -396,6 +498,31 @@ class ChatWidget(QWidget):
         elif all(s.id != self._active.id for s in vis):
             self._active = vis[0]
 
+    # ----- tool-call display mode -----
+
+    def _effective_tool_display(self, sess: ChatSession) -> str:
+        """Per-session override if set, else the global default. getattr guards a
+        hot-reload `patch`-ed old instance missing the new field."""
+        return getattr(sess, "tool_display", None) or self._tool_display_default
+
+    def tool_display_default(self) -> str:
+        return self._tool_display_default
+
+    def set_tool_display_default(self, mode: str) -> None:
+        if mode not in _TOOL_DISPLAY_MODES:
+            return
+        self._tool_display_default = mode
+        _save_tool_display(mode)
+        self._render_session(self._active)
+
+    def _set_session_tool_display(self, sess: ChatSession, value) -> None:
+        sess.tool_display = value
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+        if sess is self._active:
+            self._render_session(sess)
+
     # ----- transcript render -----
 
     def _render_session(self, sess: ChatSession) -> None:
@@ -407,11 +534,14 @@ class ChatWidget(QWidget):
         self._append_system_line(
             f"backend: {self._backend.name} / model: {self._backend.model}"
         )
+        mode = self._effective_tool_display(sess)
         for m in sess.messages:
             if m.role == "user":
                 self._append_block("user", m.content or "")
             elif m.role == "assistant" and m.content:
-                self._append_block("assistant", m.content)
+                self._append_block(
+                    "assistant", _simplify_tool_text(m.content, mode), markdown=True
+                )
         # If a turn is in-flight for this session, show assistant placeholder +
         # partial buffer. Condition is `is not None` (not `turn.buffer`) so an
         # empty-buffer turn still gets the assistant header — later _on_chunk
@@ -527,6 +657,24 @@ class ChatWidget(QWidget):
         menu = QMenu(self)
         rename_action = menu.addAction(tr("chat.menu.rename"))
         rename_action.triggered.connect(lambda: self._on_rename_session(sess))
+        td_menu = menu.addMenu(tr("chat.menu.tool_display"))
+        td_group = QActionGroup(td_menu)
+        td_group.setExclusive(True)
+        current = getattr(sess, "tool_display", None)
+        td_items = (
+            (None, td_menu.addAction(tr("chat.menu.tool_display.default"))),
+            ("full", td_menu.addAction(tr("chat.menu.tool_display.full"))),
+            ("compact", td_menu.addAction(tr("chat.menu.tool_display.compact"))),
+            ("hidden", td_menu.addAction(tr("chat.menu.tool_display.hidden"))),
+        )
+        for value, action in td_items:
+            action.setCheckable(True)
+            action.setChecked(current == value)
+            td_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, m=value, s=sess:
+                self._set_session_tool_display(s, m)
+            )
         menu.exec(self._tab_bar.mapToGlobal(pos))
 
     def _on_rename_session(self, sess: ChatSession) -> None:
@@ -739,6 +887,7 @@ class ChatWidget(QWidget):
             self._mark_chat_dirty()
         if sid == self._active.id:
             self._update_turn_ui()
+            self._render_session(sess)        # 生テキストを完了 Markdown 表示へ置換
             if turn.stopped:
                 self._append_system_line("[stopped]")
             else:
@@ -773,6 +922,7 @@ class ChatWidget(QWidget):
             self._mark_chat_dirty()
         error_text = f"\n\n[error: {msg}]"
         if sid == self._active.id:
+            self._render_session(sess)        # partial 本文を Markdown 化（_on_done と対称）
             cursor = QTextCursor(self._log.document())
             cursor.movePosition(QTextCursor.MoveOperation.End)
             cursor.setCharFormat(QTextCharFormat())
@@ -901,18 +1051,33 @@ class ChatWidget(QWidget):
         )
         self._scroll_to_bottom()
 
-    def _append_block(self, role: str, text: str) -> None:
-        """role ヘッダ + 本文を末尾に追加する。"""
+    def _insert_markdown(self, cursor: QTextCursor, text: str) -> None:
+        """text を Markdown として一時ドキュメントに流し込み、フラグメントとして
+        本体ドキュメントの cursor 位置に挿入する。外部ライブラリ不要。"""
+        doc = QTextDocument()
+        doc.setDefaultFont(self._log.font())   # 見出しサイズを現在のズーム基準に揃える
+        doc.setMarkdown(
+            text.rstrip(),                     # 末尾空白由来の余分な末尾段落を抑制
+            QTextDocument.MarkdownFeature.MarkdownDialectGitHub,  # 既定値だが明示
+        )
+        cursor.insertFragment(QTextDocumentFragment(doc))
+
+    def _append_block(self, role: str, text: str, *, markdown: bool = False) -> None:
+        """role ヘッダ + 本文を末尾に追加する。markdown=True の場合のみ本文を
+        Markdown 描画する（完了済み assistant メッセージのリプレイ専用）。"""
         doc = self._log.document()
         cursor = QTextCursor(doc)
         cursor.movePosition(QTextCursor.MoveOperation.End)
         if doc.characterCount() > 1:
-            cursor.insertBlock()
+            cursor.insertBlock(QTextBlockFormat())   # ← 直前 fragment の block format 継承を断つ
         color_map = {"user": "#6ec1e4", "assistant": "#a8d08d"}
         color = color_map.get(role, "#cccccc")
         cursor.insertHtml(f'<b style="color:{color}">{html.escape(role)}</b>')
         cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())
         if text:
-            cursor.insertText(text)
+            if markdown:
+                self._insert_markdown(cursor, text)
+            else:
+                cursor.insertText(text)
         self._scroll_to_bottom()

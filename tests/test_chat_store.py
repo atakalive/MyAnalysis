@@ -283,3 +283,34 @@ def test_new_session():
     assert len(sess.messages) == 1
     assert sess.messages[0].role == "system"
     assert sess.messages[0].content == "SYSTEM"
+
+
+# ---- tool_display (Issue #35) ----
+
+
+def test_session_tool_display_roundtrip():
+    sess = _sample_session()
+    sess.tool_display = "compact"
+    d = session_to_dict(sess)
+    assert d["tool_display"] == "compact"
+    assert session_from_dict(d) == sess
+
+
+def test_session_tool_display_default_none():
+    sess = _sample_session()
+    assert sess.tool_display is None
+    d = session_to_dict(sess)
+    assert d["tool_display"] is None
+    assert session_from_dict(d).tool_display is None
+
+
+def test_session_from_dict_missing_tool_display_is_none():
+    d = session_to_dict(_sample_session())
+    del d["tool_display"]
+    assert session_from_dict(d).tool_display is None
+
+
+def test_session_from_dict_bad_tool_display_normalized_to_none():
+    d = session_to_dict(_sample_session())
+    d["tool_display"] = "bogus"
+    assert session_from_dict(d).tool_display is None

@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+TOOL_CALL_MARKER = "🔧"
+TOOL_RESULT_MARKER = "↳"
+TOOL_ERROR_MARKER = "✗"
+TOOL_RESULT_INDENT = "   "   # 結果行の 3 スペース字下げ
+
+
 @dataclass
 class TextDelta:
     text: str

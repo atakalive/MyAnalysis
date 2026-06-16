@@ -36,7 +36,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from common.paths import repo_root
-from llm_backend.base import Message, TextDelta, ToolCallRequest
+from llm_backend.base import (
+    Message, TextDelta, ToolCallRequest,
+    TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
+)
 
 # Mandatory rules + minimal llm_bridge contract, injected on every turn via
 # --append-system-prompt. The engine also auto-discovers CLAUDE.md and
@@ -325,7 +328,7 @@ class ClaudeCodeBackend:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = block.get("name", "tool")
                 summary = self._tool_input_summary(block.get("input"))
-                line = f"\n🔧 {name}"
+                line = f"\n{TOOL_CALL_MARKER} {name}"
                 if summary:
                     line += f"  {summary}"
                 yield TextDelta(text=line + "\n")
@@ -339,8 +342,8 @@ class ClaudeCodeBackend:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 text = self._tool_result_text(block)
                 if text:
-                    mark = "✗" if block.get("is_error") else "↳"
-                    yield TextDelta(text=f"   {mark} {text}\n")
+                    mark = TOOL_ERROR_MARKER if block.get("is_error") else TOOL_RESULT_MARKER
+                    yield TextDelta(text=f"{TOOL_RESULT_INDENT}{mark} {text}\n")
 
     def _capture_usage(self, event: dict) -> None:
         """Pull token/cost telemetry from a `result` event into last_usage.
