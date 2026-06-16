@@ -155,3 +155,53 @@ def test_rename_monotonic_with_future_updated(widget, monkeypatch):
     assert sess.updated > before
     merged = merge_sessions([old_sess], [sess])
     assert merged[0].title == "最新タイトル"
+
+
+# ---- new-session placement + drag-and-drop reorder ----
+
+
+def test_new_session_appends_at_end(widget):
+    before = widget._tab_bar.count()
+    widget._on_new_session()
+    assert widget._tab_bar.count() == before + 1
+    # The new session is active and occupies the LAST tab, not the first.
+    last = widget._tab_bar.count() - 1
+    assert widget._tab_bar.tabData(last) == widget._active.id
+    assert widget._active is widget._sessions[-1]
+
+
+def test_tab_moved_reorders_backing_list(widget):
+    from llm_bridge import chat_store
+
+    hidden = chat_store.new_session("mock", "sys", dataset="other", title="隠し")
+    a = chat_store.new_session("mock", "sys", dataset="ds", title="A")
+    b = chat_store.new_session("mock", "sys", dataset="ds", title="B")
+    # Pool: [scratch(None), hidden(other), A(ds), B(ds)]
+    widget._sessions = [widget._sessions[0], hidden, a, b]
+    widget._current_dataset = "ds"
+    widget._active = a
+    widget._rebuild_tab_bar()
+    # Visible tabs (ds + scratch): [scratch, A, B] at indices 0,1,2.
+    # Drag B (index 2) to the front (index 0) → fires tabMoved → _on_tab_moved.
+    widget._tab_bar.moveTab(2, 0)
+
+    vis = [s for s in widget._sessions if s.dataset in ("ds", None)]
+    assert [s.title for s in vis] == ["B", "新しいチャット", "A"]
+    # The hidden other-dataset session keeps its absolute pool position.
+    assert widget._sessions[1] is hidden
+
+
+def test_tab_moved_unresolvable_id_falls_back(widget):
+    from llm_bridge import chat_store
+
+    a = chat_store.new_session("mock", "sys", dataset=None, title="A")
+    widget._sessions = [widget._sessions[0], a]
+    widget._current_dataset = None
+    widget._rebuild_tab_bar()
+    # Corrupt a tab's session ref so the visible counts won't line up.
+    widget._tab_bar.setTabData(0, "bogus-id")
+    widget._on_tab_moved()  # must not raise — falls back to a clean rebuild
+
+    assert widget._tab_bar.count() == 2
+    ids = {widget._tab_bar.tabData(i) for i in range(2)}
+    assert ids == {widget._sessions[0].id, a.id}

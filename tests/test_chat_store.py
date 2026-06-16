@@ -180,6 +180,32 @@ def test_load_dataset_sessions_missing_dir_no_mkdir(tmp_path):
     assert not (tmp_path / "chat_sessions").exists()
 
 
+def test_session_order_roundtrip(tmp_path):
+    sess = _sample_session()
+    sess.order = 3.0
+    assert session_to_dict(sess)["order"] == 3.0
+    assert session_from_dict(session_to_dict(sess)).order == 3.0
+
+
+def test_session_from_dict_missing_order_defaults_zero():
+    d = session_to_dict(_sample_session())
+    del d["order"]  # legacy file written before the order field existed
+    assert session_from_dict(d).order == 0.0
+
+
+def test_load_dataset_sessions_sorted_by_explicit_order(tmp_path):
+    # Explicit order wins over updated: lower order = earlier, even though the
+    # higher-order session was updated more recently.
+    a = _sample_session()
+    a.id, a.order, a.updated = "a", 0.0, 100.0
+    b = _sample_session()
+    b.id, b.order, b.updated = "b", 1.0, 999.0
+    write_session_file(tmp_path, a)
+    write_session_file(tmp_path, b)
+    got = load_dataset_sessions(tmp_path)
+    assert [s.id for s in got] == ["a", "b"]
+
+
 # ---- delete_session_file ----
 
 

@@ -220,9 +220,13 @@ def _save_chat_sessions(window) -> None:
                 if chat_store.delete_session_file(work_dir, sid):
                     applied.append((ds, sid))
             # (b) live writes (skip any id under a tombstone — tombstone wins).
-            for sess in live_by_ds.get(ds, []):
+            #     Stamp explicit tab order from list position so drag-and-drop
+            #     reordering persists. live_by_ds[ds] preserves self._sessions
+            #     order, so enumerate() index == per-dataset tab position.
+            for idx, sess in enumerate(live_by_ds.get(ds, [])):
                 if sess.id in tomb_ids:
                     continue
+                sess.order = float(idx)
                 chat_store.write_session_file(work_dir, sess)
         except Exception:
             _log.warning(

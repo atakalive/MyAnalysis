@@ -39,6 +39,7 @@ class ChatSession:
     backend_session_id: str | None
     created: float
     updated: float
+    order: float = 0.0  # explicit tab position; persisted, lower = leftmost
 
 
 # ----- Message ⇄ dict -----
@@ -82,6 +83,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "backend_session_id": sess.backend_session_id,
         "created": sess.created,
         "updated": sess.updated,
+        "order": sess.order,
     }
 
 
@@ -106,6 +108,7 @@ def session_from_dict(data: dict) -> ChatSession:
         backend_session_id=data.get("backend_session_id"),
         created=data.get("created"),
         updated=data.get("updated"),
+        order=data.get("order", 0.0),
     )
 
 
@@ -178,8 +181,10 @@ def load_dataset_sessions(work_dir: Path) -> list[ChatSession]:
     """Load all chat sessions under <work_dir>/chat_sessions/.
 
     Read-only path: never mkdir. A missing directory → glob yields nothing → [].
-    Corrupt files are dropped (read_session_file → None). Sorted by `updated`
-    descending.
+    Corrupt files are dropped (read_session_file → None). Sorted by explicit
+    `order` ascending (the user-controlled tab position), with `updated`
+    descending as a tiebreaker so legacy files lacking `order` (all default 0.0)
+    retain the historical most-recent-first ordering.
     """
     target_dir = work_dir / "chat_sessions"
     sessions: list[ChatSession] = []
@@ -187,7 +192,7 @@ def load_dataset_sessions(work_dir: Path) -> list[ChatSession]:
         sess = read_session_file(path)
         if sess is not None:
             sessions.append(sess)
-    sessions.sort(key=lambda s: s.updated or 0.0, reverse=True)
+    sessions.sort(key=lambda s: (s.order, -(s.updated or 0.0)))
     return sessions
 
 

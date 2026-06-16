@@ -182,9 +182,11 @@ class ChatWidget(QWidget):
         self._tab_bar.setUsesScrollButtons(True)
         self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
         self._tab_bar.setTabsClosable(True)
+        self._tab_bar.setMovable(True)
         self._tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tab_bar.currentChanged.connect(self._on_switch_session)
         self._tab_bar.tabCloseRequested.connect(self._on_delete_session)
+        self._tab_bar.tabMoved.connect(self._on_tab_moved)
         self._tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
         header.addWidget(self._tab_bar, stretch=1)
         self._new_btn = QToolButton()
@@ -366,13 +368,13 @@ class ChatWidget(QWidget):
 
     def _visible_sessions(self) -> list[ChatSession]:
         """Sessions shown for the current dataset: dataset match or scratch
-        (None), sorted by `updated` descending."""
-        vis = [
+        (None). Order follows `self._sessions` list position (the explicit,
+        user-controlled tab order) — new sessions append to the end and
+        drag-and-drop reorders the backing list, so no sort is applied here."""
+        return [
             s for s in self._sessions
             if s.dataset in (self._current_dataset, None)
         ]
-        vis.sort(key=lambda s: s.updated or 0.0, reverse=True)
-        return vis
 
     # ----- transcript render -----
 
@@ -445,6 +447,31 @@ class ChatWidget(QWidget):
         self._active = sess
         self._render_session(sess)
         self._update_turn_ui()
+
+    def _on_tab_moved(self, *_) -> None:
+        """Sync the backing session list to a drag-and-drop tab reorder.
+
+        Qt has already moved the tab (carrying its tabData=session id), so the
+        tab bar holds the new visible order. Reorder `self._sessions` so the
+        visible slots follow that order while hidden (other-dataset) sessions
+        keep their absolute positions. If the visible counts don't line up
+        (e.g. a tabData fails to resolve), give up and resync from the backing
+        list instead of corrupting it."""
+        new_ids = [self._tab_bar.tabData(i) for i in range(self._tab_bar.count())]
+        by_id = {s.id: s for s in self._sessions}
+        new_visible = [by_id[i] for i in new_ids if i in by_id]
+        slots = [
+            k for k, s in enumerate(self._sessions)
+            if s.dataset in (self._current_dataset, None)
+        ]
+        if len(new_visible) != len(slots):
+            self._rebuild_tab_bar()
+            return
+        new_sessions = list(self._sessions)
+        for slot, sess in zip(slots, new_visible):
+            new_sessions[slot] = sess
+        self._sessions = new_sessions
+        self._mark_chat_dirty()
 
     def _on_new_session(self) -> None:
         sess = chat_store.new_session(
