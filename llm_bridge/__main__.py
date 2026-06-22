@@ -113,6 +113,21 @@ def main(argv: list[str] | None = None) -> int:
     p_clr.add_argument("kind", nargs="?", choices=["marker", "note"], default=None)
     p_clr.add_argument("--dataset", default=None)
 
+    p_csync = sub.add_parser("config-sync", help="R2 と設定を双方向同期（収束）")
+    p_csync.add_argument("--dry-run", action="store_true", default=False)
+    p_csync.add_argument("--include-env", action="store_true", default=False)
+    p_csync.add_argument("--key", default=None,
+                         help="R2 オブジェクトキー上書き（既定: <R2_PREFIX>bundle.json）")
+
+    p_cpush = sub.add_parser("config-push", help="マージ後 R2 のみへ書く")
+    p_cpush.add_argument("--dry-run", action="store_true", default=False)
+    p_cpush.add_argument("--include-env", action="store_true", default=False)
+    p_cpush.add_argument("--key", default=None)
+
+    p_cpull = sub.add_parser("config-pull", help="R2->ローカルのみ反映（remote は書かない）")
+    p_cpull.add_argument("--dry-run", action="store_true", default=False)
+    p_cpull.add_argument("--key", default=None)
+
     args = parser.parse_args(argv)
 
     if args.cmd == "state":
@@ -245,6 +260,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{result['host']!r}: {result['path']}"
         )
 
+        # 新規登録を即 remote へ（best-effort、失敗・遅延は無視）
+        try:
+            import config_share
+            config_share.try_sync()
+        except Exception:
+            pass
+
         # Auto-open in a running GUI (best-effort).
         # Path(args.path).exists() は判定に使わない — Windows/WSL 混在環境では
         # WSL 上で Windows パスが常に False になり、サイレントスキップになるため。
@@ -340,6 +362,24 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("error: no dataset open; pass --dataset")
         _check_analysis_exists(ds, args.name)
         annotations.clear(ds, args.name, args.kind)
+        return 0
+
+    if args.cmd in ("config-sync", "config-push", "config-pull"):
+        import config_share
+        fn = {"config-sync": config_share.sync,
+              "config-push": config_share.push,
+              "config-pull": config_share.pull}[args.cmd]
+        kw = {"apply": not args.dry_run, "key": args.key}
+        if args.cmd != "config-pull":
+            kw["include_env"] = args.include_env
+        try:
+            result = fn(**kw)
+        except Exception as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        for w in result.get("warnings", []):
+            print(f"warning: {w}", file=sys.stderr)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     return 1

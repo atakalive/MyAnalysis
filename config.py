@@ -7,11 +7,13 @@
 新しい PC → 使う各 dataset にそのホスト名のエントリを追加(キーは大文字)。
 """
 import ast
+import contextlib
 import json
 import re
 import socket
 from pathlib import Path
 
+from common.filelock import exclusive_lock
 from common.paths import validate_identifier_name
 
 # ホスト名は照合前に .upper() 済み。先頭は英数字 (非ASCII の文字も可)、以降は
@@ -30,12 +32,14 @@ DATASETS: dict[str, dict[str, str]] = {
     },
     "dataset_c": {
         "HOST_A": r"G:\同期\測定\dataset_l\dataset_c3",
+        "HOST_B": r"H:\同期\測定\dataset_l\dataset_c3",
     },
     "analysis_c": {
         "HOST_A": r"<repo>/data/analyses/dataset_c2",
     },
     "dataset_d": {
         "HOST_A": r"G:/同期/測定/dataset_l/dataset_d",
+        "HOST_B": r"H:\同期\測定\dataset_l\dataset_d",
     },
 }
 
@@ -154,6 +158,56 @@ def reload_datasets(config_path: Path | None = None) -> None:
     DATASETS.update(registry)
 
 
+def _config_lock_path(config_path: Path) -> Path:
+    return config_path.with_name(config_path.name + ".lock")   # 例: config.py.lock
+
+
+def _replace_datasets_block(node, source: str, block: str, config_path: Path) -> None:
+    """DATASETS ブロックを行スライスで差し替え tmp→replace（パース・ロックなし）。
+    改行コード(CRLF/LF)を保存。"""
+    newline = "\r\n" if "\r\n" in source else "\n"
+    lines = source.splitlines(keepends=True)
+    new_lines = [l + newline for l in block.splitlines()]
+    # ast line numbers are 1-based; slice is 0-based.
+    lines[node.lineno - 1 : node.end_lineno] = new_lines
+    tmp = config_path.with_suffix(".py.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(lines))
+    tmp.replace(config_path)
+
+
+@contextlib.contextmanager
+def registry_transaction(*, config_path: Path | None = None):
+    """config.py のロックを取り、(fresh_registry, writer) を yield する。
+
+    呼び出し側は yield された **その時点の最新** registry（fresh_registry）を見て新
+    registry を組み立て、writer(new_registry) を呼ぶと原子的に書き戻す（writer 未呼出なら
+    書かない）。fresh_registry の読み出し〜writer の書き込みまで同一ロックを保持するので、
+    make_bundle 時点の stale snapshot を丸ごと書き戻して他プロセスの追加を消す lost update
+    を防ぐ。ネットワーク I/O はこのブロックの外で行うこと。in-memory DATASETS は変更しない
+    （呼び出し側が reload_datasets() を呼ぶ）。
+    """
+    if config_path is None:
+        config_path = Path(__file__)
+    with exclusive_lock(_config_lock_path(config_path)):
+        node, registry, annotation, source = _parse_registry(config_path)
+
+        def writer(new_registry: dict) -> None:
+            block = _serialize_datasets(new_registry, annotation)
+            _replace_datasets_block(node, source, block, config_path)
+
+        yield registry, writer
+
+
+def write_registry(registry: dict, *, config_path: Path | None = None) -> None:
+    """完成した registry を丸ごと安全に書き戻す（ロック内・原子的）。in-memory DATASETS は不変。
+    呼び出し側が reload_datasets() を呼ぶ。CRLF/LF・raw-string/json フォールバック・無関係行
+    不変を保つ。※全置換セマンティクスなので、並行追加を保ちたい RMW では
+    registry_transaction を使うこと。"""
+    with registry_transaction(config_path=config_path) as (_fresh, writer):
+        writer(registry)
+
+
 def register_dataset(
     name: str,
     path: str,
@@ -177,25 +231,10 @@ def register_dataset(
     if not (PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()):
         raise ValueError(f"path must be absolute: {path!r}")
 
-    if config_path is None:
-        config_path = Path(__file__)
-
-    node, registry, annotation, source = _parse_registry(config_path)
-
-    created = name not in registry
-    registry.setdefault(name, {})[host] = path
-
-    block = _serialize_datasets(registry, annotation)
-
-    newline = "\r\n" if "\r\n" in source else "\n"
-    lines = source.splitlines(keepends=True)
-    new_lines = [l + newline for l in block.splitlines()]
-    # ast line numbers are 1-based; slice is 0-based.
-    lines[node.lineno - 1 : node.end_lineno] = new_lines
-
-    tmp = config_path.with_suffix(".py.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write("".join(lines))
-    tmp.replace(config_path)
+    created = False
+    with registry_transaction(config_path=config_path) as (registry, writer):
+        created = name not in registry
+        registry.setdefault(name, {})[host] = path
+        writer(registry)
 
     return {"name": name, "host": host, "path": path, "created": created}

@@ -159,6 +159,14 @@ def main() -> None:
     load_env()
     init_language()
 
+    # 起動時の best-effort config 同期（short timeout で有界・繋がるときだけ）。
+    # try_sync が内部で全例外を握りつぶすが、import 失敗等の二重防御で外側も握る。
+    try:
+        import config_share
+        config_share.try_sync()
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--demo", action="store_true", help="Launch with a synthetic demo tab"
