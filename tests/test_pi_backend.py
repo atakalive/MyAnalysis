@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -306,18 +307,17 @@ class TestJSONLParsing:
 
 class TestBuildEnv:
     def test_pathsep_join(self, monkeypatch):
-        monkeypatch.setattr(
-            "llm_backend.pi.repo_root", lambda: __import__("pathlib").Path("/repo")
-        )
+        repo = Path("/repo")
+        monkeypatch.setattr("llm_backend.pi.repo_root", lambda: repo)
         monkeypatch.setenv("PYTHONPATH", "/existing")
         monkeypatch.setenv("PATH", "/usr/bin")
 
         backend = PiCodingAgentBackend({})
         env = backend._build_env()
 
-        assert env["PYTHONPATH"].startswith("/repo")
+        assert env["PYTHONPATH"].startswith(str(repo))
         parts = env["PYTHONPATH"].split(os.pathsep)
-        assert parts[0] == "/repo"
+        assert parts[0] == str(repo)
         assert "/existing" in parts
 
         assert env["PYTHONUTF8"] == "1"
@@ -327,11 +327,10 @@ class TestBuildEnv:
         assert path_parts[0] == py_dir
 
     def test_empty_pythonpath(self, monkeypatch):
-        monkeypatch.setattr(
-            "llm_backend.pi.repo_root", lambda: __import__("pathlib").Path("/repo")
-        )
+        repo = Path("/repo")
+        monkeypatch.setattr("llm_backend.pi.repo_root", lambda: repo)
         monkeypatch.delenv("PYTHONPATH", raising=False)
 
         backend = PiCodingAgentBackend({})
         env = backend._build_env()
-        assert env["PYTHONPATH"] == "/repo"
+        assert env["PYTHONPATH"] == str(repo)

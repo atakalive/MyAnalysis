@@ -52,7 +52,7 @@ def _datasets_from(path):
 @pytest.fixture()
 def cfg(tmp_path):
     p = tmp_path / "config.py"
-    p.write_text(_TEMPLATE, encoding="utf-8")
+    p.write_text(_TEMPLATE, encoding="utf-8", newline="\n")
     return p
 
 
