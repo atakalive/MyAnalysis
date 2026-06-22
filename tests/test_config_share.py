@@ -615,6 +615,28 @@ def test_stale_upload_prevented(env):
     assert env.fake.stored()["files"]["models.toml"] == "v3"
 
 
+def test_put_time_stale_upload_remerged(env, monkeypatch):
+    # local->remote: 編集が「ループ冒頭の collect の後・put の前」に入るケース。
+    # put 直前 recheck がこれを検知して再ループし、最新 v2 を push する。
+    (env.tmp / "models.toml").write_text("v1", encoding="utf-8")
+    real_collect = config_share._collect_portable_files
+    calls = {"n": 0}
+
+    def collect_then_edit(**kw):
+        res = real_collect(**kw)
+        calls["n"] += 1
+        # 1=make_bundle, 2=loop1 冒頭。loop1 冒頭の直後に v2 へ編集 → put 直前 recheck(3)
+        # が v2 を見て再ループ → loop2 で v2 を再マージして push する。
+        if calls["n"] == 2:
+            (env.tmp / "models.toml").write_text("v2", encoding="utf-8")
+        return res
+
+    monkeypatch.setattr(config_share, "_collect_portable_files", collect_then_edit)
+    r = _sync(env)
+    assert r["pushed"] is True
+    assert env.fake.stored()["files"]["models.toml"] == "v2"
+
+
 def test_remote_stale_overwrite_prevented(env, monkeypatch):
     import os
     (env.tmp / "models.toml").write_text("v1_local", encoding="utf-8")
@@ -628,7 +650,7 @@ def test_remote_stale_overwrite_prevented(env, monkeypatch):
     calls = {"n": 0}
 
     def read_then_swap(p):
-        kind, text = real_read(p)
+        kind, text, mtime = real_read(p)
         # 1=make_bundle collect, 2=loop collect, 3=write-time recheck.
         # Simulate a concurrent edit right after the loop-start collect (2),
         # so the write-time recheck (3) sees different content and skips.
@@ -636,7 +658,7 @@ def test_remote_stale_overwrite_prevented(env, monkeypatch):
             calls["n"] += 1
             if calls["n"] == 2:
                 p.write_text("v3_concurrent", encoding="utf-8")
-        return kind, text
+        return kind, text, mtime
 
     monkeypatch.setattr(config_share, "_read_file_state", read_then_swap)
     r = _sync(env)
@@ -649,11 +671,13 @@ def test_remote_stale_overwrite_prevented(env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_read_file_state_three_way(env):
     p = env.tmp / "x.txt"
-    assert config_share._read_file_state(p) == ("missing", None)
+    assert config_share._read_file_state(p) == ("missing", None, None)
     p.write_bytes(b"\xff\xfe\x00")
-    assert config_share._read_file_state(p)[0] == "unreadable"
+    assert config_share._read_file_state(p)[:2] == ("unreadable", None)
     p.write_text("ok", encoding="utf-8")
-    assert config_share._read_file_state(p) == ("text", "ok")
+    kind, text, mtime = config_share._read_file_state(p)
+    assert (kind, text) == ("text", "ok")
+    assert isinstance(mtime, float)
 
 
 def test_unreadable_local_not_overwritten(env):
@@ -679,12 +703,12 @@ def test_write_time_unreadable_skipped(env, monkeypatch):
     calls = {"n": 0}
 
     def read_then_corrupt(p):
-        kind, text = real_read(p)
+        kind, text, mtime = real_read(p)
         if p.name == "config.toml" and kind == "missing":
             calls["n"] += 1
             (p.parent).mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"\xff\xfe\x00")     # now unreadable
-        return kind, text
+        return kind, text, mtime
 
     monkeypatch.setattr(config_share, "_read_file_state", read_then_corrupt)
     r = _sync(env)

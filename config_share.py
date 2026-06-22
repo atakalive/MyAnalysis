@@ -34,7 +34,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_iso(s):
+def _parse_iso(s: str | None) -> "datetime | None":
     """None/不正 -> None（最古扱い）。naive -> UTC とみなし aware 化（比較の TypeError 回避）。"""
     if not s:
         return None
@@ -62,29 +62,32 @@ def _tie_break(a: str, b: str) -> bool:
     return a >= b
 
 
-def _read_file_state(p: Path) -> tuple[str, str | None]:
+def _read_file_state(p: Path) -> tuple[str, str | None, float | None]:
     """ファイル状態を3値で返す（『未存在』と『存在するが読めない』を区別する）:
-      - ('missing', None)    : ファイルが無い。
-      - ('unreadable', None) : 存在するが読めない（権限・非UTF8 など）。
-      - ('text', <str>)      : UTF-8 で読めた。
-    exists()+read の TOCTOU を避けるため read を直接 try し例外種別で分類する。"""
+      - ('missing', None, None)    : ファイルが無い。
+      - ('unreadable', None, None) : 存在するが読めない（権限・非UTF8 など）。
+      - ('text', <str>, <mtime>)   : UTF-8 で読めた（content と st_mtime を同時取得）。
+    read_text と stat を同一 try 内で取得し、read 後に別途 stat する TOCTOU
+    （その隙にファイルが消えると stat が FileNotFoundError でクラッシュ）を排除する。"""
     try:
-        return ("text", p.read_text(encoding="utf-8"))
+        text = p.read_text(encoding="utf-8")
+        mtime = p.stat().st_mtime
+        return ("text", text, mtime)
     except FileNotFoundError:
-        return ("missing", None)
+        return ("missing", None, None)
     except (OSError, UnicodeDecodeError):
-        return ("unreadable", None)
+        return ("unreadable", None, None)
 
 
 def _collect_portable_files(*, include_env: bool, warnings: list) -> tuple[dict, dict, set]:
     """portable files を **その時点で fresh に** 読む。戻り: (files, file_meta, unreadable)。
       - 'missing'    -> どれにも入れない（remote-only なら新規作成の対象になり得る）。
-      - 'text'       -> files[rel]=text, file_meta[rel]=_iso_from_mtime(st_mtime)。
+      - 'text'       -> files[rel]=text, file_meta[rel]=_iso_from_mtime(mtime)。
       - 'unreadable' -> unreadable に rel を入れ warning。files には入れない。"""
     files, file_meta, unreadable = {}, {}, set()
     rels = list(PORTABLE_FILES) + ([".env"] if include_env else [])
     for rel in rels:
-        kind, text = _read_file_state(repo_root() / rel)
+        kind, text, mtime = _read_file_state(repo_root() / rel)
         if kind == "missing":
             continue
         if kind == "unreadable":
@@ -94,7 +97,7 @@ def _collect_portable_files(*, include_env: bool, warnings: list) -> tuple[dict,
                 warnings.append(msg)
             continue
         files[rel] = text
-        file_meta[rel] = _iso_from_mtime((repo_root() / rel).stat().st_mtime)
+        file_meta[rel] = _iso_from_mtime(mtime)
     return files, file_meta, unreadable
 
 
@@ -501,7 +504,7 @@ def sync(*, direction: str = "both", apply: bool = True,
                     warnings.append(f"安全でない書き込み先を拒否: {rel!r}")
                     continue
                 if rel != ".env":
-                    kind, cur = _read_file_state(repo_root() / rel)
+                    kind, cur, _cur_mtime = _read_file_state(repo_root() / rel)
                     if kind == "unreadable":
                         warnings.append(
                             f"{rel!r} が読込不能のため remote で上書きしない（ローカルを保持）"
@@ -533,6 +536,23 @@ def sync(*, direction: str = "both", apply: bool = True,
         need_push = apply and would_push
         if not need_push:
             break
+
+        # put 直前ガード（local->remote stale upload 防止）: ループ冒頭の fresh read 以降、
+        # config.py transaction やローカル write を挟む間にユーザーが portable file を編集する
+        # と、merged_files（= put 内容）に古い snapshot が残り得る。put 直前にもう一度読み、
+        # 我々が writes で書いたファイル以外で loop 冒頭と差があれば、再ループして fresh に
+        # 再マージしてから push する（remote->local 書き込みと対称の RMW ガード）。
+        recheck_files, _rc_meta, _rc_unread = _collect_portable_files(
+            include_env=include_env, warnings=warnings
+        )
+        external_change = any(
+            recheck_files.get(rel) != local_files.get(rel)
+            for rel in (set(local_files) | set(recheck_files))
+            if rel not in writes
+        )
+        if external_change:
+            _log_debug("portable files changed during sync; re-merging before push")
+            continue
 
         put_bundle = {
             "schema_version": SCHEMA_VERSION,

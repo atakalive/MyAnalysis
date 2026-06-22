@@ -167,7 +167,7 @@ def _replace_datasets_block(node, source: str, block: str, config_path: Path) ->
     改行コード(CRLF/LF)を保存。"""
     newline = "\r\n" if "\r\n" in source else "\n"
     lines = source.splitlines(keepends=True)
-    new_lines = [l + newline for l in block.splitlines()]
+    new_lines = [ln + newline for ln in block.splitlines()]
     # ast line numbers are 1-based; slice is 0-based.
     lines[node.lineno - 1 : node.end_lineno] = new_lines
     tmp = config_path.with_suffix(".py.tmp")
