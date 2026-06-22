@@ -21,6 +21,9 @@
 "menu.help.about"             = "About"
 "menu.tab.close"              = "Close tab"
 
+# --- figure panel ---
+"figure.menu.copy_image"      = "Copy Image"
+
 # --- dock ---
 "dock.chat"                   = "Chat"
 

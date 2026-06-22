@@ -4,6 +4,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFrame,
     QGraphicsPixmapItem,
@@ -12,10 +13,20 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtGui import QPainter, QPixmap, QResizeEvent, QShowEvent, QWheelEvent
+from PySide6.QtGui import (
+    QContextMenuEvent,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+    QShowEvent,
+    QWheelEvent,
+)
+
+from common.i18n import tr
 
 
 _PALETTE = [
@@ -292,4 +303,25 @@ class FigurePanel(QGraphicsView):
             self._user_zoomed = False
         else:
             self._user_zoomed = True
+        event.accept()
+
+    def copy_image_to_clipboard(self) -> bool:
+        """表示中の原寸オリジナル画像をシステムクリップボードへコピー。
+
+        コピー対象はズーム/パン後の表示結果ではなくロード済みのオリジナル
+        QPixmap（プレゼン等へ高品質で貼り付けられる）。未ロードなら False。
+        """
+        if self._pixmap is None:
+            return False
+        QApplication.clipboard().setPixmap(self._pixmap)
+        return True
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        if self._pixmap is None:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction(tr("figure.menu.copy_image"))
+        copy_action.triggered.connect(self.copy_image_to_clipboard)
+        menu.exec(event.globalPos())
         event.accept()

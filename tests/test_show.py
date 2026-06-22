@@ -39,6 +39,20 @@ def test_show_new_tab(win, png_path):
     assert not panel._pixmap.isNull()
 
 
+def test_copy_image_to_clipboard(win, png_path, qapp):
+    win.dispatch_command("show", path=str(png_path))
+    panel = win.active_tab().panel("figure")
+    assert panel.copy_image_to_clipboard() is True
+    from PySide6.QtWidgets import QApplication
+    assert not QApplication.clipboard().pixmap().isNull()
+
+
+def test_copy_image_to_clipboard_no_image(qapp):
+    from gui.panels import FigurePanel
+    panel = FigurePanel()
+    assert panel.copy_image_to_clipboard() is False
+
+
 def test_show_update_existing(win, png_path, tmp_path, qapp):
     win.dispatch_command("show", path=str(png_path))
     from PySide6.QtGui import QPixmap

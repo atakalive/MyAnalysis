@@ -21,6 +21,9 @@
 "menu.help.about"             = "バージョン情報"
 "menu.tab.close"              = "タブを閉じる"
 
+# --- figure panel ---
+"figure.menu.copy_image"      = "画像をコピー"
+
 # --- dock ---
 "dock.chat"                   = "Chat"
 
