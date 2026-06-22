@@ -256,8 +256,11 @@ class HotReloadController(QObject):
         old_tab = next((t for t in window.tabs() if t.name == name), None)
         if old_tab is None:
             return f"reload-tab-error:no open tab named {name!r}"
-        dataset = (getattr(old_tab, "session_spec", None) or {}).get("dataset") \
-            or getattr(old_tab, "dataset", None)
+        old_spec = getattr(old_tab, "session_spec", None) or {}
+        # 同名の figure/viewer タブを解析タブとして reload しない（kind 一致を要求）。
+        if old_spec.get("kind") != "analysis":
+            return f"reload-tab-error:tab {name!r} is not an analysis tab"
+        dataset = old_spec.get("dataset") or getattr(old_tab, "dataset", None)
         if not dataset:
             return f"reload-tab-error:cannot resolve dataset for tab {name!r}"
 

@@ -252,3 +252,22 @@ def test_tier2_build_failure_retains_old_tab(window, probe_analysis):
     assert result.startswith("reload-tab-error:")
     assert next(t for t in window.tabs() if t.name == name) is old_tab  # retained
     assert state.read(HR_DS, name) == {"v": 1}  # captured state restored
+
+
+def test_tier2_reload_rejects_non_analysis_tab(window, qapp, tmp_path):
+    """同名の figure/viewer タブを解析として reload しない (kind ガード)。
+
+    reviewer P2 (code review): reload_tab が old_tab の kind を見ないと、同名 viewer を
+    解析タブへ置き換え得る。kind!=analysis のタブは reload-tab-error で fail-fast。
+    """
+    from PIL import Image
+
+    png = tmp_path / "fig.png"
+    Image.new("L", (4, 4)).save(png)
+    window.dispatch_command("show", path=str(png), name="vw")
+    assert "vw" in window.tab_names()
+
+    result = window.dispatch_command("reload", scope="tab", target="vw")
+    assert result.startswith("reload-tab-error:")
+    assert "not an analysis tab" in result
+    assert "vw" in window.tab_names()  # viewer は破壊されない

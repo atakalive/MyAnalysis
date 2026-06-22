@@ -46,9 +46,9 @@ def test_attach_tab_no_dataset_is_noop(qapp, monkeypatch, tmp_path):
 
 
 class _FakeTab:
-    def __init__(self, name, dataset):
+    def __init__(self, name, dataset, kind="analysis"):
         self.name = name
-        self.session_spec = {"kind": "analysis", "name": name, "dataset": dataset}
+        self.session_spec = {"kind": kind, "name": name, "dataset": dataset}
 
 
 class _FakeWin:
@@ -75,7 +75,7 @@ def test_add_tab_same_name_other_dataset_raises(monkeypatch, tmp_path):
     existing = _FakeTab("demo", "dsA")
     win = _FakeWin([existing], current="dsB")
     add_tab = llm_bridge._make_add_tab_handler(win)
-    with pytest.raises(ValueError, match="already open for dataset"):
+    with pytest.raises(ValueError, match="already open"):
         add_tab("demo", dataset="dsB")
 
 
@@ -90,3 +90,20 @@ def test_add_tab_same_name_same_dataset_focuses(monkeypatch, tmp_path):
     add_tab = llm_bridge._make_add_tab_handler(win)
     assert add_tab("demo", dataset="dsA") == "already-present:demo"
     assert win.activated == ["demo"]
+
+
+def test_add_tab_same_name_figure_viewer_raises(monkeypatch, tmp_path):
+    """同じ dataset に同名の figure viewer があると、解析タブは fail-fast する
+    (viewer を解析と取り違えて focus しない)。reviewer P2 code review。"""
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    d = tmp_path / "dsA" / "analyses" / "demo"
+    d.mkdir(parents=True)
+    (d / "analysis.py").write_text("def build_tab(p, d): ...\n", encoding="utf-8")
+
+    # 同名 (demo)・同 dataset (dsA) の figure viewer が既に開いている。
+    existing = _FakeTab("demo", "dsA", kind="figure")
+    win = _FakeWin([existing], current="dsA")
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(ValueError, match="already open"):
+        add_tab("demo", dataset="dsA")
+    assert win.activated == []  # viewer を focus しない

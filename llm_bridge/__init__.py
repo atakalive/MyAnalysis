@@ -147,17 +147,22 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
                 raise ValueError("no dataset open; cannot resolve analysis")
         # Resolve/validate up front so a bad name reports before any build.
         _resolve_analysis_file(dataset, name)
-        # 同名タブの dataset 不一致ガード（前提 1）。
+        # 同名タブのガード（前提 1: name はウィンドウ内で単一のタブ ID）。
+        # already-present として focus してよいのは「同じ dataset の解析タブ」だけ。
+        # 別 dataset の同名解析タブ、または同名の figure/viewer タブ（kind!=analysis）は
+        # この解析を開けないので fail-fast する（同名 viewer を解析と取り違えない）。
         existing = next((t for t in window.tabs() if t.name == name), None)
         if existing is not None:
-            ex_ds = (getattr(existing, "session_spec", None) or {}).get("dataset") \
-                    or getattr(existing, "dataset", None)
-            if ex_ds == dataset:
+            ex_spec = getattr(existing, "session_spec", None) or {}
+            ex_kind = ex_spec.get("kind")
+            ex_ds = ex_spec.get("dataset") or getattr(existing, "dataset", None)
+            if ex_kind == "analysis" and ex_ds == dataset:
                 window.set_active_tab(name)
                 return f"already-present:{name}"
             raise ValueError(
-                f"tab {name!r} is already open for dataset {ex_ds!r}; cannot open the "
-                f"same-named analysis from {dataset!r} in the same window"
+                f"tab {name!r} is already open (kind={ex_kind!r}, dataset={ex_ds!r}); "
+                f"cannot open analysis {name!r} for dataset {dataset!r} in the same "
+                f"window (name is the single tab id)"
             )
         from PySide6.QtWidgets import QWidget
 
