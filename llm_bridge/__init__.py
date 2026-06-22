@@ -7,12 +7,14 @@ Public entry points (called from GUI side):
 Both return iterables of QFileSystemWatcher etc. — caller must hold references.
 """
 
+import contextlib
+import contextvars
 import importlib.util
 import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
-from common.paths import analyses_root
+import dataset_config
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
@@ -20,41 +22,58 @@ from llm_bridge import state, snapshots, commands, annotations, session
 from llm_bridge.paths import active_state_path
 
 
-def _validate_analysis_name(name: str) -> None:
-    """Reject names that could escape analyses/ directory."""
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
-        raise ValueError(f"invalid analysis name: {name!r}")
+_building_dataset: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_building_dataset", default=None
+)
+
+
+@contextlib.contextmanager
+def _building(dataset: str | None):
+    """build_tab 実行中だけ dataset を contextvar に立てる。テスト/将来の再利用用に公開。"""
+    token = _building_dataset.set(dataset)
+    try:
+        yield
+    finally:
+        _building_dataset.reset(token)
 
 
 def _write_active(window) -> None:
     tab = window.active_tab()
     name = tab.name if tab is not None else None
-    ds = getattr(window, "current_dataset", None)
+    current = getattr(window, "current_dataset", None)          # sticky（既存意味）
+    # active_analysis_dataset: active タブが解析タブのときだけその dataset。
+    # figure/viewer/dataset-less は None（同名 viewer による誤読を防ぐ）。
+    active_analysis_ds = None
+    if tab is not None:
+        spec = getattr(tab, "session_spec", None)
+        if isinstance(spec, dict) and spec.get("kind") == "analysis":
+            active_analysis_ds = spec.get("dataset")
     p = active_state_path()
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(
-        json.dumps({"active_tab": name, "dataset": ds}, ensure_ascii=False),
+        json.dumps(
+            {"active_tab": name, "dataset": current,
+             "active_analysis_dataset": active_analysis_ds},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     tmp.replace(p)
 
 
-def _resolve_analysis_file(name: str):
-    """Validate `name` and resolve analyses/<name>/analysis.py, or raise."""
-    _validate_analysis_name(name)
-    root = analyses_root().resolve()
-    analysis_dir = (analyses_root() / name).resolve()
-    analysis_file = (analysis_dir / "analysis.py").resolve()
-    if not analysis_dir.is_relative_to(root):
-        raise ValueError(f"analysis directory escapes analyses/: {name!r}")
-    if not analysis_file.is_relative_to(root):
-        raise ValueError(f"analysis.py escapes analyses/: {name!r}")
-    if not analysis_file.is_file():
-        raise LookupError(f"no analysis named {name!r} under analyses/")
-    return analysis_file
+def _resolve_analysis_file(dataset, name: str):
+    """Resolve <dataset_dir>/analyses/<name>/analysis.py, or raise.
+
+    Validation/containment is handled by dataset_config.analysis_file; this adds
+    the existence check.
+    """
+    f = dataset_config.analysis_file(dataset, name)
+    if not f.is_file():
+        raise LookupError(f"no analysis named {name!r} under {dataset!r}")
+    return f
 
 
-def _build_analysis(parent, name: str):
+def _build_analysis(parent, dataset, name: str):
     """Fresh-import analyses/<name>/analysis.py, run load() + build_tab(parent),
     and assign session_spec. Returns ``(tab, mod)``.
 
@@ -72,7 +91,7 @@ def _build_analysis(parent, name: str):
     Each call re-executes the file and re-runs `load()`. Analyses that want
     caching should memoize inside `load()` themselves.
     """
-    analysis_file = _resolve_analysis_file(name)
+    analysis_file = _resolve_analysis_file(dataset, name)
     spec = importlib.util.spec_from_file_location(
         f"_llm_bridge_analysis_{name}", analysis_file
     )
@@ -91,20 +110,16 @@ def _build_analysis(parent, name: str):
             f"analyses/{name}/analysis.py has no build_tab(parent, data)"
         )
     data = mod.load() if hasattr(mod, "load") else None
-    tab = mod.build_tab(parent, data)
+    # dataset を contextvar 経由で attach_tab に供給する（build_tab 同期実行中のみ）。
+    # mod.load() は mod.DATASET を使うので囲まない（前提 2）。
+    with _building(dataset):
+        tab = mod.build_tab(parent, data)
     # Assign session_spec BEFORE the tab is inserted so the currentChanged that
     # add_tab fires sees the final spec (→ chat gets the right dataset).
-    import config
-    ds = getattr(mod, "DATASET", None) or name
-    if ds not in config.DATASETS:
-        try:
-            config.reload_datasets()
-        except Exception:
-            pass
-    if ds in config.DATASETS:
-        tab.session_spec = {
-            "kind": "analysis", "name": name, "module": name, "dataset": ds,
-        }
+    # 所在 dataset ＝ 呼び出し側が解決済みの登録名（前提 2）。
+    tab.session_spec = {
+        "kind": "analysis", "name": name, "module": name, "dataset": dataset,
+    }
     return tab, mod
 
 
@@ -125,11 +140,25 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
     `"already-present:<name>"` instead of constructing a duplicate.
     """
 
-    def _add_tab(name: str) -> str:
+    def _add_tab(name: str, dataset: str | None = None) -> str:
+        if dataset is None:
+            dataset = window.current_dataset
+            if dataset is None:
+                raise ValueError("no dataset open; cannot resolve analysis")
         # Resolve/validate up front so a bad name reports before any build.
-        _resolve_analysis_file(name)
-        if window.set_active_tab(name):
-            return f"already-present:{name}"
+        _resolve_analysis_file(dataset, name)
+        # 同名タブの dataset 不一致ガード（前提 1）。
+        existing = next((t for t in window.tabs() if t.name == name), None)
+        if existing is not None:
+            ex_ds = (getattr(existing, "session_spec", None) or {}).get("dataset") \
+                    or getattr(existing, "dataset", None)
+            if ex_ds == dataset:
+                window.set_active_tab(name)
+                return f"already-present:{name}"
+            raise ValueError(
+                f"tab {name!r} is already open for dataset {ex_ds!r}; cannot open the "
+                f"same-named analysis from {dataset!r} in the same window"
+            )
         from PySide6.QtWidgets import QWidget
 
         # Build under a sandbox parent so a partially-constructed tab (and any
@@ -137,23 +166,23 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         # down as a unit on failure. build_tab side-effects state.json (via its
         # internal refresh-state), so capture the prior state to restore on any
         # failure / no-op path — the real UI read-back is the source of truth.
-        captured_state = state.read(name)
+        captured_state = state.read(dataset, name)
         sandbox = QWidget()
         try:
-            new_tab, mod = _build_analysis(sandbox, name)
+            new_tab, mod = _build_analysis(sandbox, dataset, name)
         except Exception:
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            state.writer(dataset, name)(captured_state)
             raise
         if new_tab.name != name:
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            state.writer(dataset, name)(captured_state)
             raise ValueError(
                 f"tab name mismatch: expected {name!r}, got {new_tab.name!r}"
             )
-        if not _sync_new_tab_state(new_tab, mod, name, captured_state):
+        if not _sync_new_tab_state(new_tab, mod, dataset, name, captured_state):
             sandbox.deleteLater()
-            state.writer(name)(captured_state)
+            state.writer(dataset, name)(captured_state)
             raise RuntimeError(
                 f"could not establish state for {name!r} (apply_state / "
                 f"refresh-state failed); tab not inserted"
@@ -165,12 +194,20 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         spec = getattr(new_tab, "session_spec", None)
         if spec and spec.get("dataset"):
             session.note_dataset(spec["dataset"])
+        # ホットリロード baseline をこの時点の SHA で登録（add-tab・session 復元の
+        # 両方をカバー）。タブは既に add 済みなので best-effort（reviewer P2 R4）。
+        hr = getattr(window, "_hotreload", None)
+        if hr is not None and hasattr(hr, "note_analysis_opened"):
+            try:
+                hr.note_analysis_opened(dataset, name)
+            except Exception:
+                pass
         return f"added:{name}"
 
     return _add_tab
 
 
-def _sync_new_tab_state(tab, mod, name: str, captured_state: dict) -> bool:
+def _sync_new_tab_state(tab, mod, dataset, name: str, captured_state: dict) -> bool:
     """Apply optional `apply_state` then sync the real UI state into state.json.
 
     Returns True on success, False if apply_state or refresh-state raised (the
@@ -408,10 +445,29 @@ def attach_tab(tab, state_provider: Callable[[], dict]) -> list[object]:
     state_provider: callable returning the current state dict.
     The analysis is responsible for triggering `tab.dispatch_command("refresh-state")`
     on its panel signals to push state updates.
+
+    The owning dataset is supplied via the `_building` contextvar, set by
+    `_build_analysis` during `build_tab`. When it is unset (a dataset-less
+    demo/placeholder tab, or a direct call not routed through `_build_analysis`),
+    persistence is wired as a no-op rather than raising — these tabs are
+    synthetic/volatile and not persistence targets (前提 4).
     """
     name = tab.name
-    state_w = state.writer(name)
-    snap_w = snapshots.writer(name)
+    dataset = _building_dataset.get()
+    if dataset is None:
+        # dataset-less タブ（demo/placeholder、_build_analysis を介さない直接呼び）。
+        # 永続化対象が無いので no-op で配線し、watcher は張らない。
+        tab.dataset = None
+        tab.connect_snapshot_writer(lambda _tab: None)
+        tab.register_command(
+            "set-split", lambda left, right: tab.set_split_ratio(float(left), float(right))
+        )
+        tab.register_command("snapshot", lambda: tab.take_snapshot())  # no-op writer
+        tab.register_command("refresh-state", lambda: None)
+        return []
+    tab.dataset = dataset
+    state_w = state.writer(dataset, name)
+    snap_w = snapshots.writer(dataset, name)
 
     # snapshot_writer is consumed by tab.take_snapshot() (gui.tab).
     tab.connect_snapshot_writer(snap_w)
@@ -428,7 +484,7 @@ def attach_tab(tab, state_provider: Callable[[], dict]) -> list[object]:
     tab.register_command("refresh-state", lambda: state_w(state_provider()))
 
     # Annotations watcher
-    ann_watcher = annotations.start_watcher(tab)
+    ann_watcher = annotations.start_watcher(tab, dataset)
     return [ann_watcher]
 
 

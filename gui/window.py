@@ -330,17 +330,28 @@ class ToolWindow(QMainWindow):
         return verb in self._command_handlers
 
     def _open_analysis(self) -> None:
-        from common.paths import analyses_root
+        import dataset_config
 
-        root = analyses_root()
-        if root.is_dir():
-            names = sorted(
-                d.name
-                for d in root.glob("*")
-                if (d / "analysis.py").is_file()
+        current = self.current_dataset
+        if current is None:
+            QMessageBox.information(
+                self, tr("dlg.open_analysis.title"),
+                tr("dlg.open_analysis.no_dataset"),
             )
-        else:
-            names = []
+            return
+        try:
+            root = dataset_config.analyses_root(current)
+            if root.is_dir():
+                names = sorted(
+                    d.name
+                    for d in root.glob("*")
+                    if (d / "analysis.py").is_file()
+                )
+            else:
+                names = []
+        except (KeyError, RuntimeError, OSError) as e:
+            QMessageBox.critical(self, tr("err.open_analysis.title"), str(e))
+            return
         if not names:
             QMessageBox.information(
                 self, tr("dlg.open_analysis.title"), tr("dlg.open_analysis.empty")
@@ -356,7 +367,7 @@ class ToolWindow(QMainWindow):
             QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_add_tab"))
             return
         try:
-            self.dispatch_command("add-tab", name=name)
+            self.dispatch_command("add-tab", name=name, dataset=current)
             self.set_active_tab(name)
         except Exception as e:
             QMessageBox.critical(self, tr("err.open_analysis.title"), str(e))

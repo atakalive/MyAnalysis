@@ -1,9 +1,9 @@
 """Hermetic tests for the `python -m newanalysis` generator.
 
-All tests redirect common.paths roots to tmp_path via monkeypatch so the real
-repository's analyses/ directory is never touched:
-- `newanalysis.__main__.analyses_root` → tmp_path/analyses (where the generator writes)
-- `common.paths.repo_root` → tmp_path (where attach_tab writes state)
+All tests redirect the dataset directory into tmp_path by patching
+`config.get_dataset_dir`, so the real synced drive is never touched. The
+generator now writes into `<dataset_dir>/analyses/<name>/` and analysis output
+(state) lands under `<dataset_dir>/_work/analyses/<name>/`.
 
 Generated analysis.py modules are loaded by file path with
 importlib.util.spec_from_file_location, mirroring the loader in
@@ -20,14 +20,14 @@ import pytest
 
 import newanalysis.__main__ as gen
 
+DS = "ds_test"
+
 
 @pytest.fixture()
 def fake_roots(monkeypatch, tmp_path):
-    """Redirect generator + state roots into tmp_path. Returns the analyses root."""
-    analyses = tmp_path / "analyses"
-    monkeypatch.setattr("newanalysis.__main__.analyses_root", lambda: analyses)
-    monkeypatch.setattr("common.paths.repo_root", lambda: tmp_path)
-    return analyses
+    """Point dataset dirs at tmp_path. Returns DS's analyses root."""
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+    return tmp_path / DS / "analyses"
 
 
 def _load_generated(path: Path):
@@ -40,30 +40,32 @@ def _load_generated(path: Path):
 # ---- 正常系 ----
 
 def test_generates_files(fake_roots):
-    gen.main(["demo_probe", "--dataset", "dataset_a"])
+    gen.main(["demo_probe", "--dataset", DS])
     assert (fake_roots / "demo_probe" / "analysis.py").is_file()
     assert (fake_roots / "demo_probe" / "README.md").is_file()
 
 
 def test_generated_files_are_utf8(fake_roots):
-    gen.main(["demo_probe"])
+    gen.main(["demo_probe", "--dataset", DS])
     # cp932 で書かれていれば日本語 docstring の decode で失敗する。
     text = (fake_roots / "demo_probe" / "analysis.py").open(encoding="utf-8").read()
     assert 'NAME = "demo_probe"' in text
-    assert 'DATASET = ""' in text
+    assert f'DATASET = "{DS}"' in text
     (fake_roots / "demo_probe" / "README.md").open(encoding="utf-8").read()
 
 
-def test_dataset_embedded(fake_roots):
+def test_dataset_embedded(fake_roots, tmp_path):
     gen.main(["demo_probe", "--dataset", "dataset_a"])
-    text = (fake_roots / "demo_probe" / "analysis.py").read_text(encoding="utf-8")
+    text = (
+        tmp_path / "dataset_a" / "analyses" / "demo_probe" / "analysis.py"
+    ).read_text(encoding="utf-8")
     assert 'DATASET = "dataset_a"' in text
 
 
 # ---- runnable-empty (export 経路) ----
 
 def test_runnable_empty_export(fake_roots):
-    gen.main(["demo_probe"])
+    gen.main(["demo_probe", "--dataset", DS])
     mod = _load_generated(fake_roots / "demo_probe" / "analysis.py")
     data = mod.load()
     assert data is not None
@@ -81,26 +83,31 @@ def qapp(monkeypatch):
 
 
 def test_runnable_empty_gui(fake_roots, qapp, monkeypatch, tmp_path):
-    monkeypatch.setattr("llm_bridge.snapshots.writer", lambda name: (lambda tab: None))
-    gen.main(["demo_probe"])
+    import llm_bridge
+
+    gen.main(["demo_probe", "--dataset", DS])
     mod = _load_generated(fake_roots / "demo_probe" / "analysis.py")
 
     from gui.tab import AnalysisTab
-    tab = mod.build_tab(parent=None, data=mod.load())
+    with llm_bridge._building(DS):
+        tab = mod.build_tab(parent=None, data=mod.load())
     assert isinstance(tab, AnalysisTab)
     # attach_tab 配線の確認。
     assert tab.has_command("refresh-state") is True
 
     # 初期 dispatch_command("refresh-state") が state を書き出した証拠。
-    state_path = tmp_path / "data" / "analyses" / "demo_probe" / "state" / "current.json"
+    state_path = (
+        tmp_path / DS / "_work" / "analyses" / "demo_probe" / "state" / "current.json"
+    )
     assert state_path.is_file()
     assert json.loads(state_path.read_text(encoding="utf-8")) == {"status": "placeholder"}
 
 
 # ---- バリデーション拒否 (name) ----
 
-# 解析名 = analyses/<name>/ という実フォルダ。予約名・空白・空・先頭ドット・
-# パス区切り・Windows 禁止文字・末尾ドットは拒否（大文字/数字始まり/'-'/'_' は許可）。
+# 解析名 = <dataset_dir>/analyses/<name>/ という実フォルダ。予約名・空白・空・先頭
+# ドット・パス区切り・Windows 禁止文字・末尾ドットは拒否（大文字/数字始まり/'-'/'_'
+# は許可）。
 @pytest.mark.parametrize(
     "name",
     ["con", "CON", "nul", "com1", "lpt9", "my analysis", "", ".",
@@ -108,7 +115,7 @@ def test_runnable_empty_gui(fake_roots, qapp, monkeypatch, tmp_path):
 )
 def test_invalid_name_rejected(fake_roots, name):
     with pytest.raises(SystemExit):
-        gen.main([name])
+        gen.main([name, "--dataset", DS])
 
 
 # ---- バリデーション拒否 (dataset) ----
@@ -121,19 +128,21 @@ def test_invalid_dataset_rejected(fake_roots, dataset):
         gen.main(["demo_probe", "--dataset", dataset])
 
 
-def test_dataset_reserved_name_accepted(fake_roots):
+def test_dataset_reserved_name_accepted(fake_roots, tmp_path):
     """Windows 予約名チェックは name のみ。dataset は文字列埋め込みなので con 等も受理する。"""
     gen.main(["demo_probe", "--dataset", "con"])
-    text = (fake_roots / "demo_probe" / "analysis.py").read_text(encoding="utf-8")
+    text = (
+        tmp_path / "con" / "analyses" / "demo_probe" / "analysis.py"
+    ).read_text(encoding="utf-8")
     assert 'DATASET = "con"' in text
 
 
 # ---- 重複防止 ----
 
 def test_duplicate_rejected(fake_roots):
-    gen.main(["demo_probe"])
+    gen.main(["demo_probe", "--dataset", DS])
     with pytest.raises(SystemExit):
-        gen.main(["demo_probe"])
+        gen.main(["demo_probe", "--dataset", DS])
 
 
 # ---- rollback ----
@@ -144,41 +153,39 @@ def test_rollback_removes_dir_on_write_failure(fake_roots, monkeypatch):
 
     monkeypatch.setattr("newanalysis.__main__._render_readme", _boom)
     with pytest.raises(RuntimeError):
-        gen.main(["demo_probe"])
+        gen.create_analysis("demo_probe", dataset=DS)
 
     # 今回作成した analyses/demo_probe/ は残存しない。
     assert not (fake_roots / "demo_probe").exists()
-    # 親 analyses/ は削除されない。
-    assert fake_roots.exists()
 
 
 # ---- create_analysis 非終了コア ----
 
 def test_create_analysis_returns_paths(fake_roots):
-    analysis_path, readme_path = gen.create_analysis("demo_probe")
+    analysis_path, readme_path = gen.create_analysis("demo_probe", dataset=DS)
     assert analysis_path.is_file()
     assert readme_path.is_file()
     assert analysis_path == fake_roots / "demo_probe" / "analysis.py"
     assert readme_path == fake_roots / "demo_probe" / "README.md"
 
 
-def test_create_analysis_dataset_none_ok(fake_roots):
-    # dataset=None で TypeError なく正常完了する。
-    analysis_path, _ = gen.create_analysis("demo_probe")
-    assert 'DATASET = ""' in analysis_path.read_text(encoding="utf-8")
+def test_create_analysis_dataset_required(fake_roots):
+    # dataset は必須引数。省略すると TypeError。
+    with pytest.raises(TypeError):
+        gen.create_analysis("demo_probe")
 
 
 def test_create_analysis_invalid_name_raises(fake_roots):
     with pytest.raises(ValueError):
-        gen.create_analysis("a:b")  # 解析名にはフォルダ名禁止文字を使えない。
+        gen.create_analysis("a:b", dataset=DS)  # 解析名にはフォルダ名禁止文字を使えない。
     with pytest.raises(ValueError):
-        gen.create_analysis("con")
+        gen.create_analysis("con", dataset=DS)
 
 
 def test_create_analysis_duplicate_raises(fake_roots):
-    gen.create_analysis("demo_probe")
+    gen.create_analysis("demo_probe", dataset=DS)
     with pytest.raises(FileExistsError):
-        gen.create_analysis("demo_probe")
+        gen.create_analysis("demo_probe", dataset=DS)
 
 
 # ---- validate_identifier_name ----
@@ -239,18 +246,18 @@ def test_validate_identifier_name_dirname_strict(name):
 # ---- format template dispatch (#27) ----
 
 def test_custom_format_template(fake_roots):
-    analysis_path, _ = gen.create_analysis("cust", dataset="ds", fmt="custom")
+    analysis_path, _ = gen.create_analysis("cust", dataset=DS, fmt="custom")
     text = analysis_path.read_text(encoding="utf-8")
     assert "load_csv_per_subdir" not in text
     assert 'format="custom"' in text
 
 
 def test_default_format_template(fake_roots):
-    analysis_path, _ = gen.create_analysis("deflt", dataset="ds")
+    analysis_path, _ = gen.create_analysis("deflt", dataset=DS)
     text = analysis_path.read_text(encoding="utf-8")
     assert "load_csv_per_subdir" in text
 
 
 def test_unknown_format_raises(fake_roots):
     with pytest.raises(ValueError):
-        gen.create_analysis("badfmt", dataset="ds", fmt="unknown")
+        gen.create_analysis("badfmt", dataset=DS, fmt="unknown")

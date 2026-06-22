@@ -1,15 +1,16 @@
 """解析モジュール生成器 (オンボーディング雛形)。
 
 使用法:
-    python -m newanalysis <name> [--dataset <key>]
+    python -m newanalysis <name> --dataset <key>
 
-`analyses/<name>/` を作成し、#13 で確立した標準パターン
+`<dataset_dir>/analyses/<name>/` を作成し、#13 で確立した標準パターン
 (build_export_figs + 注釈ハンドラ + connect_annotations + attach_tab) を内包する
-`analysis.py` と `README.md` を書き出す。生成物はリポジトリへのコミット対象外。
+`analysis.py` と `README.md` を書き出す。生成物は同期ドライブ側に置かれ、
+リポジトリへのコミット対象外。
 
 テンプレートは本ファイル内の in-code 文字列で持つ (`analyses/_template/` は作らない)。
-理由: gui/window.py の _open_analysis() が analyses/*/analysis.py を glob で列挙するため、
-テンプレートディレクトリがメニューに出てしまう。
+理由: gui/window.py の _open_analysis() が当該データセットの analyses/*/analysis.py を
+glob で列挙するため、テンプレートディレクトリがメニューに出てしまう。
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 
-from common.paths import analyses_root, validate_identifier_name
+from common.paths import validate_identifier_name
+import dataset_config
 from dataset_config import KNOWN_FORMATS
 
 
@@ -157,7 +159,7 @@ python tool.py
 # → メニュー「ファイル → 解析を開く」→ 一覧から __GEN_NAME__ を選択
 
 # ヘッドレスエクスポート
-python -m export __GEN_NAME__
+python -m export <dataset> __GEN_NAME__
 ```
 
 ## CLI verb
@@ -166,9 +168,9 @@ TODO: tab.register_command で登録するカスタムコマンドを記述し�
 
 ## 出力
 
-- `data/analyses/__GEN_NAME__/state/current.json` — GUI 現選択
-- `data/analyses/__GEN_NAME__/state/current_view.png` — snapshot 実行後に生成される GUI 現表示 PNG
-- `data/analyses/__GEN_NAME__/state/annotations.json` — markers + notes
+- `_work/analyses/__GEN_NAME__/state/current.json` — GUI 現選択
+- `_work/analyses/__GEN_NAME__/state/current_view.png` — snapshot 実行後に生成される GUI 現表示 PNG
+- `_work/analyses/__GEN_NAME__/state/annotations.json` — markers + notes
 
 ## 知見メモ
 
@@ -176,17 +178,12 @@ TODO: tab.register_command で登録するカスタムコマンドを記述し�
 '''
 
 
-def _render_analysis(name: str, dataset: str | None, fmt: str = "csv_per_subdir") -> str:
+def _render_analysis(name: str, dataset: str, fmt: str = "csv_per_subdir") -> str:
     if fmt not in KNOWN_FORMATS:
         raise ValueError(
             f"unknown format {fmt!r}; known formats: {KNOWN_FORMATS}"
         )
-    if dataset:
-        dataset_line = f'DATASET = "{dataset}"'
-    else:
-        dataset_line = (
-            'DATASET = ""  # TODO: config.DATASETS のキーを設定してください'
-        )
+    dataset_line = f'DATASET = "{dataset}"'
     return (
         _ANALYSIS_TEMPLATE
         .replace("__GEN_LOAD_COMMENT__", _LOAD_COMMENTS[fmt])
@@ -200,20 +197,20 @@ def _render_readme(name: str) -> str:
 
 
 def create_analysis(
-    name: str, dataset: str | None = None, fmt: str = "csv_per_subdir",
+    name: str, dataset: str, fmt: str = "csv_per_subdir",
 ) -> tuple[Path, Path]:
-    """Create analysis scaffold. Returns (analysis_py_path, readme_path).
+    """Create analysis scaffold under the dataset dir. Returns (analysis_py, readme).
 
-    Raises ValueError (invalid name/dataset), FileExistsError (already exists).
-    Rolls back partial creation on any exception.
+    Raises ValueError (invalid name/dataset), FileExistsError (already exists),
+    KeyError (unregistered dataset), RuntimeError (no host path for dataset).
+    Rolls back partial creation on any exception. `dataset` is required.
     """
     validate_identifier_name(name, check_reserved=True)
-    if dataset is not None:
-        validate_identifier_name(dataset, check_reserved=False)
+    validate_identifier_name(dataset, check_reserved=False)
 
-    target_dir = analyses_root() / name
+    target_dir = dataset_config.analyses_root(dataset) / name
     if target_dir.exists():
-        raise FileExistsError(f"analyses/{name}/ already exists")
+        raise FileExistsError(f"{dataset}/analyses/{name}/ already exists")
 
     target_dir.mkdir(parents=True)
     try:
@@ -224,7 +221,7 @@ def create_analysis(
     except BaseException:
         # 不完全な生成物が残ると次回の「already exists」チェックを妨げる。
         # ignore_errors=True はロールバック自体の失敗 (ファイルロック等) で
-        # クラッシュしないための防御。削除対象は今回作成した analyses/<name>/ のみ。
+        # クラッシュしないための防御。削除対象は今回作成した <dataset>/analyses/<name>/ のみ。
         shutil.rmtree(target_dir, ignore_errors=True)
         raise
 
@@ -236,9 +233,11 @@ def main(argv: list[str] | None = None) -> None:
         prog="python -m newanalysis",
         description="解析モジュール雛形を生成する",
     )
-    parser.add_argument("name", help="解析ディレクトリ名 (analyses/<name>/ として作成)")
     parser.add_argument(
-        "--dataset", default=None, help="config.DATASETS のキー文字列 (任意)"
+        "name", help="解析ディレクトリ名 (<dataset_dir>/analyses/<name>/ として作成)"
+    )
+    parser.add_argument(
+        "--dataset", required=True, help="config.DATASETS のキー文字列 (必須)"
     )
     parser.add_argument(
         "--format", default="csv_per_subdir",
@@ -248,19 +247,16 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     name: str = args.name.strip()
-    dataset: str | None = args.dataset
+    dataset: str = args.dataset
 
     try:
         create_analysis(name, dataset, fmt=args.format)
-    except (ValueError, FileExistsError) as e:
+    except (ValueError, FileExistsError, KeyError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"created analyses/{name}/analysis.py")
-    print(f"created analyses/{name}/README.md")
-    if dataset:
-        print("# config.py に未登録なら追記してください:")
-        print(f'#   DATASETS["{dataset}"] = {{"<HOSTNAME>": r"<full_path>"}}')
+    print(f"created {dataset}/analyses/{name}/analysis.py")
+    print(f"created {dataset}/analyses/{name}/README.md")
 
 
 if __name__ == "__main__":

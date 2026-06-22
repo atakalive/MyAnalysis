@@ -140,7 +140,7 @@ The lower-level loader is `load_csv_per_subdir` in [common/loaders.py](common/lo
 
 ## Adding an analysis & exporting
 
-Each analysis is a single `analyses/<name>/analysis.py` module. Standard pattern:
+Each analysis is a single `<dataset_dir>/analyses/<name>/analysis.py` module that lives on the synced drive beside its data (not in the repo). Standard pattern:
 
 ```python
 NAME = "my_analysis"      # module identifier
@@ -159,18 +159,18 @@ Existing examples: `dataset_d` (.h5 camera images), `analysis_c` (scaffold), `ex
 ### Scaffold generation
 
 ```bash
-python -m newanalysis <name> [--dataset <key>]
+python -m newanalysis <name> --dataset <key>
 ```
 
-Creates `analyses/<name>/` with an `analysis.py` (standard pattern) + `README.md`. `register-dataset --with-analysis [NAME]` invokes the same generator (name defaults to the dataset name).
+Creates `<dataset_dir>/analyses/<name>/` with an `analysis.py` (standard pattern) + `README.md`. `--dataset` is required (the scaffold writes into that dataset's directory). `register-dataset --with-analysis [NAME]` invokes the same generator (name defaults to the dataset name).
 
 ### Headless PNG export
 
 ```bash
-python -m export <analysis_name>
+python -m export <dataset> <name>
 ```
 
-Runs `build_export_figs()` on the Agg backend and writes PNGs to `data/analyses/<name>/batch/` (no GUI required).
+Runs `build_export_figs()` on the Agg backend and writes PNGs to `<work_dir>/analyses/<name>/batch/` (no GUI required).
 
 ---
 
@@ -246,7 +246,7 @@ Four-tier escalation:
 | scope | Target | Mechanism |
 |---|---|---|
 | `patch` (default) | repo modules in sys.modules | in-place patch (display state untouched) |
-| `tab` | `analyses/<name>/analysis.py` | rebuild a single tab in a sandbox → swap |
+| `tab` | `<dataset_dir>/analyses/<name>/analysis.py` | rebuild a single tab in a sandbox → swap |
 | `app` | structural changes (`__init__` / Signal / `__bases__`, etc.) | blue-green window rebuild |
 | `restart` | tool.py itself, PySide6 upgrade | process restart + automatic session restore |
 

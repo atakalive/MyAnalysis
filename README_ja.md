@@ -140,7 +140,7 @@ summary = dataset_summary("my_dataset")    # カラム・dtype・行数をセッ
 
 ## 解析モジュールの追加と export
 
-各解析は `analyses/<name>/analysis.py` の 1 モジュールです。標準パターン:
+各解析は `<dataset_dir>/analyses/<name>/analysis.py` の 1 モジュールで、データと並んで同期ドライブ側に置かれます（リポジトリには含まれません）。標準パターン:
 
 ```python
 NAME = "my_analysis"      # モジュール識別子
@@ -159,18 +159,18 @@ def build_tab(parent, data) -> AnalysisTab: # GUI タブ構築
 ### 雛形生成
 
 ```bash
-python -m newanalysis <name> [--dataset <key>]
+python -m newanalysis <name> --dataset <key>
 ```
 
-`analyses/<name>/` に標準パターン入りの `analysis.py` + `README.md` を生成します。`register-dataset --with-analysis [NAME]` からも同じ生成器が呼ばれます（NAME 省略時はデータセット名）。
+`<dataset_dir>/analyses/<name>/` に標準パターン入りの `analysis.py` + `README.md` を生成します。`--dataset` は必須です（雛形は当該データセットのディレクトリに書き込まれます）。`register-dataset --with-analysis [NAME]` からも同じ生成器が呼ばれます（NAME 省略時はデータセット名）。
 
 ### ヘッドレス PNG エクスポート
 
 ```bash
-python -m export <analysis_name>
+python -m export <dataset> <name>
 ```
 
-`build_export_figs()` を Agg バックエンドで実行し、PNG を `data/analyses/<name>/batch/` に書き出します（GUI 不要）。
+`build_export_figs()` を Agg バックエンドで実行し、PNG を `<work_dir>/analyses/<name>/batch/` に書き出します（GUI 不要）。
 
 ---
 
@@ -246,7 +246,7 @@ python -m llm_bridge window reload [scope=app] --wait
 | scope | 対象 | 機構 |
 |---|---|---|
 | `patch`（既定） | sys.modules 内の repo モジュール | in-place パッチ（表示状態は無傷） |
-| `tab` | `analyses/<name>/analysis.py` | 単一タブの sandbox 再ビルド → 差し替え |
+| `tab` | `<dataset_dir>/analyses/<name>/analysis.py` | 単一タブの sandbox 再ビルド → 差し替え |
 | `app` | 構造変更（`__init__` / Signal / `__bases__` 等） | blue-green でウィンドウ再構築 |
 | `restart` | tool.py 自体・PySide6 更新 | プロセス再起動 + セッション自動復元 |
 

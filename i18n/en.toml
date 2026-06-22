@@ -34,6 +34,7 @@
 # --- dialogs ---
 "dlg.open_analysis.title"     = "Open analysis"
 "dlg.open_analysis.empty"     = "No analyses available"
+"dlg.open_analysis.no_dataset" = "Open a dataset first."
 "dlg.open_analysis.label"     = "Select analysis:"
 "dlg.open_dataset.title"      = "Open dataset"
 "dlg.open_dataset.empty"      = "No datasets registered"

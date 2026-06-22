@@ -25,6 +25,24 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 
 Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in `config.py`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
 
+### 解析ファイルはデータセット側に置く（Issue #37）
+
+解析は **`(dataset, name)` ペア** で解決する。あるデータセットの解析一式はそのデータセットディレクトリ配下に自己完結する:
+
+```
+<dataset_dir>/
+  myanalysis.toml
+  analyses/<name>/analysis.py   ← 解析コード本体（git 管理外・同期ドライブで sync）
+  analyses/<name>/README.md
+  <work_dir>/                    ← 既定 "_work"（myanalysis.toml で変更可）
+    analyses/<name>/state/       ← current.json / current_view.png / annotations.json
+    analyses/<name>/batch/       ← export 出力 PNG
+```
+
+パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。同一ウィンドウ内で別データセットの同名解析を同時に開くことは非サポート（タブ論理 ID は `name` 単独）。
+
+リポジトリ直下の旧 `analyses/`（4 件）はコードから参照されなくなり不活性化済み（物理削除はせず、手動移行は範囲外）。`data/analyses/` への書き込みは全廃。
+
 ## Git workflow
 
 **`main` ブランチに直接コミットする。feature ブランチを切ってはならない。**
@@ -127,7 +145,7 @@ to discover registered dataset names.
 | scope | 対象 | 機構 |
 |---|---|---|
 | `patch`（既定） | sys.modules 内の repo モジュール | superreload 式 in-place パッチ（関数は `__code__` 移植、クラスは `__dict__` 更新）。表示状態は無傷 |
-| `tab` | `analyses/<name>/analysis.py` | 単一 sandbox ビルド → 成功後に旧タブ close → 新タブ採用。`target=<tab名>` 必須 |
+| `tab` | `<dataset_dir>/analyses/<name>/analysis.py` | 単一 sandbox ビルド → 成功後に旧タブ close → 新タブ採用。`target=<tab名>` 必須 |
 | `app` | 構造変更（`__init__`/Signal/`__bases__`/watcher closure 等、Tier 1 が警告するもの） | blue-green: 状態 flush → repo モジュール全パージ → 新コードで ToolWindow 再構築 → manifest 復元。失敗時は旧ウィンドウが無傷で残る |
 | `restart` | tool.py 自体・PySide6 更新・Tier 3 失敗後 | プロセス再起動 + `--resume-session` 自動復元 |
 

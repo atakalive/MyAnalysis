@@ -198,29 +198,23 @@ def build_tab(parent, data):
 """
 
 
+HR_DS = "_hr_probe_ds"
+
+
 @pytest.fixture()
 def probe_analysis(monkeypatch, tmp_path):
-    """A throwaway analysis under tmp_path — hermetic, no real repo writes."""
-    from devtools import hotreload
+    """A throwaway analysis under tmp_path — hermetic, no real repo writes.
 
+    Points config.get_dataset_dir at tmp_path/<dataset>, so analyses live at
+    tmp_path/HR_DS/analyses/<name>/ and state at tmp_path/HR_DS/_work/... .
+    """
     name = "_hr_probe_analysis_xyz"
-    analyses_dir = tmp_path / "analyses"
-    d = analyses_dir / name
+    d = tmp_path / HR_DS / "analyses" / name
     d.mkdir(parents=True)
     af = d / "analysis.py"
     af.write_text(_ANALYSIS_SRC.format(name=name, v=1), encoding="utf-8")
 
-    def fake_state_dir(n):
-        p = tmp_path / "data" / "analyses" / n / "state"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    monkeypatch.setattr("common.paths.analyses_root", lambda: analyses_dir)
-    monkeypatch.setattr("llm_bridge.analyses_root", lambda: analyses_dir)
-    monkeypatch.setattr(hotreload, "analyses_root", lambda: analyses_dir)
-    monkeypatch.setattr("llm_bridge.state.state_dir", fake_state_dir)
-    monkeypatch.setattr("llm_bridge.snapshots.state_dir", fake_state_dir)
-    monkeypatch.setattr("llm_bridge.annotations.state_dir", fake_state_dir)
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
 
     yield name, af
 
@@ -229,9 +223,10 @@ def test_tier2_reload_tab_swaps_and_syncs_state(window, probe_analysis):
     from llm_bridge import state
 
     name, af = probe_analysis
-    assert window.dispatch_command("add-tab", name=name) == f"added:{name}"
+    assert window.dispatch_command("add-tab", name=name, dataset=HR_DS) \
+        == f"added:{name}"
     assert name in window.tab_names()
-    assert state.read(name) == {"v": 1}
+    assert state.read(HR_DS, name) == {"v": 1}
     old_tab = next(t for t in window.tabs() if t.name == name)
 
     af.write_text(_ANALYSIS_SRC.format(name=name, v=2), encoding="utf-8")
@@ -239,14 +234,14 @@ def test_tier2_reload_tab_swaps_and_syncs_state(window, probe_analysis):
     assert result == f"reloaded-tab:{name}"
     new_tab = next(t for t in window.tabs() if t.name == name)
     assert new_tab is not old_tab  # swapped
-    assert state.read(name) == {"v": 2}  # refresh-state synced new UI
+    assert state.read(HR_DS, name) == {"v": 2}  # refresh-state synced new UI
 
 
 def test_tier2_build_failure_retains_old_tab(window, probe_analysis):
     from llm_bridge import state
 
     name, af = probe_analysis
-    window.dispatch_command("add-tab", name=name)
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
     old_tab = next(t for t in window.tabs() if t.name == name)
 
     af.write_text(
@@ -256,4 +251,4 @@ def test_tier2_build_failure_retains_old_tab(window, probe_analysis):
     result = window.dispatch_command("reload", scope="tab", target=name)
     assert result.startswith("reload-tab-error:")
     assert next(t for t in window.tabs() if t.name == name) is old_tab  # retained
-    assert state.read(name) == {"v": 1}  # captured state restored
+    assert state.read(HR_DS, name) == {"v": 1}  # captured state restored

@@ -16,6 +16,7 @@ import tomllib
 from pathlib import Path, PureWindowsPath
 
 from common.i18n import tr
+from common.paths import validate_identifier_name
 
 CONFIG_FILENAME = "myanalysis.toml"
 
@@ -123,12 +124,18 @@ def ensure_config(name: str) -> Path:
     return config_path
 
 
-def get_work_dir(name: str) -> Path:
-    """Resolve (and create) this dataset's output directory. Called at save time.
+def get_work_dir(name: str, *, create: bool = True) -> Path:
+    """Resolve this dataset's output directory.
 
-    Ensures myanalysis.toml exists, reads work_dir, validates it, resolves a
-    relative value under the dataset dir (absolute is used as-is), creates the
-    directory, and returns it. Default "_work".
+    With ``create=True`` (the save-time default): ensures myanalysis.toml exists,
+    reads work_dir, validates it, resolves a relative value under the dataset dir
+    (absolute is used as-is), creates the directory, and returns it. Default
+    work_dir is "_work".
+
+    With ``create=False`` (read path): performs the same validation + resolution
+    but does NOT call ensure_config() and does NOT mkdir — so a read-only resolve
+    never writes the myanalysis.toml sidecar or grows a work_dir tree on the
+    synced drive.
 
     Raises:
         ValueError: work_dir is a drive-relative ("C:foo"), root-relative
@@ -136,7 +143,8 @@ def get_work_dir(name: str) -> Path:
                     path, or resolves outside the dataset dir.
     """
     from config import get_dataset_dir
-    ensure_config(name)
+    if create:
+        ensure_config(name)
     work_dir = load_config(name)["work_dir"]
 
     p = Path(work_dir)
@@ -157,5 +165,51 @@ def get_work_dir(name: str) -> Path:
         # defense-in-depth: re-check containment after resolution.
         if not resolved.resolve().is_relative_to(dataset_dir.resolve()):
             raise ValueError(tr("workdir.escape", resolved=resolved))
-    resolved.mkdir(parents=True, exist_ok=True)
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
     return resolved
+
+
+def analyses_root(dataset: str) -> Path:
+    """Return <dataset_dir>/analyses/ (read-only; never created here)."""
+    from config import get_dataset_dir
+    return get_dataset_dir(dataset) / "analyses"
+
+
+def analysis_file(dataset, name: str) -> Path:
+    """Resolve <dataset_dir>/analyses/<name>/analysis.py (containment-checked).
+
+    Validates `name`, ensures the resolved path stays under analyses_root, and
+    returns it. Does NOT check existence (caller does) and does NOT mkdir.
+    """
+    validate_identifier_name(name, check_reserved=True)
+    root = analyses_root(dataset).resolve()
+    f = (analyses_root(dataset) / name / "analysis.py").resolve()
+    if not f.is_relative_to(root):
+        raise ValueError(f"analysis.py escapes analyses/: {name!r}")
+    return f
+
+
+def analysis_out_dir(dataset, name: str, *, create: bool = True) -> Path:
+    """Return <work_dir>/analyses/<name>/ for this dataset's analysis output."""
+    validate_identifier_name(name, check_reserved=True)
+    p = get_work_dir(dataset, create=create) / "analyses" / name
+    if create:
+        p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def state_dir(dataset, name: str, *, create: bool = True) -> Path:
+    """Return <work_dir>/analyses/<name>/state/."""
+    d = analysis_out_dir(dataset, name, create=create) / "state"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def batch_dir(dataset, name: str, *, create: bool = True) -> Path:
+    """Return <work_dir>/analyses/<name>/batch/."""
+    d = analysis_out_dir(dataset, name, create=create) / "batch"
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d

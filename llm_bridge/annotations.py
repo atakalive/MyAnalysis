@@ -2,7 +2,7 @@
 import contextlib
 import json
 from common.filelock import exclusive_lock
-from common.paths import state_dir
+import dataset_config
 
 
 def _empty() -> dict:
@@ -10,63 +10,63 @@ def _empty() -> dict:
     return {"markers": [], "notes": []}
 
 
-def _path(name: str):
-    return state_dir(name) / "annotations.json"
+def _path(dataset: str, name: str, *, create: bool = True):
+    return dataset_config.state_dir(dataset, name, create=create) / "annotations.json"
 
 
 @contextlib.contextmanager
-def _lock(name: str):
+def _lock(dataset: str, name: str):
     """Advisory file lock for annotations read-modify-write serialization.
 
     Prevents data loss when multiple CLI processes (e.g. parallel LLM tool
     calls) concurrently submit/clear annotations for the same tab.
     """
-    lock_path = _path(name).with_suffix(".json.lock")
+    lock_path = _path(dataset, name, create=True).with_suffix(".json.lock")
     with exclusive_lock(lock_path):
         yield
 
 
-def read(name: str) -> dict:
-    p = _path(name)
+def read(dataset: str, name: str) -> dict:
+    p = _path(dataset, name, create=False)
     if not p.exists():
         return _empty()
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _write(name: str, data: dict) -> None:
-    p = _path(name)
+def _write(dataset: str, name: str, data: dict) -> None:
+    p = _path(dataset, name, create=True)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
 
 
-def submit(name: str, kind: str, **fields) -> None:
+def submit(dataset: str, name: str, kind: str, **fields) -> None:
     """Append a marker or note. kind: 'marker' | 'note'."""
     if kind not in ("marker", "note"):
         raise ValueError(f"unknown annotation kind: {kind!r}")
     bucket = "markers" if kind == "marker" else "notes"
-    with _lock(name):
-        data = read(name)
+    with _lock(dataset, name):
+        data = read(dataset, name)
         data[bucket].append(fields)
-        _write(name, data)
+        _write(dataset, name, data)
 
 
-def clear(name: str, kind: str | None = None) -> None:
+def clear(dataset: str, name: str, kind: str | None = None) -> None:
     """Clear annotations. kind=None clears both; else clears only that bucket."""
     if kind is None:
-        with _lock(name):
-            _write(name, _empty())
+        with _lock(dataset, name):
+            _write(dataset, name, _empty())
         return
     if kind not in ("marker", "note"):
         raise ValueError(f"unknown annotation kind: {kind!r}")
     bucket = "markers" if kind == "marker" else "notes"
-    with _lock(name):
-        data = read(name)
+    with _lock(dataset, name):
+        data = read(dataset, name)
         data[bucket] = []
-        _write(name, data)
+        _write(dataset, name, data)
 
 
-def start_watcher(tab) -> object:
+def start_watcher(tab, dataset: str) -> object:
     """Watch annotations.json via parent directory; call tab.apply_annotations(dict) on change.
 
     Watches state_dir (the parent directory) instead of annotations.json directly.
@@ -81,9 +81,9 @@ def start_watcher(tab) -> object:
     Returns the QFileSystemWatcher (caller must hold reference to keep it alive).
     """
     from PySide6.QtCore import QFileSystemWatcher
-    p = _path(tab.name)
+    p = _path(dataset, tab.name, create=True)
     if not p.exists():
-        _write(tab.name, _empty())
+        _write(dataset, tab.name, _empty())
     parent_dir = str(p.parent)
     # Parent the watcher to `tab` so it is destroyed when the tab is (Tier 2/3
     # teardown + close_tab). Unparented, the closure keeps `tab` alive and a
@@ -110,5 +110,5 @@ def start_watcher(tab) -> object:
         tab.apply_annotations(data)
 
     watcher.directoryChanged.connect(_on_dir_changed)
-    tab.apply_annotations(read(tab.name))
+    tab.apply_annotations(read(dataset, tab.name))
     return watcher

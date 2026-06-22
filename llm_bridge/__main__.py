@@ -5,7 +5,7 @@ import socket
 import sys
 from pathlib import Path
 
-from common.paths import analyses_root
+import dataset_config
 from llm_bridge import state, annotations, commands
 from llm_bridge.paths import active_state_path
 
@@ -32,18 +32,26 @@ def _check_tab_name(name: str) -> None:
         raise SystemExit(f"error: invalid tab name: {name!r}")
 
 
-def _check_analysis_exists(name: str) -> None:
-    if not name or "/" in name or "\\" in name or name in (".", ".."):
-        raise SystemExit(f"error: invalid analysis name: {name!r}")
-    root = analyses_root().resolve()
-    analysis_dir = (analyses_root() / name).resolve()
-    if not analysis_dir.is_relative_to(root):
-        raise SystemExit(f"error: analysis directory escapes analyses/: {name!r}")
-    if not analysis_dir.is_dir():
-        raise SystemExit(f"error: no analysis named {name!r} under analyses/")
-    analysis_file = (analysis_dir / "analysis.py").resolve()
-    if not analysis_file.is_relative_to(root) or not analysis_file.is_file():
-        raise SystemExit(f"error: no valid analysis.py for {name!r} under analyses/")
+def _check_analysis_exists(dataset: str, name: str) -> None:
+    try:
+        analysis_file = dataset_config.analysis_file(dataset, name)
+    except (ValueError, KeyError, RuntimeError) as e:
+        raise SystemExit(f"error: {e}")
+    if not analysis_file.is_file():
+        raise SystemExit(f"error: no analysis named {name!r} under {dataset!r}")
+
+
+def _resolve_dataset(args, active: dict | None = None, *,
+                     use_active_analysis: bool = False) -> str | None:
+    """優先順: --dataset 明示 → active.json の該当フィールド。解決不能なら None。"""
+    ds = getattr(args, "dataset", None)
+    if ds:
+        return ds
+    if active is None:
+        active = json.loads(active_state_path().read_text(encoding="utf-8")) \
+            if active_state_path().exists() else {}
+    return active.get("active_analysis_dataset") if use_active_analysis \
+        else active.get("dataset")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,9 +60,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_state = sub.add_parser("state", help="Print state.json for an analysis")
     p_state.add_argument("name", nargs="?")
+    p_state.add_argument("--dataset", default=None)
 
     sub.add_parser("active", help="Print active tab name and currently open dataset")
-    sub.add_parser("list-analyses", help="List analyses/ subdirs")
+    p_la = sub.add_parser("list-analyses", help="List the open dataset's analyses")
+    p_la.add_argument("--dataset", default=None)
     p_lds = sub.add_parser("list-datasets", help="List registered dataset names")
     p_lds.add_argument("--json", action="store_true", dest="json_out", default=False,
                         help="Output as JSON with format and path info")
@@ -96,10 +106,12 @@ def main(argv: list[str] | None = None) -> int:
     p_ann.add_argument("name")
     p_ann.add_argument("kind", choices=["marker", "note"])
     p_ann.add_argument("kvs", nargs="*")
+    p_ann.add_argument("--dataset", default=None)
 
     p_clr = sub.add_parser("clear-annotations", help="Clear annotations")
     p_clr.add_argument("name")
     p_clr.add_argument("kind", nargs="?", choices=["marker", "note"], default=None)
+    p_clr.add_argument("--dataset", default=None)
 
     args = parser.parse_args(argv)
 
@@ -110,11 +122,18 @@ def main(argv: list[str] | None = None) -> int:
             if not active.get("active_tab"):
                 print(json.dumps({}))
                 return 0
-            print(json.dumps(state.read(active["active_tab"]),
+            ds = _resolve_dataset(args, active, use_active_analysis=True)
+            if ds is None:
+                print(json.dumps({}))
+                return 0
+            print(json.dumps(state.read(ds, active["active_tab"]),
                              ensure_ascii=False, indent=2))
         else:
-            _check_analysis_exists(args.name)
-            print(json.dumps(state.read(args.name), ensure_ascii=False, indent=2))
+            ds = _resolve_dataset(args)
+            if ds is None:
+                raise SystemExit("error: no dataset open; pass --dataset")
+            _check_analysis_exists(ds, args.name)
+            print(json.dumps(state.read(ds, args.name), ensure_ascii=False, indent=2))
         return 0
 
     if args.cmd == "active":
@@ -126,16 +145,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "list-analyses":
-        root = analyses_root().resolve()
-        for d in sorted(analyses_root().glob("*")):
-            if d.name.startswith("_"):
-                continue
-            resolved = d.resolve()
-            if not resolved.is_relative_to(root):
-                continue
-            af = (resolved / "analysis.py").resolve()
-            if resolved.is_dir() and af.is_relative_to(root) and af.is_file():
-                print(d.name)
+        ds = _resolve_dataset(args)
+        if ds is None:
+            print("no dataset open; pass --dataset", file=sys.stderr)
+            return 0
+        try:
+            root = dataset_config.analyses_root(ds)
+        except (KeyError, RuntimeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 0
+        if root.is_dir():
+            root_resolved = root.resolve()
+            for d in sorted(root.glob("*")):
+                if d.name.startswith("_"):
+                    continue
+                resolved = d.resolve()
+                if not resolved.is_relative_to(root_resolved):
+                    continue
+                af = (resolved / "analysis.py").resolve()
+                if resolved.is_dir() and af.is_relative_to(root_resolved) and af.is_file():
+                    print(d.name)
         return 0
 
     if args.cmd == "list-datasets":
@@ -193,14 +222,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"warning: could not set format in myanalysis.toml: {e}", file=sys.stderr)
 
         if args.with_analysis is not None:
-            from newanalysis.__main__ import create_analysis
-
             analysis_name = args.with_analysis or args.name
-            try:
-                create_analysis(analysis_name, dataset=args.name, fmt=args.format)
-                print(f"created analyses/{analysis_name}/")
-            except (ValueError, FileExistsError) as e:
-                print(f"error creating analysis: {e}", file=sys.stderr)
+            # scaffold writes into the dataset directory, so only run it when the
+            # path exists on this host (same gate as set_format above).
+            if is_current_host and Path(args.path).exists():
+                from newanalysis.__main__ import create_analysis
+
+                try:
+                    create_analysis(analysis_name, dataset=args.name, fmt=args.format)
+                    print(f"created {args.name}/analyses/{analysis_name}/")
+                except (ValueError, FileExistsError, KeyError, RuntimeError) as e:
+                    print(f"error creating analysis: {e}", file=sys.stderr)
+            else:
+                print(
+                    "scaffold は当該ホストにパスが無いためスキップしました",
+                    file=sys.stderr,
+                )
 
         verb = "registered" if result["created"] else "updated"
         print(
@@ -289,14 +326,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "annotate":
-        _check_analysis_exists(args.name)
+        ds = _resolve_dataset(args)
+        if ds is None:
+            raise SystemExit("error: no dataset open; pass --dataset")
+        _check_analysis_exists(ds, args.name)
         fields = _parse_kvs(args.kvs)
-        annotations.submit(args.name, args.kind, **fields)
+        annotations.submit(ds, args.name, args.kind, **fields)
         return 0
 
     if args.cmd == "clear-annotations":
-        _check_analysis_exists(args.name)
-        annotations.clear(args.name, args.kind)
+        ds = _resolve_dataset(args)
+        if ds is None:
+            raise SystemExit("error: no dataset open; pass --dataset")
+        _check_analysis_exists(ds, args.name)
+        annotations.clear(ds, args.name, args.kind)
         return 0
 
     return 1

@@ -36,7 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import FunctionType, ModuleType
 
-from common.paths import analyses_root, repo_root
+from common.paths import repo_root
+import dataset_config
 
 # ---------------------------------------------------------------------------
 # Skip sets
@@ -71,7 +72,7 @@ class ReloadReport:
     skipped_syntax: list[str] = field(default_factory=list)  # "path:line: msg"
     failed: list[str] = field(default_factory=list)          # "module: err" (rolled back)
     warnings: list[str] = field(default_factory=list)
-    analyses_changed: list[str] = field(default_factory=list)
+    analyses_changed: list[tuple[str, str]] = field(default_factory=list)  # (dataset, name)
 
     @property
     def ok(self) -> bool:
@@ -90,7 +91,7 @@ class ReloadReport:
         if self.analyses_changed:
             parts.append(
                 "analyses changed (use scope=tab): "
-                + ", ".join(self.analyses_changed)
+                + ", ".join(f"{ds}/{nm}" for ds, nm in self.analyses_changed)
             )
         if self.skipped_syntax:
             parts.append("SYNTAX ERROR — nothing reloaded:\n  " + "\n  ".join(self.skipped_syntax))
@@ -592,9 +593,8 @@ class HotReloader:
     def __init__(self, root: Path | None = None):
         self.root = (root or repo_root()).resolve()
         self.records: dict[str, ModuleRecord] = {}
-        self.analyses: dict[str, str] = {}  # name -> sha1
+        self.analyses: dict[tuple[str, str], str] = {}  # (dataset, name) -> baseline sha1
         self.scan()
-        self._scan_analyses(initial=True)
 
     # -- discovery --
 
@@ -620,22 +620,18 @@ class HotReloader:
                 continue
             self.records[name] = ModuleRecord(name, mod, path, sha)
 
-    def _scan_analyses(self, initial: bool = False) -> dict[str, str]:
-        """Return {analysis_name: sha1} for analyses/*/analysis.py. Seeds baseline
-        on the initial call."""
-        current: dict[str, str] = {}
-        root = analyses_root()
-        if root.is_dir():
-            for d in sorted(root.glob("*")):
-                af = d / "analysis.py"
-                if not af.is_file():
-                    continue
-                try:
-                    current[d.name] = _file_sha1(af.resolve())
-                except OSError:
-                    continue
-        if initial:
-            self.analyses = dict(current)
+    def _scan_analyses(self, open_pairs) -> dict[tuple[str, str], str]:
+        """Return {(dataset, name): sha1} for the currently open analysis tabs.
+
+        open_pairs: Iterable[(dataset, name)] = open analysis tabs. Tier-2 reload
+        only applies to open tabs, so we never glob unopened analyses.
+        """
+        current: dict[tuple[str, str], str] = {}
+        for ds, nm in open_pairs:
+            try:
+                current[(ds, nm)] = _file_sha1(dataset_config.analysis_file(ds, nm))
+            except (OSError, ValueError, KeyError, RuntimeError):
+                continue
         return current
 
     def changed_modules(self) -> list[ModuleRecord]:
@@ -649,29 +645,48 @@ class HotReloader:
                 out.append(rec)
         return out
 
-    def changed_analyses(self) -> list[str]:
-        current = self._scan_analyses()
-        changed = [
-            name for name, sha in current.items()
-            if self.analyses.get(name) != sha
-        ]
-        return sorted(changed)
+    def changed_analyses(self, open_pairs) -> list[tuple[str, str]]:
+        """Report open analyses whose sha diverged from their clean baseline.
+
+        Only keys with an existing baseline (registered at tab-open time via
+        mark_analysis_clean) are considered — baselines are never seeded
+        implicitly here, so an analysis edited after it was opened reports on the
+        first reload (reviewer P1 R3).
+        """
+        current = self._scan_analyses(open_pairs)
+        return sorted(
+            k for k, sha in current.items()
+            if k in self.analyses and self.analyses[k] != sha
+        )
 
     # -- reload --
 
-    def mark_analysis_clean(self, name: str) -> None:
-        """Record an analysis's current sha as the new baseline (after Tier 2)."""
-        af = (analyses_root() / name / "analysis.py").resolve()
+    def mark_analysis_clean(self, dataset: str, name: str) -> None:
+        """Record an analysis's current sha as the new baseline.
+
+        Used both for tab-open baseline registration and Tier-2 post-reload
+        re-baseline.
+        """
         try:
-            self.analyses[name] = _file_sha1(af)
-        except OSError:
-            self.analyses.pop(name, None)
+            af = dataset_config.analysis_file(dataset, name)
+            self.analyses[(dataset, name)] = _file_sha1(af)
+        except (OSError, ValueError, KeyError, RuntimeError):
+            self.analyses.pop((dataset, name), None)
 
     def reload(self, ctx: object = None) -> ReloadReport:
         """Tier 1: syntax-guard + patch every changed repo module in place."""
         report = ReloadReport()
         self.scan()
-        report.analyses_changed = self.changed_analyses()
+        window = getattr(ctx, "window", None)
+        open_pairs = set()
+        if window is not None:
+            for tab in window.tabs():
+                spec = getattr(tab, "session_spec", None) or {}
+                if spec.get("kind") == "analysis":
+                    ds = spec.get("dataset") or getattr(tab, "dataset", None)
+                    if ds:
+                        open_pairs.add((ds, tab.name))
+        report.analyses_changed = self.changed_analyses(open_pairs)
         changed = self.changed_modules()
         if not changed:
             return report

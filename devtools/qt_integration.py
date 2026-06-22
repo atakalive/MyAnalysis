@@ -221,6 +221,10 @@ class HotReloadController(QObject):
         self._window = window
         self._reloader = hotreload.HotReloader()
 
+    def note_analysis_opened(self, dataset: str, name: str) -> None:
+        """解析タブを開いた時点の SHA を clean baseline として登録する。"""
+        self._reloader.mark_analysis_clean(dataset, name)
+
     # -- guards --
 
     def _busy(self) -> str | None:
@@ -246,9 +250,21 @@ class HotReloadController(QObject):
         busy = self._busy()
         if busy:
             return busy
-        from common.paths import analyses_root
+        import dataset_config
 
-        af = analyses_root() / name / "analysis.py"
+        window = self._window
+        old_tab = next((t for t in window.tabs() if t.name == name), None)
+        if old_tab is None:
+            return f"reload-tab-error:no open tab named {name!r}"
+        dataset = (getattr(old_tab, "session_spec", None) or {}).get("dataset") \
+            or getattr(old_tab, "dataset", None)
+        if not dataset:
+            return f"reload-tab-error:cannot resolve dataset for tab {name!r}"
+
+        try:
+            af = dataset_config.analysis_file(dataset, name)
+        except (ValueError, KeyError, RuntimeError) as e:
+            return f"reload-tab-error:{e}"
         if not af.is_file():
             return f"reload-tab-error:no analysis named {name!r}"
         try:
@@ -256,30 +272,27 @@ class HotReloadController(QObject):
         except SyntaxError as e:
             return f"reload-tab-error:syntax {e.filename}:{e.lineno}: {e.msg}"
 
-        window = self._window
-        old_tab = next((t for t in window.tabs() if t.name == name), None)
-        if old_tab is None:
-            return f"reload-tab-error:no open tab named {name!r}"
-
-        captured_state = _m("llm_bridge.state").read(name)
+        captured_state = _m("llm_bridge.state").read(dataset, name)
         view = _capture_view(old_tab)
         sandbox = QWidget()
         try:
-            new_tab, mod = _m("llm_bridge")._build_analysis(sandbox, name)
+            new_tab, mod = _m("llm_bridge")._build_analysis(sandbox, dataset, name)
         except Exception as e:  # noqa: BLE001 — keep old tab on any build failure
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(name)(captured_state)
+            _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return f"reload-tab-error:build failed: {e!r} (old tab retained)"
         if new_tab.name != name:
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(name)(captured_state)
+            _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return (
                 f"reload-tab-error:tab name mismatch: expected {name!r}, "
                 f"got {new_tab.name!r} (old tab retained)"
             )
-        if not _m("llm_bridge")._sync_new_tab_state(new_tab, mod, name, captured_state):
+        if not _m("llm_bridge")._sync_new_tab_state(
+            new_tab, mod, dataset, name, captured_state
+        ):
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(name)(captured_state)
+            _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return (
                 "reload-tab-error:apply_state / refresh-state failed (old tab retained)"
             )
@@ -290,7 +303,7 @@ class HotReloadController(QObject):
         window.add_tab(new_tab)
         window.set_active_tab(name)
         _restore_view(new_tab, view)
-        self._reloader.mark_analysis_clean(name)
+        self._reloader.mark_analysis_clean(dataset, name)
         return f"reloaded-tab:{name}"
 
     # -- Tier 3 --

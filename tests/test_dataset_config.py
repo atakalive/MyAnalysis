@@ -227,3 +227,56 @@ def test_set_format_handles_no_trailing_newline(ds_dir):
     assert 'work_dir = "_work"format' not in text
     assert dataset_config.load_config("ds")["format"] == "custom"
     assert dataset_config.load_config("ds")["work_dir"] == "_work"
+
+
+# ---- (c) analysis path-resolution layer (Issue #37) ----
+
+def test_analyses_root_no_mkdir(ds_dir):
+    root = dataset_config.analyses_root("ds")
+    assert root == ds_dir / "analyses"
+    assert not root.exists()  # read-only: never created
+
+
+def test_analysis_file_resolves_without_existence_check(ds_dir):
+    f = dataset_config.analysis_file("ds", "an1")
+    assert f == (ds_dir / "analyses" / "an1" / "analysis.py").resolve()
+    assert not f.exists()  # existence is the caller's concern
+
+
+@pytest.mark.parametrize("bad", ["../etc", "a/b", "a\\b", ".", "..", ""])
+def test_analysis_file_rejects_traversal(ds_dir, bad):
+    with pytest.raises(ValueError):
+        dataset_config.analysis_file("ds", bad)
+
+
+def test_analysis_out_dir_create_true_makes_tree(ds_dir):
+    p = dataset_config.analysis_out_dir("ds", "an1", create=True)
+    assert p == ds_dir / "_work" / "analyses" / "an1"
+    assert p.is_dir()
+
+
+def test_state_dir_create_false_no_mkdir(ds_dir):
+    d = dataset_config.state_dir("ds", "an1", create=False)
+    assert d == ds_dir / "_work" / "analyses" / "an1" / "state"
+    # create=False must not write myanalysis.toml nor grow the work_dir tree.
+    assert not (ds_dir / "myanalysis.toml").exists()
+    assert not (ds_dir / "_work").exists()
+
+
+def test_state_dir_create_true_makes_tree(ds_dir):
+    d = dataset_config.state_dir("ds", "an1", create=True)
+    assert d.is_dir()
+    assert (ds_dir / "myanalysis.toml").is_file()
+
+
+def test_batch_dir_create_true(ds_dir):
+    d = dataset_config.batch_dir("ds", "an1")
+    assert d == ds_dir / "_work" / "analyses" / "an1" / "batch"
+    assert d.is_dir()
+
+
+def test_get_work_dir_create_false_no_side_effects(ds_dir):
+    out = dataset_config.get_work_dir("ds", create=False)
+    assert out == ds_dir / "_work"
+    assert not out.exists()
+    assert not (ds_dir / "myanalysis.toml").exists()

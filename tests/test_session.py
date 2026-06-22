@@ -411,3 +411,41 @@ def test_open_dataset_nonexistent_dir_returns_error(ds_env, monkeypatch):
     result = session.open_dataset(win, "ds_a")
     assert result.startswith("error:")
     assert win.noted_datasets == []
+
+
+# ---- active_tab focus dataset-match guard (reviewer P1 R2) ----
+
+class _FocusWindow(_DispatchWindow):
+    """Window whose add-tab simulates the same-name cross-dataset collision and
+    whose tabs() already holds a foreign-dataset same-named tab."""
+
+    def __init__(self, preexisting):
+        super().__init__()
+        self._tabs = list(preexisting)
+        self.activated: list[str] = []
+
+    def dispatch_command(self, verb, **kwargs):
+        if verb == "add-tab":
+            # §2a collision guard would raise for a same-name other-dataset tab.
+            raise ValueError("same-named analysis already open for another dataset")
+
+    def set_active_tab(self, name):
+        self.activated.append(name)
+        return True
+
+
+def test_open_dataset_active_tab_focus_dataset_guard(ds_env):
+    """dsA/demo が開いている状態で dsB を開くと、衝突で dsB/demo は skip され、
+    かつ active_tab 復元が dsA/demo を誤 focus しない（reviewer P1 R2）。"""
+    session._touched.clear()
+    payload = {
+        "version": 1, "dataset": "ds_b", "active_tab": "demo",
+        "tabs": [{"name": "demo", "kind": "analysis", "module": "demo"}],
+    }
+    session.write_session("ds_b", payload)
+
+    foreign = _FakeTab("demo", {"kind": "analysis", "name": "demo", "dataset": "ds_a"})
+    win = _FocusWindow([foreign])
+    result = session.open_dataset(win, "ds_b")
+    assert result == "restored:0"  # collision → demo skipped
+    assert win.activated == []  # foreign dsA/demo NOT focused

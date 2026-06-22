@@ -296,6 +296,57 @@ def test_on_reload_reregisters_window_verbs():
     win.set_session_saver.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Analysis baseline: (dataset, name) keying + tab-open baseline (reviewer P1 R3)
+# ---------------------------------------------------------------------------
+
+
+def test_changed_analyses_baseline_on_open(monkeypatch, tmp_path):
+    from devtools.hotreload import HotReloader
+
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    ds, name = "dsx", "an1"
+    d = tmp_path / ds / "analyses" / name
+    d.mkdir(parents=True)
+    af = d / "analysis.py"
+    af.write_text("V = 1\n", encoding="utf-8")
+
+    hr = HotReloader()
+    pairs = {(ds, name)}
+
+    # Before any baseline is registered, an open analysis is never reported
+    # (no false "changed" at startup; reviewer P1 / reviewer P2-1).
+    assert hr.changed_analyses(pairs) == []
+
+    # Tab-open registers a clean baseline.
+    hr.mark_analysis_clean(ds, name)
+    assert hr.changed_analyses(pairs) == []
+
+    # Edit after open → reported on the first reload (reviewer P1 R3).
+    af.write_text("V = 2\n", encoding="utf-8")
+    assert hr.changed_analyses(pairs) == [(ds, name)]
+
+    # Tier-2 re-baseline clears it.
+    hr.mark_analysis_clean(ds, name)
+    assert hr.changed_analyses(pairs) == []
+
+
+def test_changed_analyses_no_setdefault(monkeypatch, tmp_path):
+    """A scanned-but-unregistered analysis must not seed a baseline implicitly."""
+    from devtools.hotreload import HotReloader
+
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    ds, name = "dsy", "an2"
+    d = tmp_path / ds / "analyses" / name
+    d.mkdir(parents=True)
+    (d / "analysis.py").write_text("V = 1\n", encoding="utf-8")
+
+    hr = HotReloader()
+    pairs = {(ds, name)}
+    hr.changed_analyses(pairs)  # scan without registering
+    assert (ds, name) not in hr.analyses
+
+
 def test_toposort_dependency_first(tmp_path):
     (tmp_path / "a.py").write_text("import b\nx = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("y = 1\n", encoding="utf-8")

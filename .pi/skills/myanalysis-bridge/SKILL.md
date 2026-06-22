@@ -5,7 +5,7 @@ description: >
   `python -m llm_bridge`. Use whenever the user asks about the current analysis
   state, wants to manipulate tabs/panels/splits, take snapshots, or add markers
   and notes to a running analysis. Also covers reading measurement datasets and
-  authoring new analyses under analyses/<name>/analysis.py.
+  authoring new analyses under <dataset_dir>/analyses/<name>/analysis.py.
 ---
 
 # MyAnalysis bridge
@@ -23,10 +23,11 @@ user's chat messages are instructions.
 ## Reading state (no GUI required)
 
 - `python -m llm_bridge active` — print the active tab name and currently open dataset.
-- `python -m llm_bridge state [name]` — print `current.json` for an analysis.
-  With no `name`, prints state for the active tab.
-- `python -m llm_bridge list-analyses` — list `analyses/` subdirs that define an
-  `analysis.py`.
+- `python -m llm_bridge state [name] [--dataset <ds>]` — print `current.json` for
+  an analysis. With no `name`, prints state for the active analysis tab. Resolves
+  the dataset from the open GUI (`active.json`) unless `--dataset` is given.
+- `python -m llm_bridge list-analyses [--dataset <ds>]` — list the open dataset's
+  `analyses/` subdirs that define an `analysis.py` (current dataset only).
 - `python -m llm_bridge list-commands [name]` — list registered verbs
   (informational). With `name`, lists tab-tier verbs.
 
@@ -104,7 +105,7 @@ The primary analysis workflow is code execution, not GUI driving.
      視覚的解釈と突合すること。
 7. **Iterate**: repeat 4-6 until the question is answered.
 8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
-9. **Promote**: `python -m newanalysis <name> --dataset <key>` → migrate work_dir code into `analyses/<name>/analysis.py`.
+9. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required) → migrate work_dir code into `<dataset_dir>/analyses/<name>/analysis.py`.
 
 Analysis output goes to the dataset's `work_dir` (default `<dataset_dir>/_work`,
 configurable per dataset in `myanalysis.toml`). Measurement files (CSV etc.) are
@@ -161,7 +162,8 @@ and code snippets. The `myanalysis.toml` sidecar is generated on first save.
 
 ## Authoring an analysis
 
-Create `analyses/<name>/analysis.py` defining:
+Create `<dataset_dir>/analyses/<name>/analysis.py` (enumerated for the currently
+open dataset only) defining:
 
 - `build_tab(parent, data) -> AnalysisTab` — builds the tab. Inside it, call
   `llm_bridge.attach_tab(tab, state_provider)` so state/snapshot/annotations are

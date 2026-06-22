@@ -210,14 +210,16 @@ def test_list_datasets_cli(monkeypatch, capsys):
 
 # ---- CLI: list-analyses excludes underscore-prefixed dirs ----
 
-def test_list_analyses_excludes_underscore(fake_roots, capsys):
-    analyses = fake_roots / "analyses"
+def test_list_analyses_excludes_underscore(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+    ds = "ds_test"
+    analyses = tmp_path / ds / "analyses"
     for name in ("_viewer", "real_one"):
         d = analyses / name
         d.mkdir(parents=True)
         (d / "analysis.py").write_text("# stub\n", encoding="utf-8")
 
-    rc = bridge_main.main(["list-analyses"])
+    rc = bridge_main.main(["list-analyses", "--dataset", ds])
     assert rc == 0
     names = capsys.readouterr().out.splitlines()
     assert "_viewer" not in names

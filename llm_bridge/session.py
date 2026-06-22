@@ -46,30 +46,12 @@ def note_dataset(name: str) -> None:
 def _resolve_work_dir_readonly(dataset: str) -> Path:
     """Resolve a dataset's work_dir WITHOUT side effects (no toml/dir creation).
 
-    Same logic as dataset_config.get_work_dir but without ensure_config() and
-    mkdir(). Does not absorb exceptions — KeyError (unregistered dataset),
-    RuntimeError (no host path), FileNotFoundError (no toml), ValueError (bad
+    Delegates to dataset_config.get_work_dir(create=False): validation +
+    resolution only, no ensure_config() / mkdir(). Does not absorb exceptions —
+    KeyError (unregistered dataset), RuntimeError (no host path), ValueError (bad
     work_dir) all propagate to the caller for individual handling.
     """
-    from pathlib import PureWindowsPath
-
-    dataset_dir = config.get_dataset_dir(dataset)
-    work_dir = dataset_config.load_config(dataset)["work_dir"]
-
-    p = Path(work_dir)
-    pw = PureWindowsPath(work_dir)
-    if p.is_absolute():
-        return p
-    if pw.drive:
-        raise ValueError(f"work_dir にドライブ相対パスは使えません: {work_dir!r}")
-    if pw.root:
-        raise ValueError(f"work_dir にルート相対パスは使えません: {work_dir!r}")
-    if ".." in pw.parts:
-        raise ValueError(f"work_dir に '..' は使えません: {work_dir!r}")
-    resolved = dataset_dir / p
-    if not resolved.resolve().is_relative_to(dataset_dir.resolve()):
-        raise ValueError(f"work_dir が dataset dir 外に解決されました: {resolved}")
-    return resolved
+    return dataset_config.get_work_dir(dataset, create=False)
 
 
 def read_session(dataset: str) -> dict | None:
@@ -296,7 +278,9 @@ def open_dataset(window, dataset: str) -> str:
                         )
                         restored += 1
                     elif kind == "analysis":
-                        window.dispatch_command("add-tab", name=entry.get("module"))
+                        window.dispatch_command(
+                            "add-tab", name=entry.get("module"), dataset=dataset
+                        )
                         restored += 1
                 except Exception:
                     _log.warning(
@@ -306,7 +290,15 @@ def open_dataset(window, dataset: str) -> str:
 
             active_tab = sess.get("active_tab")
             if active_tab is not None:
-                window.set_active_tab(active_tab)
+                # 開いた dataset に属するタブのときだけ focus する（同名衝突で別
+                # dataset の同名タブを誤 focus しないため。reviewer P1 R2）。
+                t = next(
+                    (t for t in window.tabs() if t.name == active_tab), None
+                )
+                t_ds = (getattr(t, "session_spec", None) or {}).get("dataset") \
+                    if t is not None else None
+                if t is not None and t_ds == dataset:
+                    window.set_active_tab(active_tab)
 
             if restored >= 1:
                 window.close_tab("(empty)")

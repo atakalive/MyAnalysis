@@ -34,6 +34,7 @@
 # --- dialogs ---
 "dlg.open_analysis.title"     = "解析を開く"
 "dlg.open_analysis.empty"     = "解析がありません"
+"dlg.open_analysis.no_dataset" = "先にデータセットを開いてください。"
 "dlg.open_analysis.label"     = "解析を選択:"
 "dlg.open_dataset.title"      = "データセットを開く"
 "dlg.open_dataset.empty"      = "データセットが登録されていません"

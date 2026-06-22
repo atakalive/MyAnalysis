@@ -23,9 +23,9 @@ def validate_identifier_name(name: str, *, check_reserved: bool = True) -> None:
     拒否リスト方式。英大小文字・非ASCII (日本語等)・任意位置の数字・'-'・'_'
     は許可し、本当に危険なものだけ拒否する。
 
-    check_reserved=True は解析名用 = analyses/<name>/ という実フォルダになるため、
-    汎用ハイジーンに加えて Windows のファイル名規則 (禁止文字・末尾ドット・予約
-    デバイス名) も適用する。
+    check_reserved=True は解析名用 = <dataset_dir>/analyses/<name>/ という実フォルダに
+    なるため、汎用ハイジーンに加えて Windows のファイル名規則 (禁止文字・末尾ドット・
+    予約デバイス名) も適用する。
     check_reserved=False はデータセット名用 = DATASETS の dict キーにしかならず
     パスにならないので、汎用ハイジーンのみ。
     """
@@ -58,7 +58,7 @@ def validate_name(name: str) -> None:
 
     Rejects empty strings, path separators (/ \\), relative-path
     components (. and ..), and NUL bytes.  This prevents constructing
-    paths outside data/analyses/.
+    paths outside the analysis output tree.
     """
     from common.i18n import tr
     if not name or "/" in name or "\\" in name or name in (".", "..") or "\0" in name:
@@ -76,32 +76,3 @@ def repo_root() -> Path:
 def i18n_dir() -> Path:
     """Return <repo>/i18n/ (committed catalogs; not created)."""
     return repo_root() / "i18n"
-
-
-def analyses_root() -> Path:
-    return repo_root() / "analyses"
-
-
-def analysis_out_dir(name: str) -> Path:
-    """Return data/analyses/<name>/, creating it if missing.
-
-    name must be a simple directory name (no /, \\, ., or ..).
-    """
-    validate_name(name)
-    p = repo_root() / "data" / "analyses" / name
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def state_dir(name: str) -> Path:
-    """Return data/analyses/<name>/state/, creating it if missing."""
-    p = analysis_out_dir(name) / "state"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def batch_dir(name: str) -> Path:
-    """Return data/analyses/<name>/batch/, creating it if missing."""
-    p = analysis_out_dir(name) / "batch"
-    p.mkdir(parents=True, exist_ok=True)
-    return p

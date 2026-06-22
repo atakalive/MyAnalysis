@@ -1,16 +1,16 @@
 import json
 import time
 
-from llm_bridge import commands
+from llm_bridge import commands, state
 from llm_bridge.paths import active_state_path
-from common.paths import analyses_root, repo_root
+import dataset_config
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "list_analyses",
-            "description": "List analysis names available under analyses/.",
+            "description": "List analysis names available under the currently open dataset.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -142,8 +142,17 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
     if "__parse_error__" in args:
         return json.dumps({"error": args["__parse_error__"]})
     if name == "list_analyses":
+        cur = window.current_dataset
+        if cur is None:
+            return json.dumps([])
+        try:
+            root = dataset_config.analyses_root(cur)
+        except (KeyError, RuntimeError):
+            return json.dumps([])
+        if not root.is_dir():
+            return json.dumps([])
         names = [
-            d.name for d in analyses_root().glob("*") if (d / "analysis.py").is_file()
+            d.name for d in root.glob("*") if (d / "analysis.py").is_file()
         ]
         return json.dumps(sorted(names))
     if name == "list_open_tabs":
@@ -198,10 +207,16 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
             or tab_name in (".", "..")
         ):
             return json.dumps({"error": f"invalid name: {tab_name!r}"})
-        p = repo_root() / "data" / "analyses" / tab_name / "state" / "current.json"
-        if not p.exists():
+        # named tab の state は、その名前で開いている解析タブ自身の dataset から
+        # 引く（current_dataset と乖離し得るため）。解析タブでなければ {} を返す。
+        t = next((t for t in window.tabs() if t.name == tab_name), None)
+        spec = getattr(t, "session_spec", None) if t is not None else None
+        if not isinstance(spec, dict) or spec.get("kind") != "analysis":
             return json.dumps({})
-        return json.dumps(json.loads(p.read_text(encoding="utf-8")), ensure_ascii=False)
+        ds = spec.get("dataset") or getattr(t, "dataset", None)
+        if ds is None:
+            return json.dumps({})
+        return json.dumps(state.read(ds, tab_name), ensure_ascii=False)
     return json.dumps({"error": f"unknown tool: {name}"})
 
 

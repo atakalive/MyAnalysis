@@ -187,19 +187,46 @@ class TestMessagePayload:
 # ---------------------------------------------------------------------------
 
 
+DS = "ds_test"
+
+
+class _FakeTab:
+    def __init__(self, name, session_spec=None, dataset=None):
+        self.name = name
+        if session_spec is not None:
+            self.session_spec = session_spec
+        if dataset is not None:
+            self.dataset = dataset
+
+
+class _FakeWindow:
+    """Minimal Qt-free window for gui.tools._dispatch (current_dataset + tabs)."""
+    def __init__(self, current_dataset=None, tabs=()):
+        self._current_dataset = current_dataset
+        self._tabs = list(tabs)
+
+    @property
+    def current_dataset(self):
+        return self._current_dataset
+
+    def tabs(self):
+        return self._tabs
+
+
 class TestDispatchDirectReads:
     def test_list_analyses(self, tmp_path, monkeypatch):
-        analyses = tmp_path / "analyses"
-        analyses.mkdir()
+        monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+        analyses = tmp_path / DS / "analyses"
+        analyses.mkdir(parents=True)
         (analyses / "alpha").mkdir()
         (analyses / "alpha" / "analysis.py").write_text("# ok")
         (analyses / "beta").mkdir()
         # beta has no analysis.py — should be excluded
-        monkeypatch.setattr("gui.tools.analyses_root", lambda: analyses)
 
         from gui.tools import _dispatch
 
-        result = json.loads(_dispatch(None, "list_analyses", {}))
+        win = _FakeWindow(current_dataset=DS)
+        result = json.loads(_dispatch(win, "list_analyses", {}))
         assert result == ["alpha"]
 
     def test_get_active_tab_missing(self, tmp_path, monkeypatch):
@@ -222,32 +249,58 @@ class TestDispatchDirectReads:
         assert result == {"active_tab": "_demo"}
 
     def test_get_state_read_only(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("gui.tools.repo_root", lambda: tmp_path)
-        state_dir = tmp_path / "data" / "analyses" / "mytest" / "state"
+        monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+        state_dir = tmp_path / DS / "_work" / "analyses" / "mytest" / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "current.json").write_text('{"unit": "A"}')
 
         from gui.tools import _dispatch
 
-        result = json.loads(_dispatch(None, "get_state", {"name": "mytest"}))
+        tab = _FakeTab("mytest", session_spec={"kind": "analysis", "dataset": DS})
+        win = _FakeWindow(current_dataset=DS, tabs=[tab])
+        result = json.loads(_dispatch(win, "get_state", {"name": "mytest"}))
         assert result == {"unit": "A"}
 
     def test_get_state_missing_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("gui.tools.repo_root", lambda: tmp_path)
+        monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
 
         from gui.tools import _dispatch
 
-        result = json.loads(_dispatch(None, "get_state", {"name": "nonexist"}))
+        # no open tab named "nonexist" → {} (read path never resolves work_dir).
+        win = _FakeWindow(current_dataset=DS, tabs=[])
+        result = json.loads(_dispatch(win, "get_state", {"name": "nonexist"}))
         assert result == {}
-        assert not (tmp_path / "data" / "analyses" / "nonexist").exists()
+        assert not (tmp_path / DS / "_work").exists()
 
     def test_get_state_traversal_blocked(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("gui.tools.repo_root", lambda: tmp_path)
+        from gui.tools import _dispatch
+
+        win = _FakeWindow(current_dataset=DS, tabs=[])
+        result = json.loads(_dispatch(win, "get_state", {"name": "../etc"}))
+        assert "error" in result
+
+    def test_get_state_uses_tab_dataset_not_current(self, tmp_path, monkeypatch):
+        """active タブ a が dsA・current_dataset=dsB のとき dsA/a の state を返す。"""
+        monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+        sd = tmp_path / "dsA" / "_work" / "analyses" / "a" / "state"
+        sd.mkdir(parents=True)
+        (sd / "current.json").write_text('{"from": "dsA"}')
 
         from gui.tools import _dispatch
 
-        result = json.loads(_dispatch(None, "get_state", {"name": "../etc"}))
-        assert "error" in result
+        tab = _FakeTab("a", session_spec={"kind": "analysis", "dataset": "dsA"})
+        win = _FakeWindow(current_dataset="dsB", tabs=[tab])
+        result = json.loads(_dispatch(win, "get_state", {"name": "a"}))
+        assert result == {"from": "dsA"}
+
+    def test_get_state_figure_viewer_returns_empty(self, tmp_path, monkeypatch):
+        """同名 figure viewer が開いているとき get_state は {}（kind!=analysis）。"""
+        from gui.tools import _dispatch
+
+        tab = _FakeTab("v", session_spec={"kind": "figure", "dataset": DS})
+        win = _FakeWindow(current_dataset=DS, tabs=[tab])
+        result = json.loads(_dispatch(win, "get_state", {"name": "v"}))
+        assert result == {}
 
     def test_parse_error_forwarded(self):
         from gui.tools import _dispatch

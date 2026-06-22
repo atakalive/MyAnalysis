@@ -1,12 +1,12 @@
 """Per-tab state read/write. State is JSON describing current selection."""
 import json
 from collections.abc import Callable
-from common.paths import state_dir
+import dataset_config
 
 
-def writer(name: str) -> Callable[[dict], None]:
-    """Return an atomic writer for data/analyses/<name>/state/current.json."""
-    target = state_dir(name) / "current.json"
+def writer(dataset: str, name: str) -> Callable[[dict], None]:
+    """Return an atomic writer for <work_dir>/analyses/<name>/state/current.json."""
+    target = dataset_config.state_dir(dataset, name, create=True) / "current.json"
     def _write(d: dict) -> None:
         tmp = target.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -14,9 +14,9 @@ def writer(name: str) -> Callable[[dict], None]:
     return _write
 
 
-def read(name: str) -> dict:
-    """Read state. Returns {} if file does not exist."""
-    p = state_dir(name) / "current.json"
+def read(dataset: str, name: str) -> dict:
+    """Read state. Returns {} if file does not exist (no mkdir / toml side effect)."""
+    p = dataset_config.state_dir(dataset, name, create=False) / "current.json"
     if not p.exists():
         return {}
     return json.loads(p.read_text(encoding="utf-8"))
