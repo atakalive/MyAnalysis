@@ -20,6 +20,10 @@
 "menu.help"                   = "ヘルプ(&H)"
 "menu.help.about"             = "バージョン情報"
 "menu.tab.close"              = "タブを閉じる"
+"menu.dev"                    = "開発(&D)"
+"menu.dev.reload"             = "コード再読み込み"
+"menu.dev.rebuild"            = "アプリ再構築"
+"menu.dev.restart"            = "再起動して復元"
 
 # --- figure panel ---
 "figure.menu.copy_image"      = "画像をコピー"
@@ -60,6 +64,14 @@
 "err.save_partial.body"       = "保存に失敗したデータセット:\n{datasets}"
 "err.register.title"          = "登録エラー"
 "err.template_failed.title"   = "解析雛形の作成に失敗"
+
+# --- dev (devtools/qt_integration.py) ---
+"dev.reload.title"            = "コード再読み込み"
+"dev.abort.syntax.title"      = "再構築中止（構文エラー）"
+"dev.abort.title"             = "再構築中止"
+"dev.rebuild_failed.title"    = "アプリ再構築に失敗"
+"dev.restart_abort.title"     = "再起動中止"
+"dev.save_failed.body"        = "セッション保存に失敗: {datasets}"
 
 # --- status ---
 "status.active"               = "アクティブ: {name}"

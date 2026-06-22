@@ -40,3 +40,18 @@ def test_language_switch_live_reflects(qapp, tmp_path, monkeypatch):
     assert en_title != ja_title
     assert ja_title == "ファイル(&F)"
     assert en_title == i18n._catalogs["en"]["menu.file"]
+
+
+def test_retranslate_hooks_fire_and_never_raise(qapp):
+    """Menus built outside ToolWindow (e.g. the devtools 開発 menu) re-translate
+    via register_retranslate_hook; a broken hook must not block the others."""
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    calls = []
+    win.register_retranslate_hook(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    win.register_retranslate_hook(lambda: calls.append(1))
+
+    win.retranslate()  # must not raise despite the first hook throwing
+
+    assert calls == [1]

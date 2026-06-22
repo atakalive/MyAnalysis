@@ -20,6 +20,7 @@ IN_FILES = [
     "common/paths.py",
     "dataset_config.py",
     "tool.py",
+    "devtools/qt_integration.py",
 ]
 
 

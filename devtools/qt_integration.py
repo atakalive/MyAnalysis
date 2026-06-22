@@ -327,7 +327,9 @@ class HotReloadController(QObject):
                     cmd_id, "failed", 3, error="syntax: " + "; ".join(errs)
                 )
                 QMessageBox.critical(
-                    old_window, "再構築中止（構文エラー）", "\n".join(errs)
+                    old_window,
+                    _m("common.i18n").tr("dev.abort.syntax.title"),
+                    "\n".join(errs),
                 )
                 return
 
@@ -337,10 +339,11 @@ class HotReloadController(QObject):
                 self._log_reload_result(
                     cmd_id, "failed", 3, error=f"save_all failed: {failed}"
                 )
+                tr = _m("common.i18n").tr
                 QMessageBox.critical(
                     old_window,
-                    "再構築中止",
-                    "セッション保存に失敗: " + ", ".join(failed),
+                    tr("dev.abort.title"),
+                    tr("dev.save_failed.body", datasets=", ".join(failed)),
                 )
                 return
 
@@ -387,7 +390,9 @@ class HotReloadController(QObject):
                 old_window.show()
             except Exception:
                 pass
-            QMessageBox.critical(old_window, "アプリ再構築に失敗", tb)
+            QMessageBox.critical(
+                old_window, _m("common.i18n").tr("dev.rebuild_failed.title"), tb
+            )
             self._log_reload_result(cmd_id, "failed", 3, error=tb)
 
     # -- Tier 4 --
@@ -409,8 +414,11 @@ class HotReloadController(QObject):
             self._log_reload_result(
                 cmd_id, "failed", 4, error=f"save_all failed: {failed}"
             )
+            tr = _m("common.i18n").tr
             QMessageBox.critical(
-                window, "再起動中止", "セッション保存に失敗: " + ", ".join(failed)
+                window,
+                tr("dev.restart_abort.title"),
+                tr("dev.save_failed.body", datasets=", ".join(failed)),
             )
             return
         write_manifest(window)
@@ -502,14 +510,30 @@ def install_hotreload(window) -> HotReloadController:
 
 
 def _install_menu(window, controller: HotReloadController) -> None:
-    menu = window.menuBar().addMenu("開発(&D)")
-    a_patch = menu.addAction("コード再読み込み")
+    # tr resolved at call time: common.i18n is purged on a Tier 3 rebuild (it
+    # holds mutable _active/_catalogs) while this module persists, so a module-
+    # level `from common.i18n import tr` would go stale. _m() always returns the
+    # current module — and `tr(...)` stays a Name call so the catalog test sees
+    # the keys.
+    tr = _m("common.i18n").tr
+    menu = window.menuBar().addMenu(tr("menu.dev"))
+    a_patch = menu.addAction(tr("menu.dev.reload"))
     a_patch.setShortcut(QKeySequence("Ctrl+F5"))
     a_patch.triggered.connect(lambda: _menu_patch(window, controller))
-    a_app = menu.addAction("アプリ再構築")
+    a_app = menu.addAction(tr("menu.dev.rebuild"))
     a_app.triggered.connect(controller.reload_app)
-    a_restart = menu.addAction("再起動して復元")
+    a_restart = menu.addAction(tr("menu.dev.restart"))
     a_restart.triggered.connect(controller.restart)
+
+    def _retranslate() -> None:
+        tr = _m("common.i18n").tr
+        menu.setTitle(tr("menu.dev"))
+        a_patch.setText(tr("menu.dev.reload"))
+        a_app.setText(tr("menu.dev.rebuild"))
+        a_restart.setText(tr("menu.dev.restart"))
+
+    if hasattr(window, "register_retranslate_hook"):
+        window.register_retranslate_hook(_retranslate)
 
 
 def _menu_patch(window, controller: HotReloadController) -> None:
@@ -517,4 +541,4 @@ def _menu_patch(window, controller: HotReloadController) -> None:
     first = msg.splitlines()[0] if msg else "done"
     window.statusBar().showMessage(f"reload: {first}", 5000)
     if "scope=app recommended" in msg or "SYNTAX ERROR" in msg or "FAILED" in msg:
-        QMessageBox.information(window, "コード再読み込み", msg)
+        QMessageBox.information(window, _m("common.i18n").tr("dev.reload.title"), msg)

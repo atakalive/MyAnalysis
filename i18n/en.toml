@@ -20,6 +20,10 @@
 "menu.help"                   = "Help(&H)"
 "menu.help.about"             = "About"
 "menu.tab.close"              = "Close tab"
+"menu.dev"                    = "Develop(&D)"
+"menu.dev.reload"             = "Reload code"
+"menu.dev.rebuild"            = "Rebuild app"
+"menu.dev.restart"            = "Restart and restore"
 
 # --- figure panel ---
 "figure.menu.copy_image"      = "Copy Image"
@@ -60,6 +64,14 @@
 "err.save_partial.body"       = "Datasets that failed to save:\n{datasets}"
 "err.register.title"          = "Registration error"
 "err.template_failed.title"   = "Failed to create analysis template"
+
+# --- dev (devtools/qt_integration.py) ---
+"dev.reload.title"            = "Reload code"
+"dev.abort.syntax.title"      = "Rebuild aborted (syntax error)"
+"dev.abort.title"             = "Rebuild aborted"
+"dev.rebuild_failed.title"    = "App rebuild failed"
+"dev.restart_abort.title"     = "Restart aborted"
+"dev.save_failed.body"        = "Failed to save session: {datasets}"
 
 # --- status ---
 "status.active"               = "Active: {name}"

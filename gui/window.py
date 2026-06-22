@@ -67,6 +67,11 @@ class ToolWindow(QMainWindow):
         self._suppress_dirty = False
         self._session_saver: Callable[[], object] | None = None
 
+        # Retranslate hooks let menus built outside this class (e.g. the 開発
+        # menu installed by devtools.qt_integration) re-translate on language
+        # switch without window.py importing devtools (keeps devtools→gui).
+        self._retranslate_hooks: list[Callable[[], None]] = []
+
         self._file_menu = self.menuBar().addMenu(tr("menu.file"))
         self._open_action = self._file_menu.addAction(tr("menu.file.open"))
         self._open_action.triggered.connect(self._open_analysis)
@@ -144,6 +149,19 @@ class ToolWindow(QMainWindow):
         cw = self.chat_widget()
         if cw is not None and hasattr(cw, "retranslate"):
             cw.retranslate()
+        for hook in self._retranslate_hooks:
+            try:
+                hook()
+            except Exception:  # never-raise: a broken hook must not block others
+                pass
+
+    def register_retranslate_hook(self, fn: Callable[[], None]) -> None:
+        """Register a callback invoked at the end of retranslate().
+
+        Used by menus built outside ToolWindow (e.g. the devtools 開発 menu) so
+        they re-translate on language switch.
+        """
+        self._retranslate_hooks.append(fn)
 
     def _on_set_language(self, code: str) -> None:
         i18n.set_language(code)

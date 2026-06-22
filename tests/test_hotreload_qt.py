@@ -58,12 +58,14 @@ def probe(monkeypatch, tmp_path):
 
 
 def test_reload_verb_and_menu_installed(window):
+    from common.i18n import tr
+
     assert window.has_command("reload")
     titles = [
         m.title()
         for m in window.menuBar().findChildren(type(window.menuBar().addMenu("_tmp")))
     ]
-    assert any("開発" in t for t in titles)
+    assert tr("menu.dev") in titles
 
 
 def test_reload_no_changes(window):
