@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from common import i18n
 from common.i18n import tr
 from gui.tab import AnalysisTab
+from gui.tabbar import MultiRowTabBar
 
 RESERVED_WINDOW_VERBS = frozenset([
     "add-tab", "close-tab", "list-tabs", "open-dataset",
@@ -38,6 +39,7 @@ class ToolWindow(QMainWindow):
         self._current_dataset: str | None = None
 
         self._tabs = QTabWidget()
+        self._tabs.setTabBar(MultiRowTabBar())   # 多段（N段）タブ：横スクロール廃止
         self._tabs.setMovable(True)
         self.setCentralWidget(self._tabs)
         self._tabs.currentChanged.connect(self._on_tab_changed)
