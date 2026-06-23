@@ -1,11 +1,12 @@
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QPaintEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
     QStyleOptionTab,
     QStylePainter,
     QTabBar,
+    QWidget,
 )
 
 _DEFAULT_ROW_PAD = 10  # 0 タブ時の段高フォールバック余白（潰れ防止用の既定値）
@@ -29,7 +30,7 @@ class MultiRowTabBar(QTabBar):
     _dragging = False
     _hover_index = -1
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setElideMode(Qt.TextElideMode.ElideNone)  # 省略は自前で行う
         self.setExpanding(False)
@@ -107,7 +108,7 @@ class MultiRowTabBar(QTabBar):
         return -1
 
     # --- 描画 -------------------------------------------------------------
-    def paintEvent(self, event) -> None:
+    def paintEvent(self, event: QPaintEvent) -> None:
         if not self._rects:
             return  # 0 タブ
         painter = QStylePainter(self)
@@ -131,11 +132,11 @@ class MultiRowTabBar(QTabBar):
             painter.drawControl(QStyle.ControlElement.CE_TabBarTab, opt)
 
     # --- 再レイアウトの起点（いずれも super() を先に呼ぶ）---------------
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._relayout(event.size().width())  # 主たる起点
 
-    def showEvent(self, event) -> None:
+    def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         self._relayout(self.width())  # 非表示中に追加された退化レイアウトの自己修復
 
@@ -151,7 +152,7 @@ class MultiRowTabBar(QTabBar):
         super().tabLayoutChange()
         self._relayout(self.width())
 
-    def changeEvent(self, event) -> None:
+    def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
             self._relayout(self.width())
@@ -200,7 +201,7 @@ class MultiRowTabBar(QTabBar):
             return
         super().mouseReleaseEvent(event)
 
-    def leaveEvent(self, event) -> None:
+    def leaveEvent(self, event: QEvent) -> None:
         if self._hover_index != -1:
             self._hover_index = -1
             self.update()
