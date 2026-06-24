@@ -413,3 +413,69 @@ def test_load_tool_display_invalid_types_never_raise(monkeypatch):
     for good in ("full", "compact", "hidden"):
         monkeypatch.setattr(paths, "read_ui_pref", lambda *a, _g=good, **k: _g)
         assert _load_tool_display() == good
+
+
+# ---- N 段（多段）セッションタブ：MultiRowTabBar 採用（Issue #41） ----
+
+
+def test_session_tab_bar_is_multirow(widget):
+    """セッションタブは MultiRowTabBar。×ボタン廃止（閉じるはメニュー）・横スクロール
+    廃止（多段で折り返す）。"""
+    from gui.tabbar import MultiRowTabBar
+    assert isinstance(widget._tab_bar, MultiRowTabBar)
+    assert widget._tab_bar.usesScrollButtons() is False
+    assert widget._tab_bar.tabsClosable() is False
+    assert widget._tab_bar.isMovable() is True
+
+
+def test_session_tabs_wrap_when_dock_narrow(widget, qapp):
+    """実 ChatWidget を狭めるとセッションタブが多段に折り返す（QTabWidget を介さない
+    素のレイアウト直置きでも sizeHint 高さが伝播することの担保）。"""
+    from llm_bridge import chat_store
+    widget._sessions = [
+        chat_store.new_session("mock", "sys", dataset="ds", title=f"セッション{i:02d}")
+        for i in range(14)
+    ]
+    widget._current_dataset = "ds"
+    widget._active = widget._sessions[0]
+    widget._rebuild_tab_bar()
+    widget.resize(220, 600)
+    widget.show()
+    qapp.processEvents()
+    try:
+        assert widget._tab_bar.count() == 14
+        assert widget._tab_bar._row_count > 1
+    finally:
+        widget.hide()
+
+
+def test_close_from_menu_confirms_then_deletes(widget, monkeypatch):
+    """「閉じる」が呼ぶ _on_delete_session は確認ダイアログ Yes でセッションを削除する。"""
+    from gui.chat import QMessageBox
+
+    sess = _make_session(widget, dataset="ds", title="閉じる対象")
+    idx = _tab_index_for(widget, sess)
+    before = len(widget._sessions)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
+    )
+    widget._on_delete_session(idx)
+    assert sess not in widget._sessions
+    assert len(widget._sessions) == before - 1
+
+
+def test_close_from_menu_cancel_keeps_session(widget, monkeypatch):
+    """確認ダイアログ No なら削除しない。"""
+    from gui.chat import QMessageBox
+
+    sess = _make_session(widget, dataset="ds", title="残す対象")
+    idx = _tab_index_for(widget, sess)
+    before = len(widget._sessions)
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: QMessageBox.StandardButton.No,
+    )
+    widget._on_delete_session(idx)
+    assert sess in widget._sessions
+    assert len(widget._sessions) == before

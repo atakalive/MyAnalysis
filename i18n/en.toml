@@ -75,6 +75,7 @@
 "chat.btn.stop"               = "Stop"
 "chat.btn.send"               = "Send"
 "chat.menu.rename"            = "Rename"
+"chat.menu.close"             = "Close"
 "chat.menu.tool_display"          = "Tool call display"
 "chat.menu.tool_display.default"  = "Follow default"
 "chat.menu.tool_display.full"     = "Normal"

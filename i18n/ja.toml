@@ -75,6 +75,7 @@
 "chat.btn.stop"               = "Stop"
 "chat.btn.send"               = "Send"
 "chat.menu.rename"            = "名前変更"
+"chat.menu.close"             = "閉じる"
 "chat.menu.tool_display"          = "ツール呼び出し表示"
 "chat.menu.tool_display.default"  = "既定に従う"
 "chat.menu.tool_display.full"     = "通常"

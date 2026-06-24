@@ -16,7 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QTabBar, QTextBrowser, QToolButton,
+    QPlainTextEdit, QPushButton, QTextBrowser, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -26,6 +26,7 @@ from llm_backend.base import (
 )
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
+from gui.tabbar import MultiRowTabBar
 from gui.tools import TOOLS
 
 
@@ -257,22 +258,21 @@ class ChatWidget(QWidget):
 
         # ----- session tab bar (top of dock) -----
         header = QHBoxLayout()
-        self._tab_bar = QTabBar()
-        self._tab_bar.setExpanding(False)
-        self._tab_bar.setUsesScrollButtons(True)
-        self._tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
-        self._tab_bar.setTabsClosable(True)
+        # 横幅に収まらないタブを N 段に折り返す（MultiRowTabBar が elide/expanding/
+        # scrollButtons を自前設定するので、ここで重ねて設定しない）。閉じるは×ボタン
+        # ではなくタブ右クリックメニュー「閉じる」から（_on_tab_context_menu）。
+        self._tab_bar = MultiRowTabBar()
         self._tab_bar.setMovable(True)
         self._tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tab_bar.currentChanged.connect(self._on_switch_session)
-        self._tab_bar.tabCloseRequested.connect(self._on_delete_session)
         self._tab_bar.tabMoved.connect(self._on_tab_moved)
         self._tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
         header.addWidget(self._tab_bar, stretch=1)
         self._new_btn = QToolButton()
         self._new_btn.setText("+")
         self._new_btn.clicked.connect(self._on_new_session)
-        header.addWidget(self._new_btn)
+        # 多段でタブバーが高くなっても「+」を 1 段目に揃える（縦中央へ浮かせない）。
+        header.addWidget(self._new_btn, alignment=Qt.AlignmentFlag.AlignTop)
         layout.insertLayout(0, header)
 
         self._log = QTextBrowser()
@@ -682,6 +682,12 @@ class ChatWidget(QWidget):
                 lambda _checked=False, m=value, s=sess:
                 self._set_session_tool_display(s, m)
             )
+        # 破壊的操作なのでセパレータで分離し末尾に置く。_on_delete_session が
+        # 確認ダイアログ・in-flight 停止・空時のブランク補充まで担う。index は
+        # menu.exec（同期）中に発火するため late-binding でも安全。
+        menu.addSeparator()
+        close_action = menu.addAction(tr("chat.menu.close"))
+        close_action.triggered.connect(lambda: self._on_delete_session(index))
         menu.exec(self._tab_bar.mapToGlobal(pos))
 
     def _on_rename_session(self, sess: ChatSession) -> None:
