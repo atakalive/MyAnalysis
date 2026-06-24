@@ -9,8 +9,8 @@
 リポジトリへのコミット対象外。
 
 テンプレートは本ファイル内の in-code 文字列で持つ (`analyses/_template/` は作らない)。
-理由: gui/window.py の _open_analysis() が当該データセットの analyses/*/analysis.py を
-glob で列挙するため、テンプレートディレクトリがメニューに出てしまう。
+理由: 解析一覧の列挙 (gui/tools.py の list_analyses 等) が当該データセットの
+analyses/*/analysis.py を glob するため、テンプレートディレクトリが一覧に出てしまう。
 """
 
 from __future__ import annotations
@@ -156,7 +156,8 @@ TODO: データセット構造・ディレクトリ構成・CSV カラム等を�
 ```bash
 # GUI 起動
 python tool.py
-# → メニュー「ファイル → 解析を開く」→ 一覧から __GEN_NAME__ を選択
+# → チャットエージェント経由、または CLI で解析タブを追加:
+#   python -m llm_bridge window add-tab name=__GEN_NAME__ dataset=<dataset>
 
 # ヘッドレスエクスポート
 python -m export <dataset> __GEN_NAME__

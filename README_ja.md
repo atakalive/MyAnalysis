@@ -101,7 +101,7 @@ path = get_dataset_dir("dataset_a")  # 現在のホスト名で解決
 # CLI（config.py を ast ベースで原子的に書き換える。GUI 起動中なら自動で開く）
 python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [NAME]] [--no-open]
 
-# GUI: ファイル → データセット登録…
+# GUI: ファイル → データセットを新規登録
 ```
 
 ### セッションフォルダ命名規則

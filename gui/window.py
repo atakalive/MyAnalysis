@@ -75,12 +75,10 @@ class ToolWindow(QMainWindow):
         self._retranslate_hooks: list[Callable[[], None]] = []
 
         self._file_menu = self.menuBar().addMenu(tr("menu.file"))
-        self._open_action = self._file_menu.addAction(tr("menu.file.open"))
-        self._open_action.triggered.connect(self._open_analysis)
-        self._open_dataset_action = self._file_menu.addAction(tr("menu.file.open_dataset"))
-        self._open_dataset_action.triggered.connect(self._open_dataset)
         self._register_action = self._file_menu.addAction(tr("menu.file.register"))
         self._register_action.triggered.connect(self._register_dataset)
+        self._open_dataset_action = self._file_menu.addAction(tr("menu.file.open_dataset"))
+        self._open_dataset_action.triggered.connect(self._open_dataset)
         self._file_menu.addSeparator()
         self._save_session_action = self._file_menu.addAction(tr("menu.file.save_session"))
         self._save_session_action.triggered.connect(self._save_session)
@@ -129,7 +127,6 @@ class ToolWindow(QMainWindow):
 
     def retranslate(self) -> None:
         self._file_menu.setTitle(tr("menu.file"))
-        self._open_action.setText(tr("menu.file.open"))
         self._open_dataset_action.setText(tr("menu.file.open_dataset"))
         self._register_action.setText(tr("menu.file.register"))
         self._save_session_action.setText(tr("menu.file.save_session"))
@@ -331,49 +328,6 @@ class ToolWindow(QMainWindow):
     def has_command(self, verb: str) -> bool:
         return verb in self._command_handlers
 
-    def _open_analysis(self) -> None:
-        import dataset_config
-
-        current = self.current_dataset
-        if current is None:
-            QMessageBox.information(
-                self, tr("dlg.open_analysis.title"),
-                tr("dlg.open_analysis.no_dataset"),
-            )
-            return
-        try:
-            root = dataset_config.analyses_root(current)
-            if root.is_dir():
-                names = sorted(
-                    d.name
-                    for d in root.glob("*")
-                    if (d / "analysis.py").is_file()
-                )
-            else:
-                names = []
-        except (KeyError, RuntimeError, OSError) as e:
-            QMessageBox.critical(self, tr("err.open_analysis.title"), str(e))
-            return
-        if not names:
-            QMessageBox.information(
-                self, tr("dlg.open_analysis.title"), tr("dlg.open_analysis.empty")
-            )
-            return
-        name, ok = QInputDialog.getItem(
-            self, tr("dlg.open_analysis.title"), tr("dlg.open_analysis.label"),
-            names, 0, False
-        )
-        if not ok or not name:
-            return
-        if not self.has_command("add-tab"):
-            QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_add_tab"))
-            return
-        try:
-            self.dispatch_command("add-tab", name=name, dataset=current)
-            self.set_active_tab(name)
-        except Exception as e:
-            QMessageBox.critical(self, tr("err.open_analysis.title"), str(e))
-
     def _open_dataset(self) -> None:
         import config
         try:
@@ -514,7 +468,7 @@ class ToolWindow(QMainWindow):
             QMessageBox.critical(self, tr("err.register.title"), str(e))
             return
 
-        # 成功時のみメモリ poke: 直後に「解析を開く」しても get_dataset_dir が成功する。
+        # 成功時のみメモリ poke: 直後に解析タブを追加しても get_dataset_dir が成功する。
         host = socket.gethostname().upper()
         config.DATASETS.setdefault(name, {})[host] = path
 

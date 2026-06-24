@@ -4,9 +4,8 @@
 
 # --- menu ---
 "menu.file"                   = "ファイル(&F)"
-"menu.file.open"              = "解析を開く…"
 "menu.file.open_dataset"      = "データセットを開く…"
-"menu.file.register"          = "データセット登録…"
+"menu.file.register"          = "データセットを新規登録"
 "menu.file.save_session"      = "セッションを保存"
 "menu.file.save_quit"         = "保存して終了"
 "menu.file.quit"              = "終了"
@@ -32,10 +31,6 @@
 "dock.chat"                   = "Chat"
 
 # --- dialogs ---
-"dlg.open_analysis.title"     = "解析を開く"
-"dlg.open_analysis.empty"     = "解析がありません"
-"dlg.open_analysis.no_dataset" = "先にデータセットを開いてください。"
-"dlg.open_analysis.label"     = "解析を選択:"
 "dlg.open_dataset.title"      = "データセットを開く"
 "dlg.open_dataset.empty"      = "データセットが登録されていません"
 "dlg.open_dataset.label"      = "データセットを選択:"
@@ -55,8 +50,6 @@
 
 # --- errors ---
 "err.generic.title"           = "エラー"
-"err.no_add_tab"              = "add-tab コマンドが未登録です"
-"err.open_analysis.title"     = "解析を開けません"
 "err.no_open_dataset"         = "open-dataset コマンドが未登録です"
 "err.open_dataset.title"      = "データセットを開けません"
 "err.no_saver"                = "保存機構が未配線です"

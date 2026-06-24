@@ -17,7 +17,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [ANALYSIS_NAME]]`) or GUI (File → データセット登録…). Both methods rewrite `config.py` in place (ast-based, atomic). CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
+When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [ANALYSIS_NAME]]`) or GUI (File → データセットを新規登録). Both methods rewrite `config.py` in place (ast-based, atomic). CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 

@@ -4,9 +4,8 @@
 
 # --- menu ---
 "menu.file"                   = "File(&F)"
-"menu.file.open"              = "Open analysis…"
 "menu.file.open_dataset"      = "Open dataset…"
-"menu.file.register"          = "Register dataset…"
+"menu.file.register"          = "New dataset"
 "menu.file.save_session"      = "Save session"
 "menu.file.save_quit"         = "Save and quit"
 "menu.file.quit"              = "Quit"
@@ -32,10 +31,6 @@
 "dock.chat"                   = "Chat"
 
 # --- dialogs ---
-"dlg.open_analysis.title"     = "Open analysis"
-"dlg.open_analysis.empty"     = "No analyses available"
-"dlg.open_analysis.no_dataset" = "Open a dataset first."
-"dlg.open_analysis.label"     = "Select analysis:"
 "dlg.open_dataset.title"      = "Open dataset"
 "dlg.open_dataset.empty"      = "No datasets registered"
 "dlg.open_dataset.label"      = "Select dataset:"
@@ -55,8 +50,6 @@
 
 # --- errors ---
 "err.generic.title"           = "Error"
-"err.no_add_tab"              = "add-tab command is not registered"
-"err.open_analysis.title"     = "Cannot open analysis"
 "err.no_open_dataset"         = "open-dataset command is not registered"
 "err.open_dataset.title"      = "Cannot open dataset"
 "err.no_saver"                = "Save mechanism is not wired"

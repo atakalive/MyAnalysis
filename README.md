@@ -101,7 +101,7 @@ Unknown dataset names and unregistered hosts raise descriptive errors pointing a
 # CLI (rewrites config.py atomically via AST; auto-opens if the GUI is running)
 python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [NAME]] [--no-open]
 
-# GUI: File → データセット登録… (Register dataset)
+# GUI: File → データセットを新規登録 (New dataset)
 ```
 
 ### Session folder naming
