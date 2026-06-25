@@ -50,6 +50,8 @@
   #status { font-size: 11px; color: #888; padding: 2px 8px; }
   .notice { color: #d7ba7d; font-size: 12px; padding: 6px 8px; }
   .gap { color: #888; font-style: italic; font-size: 11px; text-align: center; margin: 6px 0; }
+  #enter .remember { display: flex; align-items: center; gap: 6px; margin: 6px 0 14px; font-size: 13px; }
+  #enter .remember input { width: auto; margin: 0; }
 </style>
 </head>
 <body>
@@ -60,6 +62,7 @@
   <input id="tokenInput" placeholder="paste token…" autocomplete="off">
   <label>Display name / 表示名</label>
   <input id="nameInput" placeholder="Guest" autocomplete="off">
+  <label class="remember"><input id="rememberChk" type="checkbox"> Remember me / この端末に保存</label>
   <div id="enterErr" class="err"></div>
   <button id="joinBtn">Join / 入室</button>
 </div>
@@ -508,6 +511,16 @@ function join(tok, name) {
     return;
   }
   myName = (name || "").trim() || "Guest";
+  try {
+    const chk = document.getElementById("rememberChk");
+    if (chk && chk.checked) {
+      localStorage.setItem("myanalysis_guest_name", myName);
+      localStorage.setItem("myanalysis_guest_token", (tok || "").trim());
+    } else {
+      localStorage.removeItem("myanalysis_guest_name");
+      localStorage.removeItem("myanalysis_guest_token");
+    }
+  } catch (e) {}
   pid = genPid();
   document.getElementById("enter").style.display = "none";
   document.getElementById("app").style.display = "block";
@@ -531,6 +544,14 @@ function join(tok, name) {
 }
 
 // ---- bootstrap ----
+try {
+  const savedName = localStorage.getItem("myanalysis_guest_name");
+  const savedTok = localStorage.getItem("myanalysis_guest_token");
+  if (savedName) document.getElementById("nameInput").value = savedName;
+  if (savedTok) document.getElementById("tokenInput").value = savedTok;
+  if (savedName || savedTok) document.getElementById("rememberChk").checked = true;
+} catch (e) {}
+
 document.getElementById("joinBtn").onclick = () => {
   join(document.getElementById("tokenInput").value, document.getElementById("nameInput").value);
 };
