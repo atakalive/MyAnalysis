@@ -23,9 +23,14 @@
   button:disabled { background: #444; color: #888; cursor: default; }
   .err { color: #f48771; font-size: 13px; margin: 8px 0; }
   #app { display: none; height: 100vh; }
-  #cols { display: flex; height: 100%; }
-  #left { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #333; min-width: 0; }
-  #right { width: 380px; display: flex; flex-direction: column; min-width: 0; }
+  #cols { display: flex; height: 100%; --right-w: 380px; }
+  #left { flex: 1 1 0; display: flex; flex-direction: column; min-width: 0; }
+  #splitter { flex: none; width: 6px; cursor: col-resize; background: #333;
+              border-left: 1px solid #1e1e1e; border-right: 1px solid #1e1e1e; }
+  #splitter:hover, #splitter.dragging { background: #0e639c; }
+  body.resizing { cursor: col-resize; user-select: none; }
+  #right { flex: none; width: var(--right-w); min-width: 220px; max-width: 70vw;
+           display: flex; flex-direction: column; }
   .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
@@ -72,6 +77,7 @@
         <span id="zoomInfo" style="font-size:11px;color:#888;margin-left:auto"></span>
       </div>
     </div>
+    <div id="splitter" title="drag to resize / ドラッグで幅調整・ダブルクリックで既定値"></div>
     <div id="right">
       <div class="bar" id="sessionBar"></div>
       <div id="sessNotice" class="notice" style="display:none"></div>
@@ -404,6 +410,56 @@ function setupImageButtons() {
   };
 }
 
+// ---- resizable splitter (guest-controlled chat width) ----
+const RIGHT_W_DEFAULT = 380, RIGHT_W_MIN = 220;
+const RIGHT_W_KEY = "ma_right_w";
+function clampRightW(w) {
+  return Math.max(RIGHT_W_MIN, Math.min(w, Math.round(window.innerWidth * 0.7)));
+}
+function applyRightW(w) {
+  document.getElementById("cols").style.setProperty("--right-w", clampRightW(w) + "px");
+}
+function setupSplitter() {
+  const cols = document.getElementById("cols");
+  const sp = document.getElementById("splitter");
+  // restore persisted width
+  const saved = parseInt(localStorage.getItem(RIGHT_W_KEY) || "", 10);
+  if (Number.isFinite(saved)) applyRightW(saved);
+  let dragging = false;
+  sp.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    sp.setPointerCapture(e.pointerId);
+    sp.classList.add("dragging");
+    document.body.classList.add("resizing");
+    e.preventDefault();
+  });
+  sp.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    applyRightW(cols.getBoundingClientRect().right - e.clientX);
+  });
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    try { sp.releasePointerCapture(e.pointerId); } catch (_) {}
+    sp.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const cur = parseInt(cols.style.getPropertyValue("--right-w"), 10);
+    if (Number.isFinite(cur)) localStorage.setItem(RIGHT_W_KEY, String(cur));
+  };
+  sp.addEventListener("pointerup", end);
+  sp.addEventListener("pointercancel", end);
+  // double-click → reset to default
+  sp.addEventListener("dblclick", () => {
+    localStorage.removeItem(RIGHT_W_KEY);
+    applyRightW(RIGHT_W_DEFAULT);
+  });
+  // re-clamp on window resize (e.g. stored width now exceeds 70vw)
+  window.addEventListener("resize", () => {
+    const cur = parseInt(cols.style.getPropertyValue("--right-w"), 10);
+    if (Number.isFinite(cur)) applyRightW(cur);
+  });
+}
+
 // ---- send ----
 async function send() {
   if (!curSid || stopped) return;
@@ -458,6 +514,7 @@ function join(tok, name) {
   document.getElementById("status").textContent = T.connecting;
   setupViewer();
   setupImageButtons();
+  setupSplitter();
   document.getElementById("sendBtn").onclick = send;
   document.getElementById("msg").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
