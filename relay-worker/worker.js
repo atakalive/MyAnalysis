@@ -61,10 +61,22 @@ function genMid() {
   return { mid: `${pad13(ts)}-${rand13}`, ts };
 }
 
+// Guests fetch with an Authorization header (a non-simple header), which makes
+// every request CORS-preflighted unless the page is same-origin. Allow any
+// origin: there are no cookies/credentials (auth is a Bearer header), so a
+// wildcard ACAO is safe and lets the guest client run from any origin
+// (workers.dev, a custom host, or a local file:// whose Origin is "null").
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  "access-control-max-age": "86400",
+};
+
 function json(obj, status = 200, extra = {}) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...extra },
+    headers: { "content-type": "application/json; charset=utf-8", ...CORS, ...extra },
   });
 }
 
@@ -198,10 +210,16 @@ export default {
     const seg = url.pathname.split("/").filter((s) => s.length > 0).map(decodeURIComponent);
     const method = request.method;
 
-    // GET / (unauthenticated) → serve the guest HTML client (same-origin, no CORS).
+    // CORS preflight: the guest's Authorization header forces a preflight on any
+    // cross-origin request. Answer it for every route before auth/routing.
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS });
+    }
+
+    // GET / (unauthenticated) → serve the guest HTML client.
     if (seg.length === 0 && method === "GET") {
       return new Response(CHATDOCK_HTML, {
-        headers: { "content-type": "text/html; charset=utf-8" },
+        headers: { "content-type": "text/html; charset=utf-8", ...CORS },
       });
     }
 
@@ -364,8 +382,8 @@ export default {
         const tabs = await readTabs(env, ch);
         if (!tabs.includes(tab)) return json({ error: "tab not published" }, 403);
         const obj = await env.RELAY_R2.get(`view/${ch}/${tab}`);
-        if (!obj) return new Response(null, { status: 204 });
-        return new Response(obj.body, { headers: { "content-type": "image/png" } });
+        if (!obj) return new Response(null, { status: 204, headers: CORS });
+        return new Response(obj.body, { headers: { "content-type": "image/png", ...CORS } });
       }
     }
 

@@ -43,6 +43,12 @@ from common.i18n import tr
 
 _LOOKBACK_MS = 15000
 _REQ_TIMEOUT = 5.0
+# Cloudflare's edge bot protection (error 1010) rejects the default
+# "Python-urllib/x" UA with a 403 before the request reaches the Worker. Send a
+# browser-like UA so host requests pass the signature check (guests use a real
+# browser and are unaffected).
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 _HEARTBEAT_SEC = 20.0
 _PRESENCE_POLL_SEC = 5.0
 _FAIL_THRESHOLD = 5
@@ -118,7 +124,7 @@ class _RelayWorker(QThread):
 
     def _req(self, method: str, path: str, data=None, is_png: bool = False):
         url = self._base + path
-        headers = {"Authorization": "Bearer " + self._admin}
+        headers = {"Authorization": "Bearer " + self._admin, "User-Agent": _UA}
         body = None
         if is_png:
             headers["Content-Type"] = "image/png"
@@ -385,7 +391,7 @@ class MeetingRelay(QObject):
             self._base_url.rstrip("/") + "/admin/channel",
             data=json.dumps(body).encode("utf-8"), method="POST",
             headers={"Authorization": "Bearer " + self._admin_key,
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json", "User-Agent": _UA},
         )
         with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -420,7 +426,8 @@ class MeetingRelay(QObject):
                 req = urllib.request.Request(
                     self._base_url.rstrip("/") + "/admin/channel/" + _q(ch),
                     method="DELETE",
-                    headers={"Authorization": "Bearer " + self._admin_key},
+                    headers={"Authorization": "Bearer " + self._admin_key,
+                             "User-Agent": _UA},
                 )
                 urllib.request.urlopen(req, timeout=_REQ_TIMEOUT).close()
             except Exception:
