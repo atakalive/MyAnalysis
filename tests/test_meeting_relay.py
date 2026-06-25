@@ -111,8 +111,8 @@ def test_meeting_start_and_token(qapp, monkeypatch):
     assert captured["method"] == "POST"
     assert captured["auth"] == "Bearer ADMIN"
     assert r.expires_at() == 999
-    # default publish scope = current-dataset sessions only (default-deny others)
-    assert r.published_session_ids() == {"a"}
+    # default publish scope = ALL sessions across every dataset
+    assert r.published_session_ids() == {"a", "b"}
 
     pad = token + "=" * (-len(token) % 4)
     obj = json.loads(base64.urlsafe_b64decode(pad))
@@ -253,7 +253,7 @@ def test_expired_and_stop_idempotent(qapp, monkeypatch):
     assert r._worker is None
 
 
-# ---- publish scope: dataset-switch invariance + opt-in + deletion pruning ----
+# ---- publish scope: all-default + dataset-switch invariance + deletion pruning ----
 
 def test_publish_scope(qapp, monkeypatch):
     chat = FakeChat([
@@ -266,21 +266,18 @@ def test_publish_scope(qapp, monkeypatch):
                         lambda req, timeout=None: FakeResp(
                             json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
-    assert r.published_session_ids() == {"a"}
+    # default = ALL sessions across every dataset
+    assert r.published_session_ids() == {"a", "b"}
 
-    # dataset switch must NOT change the published set (in-flight stays alive).
+    # deselect one, then switch dataset: the snapshot must NOT be recomputed
+    # (otherwise ds2's "b" would re-enter). Proves dataset-switch invariance.
+    r.set_published_sessions({"a"})
     win.current_dataset = "ds2"
+    r._last_sessions_json = None
     r._on_capture_tick()
     assert r.published_session_ids() == {"a"}
     sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
     assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"a"}
-
-    # opt-in the other dataset's session.
-    r.set_published_sessions({"a", "b"})
-    r._last_sessions_json = None
-    r._on_capture_tick()
-    sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
-    assert {s["id"] for s in sess_puts[-1]["data"]} == {"a", "b"}
 
     # a deleted session drops out via ∩ existing.
     chat._summaries = [s for s in chat._summaries if s["id"] != "a"]
@@ -340,8 +337,12 @@ def test_share_window_smoke(qapp, monkeypatch):
     assert items == ["1h", "3h", "6h", "12h", "24h"]
     sw._name_edit.setText("Bob")
     assert r.host_name == "Bob"
+    # select-all masters exist and retranslate covers their labels
+    assert sw._sess_select_all is not None and sw._tab_select_all is not None
     sw.retranslate()
-    # toggles (not sharing → no-op) must not raise
+    # toggles + select-all (not sharing → no-op) must not raise
     sw._on_session_toggle()
     sw._on_tab_toggle()
+    sw._on_select_all_sessions()
+    sw._on_select_all_tabs()
     sw._timer.stop()

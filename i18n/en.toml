@@ -125,6 +125,7 @@
 "meeting.btn.qr"                 = "QR"
 "meeting.btn.reveal"             = "Reveal"
 "meeting.btn.hide"               = "Hide"
+"meeting.btn.select_all"         = "Select all"
 "meeting.label.ttl"              = "Duration (max 24h)"
 "meeting.label.host_name"        = "Display name"
 "meeting.label.token"            = "Invite token"

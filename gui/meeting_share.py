@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel,
@@ -121,6 +121,10 @@ class MeetingShareWindow(QWidget):
         # ----- sessions -----
         self._sess_group = QGroupBox(tr("meeting.section.sessions"))
         sess_outer = QVBoxLayout(self._sess_group)
+        self._sess_select_all = QCheckBox(tr("meeting.btn.select_all"))
+        self._sess_select_all.setTristate(True)
+        self._sess_select_all.clicked.connect(self._on_select_all_sessions)
+        sess_outer.addWidget(self._sess_select_all)
         self._sess_scroll = QScrollArea()
         self._sess_scroll.setWidgetResizable(True)
         self._sess_inner = QWidget()
@@ -137,6 +141,10 @@ class MeetingShareWindow(QWidget):
         # ----- tabs -----
         self._tab_group = QGroupBox(tr("meeting.section.tabs"))
         tab_outer = QVBoxLayout(self._tab_group)
+        self._tab_select_all = QCheckBox(tr("meeting.btn.select_all"))
+        self._tab_select_all.setTristate(True)
+        self._tab_select_all.clicked.connect(self._on_select_all_tabs)
+        tab_outer.addWidget(self._tab_select_all)
         self._tab_inner = QWidget()
         self._tab_layout = QVBoxLayout(self._tab_inner)
         tab_outer.addWidget(self._tab_inner)
@@ -352,13 +360,14 @@ class MeetingShareWindow(QWidget):
                 if sharing:
                     box.setChecked(s["id"] in published)
                 else:
-                    box.setChecked(ds == cur_ds)   # default scope = current dataset
+                    box.setChecked(True)   # default scope = all sessions
                 if ds != cur_ds:
                     box.setText(box.text() + " " + tr("meeting.other_dataset_note"))
                 box.toggled.connect(self._on_session_toggle)
                 self._sess_layout.addWidget(box)
                 self._sess_boxes[s["id"]] = box
         self._sess_layout.addStretch(1)
+        self._sync_select_all(self._sess_boxes, self._sess_select_all)
 
     def _rebuild_tab_rows(self, tabs, sharing, pub_tabs) -> None:
         while self._tab_layout.count():
@@ -373,18 +382,58 @@ class MeetingShareWindow(QWidget):
             box.toggled.connect(self._on_tab_toggle)
             self._tab_layout.addWidget(box)
             self._tab_boxes[name] = box
+        self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
     def _on_session_toggle(self, _checked=False) -> None:
-        if not self._relay.is_sharing():
-            return
-        ids = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
-        self._relay.set_published_sessions(ids)
+        if self._relay.is_sharing():
+            ids = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
+            self._relay.set_published_sessions(ids)
+        self._sync_select_all(self._sess_boxes, self._sess_select_all)
 
     def _on_tab_toggle(self, _checked=False) -> None:
-        if not self._relay.is_sharing():
+        if self._relay.is_sharing():
+            names = [name for name, box in self._tab_boxes.items() if box.isChecked()]
+            self._relay.set_published_tabs(names)
+        self._sync_select_all(self._tab_boxes, self._tab_select_all)
+
+    def _on_select_all_sessions(self, _checked=False) -> None:
+        boxes = self._sess_boxes
+        if not boxes:
             return
-        names = [name for name, box in self._tab_boxes.items() if box.isChecked()]
-        self._relay.set_published_tabs(names)
+        target = not all(b.isChecked() for b in boxes.values())
+        for b in boxes.values():
+            b.blockSignals(True)
+            b.setChecked(target)
+            b.blockSignals(False)
+        if self._relay.is_sharing():
+            ids = {sid for sid, b in boxes.items() if b.isChecked()}
+            self._relay.set_published_sessions(ids)
+        self._sync_select_all(boxes, self._sess_select_all)
+
+    def _on_select_all_tabs(self, _checked=False) -> None:
+        boxes = self._tab_boxes
+        if not boxes:
+            return
+        target = not all(b.isChecked() for b in boxes.values())
+        for b in boxes.values():
+            b.blockSignals(True)
+            b.setChecked(target)
+            b.blockSignals(False)
+        if self._relay.is_sharing():
+            names = [name for name, b in boxes.items() if b.isChecked()]
+            self._relay.set_published_tabs(names)
+        self._sync_select_all(boxes, self._tab_select_all)
+
+    def _sync_select_all(self, boxes, master) -> None:
+        t = len(boxes)
+        master.setEnabled(t > 0)
+        n = sum(1 for b in boxes.values() if b.isChecked())
+        if t == 0 or n == 0:
+            master.setCheckState(Qt.CheckState.Unchecked)
+        elif n == t:
+            master.setCheckState(Qt.CheckState.Checked)
+        else:
+            master.setCheckState(Qt.CheckState.PartiallyChecked)
 
     # ---- helpers ----
 
@@ -425,8 +474,10 @@ class MeetingShareWindow(QWidget):
         self._token_hint.setText(tr("meeting.token.hint"))
         self._expiry_note.setText(tr("meeting.expiry.delayed"))
         self._sess_group.setTitle(tr("meeting.section.sessions"))
+        self._sess_select_all.setText(tr("meeting.btn.select_all"))
         self._new_session_note.setText(tr("meeting.new_session_note"))
         self._tab_group.setTitle(tr("meeting.section.tabs"))
+        self._tab_select_all.setText(tr("meeting.btn.select_all"))
         self._part_group.setTitle(tr("meeting.section.participants"))
         self._log_group.setTitle(tr("meeting.section.log"))
         self._not_configured.setText(tr("meeting.not_configured"))

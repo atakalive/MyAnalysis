@@ -367,10 +367,10 @@ class MeetingRelay(QObject):
     def meeting_start(self, ttl_sec: int) -> str:
         """Create the channel, start the worker + capture timer, return a token.
 
-        The default published set is a SNAPSHOT of the current dataset's sessions
-        at start time (default scope = current dataset; other datasets are opt-in
-        only). This set is NOT recomputed on dataset switch, so in-flight replies
-        keep flowing even after the host moves to another dataset.
+        The default published set is a SNAPSHOT of ALL sessions (every dataset)
+        at start time. This set is NOT recomputed on dataset switch, so in-flight
+        replies keep flowing even after the host moves to another dataset, and
+        sessions can still be deselected per-session from the share window.
         """
         ttl = max(3600, min(86400, int(ttl_sec)))
         ch = secrets.token_hex(8)
@@ -379,10 +379,7 @@ class MeetingRelay(QObject):
 
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
-        cur_ds = getattr(self._window, "current_dataset", None)
-        self._published_session_ids = {
-            s["id"] for s in summaries if s.get("dataset") == cur_ds
-        }
+        self._published_session_ids = {s["id"] for s in summaries}
         self._meeting_start_ids = set(self._published_session_ids)
         self._published_tabs = set(self._window.tab_names())
 

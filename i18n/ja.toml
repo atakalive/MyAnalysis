@@ -125,6 +125,7 @@
 "meeting.btn.qr"                 = "QR"
 "meeting.btn.reveal"             = "表示"
 "meeting.btn.hide"               = "隠す"
+"meeting.btn.select_all"         = "すべて選択"
 "meeting.label.ttl"              = "有効期間（最大24h）"
 "meeting.label.host_name"        = "表示名"
 "meeting.label.token"            = "招待トークン"
