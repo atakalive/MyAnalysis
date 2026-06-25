@@ -272,6 +272,12 @@ async function poll(reanchor = false) {
 
 function schedulePoll() {
   if (stopped) return;
+  // Cancel any pending timer before arming a new one so exactly ONE poll loop
+  // ever exists. Without this, the bootstrap poll's schedulePoll() and the
+  // selectSession()->poll(true) schedulePoll() both leave a timer, and every
+  // session switch accumulates another (N+1 loops), breaking the "single
+  // unified poll" cost invariant. reviewer/reviewer code R2.
+  if (pollTimer) clearTimeout(pollTimer);
   pollInterval = Math.min(POLL_MAX, Math.max(POLL_MIN, pollInterval));
   pollTimer = setTimeout(() => poll(false), pollInterval);
 }
