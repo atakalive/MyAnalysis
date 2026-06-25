@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -40,6 +41,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage
 
 from common.i18n import tr
+
+_log = logging.getLogger(__name__)
 
 _LOOKBACK_MS = 15000
 _REQ_TIMEOUT = 5.0
@@ -501,41 +504,48 @@ class MeetingRelay(QObject):
     def _on_capture_tick(self) -> None:
         if not self._sharing or self._worker is None:
             return
-        win = self._window
-        cw = win.chat_widget()
+        # This runs on the GUI thread as a QTimer slot; an unhandled exception
+        # from a Qt slot can tear down the whole app in PySide6. Guard the whole
+        # body and skip this tick on failure (next tick recovers); keep sharing
+        # alive. Worker-thread paths have their own try/except.
+        try:
+            win = self._window
+            cw = win.chat_widget()
 
-        # Sessions: publish only ids in (_published_session_ids ∩ existing) so a
-        # deleted session drops out and dataset switch can't leak others.
-        summaries = cw.session_summaries() if cw is not None else []
-        existing = {s["id"] for s in summaries}
-        self._published_session_ids &= existing
-        pub = [
-            {"id": s["id"], "title": s["title"], "busy": s["busy"]}
-            for s in summaries if s["id"] in self._published_session_ids
-        ]
-        sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
-        if sj != self._last_sessions_json:
-            self._last_sessions_json = sj
-            self._worker.enqueue({"kind": "sessions", "data": pub})
+            # Sessions: publish only ids in (_published_session_ids ∩ existing) so a
+            # deleted session drops out and dataset switch can't leak others.
+            summaries = cw.session_summaries() if cw is not None else []
+            existing = {s["id"] for s in summaries}
+            self._published_session_ids &= existing
+            pub = [
+                {"id": s["id"], "title": s["title"], "busy": s["busy"]}
+                for s in summaries if s["id"] in self._published_session_ids
+            ]
+            sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
+            if sj != self._last_sessions_json:
+                self._last_sessions_json = sj
+                self._worker.enqueue({"kind": "sessions", "data": pub})
 
-        # Tabs: new tabs auto-join the published set (default-share); then publish
-        # the published ∩ existing.
-        self.absorb_new_tabs()
-        all_tabs = win.tab_names()
-        pub_tabs = [t for t in all_tabs if t in self._published_tabs]
-        tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)
-        if tj != self._last_tabs_json:
-            self._last_tabs_json = tj
-            self._worker.enqueue({"kind": "tabs", "data": pub_tabs})
+            # Tabs: new tabs auto-join the published set (default-share); then publish
+            # the published ∩ existing.
+            self.absorb_new_tabs()
+            all_tabs = win.tab_names()
+            pub_tabs = [t for t in all_tabs if t in self._published_tabs]
+            tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)
+            if tj != self._last_tabs_json:
+                self._last_tabs_json = tj
+                self._worker.enqueue({"kind": "tabs", "data": pub_tabs})
 
-        # Views: grab published tabs (GUI thread), hash-gate, enqueue PNG bytes.
-        for tab in win.tabs():
-            name = getattr(tab, "name", None)
-            if name is None or name not in self._published_tabs:
-                continue
-            png = self._capture_tab(tab, name)
-            if png is not None:
-                self._worker.enqueue({"kind": "view", "tab": name, "png": png})
+            # Views: grab published tabs (GUI thread), hash-gate, enqueue PNG bytes.
+            for tab in win.tabs():
+                name = getattr(tab, "name", None)
+                if name is None or name not in self._published_tabs:
+                    continue
+                png = self._capture_tab(tab, name)
+                if png is not None:
+                    self._worker.enqueue({"kind": "view", "tab": name, "png": png})
+        except Exception as exc:
+            _log.warning("capture tick skipped: %s", exc)
 
     def _capture_tab(self, tab, name: str) -> bytes | None:
         try:

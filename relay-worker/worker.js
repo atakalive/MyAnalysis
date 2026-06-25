@@ -122,7 +122,11 @@ async function checkGuest(request, env, ch) {
   if (now >= (meta.expires_at || 0)) return { ok: false, status: 410 };
   const hbRaw = await env.RELAY_KV.get(`ch:${ch}:hb`);
   const hb = hbRaw ? parseInt(hbRaw, 10) || 0 : 0;
-  if (now - hb >= HB_GRACE) return { ok: false, status: 410 };
+  // Heartbeat stale = host transiently offline (network blip / suspended PC).
+  // Return 503 (retryable) instead of 410 so a >2min host outage does not
+  // permanently kill every guest; they show "host offline" and auto-resume on
+  // host recovery. Meta missing / expired (above) remain 410 (permanent).
+  if (now - hb >= HB_GRACE) return { ok: false, status: 503 };
   return { ok: true, meta };
 }
 

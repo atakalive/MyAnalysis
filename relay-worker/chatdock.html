@@ -43,6 +43,7 @@
   .msg.assistant .who { color: #a8d08d; }
   .msg.mine { background: #094771; }
   .msg.failed { border: 1px solid #f48771; }
+  .msg .status { font-size: 11px; color: #888; margin-left: 6px; }
   .resend { margin-left: 8px; font-size: 11px; padding: 1px 6px; }
   #inputrow { display: flex; gap: 4px; padding: 6px; background: #252526; }
   #msg { flex: 1; padding: 6px; background: #1e1e1e; color: #ddd; border: 1px solid #444; border-radius: 4px;
@@ -103,11 +104,15 @@ const T = {
   en: { generating: "generating…", optedOut: "This session is no longer shared.",
         sendFail: "send failed", resend: "resend", expired: "Meeting ended (channel expired).",
         gap: "— some messages may have been skipped —", connecting: "connecting…",
-        connected: "connected", badToken: "Invalid token." },
+        connected: "connected", badToken: "Invalid token.",
+        sending: "Sending…", sent: "Sent ✓",
+        hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
         gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
-        connected: "接続OK", badToken: "トークンが不正です。" },
+        connected: "接続OK", badToken: "トークンが不正です。",
+        sending: "送信中…", sent: "送信済 ✓",
+        hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…" },
 }[LANG];
 
 // ---- constants (mirror worker.js) ----
@@ -124,10 +129,13 @@ let curSid = null;              // selected chat session id
 let curTab = null;             // selected analysis tab name
 let pollInterval = 3000;
 let pollTimer = null;
+let pollGen = 0;                // generation token: only the latest poll() renders/reschedules
 let stopped = false;
 let latestSeenTs = 0;           // worker-clock cursor (ms), never local Date.now()
 const seen = new Set();         // mid dedup
-let lastViewVersions = {};
+let lastViewVersions = {};      // last-received vv map (per tab)
+const appliedVv = {};           // tab → version successfully decoded+painted
+const viewInflight = new Set(); // tabs with an in-flight /view fetch (de-dupe)
 let lastPresenceMs = 0;
 let gapShown = false;           // de-dupe the visibility gap notice
 let lastDisplayedTs = 0;        // ts13 of the newest message painted
@@ -153,18 +161,26 @@ function genPid() {
   return "p" + Math.random().toString(36).slice(2); // last resort (very old env)
 }
 
-// ---- fetch with AbortController timeout ----
-async function api(path, { method = "GET", body = null, raw = false } = {}) {
+// ---- fetch with AbortController timeout (body read is ALSO inside the guard) ----
+// Reads the body inside the try so a header-then-stall (mobile/proxy/edge) aborts
+// at FETCH_TIMEOUT_MS instead of hanging forever on a later await res.json()/blob().
+async function api(path, { method = "GET", body = null, expect = "json" } = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
     const headers = { "Authorization": "Bearer " + cfg.secret };
-    if (body !== null && !raw) headers["content-type"] = "application/json";
+    if (body !== null) headers["content-type"] = "application/json";
     const res = await fetch(cfg.base_url + path, {
-      method, headers, body: body === null ? null : (raw ? body : JSON.stringify(body)),
+      method, headers,
+      body: body === null ? null : JSON.stringify(body),
       signal: ctrl.signal,
     });
-    return res;
+    let data = null;
+    if (res.status !== 204 && res.ok) {                 // 204 / non-2xx → data=null
+      if (expect === "json") data = await res.json();   // parse/abort failures throw (json/blob symmetric)
+      else if (expect === "blob") data = await res.blob();
+    }
+    return { status: res.status, ok: res.ok, data };    // body read also under abort protection
   } finally {
     clearTimeout(to);
   }
@@ -197,9 +213,23 @@ function addMsg(m, opts = {}) {
   txt.textContent = m.text;
   div.appendChild(who);
   div.appendChild(txt);
+  if (opts.mine === true) {
+    // One status span per own message, rewritten in place across all states
+    // (sending / sent / failed). Remote messages get no span.
+    const st = document.createElement("span");
+    st.className = "status";
+    st.textContent = T.sending;
+    div.appendChild(st);
+  }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
   return div;
+}
+
+function setMsgStatus(div, text) {
+  const span = div.querySelector(".status");
+  if (!span) return;            // remote message — no status span
+  span.textContent = text;
 }
 
 function showGapIfNeeded(serverNowMs) {
@@ -218,65 +248,74 @@ function showGapIfNeeded(serverNowMs) {
 
 // ---- unified poll ----
 async function poll(reanchor = false) {
-  if (stopped) { return; }
+  if (stopped) return;
+  // Cancel any pending scheduled poll so a direct poll(true) (selectSession /
+  // visibilitychange / join) doesn't leave a stale timer alongside this run.
+  if (pollTimer) clearTimeout(pollTimer);
+  // Generation token: only the newest poll() updates UI / reschedules. A direct
+  // poll(true) that overtakes an in-flight poll bumps pollGen; the older run
+  // returns after its await without rendering or rescheduling (reviewer P2-3).
+  const myGen = ++pollGen;
   // Bootstrap: before a session is selected (curSid === null), poll with a sentinel
   // sid ("_") so the Worker still returns sessions/tabs/alive (messages empty for an
   // unknown sid). renderSessions() then selects the first session and re-polls.
   // Without this, the old `!curSid` early-return deadlocked first entry. reviewer code R1 P1.
   const bootstrap = !curSid;
   const sidPath = curSid || "_";
-  let res;
   try {
     const since = (reanchor || bootstrap)
       ? "?since=RESET"
       : "?since=" + encodeURIComponent(sinceParam());
-    res = await api("/poll/" + encodeURIComponent(cfg.channel) + "/" +
-                    encodeURIComponent(sidPath) + since);
+    const r = await api("/poll/" + encodeURIComponent(cfg.channel) + "/" +
+                        encodeURIComponent(sidPath) + since);
+    // Permanent expiry is idempotent → handle before the generation check so even
+    // an overtaken poll reliably detects channel death and stops.
+    if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
+    if (myGen !== pollGen) return;                         // overtaken → newer poll owns render/reschedule
+    if (r.status === 503) { document.getElementById("status").textContent = T.hostOffline; return; }
+    if (!r.ok) { document.getElementById("status").textContent = T.retrying; return; }
+    const data = r.data;                                   // already parsed by api() (throws on parse/abort)
+    const serverNow = data.server_now_ms || 0;
+    if (reanchor) {
+      showGapIfNeeded(serverNow);
+      latestSeenTs = serverNow;
+    }
+    renderSessions(data.sessions || []);
+    renderTabs(data.tabs || []);
+    applyViewVersions(data.view_versions || {});
+    // session opt-out detection
+    const sids = (data.sessions || []).map((s) => s.id);
+    const notice = document.getElementById("sessNotice");
+    if (curSid && !sids.includes(curSid)) {
+      notice.style.display = "block";
+      notice.textContent = T.optedOut;
+      document.getElementById("sendBtn").disabled = true;
+    } else {
+      notice.style.display = "none";
+      document.getElementById("sendBtn").disabled = false;
+    }
+    for (const m of (data.messages || [])) {
+      if (!m.mid || seen.has(m.mid)) continue;
+      seen.add(m.mid);
+      addMsg(m);
+      const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
+      if (ts > latestSeenTs) latestSeenTs = ts;
+      if (ts > lastDisplayedTs) lastDisplayedTs = ts;
+      gapShown = false; // a real message resets the gap de-dupe
+    }
+    if (serverNow > latestSeenTs) latestSeenTs = serverNow;
+    // prune seen to keep memory bounded (ts < latest - 2*LOOKBACK)
+    const cutoff = latestSeenTs - 2 * LOOKBACK_MS;
+    for (const mid of seen) {
+      if ((parseInt(mid.slice(0, 13), 10) || 0) < cutoff) seen.delete(mid);
+    }
+    document.getElementById("status").textContent = T.connected;
+    maybePresence();
   } catch (e) {
-    document.getElementById("status").textContent = "…";
-    schedulePoll();
-    return;
+    if (myGen === pollGen) document.getElementById("status").textContent = T.retrying;
+  } finally {
+    if (!stopped && myGen === pollGen) schedulePoll();     // only the latest poll keeps the loop alive
   }
-  if (res.status === 401 || res.status === 410) { selfDestruct(); return; }
-  if (!res.ok) { schedulePoll(); return; }
-  const data = await res.json();
-  const serverNow = data.server_now_ms || 0;
-  if (reanchor) {
-    showGapIfNeeded(serverNow);
-    latestSeenTs = serverNow;
-  }
-  renderSessions(data.sessions || []);
-  renderTabs(data.tabs || []);
-  applyViewVersions(data.view_versions || {});
-  // session opt-out detection
-  const sids = (data.sessions || []).map((s) => s.id);
-  const notice = document.getElementById("sessNotice");
-  if (curSid && !sids.includes(curSid)) {
-    notice.style.display = "block";
-    notice.textContent = T.optedOut;
-    document.getElementById("sendBtn").disabled = true;
-  } else {
-    notice.style.display = "none";
-    document.getElementById("sendBtn").disabled = false;
-  }
-  for (const m of (data.messages || [])) {
-    if (!m.mid || seen.has(m.mid)) continue;
-    seen.add(m.mid);
-    addMsg(m);
-    const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
-    if (ts > latestSeenTs) latestSeenTs = ts;
-    if (ts > lastDisplayedTs) lastDisplayedTs = ts;
-    gapShown = false; // a real message resets the gap de-dupe
-  }
-  if (serverNow > latestSeenTs) latestSeenTs = serverNow;
-  // prune seen to keep memory bounded (ts < latest - 2*LOOKBACK)
-  const cutoff = latestSeenTs - 2 * LOOKBACK_MS;
-  for (const mid of seen) {
-    if ((parseInt(mid.slice(0, 13), 10) || 0) < cutoff) seen.delete(mid);
-  }
-  document.getElementById("status").textContent = T.connected;
-  maybePresence();
-  schedulePoll();
 }
 
 function schedulePoll() {
@@ -298,7 +337,8 @@ async function maybePresence(force = false) {
   lastPresenceMs = now;
   try {
     await api("/presence/" + encodeURIComponent(cfg.channel), {
-      method: "POST", body: { pid, name: myName || "Guest", sid: curSid || "", tab: curTab || "" },
+      method: "POST", expect: "none",
+      body: { pid, name: myName || "Guest", sid: curSid || "", tab: curTab || "" },
     });
   } catch (e) { /* transient */ }
 }
@@ -337,34 +377,62 @@ function renderTabs(tabs) {
     const b = document.createElement("button");
     b.className = "tabbtn" + (name === curTab ? " active" : "");
     b.textContent = name;
-    b.onclick = () => { curTab = name; renderTabs(tabs); maybePresence(true); fetchView(); };
+    b.onclick = () => {
+      curTab = name;
+      delete appliedVv[curTab];   // force re-fetch of the new tab (img is shared); use updated curTab, not loop var
+      renderTabs(tabs);
+      maybePresence(true);
+      fetchView();
+    };
     bar.appendChild(b);
   }
-  if (!curTab && tabs.length) { curTab = tabs[0]; fetchView(); }
+  if (!curTab && tabs.length) {
+    curTab = tabs[0];
+    delete appliedVv[curTab];
+    fetchView();
+  }
 }
 
 // ---- live view ----
+// Only advance appliedVv on a version we actually decoded+painted, so a failed
+// fetch/decode is retried by the next poll instead of sticking the view (cause E).
 function applyViewVersions(vv) {
-  if (curTab && vv[curTab] && vv[curTab] !== lastViewVersions[curTab]) {
-    fetchView();
-  }
   lastViewVersions = vv;
+  if (curTab && vv[curTab] && vv[curTab] !== appliedVv[curTab]) fetchView(vv[curTab]);
 }
 
-async function fetchView() {
+async function fetchView(targetVer) {
   if (!curTab || stopped) return;
+  const tab = curTab;
+  const ver = (targetVer != null) ? targetVer : (lastViewVersions[tab] || 0);
+  if (viewInflight.has(tab)) return;                  // de-dupe concurrent fetches per tab
+  viewInflight.add(tab);
   try {
-    const res = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curTab));
-    if (res.status === 401 || res.status === 410) { selfDestruct(); return; }
-    if (res.status === 204 || !res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const r = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(tab),
+                        { expect: "blob" });
+    if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
+    if (r.status === 204 || !r.ok || !r.data) return; // transient: don't advance appliedVv → next poll retries
+    const url = URL.createObjectURL(r.data);
+    // Wait for decode. A corrupt/empty PNG fires onerror and we leave appliedVv
+    // unadvanced (reviewer P2) so the view doesn't stick on a broken frame.
+    const decoded = await new Promise((resolve) => {
+      const probe = new Image();
+      probe.onload = () => resolve(true);
+      probe.onerror = () => resolve(false);
+      probe.src = url;
+    });
+    if (!decoded || tab !== curTab || stopped) {      // decode failed or tab changed/stopped mid-fetch
+      URL.revokeObjectURL(url);                        // release the new URL (leak guard)
+      return;                                          // appliedVv unadvanced → next poll retries
+    }
     const img = document.getElementById("view");
     const old = img.dataset.url;
-    img.onload = () => { if (old) URL.revokeObjectURL(old); };
-    img.src = url;
+    img.src = url;                                     // already decoded → instant paint
     img.dataset.url = url;
-  } catch (e) { /* transient */ }
+    if (old) URL.revokeObjectURL(old);                // revoke old URL synchronously (no onload race; reviewer P2-2)
+    appliedVv[tab] = ver;                             // advance only on a painted frame
+  } catch (e) { /* transient: appliedVv unadvanced → next poll retries */ }
+  finally { viewInflight.delete(tab); }
 }
 
 // ---- zoom / pan ----
@@ -472,32 +540,43 @@ async function send() {
   ta.value = "";
   const div = addMsg({ name: myName || "Guest", text, role: "user" }, { mine: true });
   try {
-    const res = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+    const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
       { method: "POST", body: { text, name: myName || "Guest" } });
-    if (res.status === 401 || res.status === 410) { selfDestruct(); markFailed(div, text); return; }
-    if (!res.ok) { markFailed(div, text); return; }
-    const data = await res.json();
-    if (data.mid) seen.add(data.mid); // dedup our own echo from /poll
+    if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(div, text, false); return; }
+    if (r.ok && r.data && r.data.mid) {
+      setMsgStatus(div, T.sent);     // relay accepted (saved in:, returned mid)
+      seen.add(r.data.mid);          // dedup our own echo from /poll
+      return;
+    }
+    markFailed(div, text, true);     // !ok / 503 / missing mid → retryable
   } catch (e) {
-    markFailed(div, text);
+    markFailed(div, text, true);     // body stall / abort / network → retryable
   }
 }
 
-function markFailed(div, text) {
+// retryable=false (401/410, channel dead, selfDestruct done) → no resend button.
+function markFailed(div, text, retryable) {
   div.classList.add("failed");
+  setMsgStatus(div, T.sendFail);     // keep the same span (so a later resend can show ✓)
+  if (!retryable) return;
   const btn = document.createElement("button");
   btn.className = "resend";
-  btn.textContent = T.resend + " (" + T.sendFail + ")";
+  btn.textContent = T.resend;
   btn.onclick = async () => {
     btn.remove();
     div.classList.remove("failed");
+    setMsgStatus(div, T.sending);
     try {
-      const res = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+      const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
         { method: "POST", body: { text, name: myName || "Guest" } });
-      if (!res.ok) { markFailed(div, text); return; }
-      const data = await res.json();
-      if (data.mid) seen.add(data.mid);
-    } catch (e) { markFailed(div, text); }
+      if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(div, text, false); return; }
+      if (r.ok && r.data && r.data.mid) {
+        setMsgStatus(div, T.sent);
+        seen.add(r.data.mid);
+        return;
+      }
+      markFailed(div, text, true);
+    } catch (e) { markFailed(div, text, true); }
   };
   div.appendChild(btn);
 }

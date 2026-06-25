@@ -287,6 +287,27 @@ def test_publish_scope(qapp, monkeypatch):
     r.stop()
 
 
+def test_capture_tick_exception_is_swallowed(qapp, monkeypatch):
+    # A throw from a capture-tick collaborator must NOT propagate out of the
+    # GUI-thread QTimer slot (it could tear down the app) and must NOT stop
+    # sharing — the next tick recovers. (Issue #43 cause #6.)
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+
+    def boom():
+        raise RuntimeError("grab failed")
+
+    monkeypatch.setattr(chat, "session_summaries", boom)
+    r._on_capture_tick()   # must not raise
+    assert r._sharing is True
+    r.stop()
+
+
 # ---- tabs: new tabs auto-share, deselected tabs stay out ----
 
 def test_tab_auto_share(qapp, monkeypatch):
