@@ -407,6 +407,24 @@ def _rewire_window(window) -> None:
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
     window.register_command("open-dataset", lambda name: session.open_dataset(window, name))
+    # Meeting relay verbs (Issue #42). The relay is resolved at call time via
+    # `window._meeting_relay` so a hot-reload re-run of _rewire_window picks up
+    # the live relay instance.
+    window.register_command(
+        "chat-inject",
+        lambda text, sender, session=None:
+            window.chat_widget().inject_remote_message(text, sender, session_id=session)
+            or f"injected:{session}",
+    )
+    window.register_command(
+        "chat-list-sessions", lambda: window.chat_widget().session_summaries()
+    )
+    window.register_command(
+        "meeting-start", lambda ttl_sec=10800: window._meeting_relay.meeting_start(int(ttl_sec))
+    )
+    window.register_command(
+        "meeting-stop", lambda: window._meeting_relay.meeting_stop() or "stopped"
+    )
     window.set_session_saver(lambda: session.save_all(window))
 
 

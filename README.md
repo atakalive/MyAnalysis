@@ -20,6 +20,7 @@ PySide6  pyqtgraph  numpy  pandas  matplotlib
 **Optional dependencies** (only for specific analyses):
 
 - `h5py` — needed only for analyses that handle `.h5` camera images (e.g. `dataset_d`). Imported lazily inside `load()`.
+- `qrcode` + `Pillow` — needed only for the QR-code button in the meeting-share window (Issue #42). Imported lazily; without them the QR button is just disabled. The meeting relay itself uses only the stdlib. See `relay-worker/` (Cloudflare Worker; **Workers Paid $5/month recommended** — the free tier suits short demos only).
 
 **Config files** (copy each `.example` to activate; the real files are gitignored):
 

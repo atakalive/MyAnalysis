@@ -20,6 +20,7 @@ PySide6  pyqtgraph  numpy  pandas  matplotlib
 **任意依存**（特定の解析を動かす時だけ）:
 
 - `h5py` — `.h5` カメラ画像を扱う解析（例: `dataset_d`）でのみ必要。`load()` 内で遅延 import される。
+- `qrcode` + `Pillow` — ミーティング共有ウィンドウ（Issue #42）の QR ボタンでのみ必要。遅延 import で、無ければ QR ボタンが無効になるだけ。リレー本体は標準ライブラリのみで動く。`relay-worker/`（Cloudflare Worker）を参照（**Cloudflare Workers Paid $5/月 推奨** — 無料枠は短時間デモのみ）。
 
 **設定ファイル**（いずれも `.example` をコピーして使う。実体は gitignore）:
 

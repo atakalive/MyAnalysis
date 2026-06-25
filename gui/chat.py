@@ -137,7 +137,7 @@ def _simplify_tool_text(content: str, mode: str) -> str:
             if calls == 0:                                       # 退化 run: 内容を消さず保持
                 block = tool_lines
             elif mode == "hidden":
-                block = [f"{TOOL_CALL_MARKER} {calls} tool calls"]
+                block = []                                       # hidden: run 全体を削除（要約行も出さない）
             elif mode == "compact":
                 block = [r for r in tool_lines if _is_tool_call(r)]
             else:  # full
@@ -154,6 +154,8 @@ def _simplify_tool_text(content: str, mode: str) -> str:
                 out.append("")
             out.append(lines[i])                    # 本文行（空行含む）は verbatim
             i += 1
+    while out and out[-1] == "":                     # hidden で run を消した末尾の余り空行を除去
+        out.pop()
     return "\n".join(out)
 
 
@@ -221,7 +223,8 @@ class _StreamWorker(QThread):
 class _Turn:
     """Per-session in-flight turn state. Not a QObject — timers/worker are
     owned by ChatWidget so they live on the GUI thread."""
-    __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped")
+    __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped",
+                 "anchor", "rendered")
 
     def __init__(self, session: ChatSession, backend: LLMBackend,
                  worker: _StreamWorker, kill_timer: QTimer):
@@ -231,9 +234,20 @@ class _Turn:
         self.kill_timer = kill_timer
         self.buffer = ""
         self.stopped = False
+        # compact/hidden のライブ描画用。anchor は in-flight assistant 本文の開始
+        # 文書位置（int。_log.clear() で無効化される QTextCursor は使わない）。
+        # rendered は直近描画済みの簡略本文（prefix-append の基準）。
+        self.anchor: int | None = None
+        self.rendered = ""
 
 
 class ChatWidget(QWidget):
+    # Emitted when a message is appended to a session. origin ∈ {"local","remote"}:
+    # host-typed sends and assistant completions are "local"; remote (guest)
+    # injections are "remote". The meeting relay publishes ONLY "local" messages
+    # (echo suppression). Args: (session_id, role, content, origin).
+    messageAdded = Signal(str, str, str, str)
+
     def __init__(self, backend_factory: Callable[[], LLMBackend], dispatch: Callable, parent: QWidget | None = None):
         super().__init__(parent)
         self._backend_factory = backend_factory
@@ -251,6 +265,9 @@ class ChatWidget(QWidget):
         self._turns: dict[str, _Turn] = {}
         self._session_backends: dict[str, LLMBackend] = {}
         self._turn_notes: dict[str, str] = {}
+        # Remote (guest) messages that arrived while a session was busy, queued
+        # FIFO per session id and drained on turn completion (_on_done/_on_failed).
+        self._pending_remote: dict[str, list] = {}
         self._tool_display_default = _load_tool_display()
 
         layout = QVBoxLayout(self)
@@ -546,16 +563,27 @@ class ChatWidget(QWidget):
             if m.role == "user":
                 self._append_block("user", m.content or "")
             elif m.role == "assistant" and m.content:
-                self._append_block(
-                    "assistant", _simplify_tool_text(m.content, mode), markdown=True
-                )
+                # hidden で tool-only メッセージは簡略後に空になる。空ヘッダだけの
+                # ブロックを描かないよう、簡略結果が中身を持つ時だけ描画する。
+                body = _simplify_tool_text(m.content, mode)
+                if body.strip():
+                    self._append_block("assistant", body, markdown=True)
         # If a turn is in-flight for this session, show assistant placeholder +
         # partial buffer. Condition is `is not None` (not `turn.buffer`) so an
         # empty-buffer turn still gets the assistant header — later _on_chunk
         # inserts into that block correctly after a tab switch back.
         turn = self._turns.get(sess.id)
         if turn is not None:
-            self._append_block("assistant", turn.buffer)
+            body = _simplify_tool_text(turn.buffer, mode)
+            self._append_block("assistant", "")                       # ヘッダ + 空本文
+            turn.anchor = self._log.document().characterCount() - 1   # 本文開始の文書位置
+            turn.rendered = body                                      # prefix-append の基準を再設定
+            if body:
+                cursor = QTextCursor(self._log.document())
+                cursor.setPosition(turn.anchor)
+                cursor.setCharFormat(QTextCharFormat())
+                cursor.insertText(body)
+                self._scroll_to_bottom()
         # Show stashed completion note from a background-finished turn.
         note = self._turn_notes.pop(sess.id, None)
         if note:
@@ -765,6 +793,7 @@ class ChatWidget(QWidget):
                 self._active = new
         self._session_backends.pop(sess.id, None)
         self._turn_notes.pop(sess.id, None)
+        self._pending_remote.pop(sess.id, None)
         self._rebuild_tab_bar()
         self._render_session(self._active)
         self._update_turn_ui()
@@ -821,7 +850,6 @@ class ChatWidget(QWidget):
         if not text.strip():
             return
         self._input.clear()
-        sess = self._active
         # Live-reference the current dataset from the window so a late
         # session_spec assignment (currentChanged fired before spec was set)
         # can't leave us with a stale cached _current_dataset.
@@ -829,7 +857,21 @@ class ChatWidget(QWidget):
             ds = self._window.current_chat_dataset()
             if ds is not None:
                 self._current_dataset = ds
+        self._start_turn(self._active, text, "local")
+
+    def _start_turn(self, sess: ChatSession, text: str, origin: str = "local") -> None:
+        """Begin a streaming turn for `sess` with user message `text`.
+
+        Extracted from `_on_send` so remote (guest) injections share the exact
+        same turn machinery. `origin` is forwarded on the `messageAdded` emit so
+        the meeting relay can tell host-typed ("local") from injected ("remote").
+
+        Works whether `sess` is the visible session or a background one: `_log`
+        is touched ONLY when `sess is self._active` (a background session's
+        transcript is redrawn by `_render_session` on tab switch).
+        """
         sess.messages.append(Message(role="user", content=text))
+        self.messageAdded.emit(sess.id, "user", text, origin)
         # Auto-title from the first non-empty line of the first user message.
         if sess.title == chat_store._DEFAULT_TITLE:
             first = next(
@@ -837,17 +879,17 @@ class ChatWidget(QWidget):
             )[:20]
             if first:
                 sess.title = first
-                idx = self._tab_bar.currentIndex()
-                if idx >= 0:
-                    self._tab_bar.setTabText(idx, self._tab_text(sess))
+                self._refresh_tab_for(sess)
                 if sess.dataset is not None:
                     self._mark_chat_dirty()
         # Adopt the current dataset into an as-yet-unbound scratch session.
         if self._current_dataset is not None and sess.dataset is None:
             sess.dataset = self._current_dataset
             self._mark_chat_dirty()
-        self._append_block("user", text)
-        self._append_block("assistant", "")
+        is_active = sess is self._active
+        if is_active:
+            self._append_block("user", text)
+            self._append_block("assistant", "")
         backend = self._session_backends.setdefault(sess.id, self._backend_factory())
         self._load_backend_session(backend, sess)
         kill_timer = QTimer(self)
@@ -855,7 +897,11 @@ class ChatWidget(QWidget):
         kill_timer.timeout.connect(partial(self._force_kill, sess.id))
         worker = _StreamWorker(sess.id, backend, list(sess.messages),
                                self._dispatch, self)
-        self._turns[sess.id] = _Turn(sess, backend, worker, kill_timer)
+        turn = _Turn(sess, backend, worker, kill_timer)
+        # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは
+        # _log を触らないので anchor=None（_rewrite_inflight_body がガード済み）。
+        turn.anchor = (self._log.document().characterCount() - 1) if is_active else None
+        self._turns[sess.id] = turn
         worker.chunk.connect(self._on_chunk)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
@@ -868,17 +914,72 @@ class ChatWidget(QWidget):
             self._spin_idx = 0
             self._spin_timer.start()
 
+    def inject_remote_message(
+        self, text: str, sender: str, session_id: str | None = None
+    ) -> None:
+        """Inject a remote (guest) message as a user turn into `session_id`.
+
+        Used by the meeting relay. The text is prefixed with a localized
+        attribution (`meeting.remote_message_prefix`) so the remote origin is
+        explicit and auditable. If the target session is busy, the message is
+        queued FIFO (`_pending_remote`) and drained on turn completion. An
+        unknown `session_id` is a no-op (never falls back to the active session).
+        """
+        if session_id is not None:
+            sess = self._session_by_id(session_id)
+            if sess is None:
+                return
+        else:
+            sess = self._active
+        inj_text = tr(
+            "meeting.remote_message_prefix",
+            sender=(sender or tr("meeting.guest_default")),
+            text=text,
+        )
+        if sess.id in self._turns:
+            self._pending_remote.setdefault(sess.id, []).append((sender, text))
+            return
+        self._start_turn(sess, inj_text, "remote")
+
+    def session_summaries(self) -> list[dict]:
+        """All sessions across every dataset as plain dicts (relay / share UI).
+
+        `dataset` lets the relay/share window decide the default (current
+        dataset) vs opt-in (other datasets) publish scope; the authoritative
+        published set lives in the relay's `_published_session_ids`.
+        """
+        return [
+            {"id": s.id, "title": self._display_title(s),
+             "busy": s.id in self._turns, "dataset": s.dataset}
+            for s in self.sessions_for_persistence()
+        ]
+
+    def _drain_pending_remote(self, sid: str) -> None:
+        """Pop one queued remote message for `sid` and start it (FIFO). Called at
+        the tail of _on_done/_on_failed, after `_turns.pop(sid)`."""
+        pend = self._pending_remote.get(sid)
+        if not pend:
+            return
+        sender, text = pend.pop(0)
+        if not pend:
+            self._pending_remote.pop(sid, None)
+        self.inject_remote_message(text, sender, session_id=sid)
+
     def _on_chunk(self, sid: str, piece: str) -> None:
         turn = self._turns.get(sid)
         if turn is None:
             return
         turn.buffer += piece
-        if sid == self._active.id:
+        if sid != self._active.id:        # 非表示セッションは文書に触れない（再開時 _render_session が再描画）
+            return
+        if self._effective_tool_display(turn.session) == "full":
             cursor = QTextCursor(self._log.document())
             cursor.movePosition(QTextCursor.MoveOperation.End)
             cursor.setCharFormat(QTextCharFormat())
             cursor.insertText(piece)
             self._scroll_to_bottom()
+        else:
+            self._rewrite_inflight_body(turn)
 
     def _on_done(self, sid: str) -> None:
         turn = self._turns.pop(sid, None)
@@ -894,6 +995,8 @@ class ChatWidget(QWidget):
         sess.messages.append(
             Message(role="assistant", content=turn.buffer)
         )
+        if turn.buffer:
+            self.messageAdded.emit(sess.id, "assistant", turn.buffer, "local")
         self._capture_backend_session(turn.backend, sess)
         sess.updated = time.time()
         if sess.dataset is not None:
@@ -914,6 +1017,7 @@ class ChatWidget(QWidget):
                 if note:
                     self._turn_notes[sid] = note
         self._refresh_tab_for(sess)
+        self._drain_pending_remote(sid)
         self._stop_spin_if_idle()
 
     def _on_failed(self, sid: str, msg: str) -> None:
@@ -945,6 +1049,7 @@ class ChatWidget(QWidget):
         else:
             self._turn_notes[sid] = error_text.strip()
         self._refresh_tab_for(sess)
+        self._drain_pending_remote(sid)
         self._stop_spin_if_idle()
 
     def _on_stop(self) -> None:
@@ -1050,12 +1155,40 @@ class ChatWidget(QWidget):
                     turn.worker.wait(1000)
 
     # ----- display helpers -----
-    # 追記専用の QTextCursor 操作。ストリーミング中は末尾への insertText のみ
-    # 行うため O(n)。既存ブロックの再描画は発生しない。
+    # 追記専用の QTextCursor 操作。full モードのストリーミングは末尾への
+    # insertText のみで O(n)。compact/hidden は _rewrite_inflight_body が
+    # _simplify_tool_text を通すが、prefix-append（増分のみ末尾追記）で
+    # append-only / O(n) を維持し、既存ブロックの再描画は通常発生しない。
 
     def _scroll_to_bottom(self) -> None:
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _rewrite_inflight_body(self, turn: "_Turn") -> None:
+        """ストリーミング中の assistant 本文を、表示モードで簡略化したバッファに
+        同期する（compact/hidden 用、プレーンテキスト）。anchor 未設定なら no-op。
+        in-flight ブロックが _log 末尾である前提（スピナーは _log に書かず、
+        in-flight セッションに _turn_notes は付かない）に依存。"""
+        if turn.anchor is None:
+            return
+        body = _simplify_tool_text(turn.buffer, self._effective_tool_display(turn.session))
+        if body == turn.rendered:                                  # ① 変化なし → Qt 操作ゼロ
+            return
+        cursor = QTextCursor(self._log.document())
+        if turn.rendered and body.startswith(turn.rendered):       # ② 末尾追記（append-only, O(n)）
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.setCharFormat(QTextCharFormat())
+            cursor.insertText(body[len(turn.rendered):])
+        else:                                                      # ③ 構造変化 → anchor〜末尾を全置換（稀）
+            cursor.setPosition(turn.anchor)
+            cursor.movePosition(QTextCursor.MoveOperation.End,
+                                QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.setCharFormat(QTextCharFormat())
+            if body:
+                cursor.insertText(body)
+        turn.rendered = body
+        self._scroll_to_bottom()
 
     def _append_system_line(self, text: str) -> None:
         self._log.append(

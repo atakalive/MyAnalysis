@@ -91,6 +91,8 @@ class ToolWindow(QMainWindow):
         self._view_menu = self.menuBar().addMenu(tr("menu.view"))
         self._chat_action = self._view_menu.addAction(tr("menu.view.toggle_chat"))
         self._chat_action.triggered.connect(self.toggle_chat_floating)
+        self._meeting_share_action = self._view_menu.addAction(tr("menu.view.meeting_share"))
+        self._meeting_share_action.triggered.connect(self._open_meeting_share)
 
         self._language_menu = self._view_menu.addMenu(tr("menu.view.language"))
         self._language_group = QActionGroup(self)
@@ -134,6 +136,7 @@ class ToolWindow(QMainWindow):
         self._quit_action.setText(tr("menu.file.quit"))
         self._view_menu.setTitle(tr("menu.view"))
         self._chat_action.setText(tr("menu.view.toggle_chat"))
+        self._meeting_share_action.setText(tr("menu.view.meeting_share"))
         self._language_menu.setTitle(tr("menu.view.language"))
         self._tool_display_menu.setTitle(tr("menu.view.tool_display"))
         self._tool_display_actions["full"].setText(tr("menu.view.tool_display.full"))
@@ -165,6 +168,20 @@ class ToolWindow(QMainWindow):
     def _on_set_language(self, code: str) -> None:
         i18n.set_language(code)
         self.retranslate()
+
+    def _open_meeting_share(self) -> None:
+        """Open the non-modal meeting-share window (Issue #42)."""
+        relay = getattr(self, "_meeting_relay", None)
+        if relay is None:
+            return
+        win = getattr(self, "_meeting_share_window", None)
+        if win is None:
+            from gui.meeting_share import MeetingShareWindow
+            win = MeetingShareWindow(self, relay)
+            self._meeting_share_window = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
     def _set_tool_display_default(self, mode: str) -> None:
         if self._chat_widget is not None \
@@ -392,8 +409,16 @@ class ToolWindow(QMainWindow):
             return
         self.close()
 
+    def _stop_meeting_relay(self) -> None:
+        """Stop the meeting relay (idempotent). Called only on closeEvent accept
+        paths — not on ignore/Cancel/save-failure, where the window stays open."""
+        relay = getattr(self, "_meeting_relay", None)
+        if relay is not None:
+            relay.stop()
+
     def closeEvent(self, event) -> None:
         if not self._session_dirty or self._session_saver is None:
+            self._stop_meeting_relay()
             event.accept()
             return
         reply = QMessageBox.question(
@@ -420,8 +445,10 @@ class ToolWindow(QMainWindow):
                 )
                 event.ignore()
                 return
+            self._stop_meeting_relay()
             event.accept()
         elif reply == QMessageBox.StandardButton.No:
+            self._stop_meeting_relay()
             event.accept()
         else:
             event.ignore()

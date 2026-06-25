@@ -371,6 +371,11 @@ class HotReloadController(QObject):
 
             # 6. stop the old command watcher (release the directory handle).
             self._teardown_watchers(old_window)
+            # Stop the old meeting relay (idempotent) so its QThread/QTimer don't
+            # outlive the blue-green rebuild (Issue #42).
+            _relay = getattr(old_window, "_meeting_relay", None)
+            if _relay is not None:
+                _relay.stop()
 
             # 7. purge repo modules.
             hotreload.purge_project_modules()

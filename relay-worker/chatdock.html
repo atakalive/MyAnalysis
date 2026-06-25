@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<!--
+  MyAnalysis meeting guest client (Issue #42). Single file, pure fetch, zero deps.
+  Served by the Worker at GET / (same origin → no CORS needed). Strings carry a
+  minimal ja/en switch in-file (the Python i18n catalog is not shipped to guests).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyAnalysis — meeting</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; }
+  #enter { max-width: 460px; margin: 8vh auto; padding: 24px; background: #252526; border-radius: 8px; }
+  #enter h1 { font-size: 18px; margin: 0 0 16px; }
+  #enter input { width: 100%; padding: 8px; margin: 6px 0 14px; background: #1e1e1e; color: #ddd;
+                 border: 1px solid #444; border-radius: 4px; font-size: 14px; }
+  button { background: #0e639c; color: #fff; border: none; padding: 8px 14px; border-radius: 4px;
+           cursor: pointer; font-size: 13px; }
+  button:hover { background: #1177bb; }
+  button:disabled { background: #444; color: #888; cursor: default; }
+  .err { color: #f48771; font-size: 13px; margin: 8px 0; }
+  #app { display: none; height: 100vh; }
+  #cols { display: flex; height: 100%; }
+  #left { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #333; min-width: 0; }
+  #right { width: 380px; display: flex; flex-direction: column; min-width: 0; }
+  .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
+  .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
+  .tabbtn.active { background: #0e639c; }
+  #canvaswrap { flex: 1; overflow: hidden; position: relative; background: #111; }
+  #view { position: absolute; transform-origin: 0 0; image-rendering: auto; }
+  #chatlog { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
+  .msg { margin: 6px 0; padding: 6px 8px; border-radius: 6px; background: #2a2d2e; white-space: pre-wrap;
+         word-break: break-word; }
+  .msg .who { font-weight: bold; font-size: 11px; color: #6ec1e4; }
+  .msg.assistant .who { color: #a8d08d; }
+  .msg.mine { background: #094771; }
+  .msg.failed { border: 1px solid #f48771; }
+  .resend { margin-left: 8px; font-size: 11px; padding: 1px 6px; }
+  #inputrow { display: flex; gap: 4px; padding: 6px; background: #252526; }
+  #msg { flex: 1; padding: 6px; background: #1e1e1e; color: #ddd; border: 1px solid #444; border-radius: 4px;
+         resize: none; font-size: 13px; }
+  #status { font-size: 11px; color: #888; padding: 2px 8px; }
+  .notice { color: #d7ba7d; font-size: 12px; padding: 6px 8px; }
+  .gap { color: #888; font-style: italic; font-size: 11px; text-align: center; margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<div id="enter">
+  <h1>MyAnalysis — meeting / ミーティング</h1>
+  <label>Invite token / 招待トークン</label>
+  <input id="tokenInput" placeholder="paste token…" autocomplete="off">
+  <label>Display name / 表示名</label>
+  <input id="nameInput" placeholder="Guest" autocomplete="off">
+  <div id="enterErr" class="err"></div>
+  <button id="joinBtn">Join / 入室</button>
+</div>
+
+<div id="app">
+  <div id="cols">
+    <div id="left">
+      <div class="bar" id="tabBar"></div>
+      <div id="canvaswrap">
+        <img id="view" alt="">
+      </div>
+      <div class="bar">
+        <button id="copyBtn">Copy image</button>
+        <button id="dlBtn">Download</button>
+        <span id="zoomInfo" style="font-size:11px;color:#888;margin-left:auto"></span>
+      </div>
+    </div>
+    <div id="right">
+      <div class="bar" id="sessionBar"></div>
+      <div id="sessNotice" class="notice" style="display:none"></div>
+      <div id="chatlog"></div>
+      <div id="status"></div>
+      <div id="inputrow">
+        <textarea id="msg" rows="2" placeholder="Message… (Enter to send)"></textarea>
+        <button id="sendBtn">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---- minimal i18n (guest-side only) ----
+const LANG = (navigator.language || "en").startsWith("ja") ? "ja" : "en";
+const T = {
+  en: { generating: "generating…", optedOut: "This session is no longer shared.",
+        sendFail: "send failed", resend: "resend", expired: "Meeting ended (channel expired).",
+        gap: "— some messages may have been skipped —", connecting: "connecting…",
+        connected: "connected", badToken: "Invalid token." },
+  ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
+        sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
+        gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
+        connected: "接続OK", badToken: "トークンが不正です。" },
+}[LANG];
+
+// ---- constants (mirror worker.js) ----
+const LOOKBACK_MS = 15000;
+const POLL_MIN = 1000, POLL_MAX = 30000;
+const FETCH_TIMEOUT_MS = 10000;
+const PRESENCE_INTERVAL_MS = 20000;
+
+// ---- state ----
+let cfg = null;                 // {base_url, channel, secret}
+let pid = null;                 // participant id (high-entropy)
+let myName = "Guest";
+let curSid = null;              // selected chat session id
+let curTab = null;             // selected analysis tab name
+let pollInterval = 3000;
+let pollTimer = null;
+let stopped = false;
+let latestSeenTs = 0;           // worker-clock cursor (ms), never local Date.now()
+const seen = new Set();         // mid dedup
+let lastViewVersions = {};
+let lastPresenceMs = 0;
+let gapShown = false;           // de-dupe the visibility gap notice
+let lastDisplayedTs = 0;        // ts13 of the newest message painted
+
+// ---- token decode (base64url → JSON) ----
+function decodeToken(tok) {
+  let s = tok.trim().replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const obj = JSON.parse(atob(s));
+  if (!obj.base_url || !obj.channel || !obj.secret) throw new Error("missing fields");
+  // strip a trailing slash on base_url for clean concatenation
+  obj.base_url = String(obj.base_url).replace(/\/+$/, "");
+  return obj;
+}
+
+function genPid() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  if (crypto && crypto.getRandomValues) {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  }
+  return "p" + Math.random().toString(36).slice(2); // last resort (very old env)
+}
+
+// ---- fetch with AbortController timeout ----
+async function api(path, { method = "GET", body = null, raw = false } = {}) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const headers = { "Authorization": "Bearer " + cfg.secret };
+    if (body !== null && !raw) headers["content-type"] = "application/json";
+    const res = await fetch(cfg.base_url + path, {
+      method, headers, body: body === null ? null : (raw ? body : JSON.stringify(body)),
+      signal: ctrl.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+function pad13(n) { return String(n).padStart(13, "0"); }
+function sinceParam() {
+  const floor = Math.max(0, latestSeenTs - LOOKBACK_MS);
+  return pad13(floor) + "-" + "0".repeat(13);
+}
+
+// ---- self-destruct on expiry/auth failure ----
+function selfDestruct() {
+  if (stopped) return;
+  stopped = true;
+  if (pollTimer) clearTimeout(pollTimer);
+  document.getElementById("status").textContent = T.expired;
+  document.getElementById("sendBtn").disabled = true;
+}
+
+// ---- chat rendering ----
+function addMsg(m, opts = {}) {
+  const log = document.getElementById("chatlog");
+  const div = document.createElement("div");
+  div.className = "msg " + (m.role === "assistant" ? "assistant" : "") + (opts.mine ? " mine" : "");
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = m.name || (m.role === "assistant" ? "AI" : "Guest");
+  const txt = document.createElement("div");
+  txt.textContent = m.text;
+  div.appendChild(who);
+  div.appendChild(txt);
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function showGapIfNeeded(serverNowMs) {
+  // Only when an actual gap opened (reanchor jumped past lookback) AND we have
+  // painted something before. De-dupe until the next real message arrives.
+  if (gapShown || lastDisplayedTs === 0) return;
+  if (serverNowMs - lastDisplayedTs > LOOKBACK_MS) {
+    const log = document.getElementById("chatlog");
+    const g = document.createElement("div");
+    g.className = "gap";
+    g.textContent = T.gap;
+    log.appendChild(g);
+    gapShown = true;
+  }
+}
+
+// ---- unified poll ----
+async function poll(reanchor = false) {
+  if (stopped || !curSid) { schedulePoll(); return; }
+  let res;
+  try {
+    const since = reanchor ? "" : "?since=" + encodeURIComponent(sinceParam());
+    res = await api("/poll/" + encodeURIComponent(cfg.channel) + "/" +
+                    encodeURIComponent(curSid) + (since ? since : "?since=RESET"));
+  } catch (e) {
+    document.getElementById("status").textContent = "…";
+    schedulePoll();
+    return;
+  }
+  if (res.status === 401 || res.status === 410) { selfDestruct(); return; }
+  if (!res.ok) { schedulePoll(); return; }
+  const data = await res.json();
+  const serverNow = data.server_now_ms || 0;
+  if (reanchor) {
+    showGapIfNeeded(serverNow);
+    latestSeenTs = serverNow;
+  }
+  renderSessions(data.sessions || []);
+  renderTabs(data.tabs || []);
+  applyViewVersions(data.view_versions || {});
+  // session opt-out detection
+  const sids = (data.sessions || []).map((s) => s.id);
+  const notice = document.getElementById("sessNotice");
+  if (curSid && !sids.includes(curSid)) {
+    notice.style.display = "block";
+    notice.textContent = T.optedOut;
+    document.getElementById("sendBtn").disabled = true;
+  } else {
+    notice.style.display = "none";
+    document.getElementById("sendBtn").disabled = false;
+  }
+  for (const m of (data.messages || [])) {
+    if (!m.mid || seen.has(m.mid)) continue;
+    seen.add(m.mid);
+    addMsg(m);
+    const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
+    if (ts > latestSeenTs) latestSeenTs = ts;
+    if (ts > lastDisplayedTs) lastDisplayedTs = ts;
+    gapShown = false; // a real message resets the gap de-dupe
+  }
+  if (serverNow > latestSeenTs) latestSeenTs = serverNow;
+  // prune seen to keep memory bounded (ts < latest - 2*LOOKBACK)
+  const cutoff = latestSeenTs - 2 * LOOKBACK_MS;
+  for (const mid of seen) {
+    if ((parseInt(mid.slice(0, 13), 10) || 0) < cutoff) seen.delete(mid);
+  }
+  document.getElementById("status").textContent = T.connected;
+  maybePresence();
+  schedulePoll();
+}
+
+function schedulePoll() {
+  if (stopped) return;
+  pollInterval = Math.min(POLL_MAX, Math.max(POLL_MIN, pollInterval));
+  pollTimer = setTimeout(() => poll(false), pollInterval);
+}
+
+// ---- presence (every ~20s, or immediately on sid/tab switch) ----
+async function maybePresence(force = false) {
+  const now = Date.now();
+  if (!force && now - lastPresenceMs < PRESENCE_INTERVAL_MS) return;
+  lastPresenceMs = now;
+  try {
+    await api("/presence/" + encodeURIComponent(cfg.channel), {
+      method: "POST", body: { pid, name: myName || "Guest", sid: curSid || "", tab: curTab || "" },
+    });
+  } catch (e) { /* transient */ }
+}
+
+// ---- sessions / tabs UI ----
+function renderSessions(sessions) {
+  const bar = document.getElementById("sessionBar");
+  const have = new Set(sessions.map((s) => s.id));
+  if (curSid && !have.has(curSid)) { /* opted out — keep selection, poll shows notice */ }
+  bar.innerHTML = "";
+  for (const s of sessions) {
+    const b = document.createElement("button");
+    b.className = "tabbtn" + (s.id === curSid ? " active" : "");
+    b.textContent = (s.busy ? "● " : "") + (s.title || "chat") + (s.busy ? " (" + T.generating + ")" : "");
+    b.onclick = () => selectSession(s.id);
+    bar.appendChild(b);
+  }
+  if (!curSid && sessions.length) selectSession(sessions[0].id);
+}
+
+function selectSession(sid) {
+  if (sid === curSid) return;
+  curSid = sid;
+  seen.clear();
+  document.getElementById("chatlog").innerHTML = "";
+  lastDisplayedTs = 0;
+  gapShown = false;
+  maybePresence(true);
+  poll(true); // reanchor for the freshly selected session
+}
+
+function renderTabs(tabs) {
+  const bar = document.getElementById("tabBar");
+  bar.innerHTML = "";
+  for (const name of tabs) {
+    const b = document.createElement("button");
+    b.className = "tabbtn" + (name === curTab ? " active" : "");
+    b.textContent = name;
+    b.onclick = () => { curTab = name; renderTabs(tabs); maybePresence(true); fetchView(true); };
+    bar.appendChild(b);
+  }
+  if (!curTab && tabs.length) { curTab = tabs[0]; fetchView(true); }
+}
+
+// ---- live view ----
+function applyViewVersions(vv) {
+  if (curTab && vv[curTab] && vv[curTab] !== lastViewVersions[curTab]) {
+    fetchView(false);
+  }
+  lastViewVersions = vv;
+}
+
+async function fetchView() {
+  if (!curTab || stopped) return;
+  try {
+    const res = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curTab));
+    if (res.status === 401 || res.status === 410) { selfDestruct(); return; }
+    if (res.status === 204 || !res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const img = document.getElementById("view");
+    const old = img.dataset.url;
+    img.onload = () => { if (old) URL.revokeObjectURL(old); };
+    img.src = url;
+    img.dataset.url = url;
+  } catch (e) { /* transient */ }
+}
+
+// ---- zoom / pan ----
+let scale = 1, panX = 0, panY = 0;
+function applyTransform() {
+  const img = document.getElementById("view");
+  img.style.transform = `translate(${panX}px,${panY}px) scale(${scale})`;
+  document.getElementById("zoomInfo").textContent = Math.round(scale * 100) + "%";
+}
+function setupViewer() {
+  const wrap = document.getElementById("canvaswrap");
+  wrap.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    scale = Math.min(20, Math.max(0.1, scale * f));
+    applyTransform();
+  }, { passive: false });
+  let dragging = false, sx = 0, sy = 0;
+  wrap.addEventListener("mousedown", (e) => { dragging = true; sx = e.clientX - panX; sy = e.clientY - panY; });
+  window.addEventListener("mousemove", (e) => { if (dragging) { panX = e.clientX - sx; panY = e.clientY - sy; applyTransform(); } });
+  window.addEventListener("mouseup", () => { dragging = false; });
+  applyTransform();
+}
+
+// ---- image copy / download (feature-detect clipboard) ----
+function setupImageButtons() {
+  const dl = document.getElementById("dlBtn");
+  dl.onclick = () => {
+    const img = document.getElementById("view");
+    if (!img.dataset.url) return;
+    const a = document.createElement("a");
+    a.href = img.dataset.url; a.download = (curTab || "view") + ".png"; a.click();
+  };
+  const copy = document.getElementById("copyBtn");
+  if (!(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem)) {
+    copy.style.display = "none";
+    return;
+  }
+  copy.onclick = async () => {
+    const img = document.getElementById("view");
+    if (!img.dataset.url) return;
+    try {
+      const blob = await (await fetch(img.dataset.url)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    } catch (e) { /* ignore */ }
+  };
+}
+
+// ---- send ----
+async function send() {
+  if (!curSid || stopped) return;
+  const ta = document.getElementById("msg");
+  const text = ta.value;
+  if (!text.trim()) return;
+  ta.value = "";
+  const div = addMsg({ name: myName || "Guest", text, role: "user" }, { mine: true });
+  try {
+    const res = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+      { method: "POST", body: { text, name: myName || "Guest" } });
+    if (res.status === 401 || res.status === 410) { selfDestruct(); markFailed(div, text); return; }
+    if (!res.ok) { markFailed(div, text); return; }
+    const data = await res.json();
+    if (data.mid) seen.add(data.mid); // dedup our own echo from /poll
+  } catch (e) {
+    markFailed(div, text);
+  }
+}
+
+function markFailed(div, text) {
+  div.classList.add("failed");
+  const btn = document.createElement("button");
+  btn.className = "resend";
+  btn.textContent = T.resend + " (" + T.sendFail + ")";
+  btn.onclick = async () => {
+    btn.remove();
+    div.classList.remove("failed");
+    try {
+      const res = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+        { method: "POST", body: { text, name: myName || "Guest" } });
+      if (!res.ok) { markFailed(div, text); return; }
+      const data = await res.json();
+      if (data.mid) seen.add(data.mid);
+    } catch (e) { markFailed(div, text); }
+  };
+  div.appendChild(btn);
+}
+
+// ---- join ----
+function join(tok, name) {
+  try {
+    cfg = decodeToken(tok);
+  } catch (e) {
+    document.getElementById("enterErr").textContent = T.badToken;
+    return;
+  }
+  myName = (name || "").trim() || "Guest";
+  pid = genPid();
+  document.getElementById("enter").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("status").textContent = T.connecting;
+  setupViewer();
+  setupImageButtons();
+  document.getElementById("sendBtn").onclick = send;
+  document.getElementById("msg").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  // Page Visibility: on resume, reanchor (since omitted) to jump cleanly to
+  // "now" using the worker clock — never local Date.now().
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !stopped) {
+      if (pollTimer) clearTimeout(pollTimer);
+      poll(true);
+    }
+  });
+  poll(true); // initial reanchor poll
+}
+
+// ---- bootstrap ----
+document.getElementById("joinBtn").onclick = () => {
+  join(document.getElementById("tokenInput").value, document.getElementById("nameInput").value);
+};
+// Deep link: …/#token=<base64url>
+(function () {
+  const m = (location.hash || "").match(/#token=([^&]+)/);
+  if (m) {
+    document.getElementById("tokenInput").value = decodeURIComponent(m[1]);
+    join(decodeURIComponent(m[1]), document.getElementById("nameInput").value);
+  }
+})();
+</script>
+</body>
+</html>
