@@ -157,16 +157,20 @@ class _RelayWorker(QThread):
         kind = item.get("kind")
         try:
             if kind == "out":
-                self._req("POST", f"/out/{_q(self._ch)}/{_q(item['sid'])}", data=item["body"])
+                resp = self._req("POST", f"/out/{_q(self._ch)}/{_q(item['sid'])}", data=item["body"])
             elif kind == "sessions":
-                self._req("PUT", f"/sessions/{_q(self._ch)}", data=item["data"])
+                resp = self._req("PUT", f"/sessions/{_q(self._ch)}", data=item["data"])
             elif kind == "tabs":
-                self._req("PUT", f"/tabs/{_q(self._ch)}", data=item["data"])
+                resp = self._req("PUT", f"/tabs/{_q(self._ch)}", data=item["data"])
             elif kind == "view":
-                self._req("PUT", f"/view/{_q(self._ch)}/{_q(item['tab'])}",
-                          data=item["png"], is_png=True)
+                resp = self._req("PUT", f"/view/{_q(self._ch)}/{_q(item['tab'])}",
+                                 data=item["png"], is_png=True)
             else:
                 return
+            # Drain the body and close: release the socket/FD promptly (1s capture
+            # cadence) and let urllib reuse the connection (Keep-Alive). reviewer R1.
+            with resp:
+                resp.read()
             self._note_ok()
         except urllib.error.HTTPError as e:
             if e.code in (401, 410):
@@ -227,7 +231,9 @@ class _RelayWorker(QThread):
             return
         self._last_hb = now
         try:
-            self._req("PUT", f"/heartbeat/{_q(self._ch)}").close()
+            # read()+close via context manager: release FD + allow Keep-Alive. reviewer R1.
+            with self._req("PUT", f"/heartbeat/{_q(self._ch)}") as r:
+                r.read()
             self._note_ok()
         except urllib.error.HTTPError as e:
             if e.code in (401, 410):

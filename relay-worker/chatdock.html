@@ -209,12 +209,20 @@ function showGapIfNeeded(serverNowMs) {
 
 // ---- unified poll ----
 async function poll(reanchor = false) {
-  if (stopped || !curSid) { schedulePoll(); return; }
+  if (stopped) { return; }
+  // Bootstrap: before a session is selected (curSid === null), poll with a sentinel
+  // sid ("_") so the Worker still returns sessions/tabs/alive (messages empty for an
+  // unknown sid). renderSessions() then selects the first session and re-polls.
+  // Without this, the old `!curSid` early-return deadlocked first entry. reviewer code R1 P1.
+  const bootstrap = !curSid;
+  const sidPath = curSid || "_";
   let res;
   try {
-    const since = reanchor ? "" : "?since=" + encodeURIComponent(sinceParam());
+    const since = (reanchor || bootstrap)
+      ? "?since=RESET"
+      : "?since=" + encodeURIComponent(sinceParam());
     res = await api("/poll/" + encodeURIComponent(cfg.channel) + "/" +
-                    encodeURIComponent(curSid) + (since ? since : "?since=RESET"));
+                    encodeURIComponent(sidPath) + since);
   } catch (e) {
     document.getElementById("status").textContent = "…";
     schedulePoll();
@@ -314,16 +322,16 @@ function renderTabs(tabs) {
     const b = document.createElement("button");
     b.className = "tabbtn" + (name === curTab ? " active" : "");
     b.textContent = name;
-    b.onclick = () => { curTab = name; renderTabs(tabs); maybePresence(true); fetchView(true); };
+    b.onclick = () => { curTab = name; renderTabs(tabs); maybePresence(true); fetchView(); };
     bar.appendChild(b);
   }
-  if (!curTab && tabs.length) { curTab = tabs[0]; fetchView(true); }
+  if (!curTab && tabs.length) { curTab = tabs[0]; fetchView(); }
 }
 
 // ---- live view ----
 function applyViewVersions(vv) {
   if (curTab && vv[curTab] && vv[curTab] !== lastViewVersions[curTab]) {
-    fetchView(false);
+    fetchView();
   }
   lastViewVersions = vv;
 }

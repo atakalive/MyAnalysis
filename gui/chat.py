@@ -1038,6 +1038,11 @@ class ChatWidget(QWidget):
         if sess.dataset is not None:
             self._mark_chat_dirty()
         error_text = f"\n\n[error: {msg}]"
+        # Relay the failed turn to guests too (bidirectional requirement): emit the
+        # partial buffer + error so the relay's origin=="local" gate forwards it to
+        # out:. Always emit (even on empty buffer) so the guest isn't left hanging
+        # with only a vanished busy indicator. reviewer code R1 P2-2.
+        self.messageAdded.emit(sess.id, "assistant", (turn.buffer or "") + error_text, "local")
         if sid == self._active.id:
             self._render_session(sess)        # partial 本文を Markdown 化（_on_done と対称）
             cursor = QTextCursor(self._log.document())

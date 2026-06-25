@@ -56,7 +56,9 @@ function genMid() {
   let v = 0n;
   for (const b of buf) v = (v << 8n) | BigInt(b);
   const rand13 = v.toString(36).padStart(13, "0").slice(-13);
-  return `${pad13(ts)}-${rand13}`;
+  // Return ts too so callers derive the bucket from the SAME clock reading as the
+  // mid (avoids a 1-bucket mismatch at a bucket boundary from a second Date.now()).
+  return { mid: `${pad13(ts)}-${rand13}`, ts };
 }
 
 function json(obj, status = 200, extra = {}) {
@@ -267,8 +269,8 @@ export default {
       try { body = await request.json(); } catch { return json({ error: "bad json" }, 400); }
       const text = String(body.text || "");
       if (!text.trim()) return json({ error: "empty text" }, 400);
-      const mid = genMid();
-      const bucket = bucketOf(nowMs());
+      const { mid, ts } = genMid();
+      const bucket = bucketOf(ts);
       const val = { text, name: String(body.name || ""), role: String(body.role || "assistant"),
                     origin: "host", mid, sid };
       await env.RELAY_KV.put(`out:${ch}:${bucket}:${sid}:${mid}`, JSON.stringify(val),
@@ -319,8 +321,8 @@ export default {
       if (!text.trim()) return json({ error: "empty text" }, 400);
       let name = String(body.name || "").trim();
       if (!name) name = "Guest";
-      const mid = genMid();
-      const bucket = bucketOf(nowMs());
+      const { mid, ts } = genMid();
+      const bucket = bucketOf(ts);
       const val = { text, name, role: "user", origin: "guest", mid, sid };
       await env.RELAY_KV.put(`in:${ch}:${bucket}:${sid}:${mid}`, JSON.stringify(val),
         { expirationTtl: MSG_TTL });
@@ -353,7 +355,7 @@ export default {
         const buf = await request.arrayBuffer();
         await env.RELAY_R2.put(`view/${ch}/${tab}`, buf,
           { httpMetadata: { contentType: "image/png" } });
-        await env.RELAY_KV.put(`vv:${ch}:${tab}`, String(nowMs()));
+        await env.RELAY_KV.put(`vv:${ch}:${tab}`, String(nowMs()), { expirationTtl: MSG_TTL });
         return json({ ok: true });
       }
       if (method === "GET") {
