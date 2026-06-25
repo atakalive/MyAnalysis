@@ -176,6 +176,7 @@ class MeetingShareWindow(QWidget):
         relay.channelStateChanged.connect(self._on_state)
         relay.participantsUpdated.connect(self._on_participants)
         relay.remoteMessageReceived.connect(self._on_remote_message)
+        relay.tokenReady.connect(self._on_token_ready)
 
         # periodic refresh (remaining time + session/tab lists)
         self._timer = QTimer(self)
@@ -185,6 +186,14 @@ class MeetingShareWindow(QWidget):
 
         if hasattr(window, "register_retranslate_hook"):
             window.register_retranslate_hook(self.retranslate)
+
+        # Adopt a share already started via CLI/llm_bridge before this window
+        # opened: tokenReady has already fired, so seed the current token here
+        # (before _update_enabled → _update_state_label) so the window shows
+        # "Sharing" + the token instead of a blank "starting" view.
+        self._token = self._relay.current_token()
+        if self._token:
+            self._token_edit.setText(self._token)
 
         self._refresh_lists()
         self._update_enabled()
@@ -197,11 +206,18 @@ class MeetingShareWindow(QWidget):
         self._relay.set_host_name(self._name_edit.text())
         ttl = self._ttl_combo.currentData()
         try:
-            self._token = self._relay.meeting_start(int(ttl))
+            self._relay.meeting_start(int(ttl))
         except Exception as e:
             self._log_line(f"start failed: {e!r}")
             return
-        self._token_edit.setText(self._token)
+        # Token arrives asynchronously via _on_token_ready (tunnel URL resolves
+        # off-thread); just reflect the new "starting"/"sharing" state here.
+        self._update_state_label()
+        self._update_enabled()
+
+    def _on_token_ready(self, token: str) -> None:
+        self._token = token
+        self._token_edit.setText(token)
         self._sess_sig = None    # force a list rebuild against the new published set
         self._tab_sig = None
         self._log_line(tr("meeting.state.sharing"))
@@ -270,6 +286,12 @@ class MeetingShareWindow(QWidget):
             self._conn_label.setText(tr("meeting.conn.disconnected"))
         elif state == "ok":
             self._conn_label.setText(tr("meeting.conn.ok"))
+        elif state == "starting":
+            self._log_line(tr("meeting.state.starting"))
+        elif state == "tunnel_failed":
+            self._token = ""
+            self._token_edit.setText("")
+            self._log_line(tr("meeting.state.tunnel_failed"))
         self._update_state_label()
         self._update_enabled()
 
@@ -445,7 +467,9 @@ class MeetingShareWindow(QWidget):
 
     def _update_state_label(self) -> None:
         if self._relay.is_sharing():
-            self._state_label.setText(tr("meeting.state.sharing"))
+            self._state_label.setText(
+                tr("meeting.state.sharing") if self._token
+                else tr("meeting.state.starting"))
             ch = self._relay.channel() or ""
             self._channel_label.setText(tr("meeting.label.channel") + ": " + ch)
         else:

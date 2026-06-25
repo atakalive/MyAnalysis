@@ -1,107 +1,72 @@
-# ミーティング共有リレー（Issue #42）セットアップ
+# ミーティング共有リレー（Issue #44）セットアップ
 
 `View → ミーティング共有…` で会議相手をブラウザ（チャットドック）から自分の
-チャットドックへライブ参加させる機能の**中継サーバ**。相手のブラウザと自分の PC
-を HTTP で橋渡しするため、この Cloudflare Worker を**自分の Cloudflare アカウントに
-デプロイする必要がある**。デプロイするまで GUI は「.env に RELAY_BASE_URL と
-RELAY_ADMIN_KEY を設定してください」と表示し、開始ボタンは無効。
+チャットドックへライブ参加させる機能の**中継サーバ**。
 
-`.env` の 2 項目は「どこかの既存値を写す」ものではなく、**このデプロイ作業の過程で
-決まる値**：
+Issue #44 で設計を見直し、**Cloudflare Worker + KV/R2 を廃止**して
+**ローカル・インメモリ・リレー（`127.0.0.1`）+ cloudflared クイックトンネル**に
+作り直した。共有データ（ライブビュー・チャット・presence）はすべて ephemeral で
+ホスト GUI が動いて初めて存在する＝永続ストア（KV/R2）にポーリングで叩く必要が
+無い。これで Cloudflare の KV write/list 課金次元が丸ごと消え、即時失効
+（KV 伝播待ち無し）になる。
 
-| 変数 | 中身 | いつ決まるか |
+## 必要な設定（`.env`）
+
+| 変数 | 中身 | 必須 |
 |---|---|---|
-| `RELAY_ADMIN_KEY` | ホストとして書き込むための秘密鍵（自分で決める） | 手順 4。同じ値を Worker secret にも登録 |
-| `RELAY_BASE_URL`  | デプロイした Worker の URL | 手順 5 の `wrangler deploy` 成功時に確定 |
+| `RELAY_ADMIN_KEY` | ホストとして書き込むための秘密鍵 | **必須** |
+| `RELAY_BASE_URL`  | legacy override（設定すると remote relay を指す） | 既定は**未設定** |
 
-## 構成
+**`RELAY_ADMIN_KEY` のみ必須。** 公開トンネルは admin 含む全ルートをインターネットに
+晒すため、弱鍵・推測可能鍵は admin 乗っ取りリスクになる。**十分な長さのランダム鍵**を使うこと：
 
-- `worker.js` — Cloudflare Worker 本体。KV（メタ/メッセージ/presence）+ R2（view PNG）。
-- `chatdock.html` — ゲスト用 UI。Worker が `GET /` で配信（Text モジュールとして bundle）。
-- `wrangler.toml` — デプロイ設定。KV namespace id と R2 バケットの binding を持つ。
-
-## コスト
-
-heartbeat(~20s) + presence(~20s) の KV write が無料枠（~1000 writes/日）を会議数時間で
-超える。**短時間デモは無料枠で可、常用は Workers Paid（$5/月）推奨**。READ/LIST・
-リクエスト数・R2 は有料枠の無料分で収まる。
-
-## 前提
-
-- Cloudflare アカウント（R2 を使っているなら取得済み）。
-- Node.js（wrangler が必要とする）。未導入なら `winget install OpenJS.NodeJS.LTS`。
-- wrangler：`npm i -g wrangler`（または各コマンドを `npx wrangler …` に読み替え）。
-
-以降のコマンドは `relay-worker/` ディレクトリで実行する。
-
-## 手順
-
-### 1. wrangler ログイン
 ```
-wrangler login
+python -c "import secrets;print(secrets.token_urlsafe(32))"
 ```
-ブラウザが開き Cloudflare アカウントへ認証する（要クリック）。
 
-### 2. KV namespace を作成して id を wrangler.toml に焼く
-```
-wrangler kv namespace create RELAY_KV
-```
-出力された `id`（例 `id = "abc123…"`）を `wrangler.toml` の
-`REPLACE_WITH_KV_NAMESPACE_ID` と置換する。この id は秘密ではないのでコミットしてよい。
+生成値を `.env` の `RELAY_ADMIN_KEY=…` に書く（gitignore 済み）。
 
-### 3. R2 バケットを作成
-```
-wrangler r2 bucket create REPLACE_WITH_BUCKET
-```
-バケット名は `wrangler.toml` の `bucket_name` と一致必須。任意で Cloudflare ダッシュボード
-にて `view/` 配下を ~1 日で expire する lifecycle ルールを設定すると孤児 PNG が自動回収
-される（`DELETE /admin/channel` は view を消さない設計のため）。
+`RELAY_BASE_URL` は**未設定が既定**。設定するとローカルサーバ + トンネルを起動せず、
+その URL を remote relay として使う legacy override モードになる（旧構成の延命用）。
 
-### 4. 管理鍵を Worker secret として登録
-鍵は `.env` に既に生成済み（`RELAY_ADMIN_KEY=…`）。同じ値を Worker 側にも入れる：
-```
-wrangler secret put RELAY_ADMIN_KEY
-```
-プロンプトに `.env` の `RELAY_ADMIN_KEY` の値を貼り付ける。
+## 前提バイナリ: `cloudflared`
 
-> secret は `wrangler.toml` の `[vars] RELAY_ADMIN_KEY` を上書きするので、`wrangler.toml`
-> 側はプレースホルダのままでよい（**実鍵を `wrangler.toml` に書かないこと**。このファイルは
-> コミットされる）。新しい鍵を作り直したいときは
-> `python -c "import secrets; print(secrets.token_urlsafe(32))"`。
+クイックトンネルには `cloudflared` が必要（PATH 上、または環境変数 `CLOUDFLARED_BIN`
+で明示）。Node/wrangler とは別バイナリなので個別に入れる：
 
-### 5. デプロイ
 ```
-wrangler deploy
+winget install cloudflare.cloudflared
 ```
-成功すると `https://myanalysis-relay.<account>.workers.dev` が表示される。
 
-### 6. `.env` に URL を記入
-リポジトリ直下の `.env`（`.env.example` ではない）の `RELAY_BASE_URL` 行の行頭 `#` を外し、
-手順 5 の URL を入れる：
+## 動作
+
+共有開始（GUI またはCLI/llm_bridge）で：
+
+1. ローカル・インメモリ・リレーが `127.0.0.1:<エフェメラルポート>` に起動（外部直アクセス不可）。
+2. cloudflared クイックトンネルが起動し、毎回ランダムな `*.trycloudflare.com` URL を払い出す。
+   この URL がゲスト配布トークンに入る（**URL は都度変わる／SLA 無し**）。
+3. ゲストはトークン内の `trycloudflare.com` URL を開いて入室。チャット双方向・ライブビュー・
+   公開トグル・即時失効はすべて従来どおり。
+
+## 旧 Cloudflare Worker の退役（手動）
+
+既に `worker.js` を Cloudflare にデプロイ済みなら、`relay-worker/` で
+
 ```
-RELAY_BASE_URL=https://myanalysis-relay.<account>.workers.dev
+wrangler delete
 ```
-値はクォート不要。`.env` は gitignore 済みなので鍵を書いて安全。
 
-### 7. GUI を再起動
-`.env` は起動時に一度だけ読まれる（`tool.py` の `load_env()`）。ホットリロードでは
-反映されないので**プロセス再起動が必須**。再起動後 `View → ミーティング共有…` の赤字が
-消え、開始ボタンが有効になれば設定完了。
+を実行して workers.dev の残留トラフィック・課金を止める（**人間が実施する運用手順**）。
 
-## 動作確認
-
-1. GUI で `View → ミーティング共有…` → 開始 → 招待トークンが生成される。
-2. 別ブラウザ（できれば別端末）で `RELAY_BASE_URL` を開き、トークンと表示名を入力して入室。
-3. ゲストの発言がホストのチャットへ user turn として注入され、ゲスト側にホスト応答と
-   アクティブタブの view が表示されることを確認。
+`wrangler.toml` / `worker.js` のコードは**参照用に残置**（移植元の Single Source of
+Truth）。再デプロイは不要。
 
 ## トラブルシュート
 
-- **開始ボタンが無効/赤字のまま** → `.env` の 2 変数が両方セットされ、行頭 `#` が外れているか。
-  GUI を再起動したか（ホットリロード不可）。
-- **共有開始はできるがゲストが入れない/401** → `.env` の `RELAY_ADMIN_KEY` と
-  `wrangler secret put` で入れた値が不一致。手順 4 をやり直す。
-- **view が出ない/接続不安定** → URL 末尾の余分なスラッシュ、または無料枠の KV write
-  上限超過。Workers Paid を検討。
-- **`wrangler` が見つからない** → Node 未導入。`winget install OpenJS.NodeJS.LTS` 後、
-  新しいシェルを開いて `npm i -g wrangler`。
+- **「トンネル起動に失敗しました」** → `cloudflared` が PATH 上に無いか、起動が
+  タイムアウト。`winget install cloudflare.cloudflared` 後、新しいシェルで再試行。
+  別パスにあるなら `CLOUDFLARED_BIN` で指定。
+- **開始ボタンが無効/赤字のまま** → `.env` に `RELAY_ADMIN_KEY` が未設定。GUI を
+  再起動したか（`.env` は起動時に一度だけ読まれる）。
+- **トークンの URL が毎回変わる** → クイックトンネルの仕様（固定 URL が必要なら
+  named tunnel へ昇格）。

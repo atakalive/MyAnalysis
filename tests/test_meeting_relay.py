@@ -79,7 +79,7 @@ def _make_relay(monkeypatch, win):
     import meeting.relay as mr
     monkeypatch.setattr(mr._RelayWorker, "start", lambda self: None)
     r = mr.MeetingRelay(win)
-    r._base_url = "http://relay.test"
+    r._remote_base = "http://relay.test"   # legacy mode → synchronous token, no socket/tunnel
     r._admin_key = "ADMIN"
     return mr, r
 
@@ -99,18 +99,21 @@ def test_meeting_start_and_token(qapp, monkeypatch):
         captured["body"] = req.data
         captured["method"] = req.get_method()
         captured["auth"] = req.headers.get("Authorization")
-        return FakeResp(json.dumps({"expires_at": 999, "server_now_ms": 123}).encode())
+        return FakeResp(json.dumps({"expires_at": 9999999999, "server_now_ms": 123}).encode())
 
     monkeypatch.setattr(mr.urllib.request, "urlopen", fake_urlopen)
 
-    token = r.meeting_start(999999)   # clamp to 86400
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(999999)   # clamp to 86400
+    token = tokens[-1]
 
     body = json.loads(captured["body"])
     assert len(body["secret_hash"]) == 64
     assert body["ttl_sec"] == 86400
     assert captured["method"] == "POST"
     assert captured["auth"] == "Bearer ADMIN"
-    assert r.expires_at() == 999
+    assert r.expires_at() == 9999999999
     # default publish scope = ALL sessions across every dataset
     assert r.published_session_ids() == {"a", "b"}
 
@@ -119,6 +122,7 @@ def test_meeting_start_and_token(qapp, monkeypatch):
     assert obj["channel"] == r.channel()
     assert obj["base_url"] == "http://relay.test"
     assert obj["secret"]
+    assert r.current_token() == token
     r.stop()
 
 
@@ -264,7 +268,7 @@ def test_publish_scope(qapp, monkeypatch):
     mr, r = _make_relay(monkeypatch, win)
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
-                            json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
     # default = ALL sessions across every dataset
     assert r.published_session_ids() == {"a", "b"}
@@ -296,7 +300,7 @@ def test_capture_tick_exception_is_swallowed(qapp, monkeypatch):
     mr, r = _make_relay(monkeypatch, win)
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
-                            json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
 
     def boom():
@@ -316,7 +320,7 @@ def test_tab_auto_share(qapp, monkeypatch):
     mr, r = _make_relay(monkeypatch, win)
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
-                            json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
     assert r.published_tabs() == {"t1", "t2"}
 
@@ -399,3 +403,162 @@ def test_share_window_smoke(qapp, monkeypatch):
     sw._on_select_all_sessions()
     sw._on_select_all_tabs()
     sw._timer.stop()
+
+
+# ---- local mode (Issue #44): tunnel + stop ordering + stale signal ----
+
+class _FakeServer:
+    def __init__(self, port=54321):
+        self.port = port
+        self.state = None
+        self.shut = 0
+
+    def shutdown(self):
+        self.shut += 1
+
+
+def _local_relay(monkeypatch, win, *, port=54321):
+    mr, r = _make_relay(monkeypatch, win)
+    r._remote_base = ""   # local mode
+    monkeypatch.setattr(mr.local_relay, "start_server",
+                        lambda admin_key, **kw: _FakeServer(port=port))
+    return mr, r
+
+
+def test_meeting_start_local_tunnel(qapp, monkeypatch):
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _local_relay(monkeypatch, win, port=54321)
+
+    seen_urls = []
+
+    def fake_urlopen(req, timeout=None):
+        seen_urls.append(req.full_url)
+        return FakeResp(json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode())
+
+    monkeypatch.setattr(mr.urllib.request, "urlopen", fake_urlopen)
+    # Hermetic tunnel: run() executes synchronously, Tunnel.start returns a URL.
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: self.run())
+    monkeypatch.setattr(mr.Tunnel, "start",
+                        lambda self, port, **kw: "https://x.trycloudflare.com")
+
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(3600)
+
+    assert seen_urls and seen_urls[0] == "http://127.0.0.1:54321/admin/channel"
+    pad = tokens[-1] + "=" * (-len(tokens[-1]) % 4)
+    obj = json.loads(base64.urlsafe_b64decode(pad))
+    assert obj["base_url"] == "https://x.trycloudflare.com"
+    assert r.base_url() == "https://x.trycloudflare.com"
+    assert r.current_token() == tokens[-1]
+    assert obj["channel"] == r.channel()
+    r.stop()
+
+
+def test_stop_during_starting_drops_stale_token(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: None)  # no auto-fire
+
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(3600)
+    g = r._gen
+    assert r.share_status() == "starting"
+
+    r.stop()
+    assert r.share_status() == "idle"
+
+    r._on_tunnel_ready(g, "https://stale.trycloudflare.com")
+    assert tokens == []   # stale generation → no token
+    r._on_tunnel_ready(r._gen, "https://stale2.trycloudflare.com")
+    assert tokens == []   # not sharing → no token
+
+
+def test_tunnel_failed_clears_sharing_before_notify(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: None)
+    r.meeting_start(3600)
+
+    seen = []
+    r.channelStateChanged.connect(lambda s: seen.append((s, r.is_sharing())))
+    r._on_tunnel_failed(r._gen, "boom")
+    assert ("tunnel_failed", False) in seen
+    assert r.is_sharing() is False
+    assert r.share_status() == "tunnel_failed"
+
+
+def test_meeting_start_reentry_is_noop(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)   # legacy mode
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=None):
+        calls["n"] += 1
+        return FakeResp(json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode())
+
+    monkeypatch.setattr(mr.urllib.request, "urlopen", fake_urlopen)
+    r.meeting_start(3600)
+    ch1 = r.channel()
+    n_after_first = calls["n"]
+
+    ret = r.meeting_start(3600)
+    assert ret is None
+    assert calls["n"] == n_after_first   # no new admin/channel POST
+    assert r.channel() == ch1
+    r.stop()
+
+
+def test_host_side_ttl_expiry(qapp, monkeypatch):
+    import time as _time
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)   # legacy mode
+    methods = []
+
+    def fake_urlopen(req, timeout=None):
+        methods.append((req.get_method(), req.full_url))
+        return FakeResp(json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode())
+
+    monkeypatch.setattr(mr.urllib.request, "urlopen", fake_urlopen)
+    r.meeting_start(3600)
+
+    r._expires_at = int(_time.time()) - 1
+    seen = []
+    r.channelStateChanged.connect(seen.append)
+    r._on_capture_tick()
+    assert r.is_sharing() is False
+    assert "expired" in seen
+    assert any(m == "DELETE" and "/admin/channel/" in u for m, u in methods)
+
+
+def test_share_window_adopts_running_token(qapp, monkeypatch):
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _make_relay(monkeypatch, win)   # legacy mode → synchronous token
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(3600)
+    tok = tokens[-1]
+
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    assert sw._token == tok
+    assert sw._token_edit.text() == tok
+    assert sw._state_label.text() == tr("meeting.state.sharing")
+    sw._timer.stop()
+    r.stop()

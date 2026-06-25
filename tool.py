@@ -150,12 +150,13 @@ def create_main_window(
     # Meeting relay (Issue #42): live-share the chat dock + analysis view to
     # remote guests. Created after the chat widget is mounted so it can connect
     # to ChatWidget.messageAdded. stop() is idempotent and wired on three
-    # teardown paths: aboutToQuit (here), ToolWindow.closeEvent, and the
-    # hot-reload Tier 3 rebuild.
+    # teardown paths: aboutToQuit (here, via shutdown() = stop() + close the
+    # local relay server), ToolWindow.closeEvent, and the hot-reload Tier 3
+    # rebuild (both use stop(), keeping the app-scoped local server alive).
     from meeting.relay import MeetingRelay
 
     win._meeting_relay = MeetingRelay(win)
-    app.aboutToQuit.connect(win._meeting_relay.stop)
+    app.aboutToQuit.connect(win._meeting_relay.shutdown)
 
     if resume_session:
         from devtools.qt_integration import consume_manifest

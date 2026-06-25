@@ -1,0 +1,381 @@
+"""Hermetic tests for the in-memory local relay (Issue #44).
+
+Drives ``RelayState.handle()`` directly — no socket, cloudflared, or network.
+Time-dependent assertions monkeypatch ``local_relay.time.time`` to freeze /
+advance the clock so mids, expiry, hb, presence evict, and TTL compaction are
+deterministic.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+
+import pytest
+
+import meeting.local_relay as lr
+from meeting.local_relay import RelayState
+
+ADMIN = "ADMIN_KEY"
+SECRET = "guest-secret"
+SECRET_HASH = hashlib.sha256(SECRET.encode("utf-8")).hexdigest()
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    state = {"t": 1_000_000.0}
+    monkeypatch.setattr(lr.time, "time", lambda: state["t"])
+    return state
+
+
+def _admin_h():
+    return {"Authorization": "Bearer " + ADMIN}
+
+
+def _guest_h():
+    return {"Authorization": "Bearer " + SECRET}
+
+
+def _jbody(obj):
+    return json.dumps(obj).encode("utf-8")
+
+
+def _call(st, method, path, headers=None, body=b""):
+    status, hdrs, payload = st.handle(method, path, headers or {}, body)
+    return status, hdrs, payload
+
+
+def _json(payload):
+    return json.loads(payload.decode("utf-8"))
+
+
+def _new_channel(st, ch="ch1", ttl=3600):
+    return _call(st, "POST", "/admin/channel", _admin_h(),
+                 _jbody({"ch": ch, "ttl_sec": ttl, "secret_hash": SECRET_HASH}))
+
+
+def _publish_session(st, ch="ch1", sid="s1"):
+    _call(st, "PUT", f"/sessions/{ch}", _admin_h(), _jbody([{"id": sid, "title": "T", "busy": False}]))
+
+
+def _publish_tab(st, ch="ch1", tab="t1"):
+    _call(st, "PUT", f"/tabs/{ch}", _admin_h(), _jbody([tab]))
+
+
+# 1. admin auth
+def test_admin_auth(clock):
+    st = RelayState(ADMIN)
+    status, _, _ = _call(st, "POST", "/admin/channel", {}, _jbody({"ch": "c"}))
+    assert status == 401
+    status, _, payload = _new_channel(st)
+    assert status == 200
+    obj = _json(payload)
+    assert "expires_at" in obj and "server_now_ms" in obj
+
+
+# 2. ttl clamp
+def test_ttl_clamp(clock):
+    st = RelayState(ADMIN)
+    _, _, p = _new_channel(st, ch="lo", ttl=10)
+    assert _json(p)["expires_at"] - int(clock["t"]) == lr.TTL_MIN
+    _, _, p = _new_channel(st, ch="hi", ttl=999999)
+    assert _json(p)["expires_at"] - int(clock["t"]) == lr.TTL_MAX
+
+
+# 3. sessions/tabs PUT
+def test_sessions_tabs_put(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, p = _call(st, "PUT", "/sessions/ch1", _admin_h(), _jbody([{"id": "s1"}]))
+    assert status == 200 and _json(p) == {"ok": True}
+    assert st._ch["ch1"]["sessions"] == [{"id": "s1"}]
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody(["t1"]))
+    assert st._ch["ch1"]["tabs"] == ["t1"]
+
+
+# 4. out → poll, not inbound (echo gate)
+def test_out_to_poll_not_inbound(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    status, _, p = _call(st, "POST", "/out/ch1/s1", _admin_h(), _jbody({"text": "hello"}))
+    assert status == 200
+    mid = _json(p)["mid"]
+    assert re.match(r"^\d{13}-.{13}$", mid)
+
+    _, _, pp = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    assert any(m["text"] == "hello" for m in _json(pp)["messages"])
+
+    _, _, ib = _call(st, "GET", "/inbound/ch1", _admin_h())
+    assert all(m["text"] != "hello" for m in _json(ib)["messages"])
+
+
+# 5. msg → inbound
+def test_msg_to_inbound(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "hi", "name": "Bob"}))
+    assert status == 200
+    _, _, ib = _call(st, "GET", "/inbound/ch1", _admin_h())
+    msgs = _json(ib)["messages"]
+    assert any(m["text"] == "hi" and m["name"] == "Bob" for m in msgs)
+
+
+# 6. since is inclusive
+def test_since_inclusive(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    clock["t"] += 1
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "m1"}))
+    clock["t"] += 1
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "m2"}))
+    _, _, ib = _call(st, "GET", "/inbound/ch1", _admin_h())
+    msgs = _json(ib)["messages"]
+    mid1 = next(m["mid"] for m in msgs if m["text"] == "m1")
+    mid2 = next(m["mid"] for m in msgs if m["text"] == "m2")
+
+    _, _, r1 = _call(st, "GET", f"/inbound/ch1?since={mid1}", _admin_h())
+    texts1 = {m["text"] for m in _json(r1)["messages"]}
+    assert texts1 == {"m1", "m2"}
+
+    _, _, r2 = _call(st, "GET", f"/inbound/ch1?since={mid2}", _admin_h())
+    texts2 = {m["text"] for m in _json(r2)["messages"]}
+    assert texts2 == {"m2"}
+
+
+# 7. msg sid whitelist + auth errors
+def test_msg_sid_whitelist(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    # not published → 403
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
+    assert status == 403 and _json(p) == {"error": "session not published"}
+    _publish_session(st)
+    status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
+    assert status == 200
+    # secret mismatch → 401
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", {"Authorization": "Bearer wrong"}, _jbody({"text": "x"}))
+    assert status == 401 and _json(p) == {"error": "not live"}
+    # missing channel → 410
+    status, _, p = _call(st, "POST", "/msg/none/s1", _guest_h(), _jbody({"text": "x"}))
+    assert status == 410 and _json(p) == {"error": "not live"}
+
+
+# 8. poll unified shape
+def test_poll_shape(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    _publish_tab(st)
+    _, _, p = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    obj = _json(p)
+    assert set(obj) == {"messages", "sessions", "tabs", "view_versions", "alive", "server_now_ms"}
+    assert obj["alive"] is True
+
+    # un-published sid → empty messages but sessions/tabs still flow
+    _, _, p2 = _call(st, "GET", "/poll/ch1/other", _guest_h())
+    obj2 = _json(p2)
+    assert obj2["messages"] == []
+    assert obj2["tabs"] == ["t1"]
+
+
+# 8b. poll global mid order + compaction
+def test_poll_global_order_and_compaction(clock, monkeypatch):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    # inject one already-stale message into each list (older than MSG_TTL)
+    now_m = lr.now_ms()
+    stale_mid = f"{max(0, now_m - lr.MSG_TTL * 1000 - 10000):013d}-{'0' * 13}"
+    st._ch["ch1"]["in_msgs"].append({"text": "stale", "name": "", "role": "user",
+                                     "origin": "guest", "mid": stale_mid, "sid": "s1"})
+    st._ch["ch1"]["out_msgs"].append({"text": "stale", "name": "", "role": "assistant",
+                                      "origin": "host", "mid": stale_mid, "sid": "s1"})
+    clock["t"] += 1
+    _call(st, "POST", "/out/ch1/s1", _admin_h(), _jbody({"text": "o1"}))
+    clock["t"] += 1
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "m1"}))
+    clock["t"] += 1
+    _call(st, "POST", "/out/ch1/s1", _admin_h(), _jbody({"text": "o2"}))
+
+    _, _, p = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    texts = [m["text"] for m in _json(p)["messages"]]
+    assert texts == ["o1", "m1", "o2"]
+    # both lists compacted in place (stale dropped)
+    assert all(m["mid"] != stale_mid for m in st._ch["ch1"]["in_msgs"])
+    assert all(m["mid"] != stale_mid for m in st._ch["ch1"]["out_msgs"])
+
+
+# 9. view put/get
+def test_view_put_get(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    # tab not published → 403
+    status, _, _ = _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNG")
+    assert status == 403
+    _publish_tab(st)
+    status, _, _ = _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNGDATA")
+    assert status == 200
+    assert st._ch["ch1"]["vv"]["t1"] > 0
+    status, hdrs, payload = _call(st, "GET", "/view/ch1/t1", _guest_h())
+    assert status == 200 and hdrs["content-type"] == "image/png"
+    assert payload == b"\x89PNGDATA"
+    # published tab with no image → 204
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody(["t1", "t2"]))
+    status, _, payload = _call(st, "GET", "/view/ch1/t2", _guest_h())
+    assert status == 204 and payload == b""
+
+
+# 10. expiry + hb grace
+def test_expiry_and_hb_grace(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st, ttl=3600)
+    _publish_session(st)
+    # hb grace: advance past HB_GRACE but not expiry → 503
+    clock["t"] += lr.HB_GRACE + 1
+    status, _, _ = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    assert status == 503
+    # refresh hb, then advance past expiry → 410 (channel evicted)
+    st2 = RelayState(ADMIN)
+    _new_channel(st2, ttl=3600)
+    _publish_session(st2)
+    clock["t"] += 3601
+    status, _, _ = _call(st2, "GET", "/poll/ch1/s1", _guest_h())
+    assert status == 410
+
+
+# 11. presence evict (in-place)
+def test_presence_evict(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, _ = _call(st, "POST", "/presence/ch1", _guest_h(),
+                         _jbody({"pid": "p1", "name": "Bob"}))
+    assert status == 200
+    _, _, p = _call(st, "GET", "/presence/ch1", _admin_h())
+    assert any(x["pid"] == "p1" for x in _json(p))
+    clock["t"] += lr.PRES_TTL + 1
+    _, _, p = _call(st, "GET", "/presence/ch1", _admin_h())
+    assert _json(p) == []
+    assert "p1" not in st._ch["ch1"]["presence"]
+
+
+# 12. expired channel eviction
+def test_expired_channel_eviction(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st, ttl=3600)
+    assert "ch1" in st._ch
+    clock["t"] += 3601
+    # any handle() call triggers _evict_expired_channels
+    _call(st, "GET", "/inbound/ch2", _admin_h())
+    assert "ch1" not in st._ch
+
+
+# 13. message TTL compaction
+def test_message_ttl_compaction(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    now_m = lr.now_ms()
+    stale_mid = f"{max(0, now_m - lr.MSG_TTL * 1000 - 10000):013d}-{'0' * 13}"
+    st._ch["ch1"]["in_msgs"].append({"text": "stale", "name": "", "role": "user",
+                                     "origin": "guest", "mid": stale_mid, "sid": "s1"})
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "fresh"}))
+    _call(st, "GET", "/inbound/ch1", _admin_h())
+    assert len(st._ch["ch1"]["in_msgs"]) == 1
+    assert st._ch["ch1"]["in_msgs"][0]["text"] == "fresh"
+
+
+# 14. type normalization
+def test_type_normalization(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x", "name": 123}))
+    _, _, ib = _call(st, "GET", "/inbound/ch1", _admin_h())
+    m = _json(ib)["messages"][0]
+    assert m["name"] == "123" and isinstance(m["name"], str)
+    # whitespace-only name → Guest
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "y", "name": "   "}))
+    _, _, ib = _call(st, "GET", "/inbound/ch1", _admin_h())
+    names = {m["name"] for m in _json(ib)["messages"]}
+    assert "Guest" in names
+
+
+# 15. CORS / OPTIONS
+def test_cors_options(clock):
+    st = RelayState(ADMIN)
+    status, hdrs, payload = _call(st, "OPTIONS", "/anything", {})
+    assert status == 204 and payload == b""
+    assert hdrs["access-control-allow-origin"] == "*"
+    _new_channel(st)
+    _, hdrs2, _ = _call(st, "GET", "/inbound/ch1", _admin_h())
+    assert hdrs2["access-control-allow-origin"] == "*"
+
+
+# 16. 404
+def test_not_found(clock):
+    st = RelayState(ADMIN)
+    status, _, p = _call(st, "GET", "/no/such/route", {})
+    assert status == 404 and _json(p) == {"error": "not found"}
+
+
+# 17. non-dict / null JSON bodies (worker.js SSOT: parse error -> 400, valid
+#     non-object -> coerced default, never 500). (reviewer code P2)
+def test_nondict_json_bodies(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    # PUT /sessions null -> non-list -> stored [] (not 400 bad json)
+    status, _, _ = _call(st, "PUT", "/sessions/ch1", _admin_h(), _jbody(None))
+    assert status == 200
+    assert st._ch["ch1"]["sessions"] == []
+    # POST /admin/channel with a JSON array -> coerced {} -> 400 missing ch (not 500)
+    status, _, p = _call(st, "POST", "/admin/channel", _admin_h(), _jbody([1, 2]))
+    assert status == 400 and _json(p) == {"error": "missing ch"}
+    # POST /msg with a JSON number (published sid) -> coerced {} -> 400 empty text (not 500)
+    _publish_session(st)
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody(123))
+    assert status == 400 and _json(p) == {"error": "empty text"}
+    # genuinely invalid JSON (and empty body) -> 400 bad json
+    status, _, p = _call(st, "POST", "/admin/channel", _admin_h(), b"{not json")
+    assert status == 400 and _json(p) == {"error": "bad json"}
+    status, _, p = _call(st, "POST", "/admin/channel", _admin_h(), b"")
+    assert status == 400 and _json(p) == {"error": "bad json"}
+
+
+# 18. orphan (metadata-less) channel reaping + read routes don't create channels.
+#     (reviewer code P2)
+def test_orphan_channel_reaped_and_reads_dont_create(clock):
+    st = RelayState(ADMIN)
+    # read on a non-existent channel must NOT create it (worker.js never creates on read)
+    status, _, p = _call(st, "GET", "/inbound/ghost", _admin_h())
+    assert status == 200 and _json(p)["messages"] == []
+    assert "ghost" not in st._ch
+    status, _, p2 = _call(st, "GET", "/presence/ghost", _admin_h())
+    assert status == 200 and _json(p2) == []
+    assert "ghost" not in st._ch
+    # a stray admin write resurrects a metadata-less channel (hb set, meta empty)
+    _call(st, "PUT", "/heartbeat/orphan", _admin_h())
+    assert st._ch["orphan"]["meta"] == {}
+    # after HB_GRACE with no further hb, the next request reaps it via _evict
+    clock["t"] += lr.HB_GRACE + 5
+    _call(st, "GET", "/inbound/other", _admin_h())
+    assert "orphan" not in st._ch
+
+
+# optional: real socket smoke
+def test_socket_smoke(tmp_path):
+    import urllib.request
+    html = tmp_path / "chatdock.html"
+    html.write_text("<html>hi</html>", encoding="utf-8")
+    srv = lr.start_server(ADMIN, html_path=html)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/", timeout=5) as resp:
+            assert resp.status == 200
+            assert resp.headers.get("content-type", "").startswith("text/html")
+            assert b"hi" in resp.read()
+    finally:
+        srv.shutdown()
+        srv.shutdown()   # idempotent

@@ -420,7 +420,15 @@ def _rewire_window(window) -> None:
         "chat-list-sessions", lambda: window.chat_widget().session_summaries()
     )
     window.register_command(
-        "meeting-start", lambda ttl_sec=10800: window._meeting_relay.meeting_start(int(ttl_sec))
+        "meeting-start",
+        lambda ttl_sec=10800:
+            window._meeting_relay.meeting_start(int(ttl_sec))
+            or window._meeting_relay.current_token()
+            or "starting",
+    )
+    window.register_command(
+        "meeting-token",
+        lambda: window._meeting_relay.current_token() or window._meeting_relay.share_status(),
     )
     window.register_command(
         "meeting-stop", lambda: window._meeting_relay.meeting_stop() or "stopped"

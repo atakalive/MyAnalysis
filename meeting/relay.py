@@ -41,6 +41,9 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage
 
 from common.i18n import tr
+from meeting import local_relay
+from meeting.local_relay import LocalRelayServer
+from meeting.tunnel import Tunnel
 
 _log = logging.getLogger(__name__)
 
@@ -268,12 +271,35 @@ class _RelayWorker(QThread):
             self._note_fail()
 
 
+class _TunnelStarter(QThread):
+    """Starts a cloudflared quick tunnel off the GUI thread. Tags every signal
+    with its own generation so MeetingRelay can drop stale results after a
+    stop / re-start."""
+
+    sig_ready = Signal(int, str)    # (gen, url)
+    sig_failed = Signal(int, str)   # (gen, error_message)
+
+    def __init__(self, tunnel: "Tunnel", port: int, gen: int, parent=None):
+        super().__init__(parent)
+        self._tunnel = tunnel
+        self._port = port
+        self._gen = gen
+
+    def run(self) -> None:
+        try:
+            url = self._tunnel.start(self._port)
+            self.sig_ready.emit(self._gen, url)
+        except Exception as e:
+            self.sig_failed.emit(self._gen, repr(e))
+
+
 class MeetingRelay(QObject):
     """Meeting lifecycle + capture timer + echo gates (GUI thread)."""
 
     channelStateChanged = Signal(str)
     participantsUpdated = Signal(object)
     remoteMessageReceived = Signal(str, str, str)
+    tokenReady = Signal(str)        # final token, after the guest URL is resolved
 
     def __init__(self, window, parent=None):
         # Parent to a QObject for lifetime management. In production `window` is
@@ -298,8 +324,17 @@ class MeetingRelay(QObject):
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
         self._view_hashes: dict[str, bytes] = {}
-        self._base_url = os.environ.get("RELAY_BASE_URL", "") or ""
         self._admin_key = os.environ.get("RELAY_ADMIN_KEY", "") or ""
+        # Legacy remote-relay override: when set, no local server / tunnel is
+        # started and this URL is the shared host+guest base_url.
+        self._remote_base = os.environ.get("RELAY_BASE_URL", "") or ""
+        self._host_base_url = ""        # host's own admin/worker target
+        self._guest_base_url = ""       # URL baked into the guest token
+        self._local_server: LocalRelayServer | None = None
+        self._tunnel: Tunnel | None = None
+        self._tunnel_starter: _TunnelStarter | None = None
+        self._gen = 0                   # tunnel-start generation (stale-signal guard)
+        self._last_tunnel_failed = False
 
         cw = window.chat_widget() if hasattr(window, "chat_widget") else None
         if cw is not None and hasattr(cw, "messageAdded"):
@@ -312,7 +347,7 @@ class MeetingRelay(QObject):
     # ---- config / accessors ----
 
     def is_configured(self) -> bool:
-        return bool(self._base_url and self._admin_key)
+        return bool(self._admin_key)
 
     def expires_at(self) -> int:
         return self._expires_at
@@ -331,7 +366,17 @@ class MeetingRelay(QObject):
         return self._channel
 
     def base_url(self) -> str:
-        return self._base_url
+        return self._guest_base_url
+
+    def share_status(self) -> str:
+        if self._sharing:
+            return "sharing" if self._guest_base_url else "starting"
+        return "tunnel_failed" if self._last_tunnel_failed else "idle"
+
+    def current_token(self) -> str:
+        if self._sharing and self._guest_base_url and self._channel and self._secret:
+            return self._make_token()
+        return ""
 
     def participants(self) -> list:
         return list(self._participants)
@@ -384,37 +429,60 @@ class MeetingRelay(QObject):
 
     # ---- lifecycle ----
 
-    def meeting_start(self, ttl_sec: int) -> str:
-        """Create the channel, start the worker + capture timer, return a token.
+    def _make_token(self) -> str:
+        token_obj = {"base_url": self._guest_base_url, "channel": self._channel,
+                     "secret": self._secret}
+        return base64.urlsafe_b64encode(
+            json.dumps(token_obj).encode("utf-8")
+        ).decode("ascii").rstrip("=")
+
+    def meeting_start(self, ttl_sec: int) -> None:
+        """Create the channel, start the worker + capture timer; deliver the token
+        asynchronously via ``tokenReady`` (the tunnel URL resolves off-thread).
 
         The default published set is a SNAPSHOT of ALL sessions (every dataset)
         at start time. This set is NOT recomputed on dataset switch, so in-flight
         replies keep flowing even after the host moves to another dataset, and
         sessions can still be deselected per-session from the share window.
+
+        No ``self`` state is mutated until the ``admin/channel`` POST succeeds, so
+        a POST failure propagates cleanly with ``_sharing`` still False.
         """
+        if self._sharing:
+            return   # re-entrancy guard: don't clobber a live tunnel starter / channel
+        self._last_tunnel_failed = False
+
         ttl = max(3600, min(86400, int(ttl_sec)))
         ch = secrets.token_hex(8)
         secret = secrets.token_urlsafe(32)
         secret_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
-        cw = self._window.chat_widget()
-        summaries = cw.session_summaries() if cw is not None else []
-        self._published_session_ids = {s["id"] for s in summaries}
-        self._meeting_start_ids = set(self._published_session_ids)
-        self._published_tabs = set(self._window.tab_names())
-        self._tab_known = set(self._published_tabs)
+        # base_url: the only `self` writes before the POST (the POST needs them).
+        if self._remote_base:
+            self._host_base_url = self._guest_base_url = self._remote_base
+        else:
+            if self._local_server is None:
+                self._local_server = local_relay.start_server(self._admin_key)
+            self._host_base_url = f"http://127.0.0.1:{self._local_server.port}"
 
         body = {"ch": ch, "ttl_sec": ttl, "secret_hash": secret_hash}
         req = urllib.request.Request(
-            self._base_url.rstrip("/") + "/admin/channel",
+            self._host_base_url.rstrip("/") + "/admin/channel",
             data=json.dumps(body).encode("utf-8"), method="POST",
             headers={"Authorization": "Bearer " + self._admin_key,
                      "Content-Type": "application/json", "User-Agent": _UA},
         )
         with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        self._expires_at = int(data.get("expires_at", 0) or 0)
 
+        # POST succeeded → now commit the sharing state.
+        self._expires_at = int(data.get("expires_at", 0) or 0)
+        cw = self._window.chat_widget()
+        summaries = cw.session_summaries() if cw is not None else []
+        self._published_session_ids = {s["id"] for s in summaries}
+        self._meeting_start_ids = set(self._published_session_ids)
+        self._published_tabs = set(self._window.tab_names())
+        self._tab_known = set(self._published_tabs)
         self._channel = ch
         self._secret = secret
         self._sharing = True
@@ -422,7 +490,8 @@ class MeetingRelay(QObject):
         self._last_tabs_json = None
         self._view_hashes = {}
 
-        self._worker = _RelayWorker(self._base_url, self._admin_key, ch, poll_ms=self._poll_ms)
+        self._worker = _RelayWorker(self._host_base_url, self._admin_key, ch,
+                                    poll_ms=self._poll_ms)
         self._worker.sig_inbound.connect(self._on_remote_message)
         self._worker.sig_presence.connect(self._on_participants)
         self._worker.sig_state.connect(self._on_state)
@@ -431,18 +500,43 @@ class MeetingRelay(QObject):
         # Push the initial snapshots immediately (don't wait for the first tick).
         self._on_capture_tick()
 
-        token_obj = {"base_url": self._base_url, "channel": ch, "secret": secret}
-        raw = base64.urlsafe_b64encode(
-            json.dumps(token_obj).encode("utf-8")
-        ).decode("ascii").rstrip("=")
-        return raw
+        if self._remote_base:
+            # _guest_base_url already resolved → token is ready synchronously.
+            self.tokenReady.emit(self._make_token())
+        else:
+            self._gen += 1
+            gen = self._gen
+            self.channelStateChanged.emit("starting")
+            self._tunnel = Tunnel()
+            self._tunnel_starter = _TunnelStarter(self._tunnel, self._local_server.port, gen)
+            self._tunnel_starter.sig_ready.connect(self._on_tunnel_ready)
+            self._tunnel_starter.sig_failed.connect(self._on_tunnel_failed)
+            self._tunnel_starter.start()
+        return None
+
+    def _on_tunnel_ready(self, gen: int, url: str) -> None:
+        if gen != self._gen or not self._sharing:
+            return    # stale signal after stop / re-start
+        self._guest_base_url = url
+        self.tokenReady.emit(self._make_token())
+
+    def _on_tunnel_failed(self, gen: int, msg: str) -> None:
+        if gen != self._gen:
+            return
+        # Order matters: channelStateChanged is delivered synchronously on a
+        # same-thread connection, so the GUI slot runs mid-emit. Flip _sharing
+        # off FIRST (via meeting_stop) so the GUI sees is_sharing()==False and
+        # renders idle, not a stale "starting".
+        self.meeting_stop()
+        self._last_tunnel_failed = True
+        self.channelStateChanged.emit("tunnel_failed")
 
     def meeting_stop(self) -> None:
         ch = self._channel
-        if ch and self._base_url and self._admin_key:
+        if ch and self._host_base_url and self._admin_key:
             try:
                 req = urllib.request.Request(
-                    self._base_url.rstrip("/") + "/admin/channel/" + _q(ch),
+                    self._host_base_url.rstrip("/") + "/admin/channel/" + _q(ch),
                     method="DELETE",
                     headers={"Authorization": "Bearer " + self._admin_key,
                              "User-Agent": _UA},
@@ -453,14 +547,36 @@ class MeetingRelay(QObject):
         self.stop()
 
     def stop(self) -> None:
-        """Idempotent. requestInterruption() + wait(); never force-kills the thread."""
+        """Idempotent. requestInterruption() + wait(); never force-kills threads."""
         self._sharing = False
+        self._gen += 1                 # invalidate in-flight tunnel-starter signals
         self._capture_timer.stop()
         w = self._worker
         if w is not None:
             w.requestInterruption()
             w.wait(8000)
             self._worker = None
+        # Stop the tunnel BEFORE waiting on the starter: terminating cloudflared
+        # closes its pipe (EOF), which unblocks the starter's blocking
+        # Tunnel.start(). Waiting first would freeze the GUI up to the timeout.
+        t = self._tunnel
+        if t is not None:
+            t.stop()
+        ts = self._tunnel_starter
+        if ts is not None:
+            ts.requestInterruption()
+            ts.wait(8000)
+            self._tunnel_starter = None
+        self._tunnel = None
+        self._guest_base_url = ""
+        # _host_base_url and _local_server are app-scoped (reused across shares).
+
+    def shutdown(self) -> None:
+        """App-teardown path (idempotent): stop sharing AND close the local server."""
+        self.meeting_stop()
+        if self._local_server is not None:
+            self._local_server.shutdown()
+            self._local_server = None
 
     # ---- signal handlers (GUI thread) ----
 
@@ -503,6 +619,14 @@ class MeetingRelay(QObject):
 
     def _on_capture_tick(self) -> None:
         if not self._sharing or self._worker is None:
+            return
+        if self._expires_at and time.time() >= self._expires_at:
+            # Host-side expiry: the local admin routes don't check expiry (worker.js
+            # SSOT), so writing past TTL would re-create metadata-less channels that
+            # _evict_expired_channels can't reap. Self-stop + DELETE so memory frees,
+            # symmetric to the guest 410.
+            self.meeting_stop()
+            self.channelStateChanged.emit("expired")
             return
         # This runs on the GUI thread as a QTimer slot; an unhandled exception
         # from a Qt slot can tear down the whole app in PySide6. Guard the whole
