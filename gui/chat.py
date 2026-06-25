@@ -137,7 +137,7 @@ def _simplify_tool_text(content: str, mode: str) -> str:
             if calls == 0:                                       # 退化 run: 内容を消さず保持
                 block = tool_lines
             elif mode == "hidden":
-                block = [f"{TOOL_CALL_MARKER} {calls} tool calls"]
+                block = []                               # hidden: run 全体を削除（要約行も出さない）
             elif mode == "compact":
                 block = [r for r in tool_lines if _is_tool_call(r)]
             else:  # full
@@ -154,6 +154,8 @@ def _simplify_tool_text(content: str, mode: str) -> str:
                 out.append("")
             out.append(lines[i])                    # 本文行（空行含む）は verbatim
             i += 1
+    while out and out[-1] == "":                     # hidden で run を消した末尾の余り空行を除去
+        out.pop()
     return "\n".join(out)
 
 

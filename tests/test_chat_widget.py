@@ -356,34 +356,56 @@ def test_simplify_t3_compact_drops_results():
             assert lines[i - 1] == "" and lines[i + 1] == ""
 
 
-def test_simplify_t4_hidden_folds_run():
-    """T4: hidden folds a run (incl. absorbed blank) into one summary line,
-    flanked by blank lines, prose preserved."""
+def test_simplify_t4_hidden_removes_run():
+    """T4: hidden removes a run (incl. absorbed blank) entirely — no summary
+    line — leaving the surrounding prose separated by a single blank line."""
     from gui.chat import _simplify_tool_text
     text = "prose\n🔧 A\n   ↳ rA\n\n🔧 B\n   ↳ rB\nprose2"
     out = _simplify_tool_text(text, "hidden")
-    assert out == "prose\n\n🔧 2 tool calls\n\nprose2"
+    assert out == "prose\n\nprose2"
 
 
-def test_simplify_t5_hidden_three_calls():
+def test_simplify_t5_hidden_tool_only_is_empty():
+    """T5: a tool-only run under hidden collapses to the empty string."""
     from gui.chat import _simplify_tool_text
     text = "🔧 A\n   ↳ rA\n🔧 B\n   ↳ rB\n🔧 C\n   ↳ rC"
     out = _simplify_tool_text(text, "hidden")
-    assert "🔧 3 tool calls" in out.split("\n")
+    assert out == ""
+
+
+def test_simplify_hidden_run_at_start_no_leading_blank():
+    from gui.chat import _simplify_tool_text
+    text = f"{CALL_A}\n{RES_A}\nprose"
+    assert _simplify_tool_text(text, "hidden") == "prose"
+
+
+def test_simplify_hidden_run_at_end_no_trailing_blank():
+    from gui.chat import _simplify_tool_text
+    text = f"prose\n{CALL_A}\n{RES_A}"
+    assert _simplify_tool_text(text, "hidden") == "prose"
+
+
+def test_simplify_hidden_runs_between_prose_single_blanks():
+    """Each removed run leaves a single blank line — never a doubled gap."""
+    from gui.chat import _simplify_tool_text
+    text = f"a\n{CALL_A}\n{RES_A}\nb\n{CALL_B}\n{RES_B}\nc"
+    out = _simplify_tool_text(text, "hidden")
+    assert out == "a\n\nb\n\nc"
+    assert "\n\n\n" not in out
 
 
 def test_simplify_t6_false_positive_in_code_block():
     """T6: marker-like lines INSIDE a fenced code block are (intentionally,
-    documented limitation) misclassified as tool lines and folded/dropped.
+    documented limitation) misclassified as tool lines and removed/dropped.
     Pin the lossy behavior so it stays deliberate, not accidental."""
     from gui.chat import _simplify_tool_text
     text = "Here is code:\n```\n🔧 not_really_a_tool\n   ↳ also_not\n```"
-    # hidden: the in-fence marker lines are folded into a summary (false positive)
+    # hidden: the in-fence marker lines are removed entirely (false positive)
     hidden_lines = _simplify_tool_text(text, "hidden").split("\n")
     assert "🔧 not_really_a_tool" not in hidden_lines
     assert "   ↳ also_not" not in hidden_lines
-    assert "🔧 1 tool calls" in hidden_lines
-    assert "```" in hidden_lines  # surrounding fence survives; content corrupted
+    assert not any("tool calls" in ln for ln in hidden_lines)
+    assert hidden_lines.count("```") == 2  # surrounding fence survives; content removed
     # compact: the result line is dropped, the call-shaped line kept
     compact_lines = _simplify_tool_text(text, "compact").split("\n")
     assert "   ↳ also_not" not in compact_lines
@@ -479,3 +501,91 @@ def test_close_from_menu_cancel_keeps_session(widget, monkeypatch):
     widget._on_delete_session(idx)
     assert sess in widget._sessions
     assert len(widget._sessions) == before
+
+
+# ---- live streaming respects the display mode (Issue: hide tool calls live) ----
+
+def _start_inflight(widget, *, mode_default):
+    """Mimic _on_send's document setup for the active session and register a
+    _Turn so _on_chunk can drive it, without a real worker thread. Returns
+    (session, turn). Caller should pop the turn from widget._turns at the end."""
+    from gui.chat import _Turn
+    widget._tool_display_default = mode_default
+    sess = widget._active
+    widget._append_block("assistant", "")
+    turn = _Turn(sess, _FakeBackend(), MagicMock(), MagicMock())
+    turn.anchor = widget._log.document().characterCount() - 1
+    widget._turns[sess.id] = turn
+    return sess, turn
+
+
+def test_live_hidden_suppresses_tool_lines(widget):
+    """Streaming chunks containing 🔧/↳ lines never reach the document in
+    hidden mode; surrounding prose does."""
+    sess, _ = _start_inflight(widget, mode_default="hidden")
+    sid = sess.id
+    widget._on_chunk(sid, "thinking\n")
+    widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
+    widget._on_chunk(sid, "   ↳ ok\n")
+    widget._on_chunk(sid, "done")
+    text = widget._log.toPlainText()
+    assert "🔧" not in text and "↳" not in text
+    assert "thinking" in text and "done" in text
+    widget._turns.pop(sid)
+
+
+def test_live_full_keeps_tool_lines(widget):
+    """full mode still streams tool-call lines verbatim."""
+    sess, _ = _start_inflight(widget, mode_default="full")
+    sid = sess.id
+    widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
+    assert "🔧 read_file" in widget._log.toPlainText()
+    widget._turns.pop(sid)
+
+
+def test_live_hidden_prose_appended_once(widget):
+    """prefix-append must not duplicate trailing prose as more chunks arrive."""
+    sess, _ = _start_inflight(widget, mode_default="hidden")
+    sid = sess.id
+    widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
+    widget._on_chunk(sid, "   ↳ ok\n")
+    widget._on_chunk(sid, "Hello ")
+    widget._on_chunk(sid, "world")
+    text = widget._log.toPlainText()
+    assert text.count("Hello world") == 1
+    assert "🔧" not in text
+    widget._turns.pop(sid)
+
+
+def test_render_session_inflight_hidden_filters(widget):
+    """A tab-switch-back redraw of an in-flight turn applies hidden mode and
+    re-anchors so subsequent chunks keep filtering."""
+    from gui.chat import _Turn
+    widget._tool_display_default = "hidden"
+    sess = widget._active
+    turn = _Turn(sess, _FakeBackend(), MagicMock(), MagicMock())
+    turn.buffer = "intro\n🔧 read_file  path=a.py\n   ↳ ok\ntail"
+    widget._turns[sess.id] = turn
+    widget._render_session(sess)
+    text = widget._log.toPlainText()
+    assert "🔧" not in text
+    assert "intro" in text and "tail" in text
+    assert turn.anchor is not None
+    widget._on_chunk(sess.id, "\n🔧 write_file  path=b.py\n")
+    assert "🔧" not in widget._log.toPlainText()
+    widget._turns.pop(sess.id)
+
+
+def test_completed_tool_only_message_no_bare_header(widget):
+    """A completed tool-only assistant message draws no bare 'assistant' header
+    in hidden mode (its body simplifies to empty)."""
+    from llm_backend.base import Message
+    widget._tool_display_default = "hidden"
+    sess = widget._active
+    sess.messages.append(
+        Message(role="assistant", content="🔧 read_file  path=a.py\n   ↳ ok")
+    )
+    widget._render_session(sess)
+    text = widget._log.toPlainText()
+    assert "assistant" not in text
+    assert "🔧" not in text
