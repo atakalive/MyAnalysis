@@ -333,6 +333,9 @@ class MeetingShareWindow(QWidget):
         else:
             self._new_session_note.setVisible(False)
 
+        # Mid-meeting tabs auto-join the published set before we read it, so a
+        # newly-opened tab renders checked immediately (no one-tick flicker).
+        self._relay.absorb_new_tabs()
         tabs = self._window.tab_names()
         pub_tabs = self._relay.published_tabs()
         tsig = tuple(tabs) + (sharing,)

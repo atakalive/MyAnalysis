@@ -290,6 +290,7 @@ class MeetingRelay(QObject):
         self._published_session_ids: set[str] = set()
         self._meeting_start_ids: set[str] = set()
         self._published_tabs: set[str] = set()
+        self._tab_known: set[str] = set()
         self._participants: list = []
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
@@ -362,6 +363,22 @@ class MeetingRelay(QObject):
     def set_published_tabs(self, names) -> None:
         self._published_tabs = set(names)
 
+    def absorb_new_tabs(self) -> list[str]:
+        """Auto-share tabs that appeared after the meeting started.
+
+        Tabs default to shared: a tab opened mid-meeting joins the published set
+        without the host having to click. Explicitly deselected tabs are NOT
+        re-added because they stay in `_tab_known` (only genuinely-new names are
+        absorbed). Returns the names newly absorbed (for logging/UI), [] if idle.
+        """
+        if not self._sharing:
+            return []
+        new = [t for t in self._window.tab_names() if t not in self._tab_known]
+        if new:
+            self._published_tabs.update(new)
+            self._tab_known.update(new)
+        return new
+
     # ---- lifecycle ----
 
     def meeting_start(self, ttl_sec: int) -> str:
@@ -382,6 +399,7 @@ class MeetingRelay(QObject):
         self._published_session_ids = {s["id"] for s in summaries}
         self._meeting_start_ids = set(self._published_session_ids)
         self._published_tabs = set(self._window.tab_names())
+        self._tab_known = set(self._published_tabs)
 
         body = {"ch": ch, "ttl_sec": ttl, "secret_hash": secret_hash}
         req = urllib.request.Request(
@@ -500,7 +518,9 @@ class MeetingRelay(QObject):
             self._last_sessions_json = sj
             self._worker.enqueue({"kind": "sessions", "data": pub})
 
-        # Tabs: published tabs only.
+        # Tabs: new tabs auto-join the published set (default-share); then publish
+        # the published ∩ existing.
+        self.absorb_new_tabs()
         all_tabs = win.tab_names()
         pub_tabs = [t for t in all_tabs if t in self._published_tabs]
         tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)

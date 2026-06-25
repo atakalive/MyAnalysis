@@ -287,6 +287,38 @@ def test_publish_scope(qapp, monkeypatch):
     r.stop()
 
 
+# ---- tabs: new tabs auto-share, deselected tabs stay out ----
+
+def test_tab_auto_share(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=["t1", "t2"])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 1, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r.published_tabs() == {"t1", "t2"}
+
+    # a tab opened mid-meeting auto-joins the published set (default-share).
+    win._tabs = ["t1", "t2", "t3"]
+    assert r.absorb_new_tabs() == ["t3"]
+    assert r.published_tabs() == {"t1", "t2", "t3"}
+    r._on_capture_tick()
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and set(tab_puts[-1]["data"]) == {"t1", "t2", "t3"}
+
+    # an explicitly deselected tab is NOT re-added on the next absorb.
+    r.set_published_tabs(["t1", "t3"])     # host unchecks t2
+    assert r.absorb_new_tabs() == []       # t2 is known, not re-absorbed
+    assert r.published_tabs() == {"t1", "t3"}
+
+    # a brand-new tab still auto-shares even after a prior deselect.
+    win._tabs = ["t1", "t2", "t3", "t4"]
+    assert r.absorb_new_tabs() == ["t4"]
+    assert r.published_tabs() == {"t1", "t3", "t4"}
+    r.stop()
+
+
 # ---- QImage hash + PNG-bytes fallback ----
 
 def test_qimage_hash(qapp):
