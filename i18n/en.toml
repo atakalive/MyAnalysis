@@ -119,7 +119,7 @@
 "meeting.state.sharing"          = "● Sharing"
 "meeting.state.idle"             = "○ Not sharing"
 "meeting.state.starting"         = "● Starting tunnel…"
-"meeting.state.tunnel_failed"    = "Tunnel start failed (cloudflared missing or timed out)"
+"meeting.state.tunnel_failed"    = "Tunnel start failed (check Tailscale is running and Funnel is enabled)"
 "meeting.state.expired"          = "Meeting ended (expired)"
 "meeting.btn.start"              = "Start"
 "meeting.btn.stop"               = "Stop"

@@ -3,7 +3,7 @@
 Re-implements every route of ``relay-worker/worker.js`` against a process-local,
 ``threading.Lock``-guarded in-memory store instead of Cloudflare KV/R2. The host
 runs this on ``127.0.0.1:<ephemeral>`` and exposes it to guests through a
-cloudflared quick tunnel (see ``meeting/tunnel.py``).
+Tailscale Funnel (see ``meeting/tunnel.py``).
 
 ``relay-worker/worker.js`` is the single source of truth: response shapes,
 ``server_now_ms``, the ``ts13-rand13`` mid format, and the ``{"error": "..."}``

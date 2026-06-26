@@ -119,7 +119,7 @@
 "meeting.state.sharing"          = "● 共有中"
 "meeting.state.idle"             = "○ 未共有"
 "meeting.state.starting"         = "● トンネル起動中…"
-"meeting.state.tunnel_failed"    = "トンネル起動に失敗しました（cloudflared が無い、またはタイムアウト）"
+"meeting.state.tunnel_failed"    = "トンネル起動に失敗しました（Tailscale 起動と Funnel 有効化を確認）"
 "meeting.state.expired"          = "ミーティング終了（失効）"
 "meeting.btn.start"              = "開始"
 "meeting.btn.stop"               = "停止"
