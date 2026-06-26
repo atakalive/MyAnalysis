@@ -1,0 +1,16 @@
+# Publishes the guest chatdock UI (relay-worker/chatdock.html) to GitLab Pages as
+# a fixed public URL, so guests open one bookmarked page and only the per-meeting
+# token is distributed. chatdock.html is a secret-free static client; it talks to
+# the host relay via the base_url embedded in the token (Pages is not in the data
+# path). Repo stays Private; Pages visibility is set to public separately.
+pages:
+  stage: deploy
+  image: alpine:latest
+  script:
+    - mkdir -p public
+    - cp relay-worker/chatdock.html public/index.html
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
