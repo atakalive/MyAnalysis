@@ -272,9 +272,9 @@ class _RelayWorker(QThread):
 
 
 class _TunnelStarter(QThread):
-    """Starts the public tunnel (Tailscale Funnel) off the GUI thread. Tags every
-    signal with its own generation so MeetingRelay can drop stale results after a
-    stop / re-start."""
+    """Starts the public tunnel (provider per RELAY_TUNNEL) off the GUI thread.
+    Tags every signal with its own generation so MeetingRelay can drop stale
+    results after a stop / re-start."""
 
     sig_ready = Signal(int, str)    # (gen, url)
     sig_failed = Signal(int, str)   # (gen, error_message)
@@ -556,9 +556,10 @@ class MeetingRelay(QObject):
             w.requestInterruption()
             w.wait(8000)
             self._worker = None
-        # Stop the tunnel BEFORE waiting on the starter: disabling the Funnel
-        # releases its lock so a concurrent Tunnel.start() can't re-enable it.
-        # (Tailscale start() is quick CLI calls, not a long blocking URL-wait.)
+        # Stop the tunnel BEFORE waiting on the starter: cloudflared/pinggy
+        # start() blocks waiting for the tunnel to come up, so t.stop() must
+        # terminate that process first to unblock the starter thread we then join
+        # (it also flips _stop_requested so a concurrent start() can't re-enable).
         t = self._tunnel
         if t is not None:
             t.stop()
