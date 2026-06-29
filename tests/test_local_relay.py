@@ -389,6 +389,16 @@ def test_backlog_put_and_replace(clock):
     assert [m["text"] for m in st._ch["ch1"]["backlog"]["s1"]] == ["only"]
 
 
+# 19b. backlog PUT upgrades a channel created before "backlog" existed (hot-reload)
+def test_backlog_put_on_legacy_channel(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    del st._ch["ch1"]["backlog"]        # channel from pre-"backlog" _ensure_channel
+    status, _, _ = _call(st, "PUT", "/backlog/ch1/s1", _admin_h(), _jbody([{"text": "x", "role": "user"}]))
+    assert status == 200
+    assert st._ch["ch1"]["backlog"]["s1"][0]["text"] == "x"
+
+
 # 20. history: turn pagination (user-delimited), before cursor, has_more
 def test_history_turn_pagination(clock):
     st = RelayState(ADMIN)

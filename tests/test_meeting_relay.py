@@ -394,6 +394,56 @@ def test_worker_sends_backlog_put(qapp):
     assert calls[0][2] == [{"text": "x", "role": "user"}]
 
 
+def test_backlog_history_end_to_end(qapp):
+    """Full path over a real socket: worker PUT /backlog → relay → guest GET
+    /history. Guards the worker<->relay integration the fake-_req tests skip."""
+    import hashlib
+    import urllib.request
+    import meeting.local_relay as lr
+    import meeting.relay as mr
+    srv = lr.start_server("ADMIN")
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        secret = "sek"
+        sh = hashlib.sha256(secret.encode()).hexdigest()
+        srv.state.handle("POST", "/admin/channel", {"Authorization": "Bearer ADMIN"},
+                         json.dumps({"ch": "ch", "ttl_sec": 3600, "secret_hash": sh}).encode())
+        srv.state.handle("PUT", "/sessions/ch", {"Authorization": "Bearer ADMIN"},
+                         json.dumps([{"id": "s1", "title": "T", "busy": False}]).encode())
+        w = mr._RelayWorker(base, "ADMIN", "ch")
+        w.enqueue({"kind": "backlog", "sid": "s1", "data": [
+            {"text": "pre_u", "name": "H", "role": "user"},
+            {"text": "pre_a", "name": "AI", "role": "assistant"}]})
+        w._drain_outbox()
+        req = urllib.request.Request(base + "/history/ch/s1?turns=5",
+                                     headers={"Authorization": "Bearer " + secret})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            obj = json.loads(r.read().decode())
+        assert [m["text"] for m in obj["messages"]] == ["pre_u", "pre_a"]
+        assert obj["has_more"] is False
+    finally:
+        srv.shutdown()
+
+
+def test_backfill_runs_after_hot_reload_without_field(qapp, monkeypatch):
+    # Simulate a mid-meeting scope=patch hot-reload: the running instance predates
+    # the _backfilled_ids field. The capture tick must recreate it and still backfill.
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}],
+                    messages={"a": [FakeMsg("user", "q1")]})
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    del r._backfilled_ids                 # field absent (pre-reload instance)
+    r._worker._outbox.clear()
+    r._on_capture_tick()                  # must not raise; must backfill
+    assert any(i["kind"] == "backlog" for i in r._worker._outbox)
+    assert r._backfilled_ids == {"a"}
+    r.stop()
+
+
 # ---- tabs: new tabs auto-share, deselected tabs stay out ----
 
 def test_tab_auto_share(qapp, monkeypatch):

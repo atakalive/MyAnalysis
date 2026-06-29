@@ -671,6 +671,12 @@ class MeetingRelay(QObject):
             self._published_session_ids &= existing
             # Stage each newly-published session's pre-meeting transcript once so
             # guests can fetch history older than meeting start (GET /history).
+            # getattr guard: a mid-meeting hot-reload patches new code onto the
+            # existing MeetingRelay instance, which lacks the new _backfilled_ids
+            # field — recreate it so backfill still runs (next tick) without a
+            # fresh meeting.
+            if not hasattr(self, "_backfilled_ids"):
+                self._backfilled_ids = set()
             if cw is not None:
                 for sid in list(self._published_session_ids - self._backfilled_ids):
                     self._backfill_session(sid, cw)

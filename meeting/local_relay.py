@@ -323,7 +323,10 @@ class RelayState:
                     "role": str(d.get("role") or "assistant"),
                     "origin": "host", "mid": f"{0:013d}-{len(backlog):013d}", "sid": sid,
                 })
-            cs["backlog"][sid] = backlog
+            # setdefault (not cs["backlog"]) so a channel created before "backlog"
+            # was added to _ensure_channel (e.g. after a mid-meeting hot-reload) is
+            # upgraded in place instead of raising KeyError.
+            cs.setdefault("backlog", {})[sid] = backlog
             return self._json({"ok": True, "count": len(backlog)})
 
         # GET /inbound/{ch}?since= (host) — in: only, all sid.
