@@ -85,6 +85,7 @@
     <div id="right">
       <div class="bar" id="sessionBar"></div>
       <div id="sessNotice" class="notice" style="display:none"></div>
+      <div class="bar" id="histBar" style="display:none"><button id="histBtn" class="tabbtn"></button></div>
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
@@ -106,13 +107,15 @@ const T = {
         gap: "— some messages may have been skipped —", connecting: "connecting…",
         connected: "connected", badToken: "Invalid token.",
         sending: "Sending…", sent: "Sent ✓",
-        hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…" },
+        hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…",
+        loadOlder: "Load older history", loadingHistory: "Loading…", noMoreHistory: "No older messages" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
         gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
         connected: "接続OK", badToken: "トークンが不正です。",
         sending: "送信中…", sent: "送信済 ✓",
-        hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…" },
+        hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…",
+        loadOlder: "過去履歴を取得", loadingHistory: "取得中…", noMoreHistory: "これ以上の履歴はありません" },
 }[LANG];
 
 // ---- constants (mirror worker.js) ----
@@ -131,14 +134,27 @@ let pollInterval = 3000;
 let pollTimer = null;
 let pollGen = 0;                // generation token: only the latest poll() renders/reschedules
 let stopped = false;
-let latestSeenTs = 0;           // worker-clock cursor (ms), never local Date.now()
-const seen = new Set();         // mid dedup
 let lastViewVersions = {};      // last-received vv map (per tab)
 const appliedVv = {};           // tab → version successfully decoded+painted
 const viewInflight = new Set(); // tabs with an in-flight /view fetch (de-dupe)
 let lastPresenceMs = 0;
-let gapShown = false;           // de-dupe the visibility gap notice
-let lastDisplayedTs = 0;        // ts13 of the newest message painted
+let histInflight = false;       // one /history fetch in flight at a time
+
+// ---- per-session chat store (in-memory; survives session-tab switches, cleared
+// on page reload). The msgs array is the render source of truth, so switching
+// sessions re-renders from memory instead of wiping the DOM + re-polling (which
+// lost everything past the 15s lookback). Each entry: {mid,text,name,role,mine?,status?,_el?}.
+const store = new Map();        // sid -> SessionState
+let cur = null;                 // active session's state (= store.get(curSid))
+function getState(sid) {
+  let s = store.get(sid);
+  if (!s) {
+    s = { msgs: [], have: new Set(), latestSeenTs: 0, lastDisplayedTs: 0,
+          gapShown: false, oldestMid: null, histExhausted: false };
+    store.set(sid, s);
+  }
+  return s;
+}
 
 // ---- token decode (base64url → JSON) ----
 function decodeToken(tok) {
@@ -188,7 +204,7 @@ async function api(path, { method = "GET", body = null, expect = "json" } = {}) 
 
 function pad13(n) { return String(n).padStart(13, "0"); }
 function sinceParam() {
-  const floor = Math.max(0, latestSeenTs - LOOKBACK_MS);
+  const floor = Math.max(0, (cur ? cur.latestSeenTs : 0) - LOOKBACK_MS);
   return pad13(floor) + "-" + "0".repeat(13);
 }
 
@@ -202,10 +218,12 @@ function selfDestruct() {
 }
 
 // ---- chat rendering ----
-function addMsg(m, opts = {}) {
-  const log = document.getElementById("chatlog");
+// Build (and (re)assign m._el to) a DOM node from a stored message. Own messages
+// carry a status span that reflects m.status across (re)renders.
+function renderMsgEl(m) {
   const div = document.createElement("div");
-  div.className = "msg " + (m.role === "assistant" ? "assistant" : "") + (opts.mine ? " mine" : "");
+  div.className = "msg " + (m.role === "assistant" ? "assistant" : "") + (m.mine ? " mine" : "")
+                 + (m.status === "failed" ? " failed" : "");
   const who = document.createElement("div");
   who.className = "who";
   who.textContent = m.name || (m.role === "assistant" ? "AI" : "Guest");
@@ -213,36 +231,77 @@ function addMsg(m, opts = {}) {
   txt.textContent = m.text;
   div.appendChild(who);
   div.appendChild(txt);
-  if (opts.mine === true) {
-    // One status span per own message, rewritten in place across all states
-    // (sending / sent / failed). Remote messages get no span.
+  if (m.mine === true) {
     const st = document.createElement("span");
     st.className = "status";
-    st.textContent = T.sending;
+    st.textContent = m.status === "sent" ? T.sent : (m.status === "failed" ? T.sendFail : T.sending);
     div.appendChild(st);
   }
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  m._el = div;
   return div;
 }
 
-function setMsgStatus(div, text) {
-  const span = div.querySelector(".status");
-  if (!span) return;            // remote message — no status span
-  span.textContent = text;
+// Add a live/own message to a session's store (and the DOM bottom if active).
+function appendMsg(state, m) {
+  if (m.mid && state.have.has(m.mid)) return null;   // dedup (poll echo / re-entry)
+  if (m.mid) state.have.add(m.mid);
+  state.msgs.push(m);
+  if (state.oldestMid === null && m.mid) state.oldestMid = m.mid;
+  if (state === cur) {
+    const log = document.getElementById("chatlog");
+    log.appendChild(renderMsgEl(m));
+    log.scrollTop = log.scrollHeight;
+  }
+  return m;
+}
+
+// Prepend older history (ascending mid order) to a session, preserving scroll.
+function prependMsgs(state, arr) {
+  const fresh = (arr || []).filter((m) => m.mid && !state.have.has(m.mid));
+  if (!fresh.length) return;
+  for (const m of fresh) state.have.add(m.mid);
+  state.msgs = fresh.concat(state.msgs);
+  state.oldestMid = state.msgs[0].mid;
+  if (state === cur) {
+    const log = document.getElementById("chatlog");
+    const prevH = log.scrollHeight, prevTop = log.scrollTop;
+    const frag = document.createDocumentFragment();
+    for (const m of fresh) frag.appendChild(renderMsgEl(m));
+    log.insertBefore(frag, log.firstChild);
+    log.scrollTop = prevTop + (log.scrollHeight - prevH);   // keep the viewport anchored
+  }
+}
+
+// Rebuild #chatlog from a session's stored msgs (on session switch). #histBar is
+// a sibling of #chatlog, so it is not affected.
+function rerenderAll(state) {
+  const log = document.getElementById("chatlog");
+  log.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const m of state.msgs) frag.appendChild(renderMsgEl(m));
+  log.appendChild(frag);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setMsgStatus(m, statusKey, text) {
+  m.status = statusKey;
+  if (!m._el) return;
+  const span = m._el.querySelector(".status");
+  if (span) span.textContent = text;
+  m._el.classList.toggle("failed", statusKey === "failed");
 }
 
 function showGapIfNeeded(serverNowMs) {
   // Only when an actual gap opened (reanchor jumped past lookback) AND we have
   // painted something before. De-dupe until the next real message arrives.
-  if (gapShown || lastDisplayedTs === 0) return;
-  if (serverNowMs - lastDisplayedTs > LOOKBACK_MS) {
+  if (!cur || cur.gapShown || cur.lastDisplayedTs === 0) return;
+  if (serverNowMs - cur.lastDisplayedTs > LOOKBACK_MS) {
     const log = document.getElementById("chatlog");
     const g = document.createElement("div");
     g.className = "gap";
     g.textContent = T.gap;
     log.appendChild(g);
-    gapShown = true;
+    cur.gapShown = true;
   }
 }
 
@@ -276,9 +335,9 @@ async function poll(reanchor = false) {
     if (!r.ok) { document.getElementById("status").textContent = T.retrying; return; }
     const data = r.data;                                   // already parsed by api() (throws on parse/abort)
     const serverNow = data.server_now_ms || 0;
-    if (reanchor) {
+    if (reanchor && cur) {
       showGapIfNeeded(serverNow);
-      latestSeenTs = serverNow;
+      cur.latestSeenTs = serverNow;
     }
     renderSessions(data.sessions || []);
     renderTabs(data.tabs || []);
@@ -294,20 +353,18 @@ async function poll(reanchor = false) {
       notice.style.display = "none";
       document.getElementById("sendBtn").disabled = false;
     }
-    for (const m of (data.messages || [])) {
-      if (!m.mid || seen.has(m.mid)) continue;
-      seen.add(m.mid);
-      addMsg(m);
-      const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
-      if (ts > latestSeenTs) latestSeenTs = ts;
-      if (ts > lastDisplayedTs) lastDisplayedTs = ts;
-      gapShown = false; // a real message resets the gap de-dupe
-    }
-    if (serverNow > latestSeenTs) latestSeenTs = serverNow;
-    // prune seen to keep memory bounded (ts < latest - 2*LOOKBACK)
-    const cutoff = latestSeenTs - 2 * LOOKBACK_MS;
-    for (const mid of seen) {
-      if ((parseInt(mid.slice(0, 13), 10) || 0) < cutoff) seen.delete(mid);
+    // Render only into the active session's store (bootstrap "_" returns no
+    // messages; cur is set by renderSessions -> selectSession on first entry).
+    if (cur) {
+      for (const m of (data.messages || [])) {
+        if (!m.mid || cur.have.has(m.mid)) continue;
+        appendMsg(cur, m);
+        const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
+        if (ts > cur.latestSeenTs) cur.latestSeenTs = ts;
+        if (ts > cur.lastDisplayedTs) cur.lastDisplayedTs = ts;
+        cur.gapShown = false; // a real message resets the gap de-dupe
+      }
+      if (serverNow > cur.latestSeenTs) cur.latestSeenTs = serverNow;
     }
     document.getElementById("status").textContent = T.connected;
     maybePresence();
@@ -362,12 +419,51 @@ function renderSessions(sessions) {
 function selectSession(sid) {
   if (sid === curSid) return;
   curSid = sid;
-  seen.clear();
-  document.getElementById("chatlog").innerHTML = "";
-  lastDisplayedTs = 0;
-  gapShown = false;
+  cur = getState(sid);
+  rerenderAll(cur);              // restore this session's retained history (no wipe)
+  updateHistBtn();
   maybePresence(true);
-  poll(true); // reanchor for the freshly selected session
+  // Resume from this session's stored cursor (0 for a fresh session → loads its
+  // full live history; otherwise fills anything missed while it was inactive).
+  poll(false);
+}
+
+// ---- history (load older, 5 turns per press) ----
+function updateHistBtn() {
+  const btn = document.getElementById("histBtn");
+  const bar = document.getElementById("histBar");
+  if (!btn || !bar) return;
+  if (!curSid) { bar.style.display = "none"; return; }
+  bar.style.display = "";
+  if (cur && cur.histExhausted) {
+    btn.disabled = true;
+    btn.textContent = T.noMoreHistory;
+  } else {
+    btn.disabled = histInflight;
+    btn.textContent = histInflight ? T.loadingHistory : T.loadOlder;
+  }
+}
+
+async function loadHistory() {
+  if (!curSid || stopped || histInflight) return;
+  const state = cur;                       // capture: user may switch sessions mid-fetch
+  if (state.histExhausted) return;
+  histInflight = true;
+  updateHistBtn();
+  try {
+    const before = state.oldestMid ? "&before=" + encodeURIComponent(state.oldestMid) : "";
+    const r = await api("/history/" + encodeURIComponent(cfg.channel) + "/" +
+                        encodeURIComponent(curSid) + "?turns=5" + before);
+    if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
+    if (r.ok && r.data) {
+      prependMsgs(state, r.data.messages || []);
+      if (!r.data.has_more) state.histExhausted = true;
+    }
+  } catch (e) { /* transient — leave the button enabled to retry */ }
+  finally {
+    histInflight = false;
+    updateHistBtn();
+  }
 }
 
 function renderTabs(tabs) {
@@ -538,47 +634,51 @@ async function send() {
   const text = ta.value;
   if (!text.trim()) return;
   ta.value = "";
-  const div = addMsg({ name: myName || "Guest", text, role: "user" }, { mine: true });
+  const state = cur;
+  // Own message lives in the store (mine, status) so it survives session switches;
+  // its mid is filled on ack to dedup the /poll echo.
+  const m = { mid: null, text, name: myName || "Guest", role: "user", mine: true, status: "sending" };
+  appendMsg(state, m);
   try {
     const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
       { method: "POST", body: { text, name: myName || "Guest" } });
-    if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(div, text, false); return; }
+    if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(state, m, false); return; }
     if (r.ok && r.data && r.data.mid) {
-      setMsgStatus(div, T.sent);     // relay accepted (saved in:, returned mid)
-      seen.add(r.data.mid);          // dedup our own echo from /poll
+      m.mid = r.data.mid;
+      state.have.add(r.data.mid);    // dedup our own echo from /poll
+      setMsgStatus(m, "sent", T.sent);
       return;
     }
-    markFailed(div, text, true);     // !ok / 503 / missing mid → retryable
+    markFailed(state, m, true);      // !ok / 503 / missing mid → retryable
   } catch (e) {
-    markFailed(div, text, true);     // body stall / abort / network → retryable
+    markFailed(state, m, true);      // body stall / abort / network → retryable
   }
 }
 
 // retryable=false (401/410, channel dead, selfDestruct done) → no resend button.
-function markFailed(div, text, retryable) {
-  div.classList.add("failed");
-  setMsgStatus(div, T.sendFail);     // keep the same span (so a later resend can show ✓)
-  if (!retryable) return;
+function markFailed(state, m, retryable) {
+  setMsgStatus(m, "failed", T.sendFail);   // keep the same span (so a later resend can show ✓)
+  if (!retryable || !m._el) return;
   const btn = document.createElement("button");
   btn.className = "resend";
   btn.textContent = T.resend;
   btn.onclick = async () => {
     btn.remove();
-    div.classList.remove("failed");
-    setMsgStatus(div, T.sending);
+    setMsgStatus(m, "sending", T.sending);
     try {
       const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
-        { method: "POST", body: { text, name: myName || "Guest" } });
-      if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(div, text, false); return; }
+        { method: "POST", body: { text: m.text, name: myName || "Guest" } });
+      if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(state, m, false); return; }
       if (r.ok && r.data && r.data.mid) {
-        setMsgStatus(div, T.sent);
-        seen.add(r.data.mid);
+        m.mid = r.data.mid;
+        state.have.add(r.data.mid);
+        setMsgStatus(m, "sent", T.sent);
         return;
       }
-      markFailed(div, text, true);
-    } catch (e) { markFailed(div, text, true); }
+      markFailed(state, m, true);
+    } catch (e) { markFailed(state, m, true); }
   };
-  div.appendChild(btn);
+  m._el.appendChild(btn);
 }
 
 // ---- join ----
@@ -608,6 +708,8 @@ function join(tok, name) {
   setupImageButtons();
   setupSplitter();
   document.getElementById("sendBtn").onclick = send;
+  document.getElementById("histBtn").onclick = loadHistory;
+  updateHistBtn();
   document.getElementById("msg").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });

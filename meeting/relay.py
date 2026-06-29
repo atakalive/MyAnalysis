@@ -170,6 +170,8 @@ class _RelayWorker(QThread):
         try:
             if kind == "out":
                 resp = self._req("POST", f"/out/{_q(self._ch)}/{_q(item['sid'])}", data=item["body"])
+            elif kind == "backlog":
+                resp = self._req("PUT", f"/backlog/{_q(self._ch)}/{_q(item['sid'])}", data=item["data"])
             elif kind == "sessions":
                 resp = self._req("PUT", f"/sessions/{_q(self._ch)}", data=item["data"])
             elif kind == "tabs":
@@ -317,6 +319,7 @@ class MeetingRelay(QObject):
         self._poll_ms = 3000
         self._host_name = tr("meeting.host_name_default")
         self._published_session_ids: set[str] = set()
+        self._backfilled_ids: set[str] = set()   # sids whose pre-meeting transcript was staged
         self._meeting_start_ids: set[str] = set()
         self._published_tabs: set[str] = set()
         self._tab_known: set[str] = set()
@@ -480,6 +483,7 @@ class MeetingRelay(QObject):
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
         self._published_session_ids = {s["id"] for s in summaries}
+        self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         self._meeting_start_ids = set(self._published_session_ids)
         self._published_tabs = set(self._window.tab_names())
         self._tab_known = set(self._published_tabs)
@@ -616,6 +620,29 @@ class MeetingRelay(QObject):
         if self._worker is not None:
             self._worker.enqueue({"kind": "out", "sid": sid, "body": body})
 
+    def _backfill_session(self, sid: str, cw) -> None:
+        """Stage a published session's existing transcript into the relay so guests
+        can fetch history older than meeting start (GET /history). Called once per
+        session per meeting (caller guards with _backfilled_ids). No duplication
+        with live out: — backfill captures only messages present now; later messages
+        flow through _on_message_added with newer (live) mids."""
+        get = getattr(cw, "_session_by_id", None)
+        if get is None or self._worker is None:
+            return
+        sess = get(sid)
+        msgs = list(getattr(sess, "messages", []) or []) if sess is not None else []
+        data = []
+        for m in msgs:
+            role = getattr(m, "role", "")
+            if role not in ("user", "assistant"):
+                continue
+            content = getattr(m, "content", None)
+            if not content or not str(content).strip():
+                continue
+            name = tr("meeting.assistant_name_default") if role == "assistant" else self._host_name
+            data.append({"text": str(content), "name": name, "role": role})
+        self._worker.enqueue({"kind": "backlog", "sid": sid, "data": data})
+
     # ---- capture (GUI thread) ----
 
     def _on_capture_tick(self) -> None:
@@ -642,6 +669,12 @@ class MeetingRelay(QObject):
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
             self._published_session_ids &= existing
+            # Stage each newly-published session's pre-meeting transcript once so
+            # guests can fetch history older than meeting start (GET /history).
+            if cw is not None:
+                for sid in list(self._published_session_ids - self._backfilled_ids):
+                    self._backfill_session(sid, cw)
+                    self._backfilled_ids.add(sid)
             pub = [
                 {"id": s["id"], "title": s["title"], "busy": s["busy"]}
                 for s in summaries if s["id"] in self._published_session_ids

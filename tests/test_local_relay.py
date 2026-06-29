@@ -365,6 +365,89 @@ def test_orphan_channel_reaped_and_reads_dont_create(clock):
     assert "orphan" not in st._ch
 
 
+# 19. backlog storage + idempotent replace
+def test_backlog_put_and_replace(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    # admin auth required
+    status, _, _ = _call(st, "PUT", "/backlog/ch1/s1", {}, _jbody([{"text": "x"}]))
+    assert status == 401
+    # store 3 (blank text filtered), order-only mids sort before any live mid
+    status, _, p = _call(st, "PUT", "/backlog/ch1/s1", _admin_h(), _jbody([
+        {"text": "u1", "role": "user", "name": "H"},
+        {"text": "   ", "role": "assistant"},        # filtered
+        {"text": "a1", "role": "assistant", "name": "AI"},
+        {"text": "u2", "role": "user"},
+    ]))
+    assert status == 200 and _json(p)["count"] == 3
+    bl = st._ch["ch1"]["backlog"]["s1"]
+    assert [m["text"] for m in bl] == ["u1", "a1", "u2"]
+    assert [m["mid"] for m in bl] == [f"{0:013d}-{i:013d}" for i in range(3)]
+    assert all(m["mid"] < f"{lr.now_ms():013d}-{'0'*13}" for m in bl)
+    # idempotent full replace
+    _call(st, "PUT", "/backlog/ch1/s1", _admin_h(), _jbody([{"text": "only", "role": "user"}]))
+    assert [m["text"] for m in st._ch["ch1"]["backlog"]["s1"]] == ["only"]
+
+
+# 20. history: turn pagination (user-delimited), before cursor, has_more
+def test_history_turn_pagination(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    # 8 turns: u1,a1,...,u8,a8 (user at even indices 0,2,...,14)
+    transcript = []
+    for i in range(1, 9):
+        transcript.append({"text": f"u{i}", "role": "user"})
+        transcript.append({"text": f"a{i}", "role": "assistant"})
+    _call(st, "PUT", "/backlog/ch1/s1", _admin_h(), _jbody(transcript))
+
+    # page 1: newest 5 turns → u4..a8
+    _, _, p = _call(st, "GET", "/history/ch1/s1?turns=5", _guest_h())
+    obj = _json(p)
+    assert [m["text"] for m in obj["messages"]] == \
+        ["u4", "a4", "u5", "a5", "u6", "a6", "u7", "a7", "u8", "a8"]
+    assert obj["has_more"] is True
+    assert set(obj) == {"messages", "has_more", "server_now_ms"}
+
+    # page 2: before u4 → remaining u1..a3, exhausted
+    before = obj["messages"][0]["mid"]
+    _, _, p2 = _call(st, "GET", f"/history/ch1/s1?turns=5&before={before}", _guest_h())
+    obj2 = _json(p2)
+    assert [m["text"] for m in obj2["messages"]] == ["u1", "a1", "u2", "a2", "u3", "a3"]
+    assert obj2["has_more"] is False
+
+
+# 21. history merges backlog (oldest) + live, sorted; unpublished sid → empty
+def test_history_merges_backlog_and_live(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    _call(st, "PUT", "/backlog/ch1/s1", _admin_h(),
+          _jbody([{"text": "old_u", "role": "user"}, {"text": "old_a", "role": "assistant"}]))
+    clock["t"] += 1
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "live_u"}))
+    clock["t"] += 1
+    _, _, op = _call(st, "POST", "/out/ch1/s1", _admin_h(), _jbody({"text": "live_a", "role": "assistant"}))
+    live_a_mid = _json(op)["mid"]
+
+    # before the live assistant reply → backlog + live_u (older), turn-grouped
+    _, _, p = _call(st, "GET", f"/history/ch1/s1?turns=5&before={live_a_mid}", _guest_h())
+    texts = [m["text"] for m in _json(p)["messages"]]
+    assert texts == ["old_u", "old_a", "live_u"]   # backlog (mid ts=0) sorts first
+
+    # no before → whole history (<=5 turns) including the live reply
+    _, _, pall = _call(st, "GET", "/history/ch1/s1?turns=5", _guest_h())
+    assert [m["text"] for m in _json(pall)["messages"]] == ["old_u", "old_a", "live_u", "live_a"]
+
+    # unpublished sid → graceful empty (mirrors /poll leniency)
+    _, _, pe = _call(st, "GET", "/history/ch1/other?turns=5", _guest_h())
+    assert _json(pe) == {"messages": [], "has_more": False, "server_now_ms": _json(pe)["server_now_ms"]}
+
+    # guest auth still enforced
+    status, _, _ = _call(st, "GET", "/history/ch1/s1", {"Authorization": "Bearer wrong"})
+    assert status == 401
+
+
 # optional: real socket smoke
 def test_socket_smoke(tmp_path):
     import urllib.request

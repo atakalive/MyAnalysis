@@ -43,14 +43,30 @@ class FakeResp:
         return False
 
 
+class FakeMsg:
+    def __init__(self, role, content):
+        self.role = role
+        self.content = content
+
+
+class FakeSession:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+
 class FakeChat:
-    def __init__(self, summaries=None):
+    def __init__(self, summaries=None, messages=None):
         self._summaries = summaries or []
+        self._messages = messages or {}   # sid -> [FakeMsg, ...] (for backfill)
         self.injected = []
         self._pending_remote = {}
 
     def session_summaries(self):
         return list(self._summaries)
+
+    def _session_by_id(self, sid):
+        msgs = self._messages.get(sid)
+        return FakeSession(msgs) if msgs is not None else None
 
     def inject_remote_message(self, text, sender, session_id=None):
         self.injected.append((text, sender, session_id))
@@ -310,6 +326,72 @@ def test_capture_tick_exception_is_swallowed(qapp, monkeypatch):
     r._on_capture_tick()   # must not raise
     assert r._sharing is True
     r.stop()
+
+
+# ---- backfill: stage pre-meeting transcript once per session per meeting ----
+
+def test_backfill_on_meeting_start(qapp, monkeypatch):
+    chat = FakeChat(
+        [{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}],
+        messages={"a": [FakeMsg("user", "q1"), FakeMsg("assistant", "ans1"),
+                        FakeMsg("tool", "junk"), FakeMsg("user", "   "),   # both filtered
+                        FakeMsg("assistant", ""), FakeMsg("user", "q2")]},  # blank filtered
+    )
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)   # commits state + first capture tick → backfill
+
+    backlogs = [i for i in r._worker._outbox if i["kind"] == "backlog"]
+    assert len(backlogs) == 1
+    item = backlogs[0]
+    assert item["sid"] == "a"
+    assert [m["text"] for m in item["data"]] == ["q1", "ans1", "q2"]
+    assert [m["role"] for m in item["data"]] == ["user", "assistant", "user"]
+    assert item["data"][0]["name"] == r.host_name
+    assert item["data"][1]["name"] == tr("meeting.assistant_name_default")
+    assert r._backfilled_ids == {"a"}
+
+    # subsequent ticks do NOT re-backfill the same session
+    r._on_capture_tick()
+    assert len([i for i in r._worker._outbox if i["kind"] == "backlog"]) == 1
+    r.stop()
+
+
+def test_backfill_recleared_on_restart(qapp, monkeypatch):
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}],
+                    messages={"a": [FakeMsg("user", "q1")]})
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r._backfilled_ids == {"a"}
+    r.stop()
+    # a fresh channel must re-stage backlog
+    r.meeting_start(3600)
+    assert r._backfilled_ids == {"a"}
+    assert any(i["kind"] == "backlog" for i in r._worker._outbox)
+    r.stop()
+
+
+def test_worker_sends_backlog_put(qapp):
+    import meeting.relay as mr
+    w = mr._RelayWorker("http://x", "k", "ch")
+    calls = []
+
+    def fake_req(method, path, data=None, is_png=False):
+        calls.append((method, path, data))
+        return FakeResp(b"{}")
+
+    w._req = fake_req
+    w.enqueue({"kind": "backlog", "sid": "s1", "data": [{"text": "x", "role": "user"}]})
+    w._drain_outbox()
+    assert calls and calls[0][0] == "PUT" and calls[0][1] == "/backlog/ch/s1"
+    assert calls[0][2] == [{"text": "x", "role": "user"}]
 
 
 # ---- tabs: new tabs auto-share, deselected tabs stay out ----

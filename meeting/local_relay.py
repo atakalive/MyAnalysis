@@ -5,10 +5,18 @@ Re-implements every route of ``relay-worker/worker.js`` against a process-local,
 runs this on ``127.0.0.1:<ephemeral>`` and exposes it to guests through a
 Tailscale Funnel (see ``meeting/tunnel.py``).
 
-``relay-worker/worker.js`` is the single source of truth: response shapes,
-``server_now_ms``, the ``ts13-rand13`` mid format, and the ``{"error": "..."}``
-error bodies all match it exactly so the unmodified guest client
+``relay-worker/worker.js`` is the single source of truth for the routes it
+defines: response shapes, ``server_now_ms``, the ``ts13-rand13`` mid format, and
+the ``{"error": "..."}`` error bodies all match it exactly so the guest client
 (``relay-worker/chatdock.html``) works unchanged.
+
+Two routes are local-relay-only extensions, NOT present in worker.js (the Worker
+path is no longer in the data path — the runtime is this module, the HTML is
+served by GitLab Pages + this server):
+  PUT /backlog/{ch}/{sid}   (admin)  — stage a session's pre-meeting transcript
+  GET /history/{ch}/{sid}   (guest)  — backward, turn-paginated history fetch
+Together they let a guest fetch the full chat history (incl. before sharing
+started), 5 turns at a time, on demand.
 
 The routing core ``RelayState.handle()`` is socket-independent so tests can drive
 it directly without a socket / cloudflared / network.
@@ -128,6 +136,7 @@ class RelayState:
             "tabs": [],
             "in_msgs": [],
             "out_msgs": [],
+            "backlog": {},     # sid -> [msg, ...] pre-meeting transcript (no TTL compaction)
             "views": {},
             "vv": {},
             "presence": {},
@@ -289,6 +298,34 @@ class RelayState:
             })
             return self._json({"mid": mid})
 
+        # PUT /backlog/{ch}/{sid} (host, admin) — full pre-meeting transcript for a
+        # session, served only via GET /history (never /poll). Replaces any prior
+        # backlog for sid (idempotent). Order-only mids "{0:013d}-{i:013d}" sort
+        # strictly before every live mid (ts13 > 0) and are exempt from MSG_TTL
+        # compaction (a separate list, never passed through _scan).
+        if seg[:1] == ["backlog"] and len(seg) == 3 and method == "PUT":
+            if not self._is_admin(headers):
+                return self._json({"error": "unauthorized"}, 401)
+            ch, sid = seg[1], seg[2]
+            arr = self._parse_json(body)
+            if arr is _BAD:
+                return self._json({"error": "bad json"}, 400)
+            cs = self._ensure_channel(ch, now_s)
+            items = arr if isinstance(arr, list) else []
+            backlog = []
+            for it in items:
+                d = it if isinstance(it, dict) else {}
+                text = str(d.get("text") or "")
+                if not text.strip():
+                    continue
+                backlog.append({
+                    "text": text, "name": str(d.get("name") or ""),
+                    "role": str(d.get("role") or "assistant"),
+                    "origin": "host", "mid": f"{0:013d}-{len(backlog):013d}", "sid": sid,
+                })
+            cs["backlog"][sid] = backlog
+            return self._json({"ok": True, "count": len(backlog)})
+
         # GET /inbound/{ch}?since= (host) — in: only, all sid.
         # Read routes use _ch.get (NOT _ensure_channel): worker.js never creates KV
         # on a read, and creating an empty channel here would leak orphans. (reviewer P2)
@@ -402,7 +439,44 @@ class RelayState:
                 "view_versions": dict(cs["vv"]), "alive": True, "server_now_ms": now_m,
             })
 
+        # GET /history/{ch}/{sid}?before=&turns= (guest) — backward pagination.
+        # Returns up to `turns` (default 5) conversation turns strictly older than
+        # `before`, drawn from backlog + live (in/out) for sid. A turn boundary is a
+        # user-role message (a user prompt + its following assistant replies).
+        if seg[:1] == ["history"] and len(seg) == 3 and method == "GET":
+            ch, sid = seg[1], seg[2]
+            ok, status = self._check_guest(headers, ch, now_s)
+            if not ok:
+                return self._json({"error": "not live"}, status)
+            cs = self._ch[ch]
+            if not any(s.get("id") == sid for s in cs["sessions"]):
+                return self._json({"messages": [], "has_more": False, "server_now_ms": now_m})
+            try:
+                turns = int(self._q1(query, "turns") or 5)
+            except (TypeError, ValueError):
+                turns = 5
+            turns = max(1, min(50, turns))
+            page, has_more = self._history_page(cs, sid, self._q1(query, "before"), turns)
+            return self._json({"messages": page, "has_more": has_more, "server_now_ms": now_m})
+
         return self._json({"error": "not found"}, 404)
+
+    def _history_page(self, cs: dict, sid: str, before: "str | None", turns: int):
+        """Last `turns` turns older than `before` (exclusive) for sid, with has_more.
+
+        Turns are delimited by user-role messages: the page starts at the
+        `turns`-th-newest user message so each user prompt is grouped with the
+        assistant replies that follow it. Fewer than `turns` users -> whole set."""
+        full = (
+            list(cs.get("backlog", {}).get(sid, []))
+            + [m for m in cs["in_msgs"] if m["sid"] == sid]
+            + [m for m in cs["out_msgs"] if m["sid"] == sid]
+        )
+        full.sort(key=lambda m: m["mid"])
+        older = [m for m in full if m["mid"] < before] if before else full
+        user_idx = [i for i, m in enumerate(older) if m.get("role") == "user"]
+        start = 0 if len(user_idx) <= turns else user_idx[-turns]
+        return older[start:], start > 0
 
     # ---- helpers ----
 
