@@ -736,13 +736,15 @@ try {
 document.getElementById("joinBtn").onclick = () => {
   join(document.getElementById("tokenInput").value, document.getElementById("nameInput").value);
 };
-// Deep link: …/#token=<base64url>
+// Deep link: …/#token=<base64url> — トークン欄に事前入力するだけ。
+// 入室は必ず Join ボタン経由（トークン・名前が揃っていても自動入室しない）。
+// この IIFE は bootstrap より後に置くこと（URL のトークンが復元トークンを上書きする＝URL 勝ち）。
 (function () {
   const m = (location.hash || "").match(/#token=([^&]+)/);
-  if (m) {
+  if (!m) return;
+  try {
     document.getElementById("tokenInput").value = decodeURIComponent(m[1]);
-    join(decodeURIComponent(m[1]), document.getElementById("nameInput").value);
-  }
+  } catch (e) { /* 不正な %xx を含む #token= はプリフィルをスキップ（手動貼り付け可） */ }
 })();
 </script>
 </body>

@@ -97,6 +97,8 @@ class MeetingShareWindow(QWidget):
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._copy_btn = QPushButton(tr("meeting.btn.copy"))
         self._copy_btn.clicked.connect(self._on_copy)
+        self._copy_link_btn = QPushButton(tr("meeting.btn.copy_link"))
+        self._copy_link_btn.clicked.connect(self._on_copy_link)
         self._reveal_btn = QPushButton(tr("meeting.btn.reveal"))
         self._reveal_btn.clicked.connect(self._on_reveal)
         self._qr_btn = QPushButton(tr("meeting.btn.qr"))
@@ -104,6 +106,7 @@ class MeetingShareWindow(QWidget):
         self._qr_btn.setEnabled(_qr_available())
         token_row.addWidget(self._token_edit, stretch=1)
         token_row.addWidget(self._copy_btn)
+        token_row.addWidget(self._copy_link_btn)
         token_row.addWidget(self._reveal_btn)
         token_row.addWidget(self._qr_btn)
         root.addLayout(token_row)
@@ -243,6 +246,17 @@ class MeetingShareWindow(QWidget):
         if self._token:
             QApplication.clipboard().setText(self._token)
 
+    def _share_url(self) -> str:
+        base = self._relay.base_url()
+        if not self._token or not base:
+            return ""
+        return base.rstrip("/") + "/#token=" + self._token
+
+    def _on_copy_link(self) -> None:
+        url = self._share_url()
+        if url:
+            QApplication.clipboard().setText(url)
+
     def _on_reveal(self) -> None:
         self._token_revealed = not self._token_revealed
         self._token_edit.setEchoMode(
@@ -259,7 +273,9 @@ class MeetingShareWindow(QWidget):
         try:
             import io
             import qrcode
-            url = self._relay.base_url().rstrip("/") + "/#token=" + self._token
+            url = self._share_url()
+            if not url:
+                return
             img = qrcode.make(url)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
@@ -504,6 +520,7 @@ class MeetingShareWindow(QWidget):
         self._start_btn.setText(tr("meeting.btn.start"))
         self._token_caption.setText(tr("meeting.label.token"))
         self._copy_btn.setText(tr("meeting.btn.copy"))
+        self._copy_link_btn.setText(tr("meeting.btn.copy_link"))
         self._reveal_btn.setText(
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )

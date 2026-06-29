@@ -842,3 +842,34 @@ def test_share_window_adopts_running_token(qapp, monkeypatch):
     assert sw._state_label.text() == tr("meeting.state.sharing")
     sw._timer.stop()
     r.stop()
+
+
+def test_share_url_and_copy_link(qapp, monkeypatch):
+    # Issue #47: 共有 URL ヘルパ + 「リンクをコピー」ボタン
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _make_relay(monkeypatch, win)   # legacy → base_url() == "http://relay.test"
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(3600)
+    tok = tokens[-1]
+
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+
+    # happy path: guest base（末尾スラッシュ除去）+ "/#token=" + token
+    assert sw._share_url() == "http://relay.test/#token=" + tok
+    # コピーハンドラは _share_url() の薄いラッパ。例外を出さないこと（スモーク）
+    sw._on_copy_link()
+    # token 無し → 空 URL（クラッシュしない）
+    sw._token = ""
+    assert sw._share_url() == ""
+    # base_url 未確定（異常系）でも相対 URL を返さない → 空（変更2-1 のガードを通す）
+    sw._token = "x"
+    monkeypatch.setattr(r, "base_url", lambda: "")
+    assert sw._share_url() == ""
+    r.stop()   # relay 後始末。姉妹テスト（test_share_window_adopts_running_token 末尾）と同様、冪等
