@@ -91,8 +91,31 @@ class FakeWindow:
         pass
 
 
-def _make_relay(monkeypatch, win):
+def _sess(sid):
+    return {"id": sid, "title": sid.upper(), "busy": False, "dataset": "ds1"}
+
+
+_UI_PREFS: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ui_prefs(monkeypatch):
+    """全 MeetingRelay 構築を hermetic に: __init__ の read_ui_pref / setter の
+    update_ui_pref を in-memory ストアへ差し替え、実 ui_prefs.json も
+    global_state_dir() のディレクトリ作成も踏ませない。_make_relay 経由か
+    MeetingRelay 直接構築かを問わず適用される。"""
+    import llm_bridge.paths as lp
+    _UI_PREFS.clear()
+    monkeypatch.setattr(lp, "read_ui_pref",
+                        lambda key, default=None: _UI_PREFS.get(key, default))
+    monkeypatch.setattr(lp, "update_ui_pref",
+                        lambda key, value: _UI_PREFS.__setitem__(key, value))
+
+
+def _make_relay(monkeypatch, win, *, ui_prefs=None):
     import meeting.relay as mr
+    if ui_prefs:
+        _UI_PREFS.update(ui_prefs)
     monkeypatch.setattr(mr._RelayWorker, "start", lambda self: None)
     r = mr.MeetingRelay(win)
     r._remote_base = "http://relay.test"   # legacy mode → synchronous token, no socket/tunnel
@@ -473,6 +496,131 @@ def test_tab_auto_share(qapp, monkeypatch):
     win._tabs = ["t1", "t2", "t3", "t4"]
     assert r.absorb_new_tabs() == ["t4"]
     assert r.published_tabs() == {"t1", "t3", "t4"}
+    r.stop()
+
+
+# ---- sessions: new sessions auto-share (Issue #48) ----
+
+def test_session_auto_share(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1"), _sess("s2")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"s1", "s2"}
+
+    # a session created mid-meeting auto-joins the published set (default-share)
+    chat._summaries.append(_sess("s3"))
+    assert r.absorb_new_sessions() == ["s3"]
+    assert "s3" in r.published_session_ids()
+    r._last_sessions_json = None
+    r._on_capture_tick()
+    sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
+    assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"s1", "s2", "s3"}
+
+    # an explicitly deselected session is NOT re-absorbed on the next absorb
+    r.set_published_sessions({"s1", "s3"})     # host unchecks s2
+    assert r.absorb_new_sessions() == []
+    assert r.published_session_ids() == {"s1", "s3"}
+
+    # a brand-new session still auto-shares even after a prior deselect
+    chat._summaries.append(_sess("s4"))
+    assert r.absorb_new_sessions() == ["s4"]
+    assert "s4" in r.published_session_ids()
+    r.stop()
+
+
+def test_session_auto_share_off(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": False})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    before = r.published_session_ids()
+    chat._summaries.append(_sess("s2"))
+    assert r.absorb_new_sessions() == []
+    assert r.published_session_ids() == before   # unchanged
+    r.stop()
+
+
+def test_session_auto_share_off_then_on_no_retroactive(qapp, monkeypatch):
+    # Privacy invariant (P1): OFF→ON must NOT retroactively publish sessions
+    # created while the toggle was OFF; only sessions created after ON auto-share.
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"s1"}
+
+    r.set_auto_share_new_sessions(False)
+    chat._summaries.append(_sess("s2"))        # created while OFF
+    assert r.absorb_new_sessions() == []       # off → observed but not published
+    assert "s2" not in r.published_session_ids()
+
+    r.set_auto_share_new_sessions(True)        # flip back ON
+    assert r.absorb_new_sessions() == []       # s2 already known → NOT retroactively published
+    assert "s2" not in r.published_session_ids()
+
+    chat._summaries.append(_sess("s3"))        # created after ON
+    assert r.absorb_new_sessions() == ["s3"]
+    assert "s3" in r.published_session_ids()
+    r.stop()
+
+
+def test_session_auto_share_off_to_on_unobserved(qapp, monkeypatch):
+    # reviewer R2 P1: flip OFF→ON BEFORE any capture/refresh tick observes a session
+    # created while OFF. set_auto_share_new_sessions must snapshot existing ids
+    # into _session_known atomically before enabling, so the first absorb after
+    # the flip does NOT publish that session.
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    r.set_auto_share_new_sessions(False)
+    chat._summaries.append(_sess("s2"))        # created while OFF; NO absorb/tick in between
+    r.set_auto_share_new_sessions(True)        # flip ON immediately (atomic snapshot)
+    assert r.absorb_new_sessions() == []       # s2 already known → NOT published
+    assert "s2" not in r.published_session_ids()
+    chat._summaries.append(_sess("s3"))        # created after ON → still auto-shares
+    assert r.absorb_new_sessions() == ["s3"]
+    assert "s3" in r.published_session_ids()
+    r.stop()
+
+
+def test_new_session_note_gated_by_toggle(qapp, monkeypatch):
+    # P1-C: the "not auto-shared" note must be hidden while the toggle is ON.
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+
+    # toggle OFF + a post-start, unpublished session → note visible
+    r.set_auto_share_new_sessions(False)
+    chat._summaries.append(_sess("s2"))
+    r.absorb_new_sessions()
+    sw._refresh_lists()
+    assert not sw._new_session_note.isHidden()
+
+    # toggle ON → note hidden (no contradictory "not auto-shared" message)
+    r.set_auto_share_new_sessions(True)
+    sw._refresh_lists()
+    assert sw._new_session_note.isHidden()
     r.stop()
 
 

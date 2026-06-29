@@ -145,5 +145,6 @@
 "meeting.token.hint"             = "Share this token with your guest. They paste it once into the guest page."
 "meeting.other_dataset_note"     = "(not in the current dataset — switch to view)"
 "meeting.new_session_note"       = "Sessions created after starting are not auto-shared — check them to publish."
+"meeting.btn.auto_share_new_sessions" = "Auto-share new sessions"
 "meeting.qr_unavailable"         = "QR needs the optional 'qrcode' + 'Pillow' packages."
 "meeting.participant_row"        = "{name} · last {age}s · tab:{tab}"

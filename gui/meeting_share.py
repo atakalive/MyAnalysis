@@ -125,6 +125,10 @@ class MeetingShareWindow(QWidget):
         self._sess_select_all.setTristate(True)
         self._sess_select_all.clicked.connect(self._on_select_all_sessions)
         sess_outer.addWidget(self._sess_select_all)
+        self._auto_share_new = QCheckBox(tr("meeting.btn.auto_share_new_sessions"))
+        self._auto_share_new.setChecked(relay.auto_share_new_sessions())
+        self._auto_share_new.toggled.connect(self._on_auto_share_toggled)
+        sess_outer.addWidget(self._auto_share_new)
         self._sess_scroll = QScrollArea()
         self._sess_scroll.setWidgetResizable(True)
         self._sess_inner = QWidget()
@@ -337,6 +341,7 @@ class MeetingShareWindow(QWidget):
         summaries = cw.session_summaries() if cw is not None else []
         cur_ds = getattr(self._window, "current_dataset", None)
         sharing = self._relay.is_sharing()
+        self._relay.absorb_new_sessions(summaries)
         published = self._relay.published_session_ids()
 
         sig = tuple((s["id"], s["dataset"], s["title"]) for s in summaries) + (sharing,)
@@ -345,7 +350,7 @@ class MeetingShareWindow(QWidget):
             self._rebuild_session_rows(summaries, cur_ds, sharing, published)
 
         # new-session note: any session created after start, not yet published.
-        if sharing:
+        if sharing and not self._relay.auto_share_new_sessions():
             start_ids = self._relay.meeting_start_ids()
             has_new = any(
                 s["id"] not in start_ids and s["id"] not in published
@@ -414,6 +419,11 @@ class MeetingShareWindow(QWidget):
             ids = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
             self._relay.set_published_sessions(ids)
         self._sync_select_all(self._sess_boxes, self._sess_select_all)
+
+    def _on_auto_share_toggled(self, checked: bool) -> None:
+        self._relay.set_auto_share_new_sessions(checked)
+        self._sess_sig = None      # 行を再構築して、公開状態の変化を反映する
+        self._refresh_lists()
 
     def _on_tab_toggle(self, _checked=False) -> None:
         if self._relay.is_sharing():
@@ -502,6 +512,7 @@ class MeetingShareWindow(QWidget):
         self._expiry_note.setText(tr("meeting.expiry.delayed"))
         self._sess_group.setTitle(tr("meeting.section.sessions"))
         self._sess_select_all.setText(tr("meeting.btn.select_all"))
+        self._auto_share_new.setText(tr("meeting.btn.auto_share_new_sessions"))
         self._new_session_note.setText(tr("meeting.new_session_note"))
         self._tab_group.setTitle(tr("meeting.section.tabs"))
         self._tab_select_all.setText(tr("meeting.btn.select_all"))

@@ -145,5 +145,6 @@
 "meeting.token.hint"             = "このトークンを相手に渡してください。相手は専用ページに1回貼り付けるだけです。"
 "meeting.other_dataset_note"     = "（現在の dataset にありません — 切替で閲覧可）"
 "meeting.new_session_note"       = "開始後に作成したセッションは自動公開されません — チェックで公開できます。"
+"meeting.btn.auto_share_new_sessions" = "新規セッションを自動共有"
 "meeting.qr_unavailable"         = "QR には任意依存 'qrcode' + 'Pillow' が必要です。"
 "meeting.participant_row"        = "{name} · 最終 {age}s前 · タブ:{tab}"

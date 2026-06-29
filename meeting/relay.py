@@ -323,6 +323,11 @@ class MeetingRelay(QObject):
         self._meeting_start_ids: set[str] = set()
         self._published_tabs: set[str] = set()
         self._tab_known: set[str] = set()
+        # Auto-share new chat sessions (Issue #48): default on, persisted in ui_prefs.json.
+        from llm_bridge.paths import read_ui_pref
+        pref = read_ui_pref("auto_share_new_sessions", True)
+        self._auto_share_new_sessions = pref if isinstance(pref, bool) else True
+        self._session_known: set[str] = set()   # session counterpart of _tab_known
         self._participants: list = []
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
@@ -430,6 +435,73 @@ class MeetingRelay(QObject):
             self._tab_known.update(new)
         return new
 
+    def auto_share_new_sessions(self) -> bool:
+        # getattr ガード: 会議中 hot-reload で本フィールド未保持の旧インスタンスでも安全。
+        return getattr(self, "_auto_share_new_sessions", True)
+
+    def set_auto_share_new_sessions(self, enabled: bool) -> None:
+        from llm_bridge.paths import update_ui_pref
+        enabled = bool(enabled)
+        if not hasattr(self, "_session_known"):
+            self._session_known = set(self._published_session_ids)
+        # Atomic OFF→ON transition (Issue #48 P1, reviewer R2): snapshot ALL
+        # currently-existing session ids into _session_known BEFORE flipping the
+        # flag on. This must NOT depend on a capture/refresh tick having already
+        # observed them — the toggle can be flipped within the same second a
+        # session was created, and _on_auto_share_toggled enables the flag and
+        # only THEN calls _refresh_lists()→absorb_new_sessions(). Without this
+        # snapshot, that first absorb would see the OFF-period session as new+ON
+        # and publish it, violating 1-f. After the snapshot, only sessions created
+        # AFTER this point are auto-shared.
+        turning_on = enabled and not getattr(self, "_auto_share_new_sessions", True)
+        if turning_on and self._sharing:
+            cw = self._window.chat_widget()
+            if cw is not None:
+                self._session_known.update(s["id"] for s in cw.session_summaries())
+        self._auto_share_new_sessions = enabled
+        update_ui_pref("auto_share_new_sessions", enabled)
+
+    def absorb_new_sessions(self, summaries=None) -> list[str]:
+        """Mark chat sessions created after meeting start as observed, and (only
+        when the auto-share toggle is on) auto-publish them. Returns the ids newly
+        PUBLISHED this call (=[] when the toggle is off or nothing is new).
+
+        ``summaries`` lets the caller pass an already-fetched session-summary list
+        (capture tick / share-window refresh both have one) to avoid a second
+        GUI-thread ``session_summaries()`` fetch; when None we fetch it here.
+
+        Privacy invariant (Issue #48 P1): while sharing we ALWAYS add observed
+        sessions to ``_session_known`` regardless of the toggle, so flipping the
+        toggle OFF→ON does NOT retroactively publish sessions that were created
+        while it was OFF. The toggle gates ``_published_session_ids`` only. A
+        session the host explicitly deselects stays in ``_session_known`` and is
+        never re-absorbed (ids are uuid4 hex — never reused, so stale ids are
+        harmless).
+        """
+        # Hot-reload guard: a mid-meeting scope=patch reload can patch this method
+        # onto an instance that predates these fields. Recreate them here (called
+        # from both the capture tick and the share-window timer), mirroring the
+        # _backfilled_ids guard in _on_capture_tick.
+        if not hasattr(self, "_auto_share_new_sessions"):
+            self._auto_share_new_sessions = True
+        if not hasattr(self, "_session_known"):
+            self._session_known = set(self._published_session_ids)
+        if not self._sharing:
+            return []
+        if summaries is None:
+            cw = self._window.chat_widget()
+            if cw is None:
+                return []
+            summaries = cw.session_summaries()
+        new = [s["id"] for s in summaries if s["id"] not in self._session_known]
+        if not new:
+            return []
+        self._session_known.update(new)          # always mark observed (privacy invariant)
+        if not self._auto_share_new_sessions:
+            return []                            # toggle off: known but NOT published
+        self._published_session_ids.update(new)
+        return new
+
     # ---- lifecycle ----
 
     def _make_token(self) -> str:
@@ -485,6 +557,7 @@ class MeetingRelay(QObject):
         self._published_session_ids = {s["id"] for s in summaries}
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         self._meeting_start_ids = set(self._published_session_ids)
+        self._session_known = set(self._published_session_ids)
         self._published_tabs = set(self._window.tab_names())
         self._tab_known = set(self._published_tabs)
         self._channel = ch
@@ -668,6 +741,7 @@ class MeetingRelay(QObject):
             # deleted session drops out and dataset switch can't leak others.
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
+            self.absorb_new_sessions(summaries)
             self._published_session_ids &= existing
             # Stage each newly-published session's pre-meeting transcript once so
             # guests can fetch history older than meeting start (GET /history).
