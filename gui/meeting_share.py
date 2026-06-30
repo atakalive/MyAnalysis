@@ -152,10 +152,13 @@ class MeetingShareWindow(QWidget):
         self._tab_select_all.setTristate(True)
         self._tab_select_all.clicked.connect(self._on_select_all_tabs)
         tab_outer.addWidget(self._tab_select_all)
+        self._tab_scroll = QScrollArea()
+        self._tab_scroll.setWidgetResizable(True)
         self._tab_inner = QWidget()
         self._tab_layout = QVBoxLayout(self._tab_inner)
-        tab_outer.addWidget(self._tab_inner)
-        root.addWidget(self._tab_group)
+        self._tab_scroll.setWidget(self._tab_inner)
+        tab_outer.addWidget(self._tab_scroll)
+        root.addWidget(self._tab_group, stretch=1)
 
         # ----- participants -----
         self._part_group = QGroupBox(tr("meeting.section.participants"))
@@ -428,6 +431,7 @@ class MeetingShareWindow(QWidget):
             box.toggled.connect(self._on_tab_toggle)
             self._tab_layout.addWidget(box)
             self._tab_boxes[name] = box
+        self._tab_layout.addStretch(1)
         self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
     def _on_session_toggle(self, _checked=False) -> None:
