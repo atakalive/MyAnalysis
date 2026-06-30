@@ -86,7 +86,7 @@
     <div id="right">
       <div class="bar" id="sessionBar"></div>
       <div id="sessNotice" class="notice" style="display:none"></div>
-      <div class="bar" id="histBar" style="display:none"><button id="histBtn" class="tabbtn"></button><select id="toolDisplaySel" class="tabbtn" style="margin-left:auto"></select></div>
+      <div class="bar" id="histBar" style="display:none"><button id="histBtn" class="tabbtn"></button><span id="toolDisplayLbl" style="margin-left:auto;align-self:center;font-size:11px;color:#aaa"></span><select id="toolDisplaySel" class="tabbtn"></select></div>
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
@@ -687,6 +687,8 @@ function setupToolDisplaySel() {
   const sel = document.getElementById("toolDisplaySel");
   if (!sel) return;
   sel.title = T.toolDisplay;
+  const lbl = document.getElementById("toolDisplayLbl");
+  if (lbl) lbl.textContent = T.toolDisplay;     // 何の3段階かを可視ラベルで明示
   sel.innerHTML = "";
   const labels = { full: T.toolFull, compact: T.toolCompact, hidden: T.toolHidden };
   for (const mode of TOOL_DISPLAY_MODES) {
