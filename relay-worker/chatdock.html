@@ -35,6 +35,10 @@
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
   select.tabbtn { color: #ddd; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+  .ctxmenu { position: fixed; z-index: 1000; background: #252526; border: 1px solid #454545;
+             border-radius: 4px; padding: 4px 0; min-width: 160px; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+  .ctxitem { padding: 6px 14px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .ctxitem:hover { background: #0e639c; }
   #canvaswrap { flex: 1; overflow: hidden; position: relative; background: #111; }
   #view { position: absolute; transform-origin: 0 0; image-rendering: auto; }
   #chatlog { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
@@ -95,6 +99,10 @@
       </div>
     </div>
   </div>
+  <div id="ctxmenu" class="ctxmenu" style="display:none">
+    <div class="ctxitem" id="ctxCopyName"></div>
+    <div class="ctxitem" id="ctxComment"></div>
+  </div>
 </div>
 
 <script>
@@ -110,7 +118,9 @@ const T = {
         sending: "Sending…", sent: "Sent ✓",
         hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…",
         loadOlder: "Load older history", loadingHistory: "Loading…", noMoreHistory: "No older messages",
-        toolDisplay: "Tool calls", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden" },
+        toolDisplay: "Tool calls", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden",
+        copyTabName: "Copy tab name", commentOnTab: "Comment on this tab",
+        tabCommentPrefix: "[Comment on tab: {name}] " },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
         gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
@@ -118,7 +128,9 @@ const T = {
         sending: "送信中…", sent: "送信済 ✓",
         hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…",
         loadOlder: "過去履歴を取得", loadingHistory: "取得中…", noMoreHistory: "これ以上の履歴はありません",
-        toolDisplay: "ツール呼び出し表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示" },
+        toolDisplay: "ツール呼び出し表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示",
+        copyTabName: "タブ名をコピー", commentOnTab: "このタブにコメント",
+        tabCommentPrefix: "[タブ「{name}」へのコメント] " },
 }[LANG];
 
 // ---- constants (mirror worker.js) ----
@@ -534,6 +546,7 @@ function renderTabs(tabs) {
       maybePresence(true);
       fetchView();
     };
+    b.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); showTabMenu(e, name); };
     bar.appendChild(b);
   }
   if (!curTab && tabs.length) {
@@ -705,6 +718,64 @@ function setupToolDisplaySel() {
   };
 }
 
+// ---- tab context menu (解析タブ右クリック: タブ名コピー / このタブにコメント) ----
+let ctxTab = null;                 // 右クリック対象のタブ名（メニューを閉じると null）
+function showTabMenu(e, name) {
+  ctxTab = name;
+  const menu = document.getElementById("ctxmenu");
+  menu.style.display = "block";
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;   // 表示後に実寸を測りビューポート内へ収める
+  menu.style.left = Math.max(0, Math.min(e.clientX, window.innerWidth - mw - 4)) + "px";
+  menu.style.top  = Math.max(0, Math.min(e.clientY, window.innerHeight - mh - 4)) + "px";
+}
+function hideTabMenu() {
+  const menu = document.getElementById("ctxmenu");
+  if (menu) menu.style.display = "none";
+  ctxTab = null;
+}
+
+// タブ名をクリップボードへ（execCommand フォールバック付き＝非セキュアコンテキスト対応）。
+function copyTabName(name) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(name); return; }
+  } catch (e) { /* fall through to legacy path */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = name; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  } catch (e) { /* ignore */ }
+}
+
+// 入力欄の冒頭に「このタブへのコメント」だと分かる機械的な接頭辞を差し込み、入力へフォーカス。
+// 送信メッセージがその接頭辞で始まるので、ホスト側でどのタブへのコメントか一目で分かる。
+function commentOnTab(name) {
+  const ta = document.getElementById("msg");
+  if (!ta) return;
+  const prefix = T.tabCommentPrefix.replace("{name}", () => name);   // 関数置換＝name 内の $ を無効化
+  if (!ta.value.startsWith(prefix)) ta.value = prefix + ta.value;    // 二重付与は防ぐ
+  ta.focus();
+  const end = ta.value.length;
+  try { ta.setSelectionRange(end, end); } catch (e) {}
+}
+
+function setupTabMenu() {
+  const copyEl = document.getElementById("ctxCopyName");
+  const cmtEl  = document.getElementById("ctxComment");
+  copyEl.textContent = T.copyTabName;
+  cmtEl.textContent  = T.commentOnTab;
+  // ctxTab はメニューを閉じる前に捕まえる（hideTabMenu が null にするため）。
+  copyEl.onclick = () => { const t = ctxTab; hideTabMenu(); if (t) copyTabName(t); };
+  cmtEl.onclick  = () => { const t = ctxTab; hideTabMenu(); if (t) commentOnTab(t); };
+  // メニュー外の左クリック・別所での右クリック・Esc・リサイズで閉じる
+  // （タブ上の右クリックは stopPropagation 済みなので document には届かない）。
+  document.addEventListener("click", hideTabMenu);
+  document.addEventListener("contextmenu", hideTabMenu);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideTabMenu(); });
+  window.addEventListener("resize", hideTabMenu);
+}
+
 // ---- send ----
 async function send() {
   if (!curSid || stopped) return;
@@ -785,6 +856,7 @@ function join(tok, name) {
   setupViewer();
   setupImageButtons();
   setupSplitter();
+  setupTabMenu();
   document.getElementById("sendBtn").onclick = send;
   document.getElementById("histBtn").onclick = loadHistory;
   setupToolDisplaySel();
