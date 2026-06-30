@@ -50,9 +50,12 @@
   .msg.failed { border: 1px solid #f48771; }
   .msg .status { font-size: 11px; color: #888; margin-left: 6px; }
   .resend { margin-left: 8px; font-size: 11px; padding: 1px 6px; }
-  #inputrow { display: flex; gap: 4px; padding: 6px; background: #252526; }
-  #msg { flex: 1; padding: 6px; background: #1e1e1e; color: #ddd; border: 1px solid #444; border-radius: 4px;
-         resize: none; font-size: 13px; }
+  #inputrow { display: flex; flex-direction: column; gap: 4px; padding: 6px; background: #252526; }
+  #msg { width: 100%; min-height: 110px; padding: 8px; background: #1e1e1e; color: #ddd;
+         border: 1px solid #444; border-radius: 4px; resize: vertical; font-size: 14px; line-height: 1.4; }
+  #inputbar { display: flex; align-items: center; gap: 8px; }
+  #genIndicator { font-size: 12px; color: #d7ba7d; font-variant-numeric: tabular-nums; }
+  #inputbar #sendBtn { margin-left: auto; }   /* 送信ボタンは常に右端（インジケータ有無に依らず） */
   #status { font-size: 11px; color: #888; padding: 2px 8px; }
   .notice { color: #d7ba7d; font-size: 12px; padding: 6px 8px; }
   .gap { color: #888; font-style: italic; font-size: 11px; text-align: center; margin: 6px 0; }
@@ -94,8 +97,11 @@
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
-        <textarea id="msg" rows="2" placeholder="Message… (Enter to send)"></textarea>
-        <button id="sendBtn">Send</button>
+        <textarea id="msg" rows="5" placeholder="Message… (Enter to send)"></textarea>
+        <div id="inputbar">
+          <span id="genIndicator" style="display:none"></span>
+          <button id="sendBtn">Send</button>
+        </div>
       </div>
     </div>
   </div>
@@ -274,8 +280,33 @@ function selfDestruct() {
   if (stopped) return;
   stopped = true;
   if (pollTimer) clearTimeout(pollTimer);
+  setGenerating(false);
   document.getElementById("status").textContent = T.expired;
   document.getElementById("sendBtn").disabled = true;
+}
+
+// ---- generating indicator (応答生成中: 入力欄の周辺で braille スピナーを回す。
+// ホスト側 gui/chat.py の待機表示(_SPINNER / chat.status.waiting)をミラー) ----
+const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+let spinIdx = 0, spinTimer = null;
+function setGenerating(on) {
+  const el = document.getElementById("genIndicator");
+  if (!el) return;
+  if (on) {
+    el.style.display = "";
+    if (spinTimer === null) {
+      const paint = () => {
+        spinIdx = (spinIdx + 1) % SPINNER.length;
+        el.textContent = SPINNER[spinIdx] + " " + T.generating;
+      };
+      paint();                                // 即時に1フレーム（待たせない）
+      spinTimer = setInterval(paint, 80);     // ホストと同じ 80ms
+    }
+  } else {
+    el.style.display = "none";
+    el.textContent = "";
+    if (spinTimer !== null) { clearInterval(spinTimer); spinTimer = null; }
+  }
 }
 
 // ---- chat rendering ----
@@ -419,6 +450,9 @@ async function poll(reanchor = false) {
       notice.style.display = "none";
       document.getElementById("sendBtn").disabled = false;
     }
+    // 現在セッションが応答生成中なら入力欄周辺にスピナーを出す（s.busy はホスト由来）。
+    const meBusy = !!curSid && (data.sessions || []).some((s) => s.id === curSid && s.busy);
+    setGenerating(meBusy);
     // Render only into the active session's store (bootstrap "_" returns no
     // messages; cur is set by renderSessions -> selectSession on first entry).
     if (cur) {
