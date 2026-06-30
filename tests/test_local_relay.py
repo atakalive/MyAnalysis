@@ -111,6 +111,51 @@ def test_out_to_poll_not_inbound(clock):
     assert all(m["text"] != "hello" for m in _json(ib)["messages"])
 
 
+# 4b. streaming /out: stream_id replaces the in-flight entry in place + re-mints mid
+def test_out_streaming_upsert_remint(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+
+    def _out(text, partial, stream="S"):
+        _, _, p = _call(st, "POST", "/out/ch1/s1", _admin_h(),
+                        _jbody({"text": text, "role": "assistant",
+                                "stream_id": stream, "partial": partial}))
+        return _json(p)["mid"]
+
+    # first partial creates a single in-flight entry
+    mid1 = _out("Hel", True)
+    out = st._ch["ch1"]["out_msgs"]
+    assert len(out) == 1
+    assert out[0]["text"] == "Hel" and out[0]["stream_id"] == "S" and out[0]["partial"] is True
+
+    # second partial replaces in place and re-mints the mid (sorts after mid1)
+    clock["t"] += 1.0
+    mid2 = _out("Hello wor", True)
+    assert mid2 > mid1
+    assert len(st._ch["ch1"]["out_msgs"]) == 1
+    assert st._ch["ch1"]["out_msgs"][0]["text"] == "Hello wor"
+
+    # final (partial=False) overwrites the same entry with the complete text
+    clock["t"] += 1.0
+    midf = _out("Hello world", False)
+    assert midf > mid2
+    out = st._ch["ch1"]["out_msgs"]
+    assert len(out) == 1 and out[0]["text"] == "Hello world" and out[0]["partial"] is False
+
+    # guest poll returns exactly one message carrying the final text + stream fields
+    _, _, pp = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    msgs = _json(pp)["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["text"] == "Hello world"
+    assert msgs[0]["stream_id"] == "S" and msgs[0]["partial"] is False
+
+    # a different stream_id is an independent in-flight entry (no collision)
+    clock["t"] += 1.0
+    _out("next", True, stream="S2")
+    assert len(st._ch["ch1"]["out_msgs"]) == 2
+
+
 # 5. msg → inbound
 def test_msg_to_inbound(clock):
     st = RelayState(ADMIN)

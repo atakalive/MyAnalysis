@@ -210,14 +210,18 @@ let histInflight = false;       // one /history fetch in flight at a time
 // ---- per-session chat store (in-memory; survives session-tab switches, cleared
 // on page reload). The msgs array is the render source of truth, so switching
 // sessions re-renders from memory instead of wiping the DOM + re-polling (which
-// lost everything past the 15s lookback). Each entry: {mid,text,name,role,mine?,status?,_el?}.
+// lost everything past the 15s lookback). Each entry:
+// {mid,text,name,role,mine?,status?,stream_id?,partial?,_el?,_txtEl?}.
+// `streams` maps an in-flight assistant turn's stream_id → its message object so
+// streaming partials update the SAME bubble in place (see upsertStreamMsg).
 const store = new Map();        // sid -> SessionState
 let cur = null;                 // active session's state (= store.get(curSid))
 function getState(sid) {
   let s = store.get(sid);
   if (!s) {
     s = { msgs: [], have: new Set(), latestSeenTs: 0, lastDisplayedTs: 0,
-          gapShown: false, oldestMid: null, histExhausted: false };
+          gapShown: false, oldestMid: null, histExhausted: false,
+          streams: new Map() };
     store.set(sid, s);
   }
   return s;
@@ -335,7 +339,40 @@ function renderMsgEl(m) {
   // store からは消さないので、full に戻して再描画すれば復活する。
   if (m.role === "assistant" && !shown.trim()) div.style.display = "none";
   m._el = div;
+  m._txtEl = txt;   // 本文ノード参照（ストリーミングの in-place 更新に使う）
   return div;
+}
+
+// In-place update of an already-rendered message's body (streaming partials).
+// Mirrors renderMsgEl's text path: re-simplify for assistants, hide if empty.
+function updateMsgText(m) {
+  if (!m._el || !m._txtEl) return;
+  const shown = (m.role === "assistant") ? simplifyToolText(m.text, toolDisplay) : m.text;
+  m._txtEl.textContent = shown;
+  m._el.style.display = (m.role === "assistant" && !shown.trim()) ? "none" : "";
+}
+
+// Create-or-update a streaming assistant message, correlated by stream_id. The
+// relay re-mints the mid on every partial (to stay in the lookback window), so
+// dedup-by-mid still admits each update; we then update the SAME bubble in place
+// instead of appending a new one. partial===false marks the turn final.
+function upsertStreamMsg(state, m) {
+  const existing = state.streams.get(m.stream_id);
+  if (existing) {
+    if (m.mid) state.have.add(m.mid);
+    existing.text = m.text;
+    if (m.mid) existing.mid = m.mid;
+    updateMsgText(existing);
+    if (state === cur) {
+      const log = document.getElementById("chatlog");
+      // ユーザーが下端付近にいる時だけ追従スクロール（上に遡って読んでいる最中は動かさない）。
+      if (log.scrollHeight - log.scrollTop - log.clientHeight < 80) log.scrollTop = log.scrollHeight;
+    }
+  } else {
+    appendMsg(state, m);          // first partial: render a fresh bubble (adds mid to have)
+    state.streams.set(m.stream_id, m);
+  }
+  if (m.partial === false) state.streams.delete(m.stream_id);  // 確定 → 以降は不変
 }
 
 // Add a live/own message to a session's store (and the DOM bottom if active).
@@ -458,7 +495,8 @@ async function poll(reanchor = false) {
     if (cur) {
       for (const m of (data.messages || [])) {
         if (!m.mid || cur.have.has(m.mid)) continue;
-        appendMsg(cur, m);
+        if (m.stream_id) upsertStreamMsg(cur, m);   // in-flight assistant: その場更新
+        else appendMsg(cur, m);
         const ts = parseInt(m.mid.slice(0, 13), 10) || 0;
         if (ts > cur.latestSeenTs) cur.latestSeenTs = ts;
         if (ts > cur.lastDisplayedTs) cur.lastDisplayedTs = ts;
@@ -513,6 +551,10 @@ function renderSessions(sessions) {
     b.onclick = () => selectSession(s.id);
     bar.appendChild(b);
   }
+  // 生成中はポーリングを速め（≈1s）、逐次表示をライブに感じさせる。非生成時は既定3s。
+  // schedulePoll が直後（poll の finally）に clamp して再武装する。
+  const activeBusy = sessions.some((s) => s.id === curSid && s.busy);
+  pollInterval = activeBusy ? POLL_MIN : 3000;
   if (!curSid && sessions.length) selectSession(sessions[0].id);
 }
 

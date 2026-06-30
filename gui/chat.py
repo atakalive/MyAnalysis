@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import time
+import uuid
 from functools import partial
 from typing import Callable
 
@@ -224,7 +225,7 @@ class _Turn:
     """Per-session in-flight turn state. Not a QObject — timers/worker are
     owned by ChatWidget so they live on the GUI thread."""
     __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped",
-                 "anchor", "rendered")
+                 "anchor", "rendered", "stream_id")
 
     def __init__(self, session: ChatSession, backend: LLMBackend,
                  worker: _StreamWorker, kill_timer: QTimer):
@@ -239,6 +240,9 @@ class _Turn:
         # rendered は直近描画済みの簡略本文（prefix-append の基準）。
         self.anchor: int | None = None
         self.rendered = ""
+        # 安定した stream 相関 ID（_start_turn で採番）。ストリーミング中の partial
+        # 配信と完了時の最終配信を同一 in-flight メッセージへ紐付けるためにリレーへ送る。
+        self.stream_id = ""
 
 
 class ChatWidget(QWidget):
@@ -247,6 +251,11 @@ class ChatWidget(QWidget):
     # injections are "remote". The meeting relay publishes ONLY "local" messages
     # (echo suppression). Args: (session_id, role, content, origin).
     messageAdded = Signal(str, str, str, str)
+    # Emitted on every streaming chunk of an assistant turn with the cumulative
+    # partial text. The meeting relay publishes THROTTLED partials so guests see
+    # the reply grow live (the final full text still arrives via messageAdded on
+    # completion). Args: (session_id, cumulative_content, origin, stream_id).
+    messageStreaming = Signal(str, str, str, str)
 
     def __init__(self, backend_factory: Callable[[], LLMBackend], dispatch: Callable, parent: QWidget | None = None):
         super().__init__(parent)
@@ -898,6 +907,7 @@ class ChatWidget(QWidget):
         worker = _StreamWorker(sess.id, backend, list(sess.messages),
                                self._dispatch, self)
         turn = _Turn(sess, backend, worker, kill_timer)
+        turn.stream_id = uuid.uuid4().hex   # この応答の partial/最終を紐付ける安定 ID
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは
         # _log を触らないので anchor=None（_rewrite_inflight_body がガード済み）。
         turn.anchor = (self._log.document().characterCount() - 1) if is_active else None
@@ -970,6 +980,8 @@ class ChatWidget(QWidget):
         if turn is None:
             return
         turn.buffer += piece
+        # ゲストへ逐次配信（背景セッションもゲストは閲覧しうるので active 判定の前で発火）。
+        self.messageStreaming.emit(sid, turn.buffer, "local", turn.stream_id)
         if sid != self._active.id:        # 非表示セッションは文書に触れない（再開時 _render_session が再描画）
             return
         if self._effective_tool_display(turn.session) == "full":

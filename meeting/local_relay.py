@@ -291,6 +291,33 @@ class RelayState:
                 return self._json({"error": "empty text"}, 400)
             cs = self._ensure_channel(ch, now_s)
             mid = gen_mid(now_m)
+            # Streaming (guest live partials): a message carrying a stream_id is the
+            # in-flight assistant turn. Re-mint its mid on every update so it stays
+            # inside the lookback window (the since-floor keeps advancing) and
+            # re-sorts to the bottom, and replace the SAME entry in place so
+            # out_msgs stays one-per-turn. The final post (partial=False) overwrites
+            # the same entry with the complete text. No stream_id -> legacy append.
+            stream_id = str(obj.get("stream_id") or "")
+            partial = bool(obj.get("partial"))
+            if stream_id:
+                existing = next(
+                    (m for m in cs["out_msgs"]
+                     if m.get("stream_id") == stream_id and m["sid"] == sid),
+                    None,
+                )
+                if existing is not None:
+                    existing["text"] = text
+                    existing["name"] = str(obj.get("name") or "")
+                    existing["mid"] = mid
+                    existing["partial"] = partial
+                    return self._json({"mid": mid})
+                cs["out_msgs"].append({
+                    "text": text, "name": str(obj.get("name") or ""),
+                    "role": str(obj.get("role") or "assistant"),
+                    "origin": "host", "mid": mid, "sid": sid,
+                    "stream_id": stream_id, "partial": partial,
+                })
+                return self._json({"mid": mid})
             cs["out_msgs"].append({
                 "text": text, "name": str(obj.get("name") or ""),
                 "role": str(obj.get("role") or "assistant"),

@@ -59,6 +59,10 @@ _HEARTBEAT_SEC = 20.0
 _PRESENCE_POLL_SEC = 5.0
 _FAIL_THRESHOLD = 5
 _VIEW_MAX_EDGE = 1920
+# Min seconds between partial /out posts per session while an assistant streams.
+# The guest polls at ~1s when busy, so finer-grained posts are wasted; the final
+# full text is unthrottled (messageAdded), so a throttled-away partial is loss-free.
+_STREAM_MIN_INTERVAL = 0.7
 
 
 def _q(s: str) -> str:
@@ -107,6 +111,17 @@ class _RelayWorker(QThread):
 
     def enqueue(self, item: dict) -> None:
         with self._lock:
+            # Supersede any still-queued partial for the same stream so a slow
+            # network can't accumulate stale partials — each partial carries the
+            # full cumulative text, so dropping older ones is loss-free. The final
+            # (partial=False) is never superseded and always sent.
+            sid_stream = item.get("stream_id")
+            if sid_stream and item.get("kind") == "out" and item.get("partial"):
+                self._outbox = deque(
+                    it for it in self._outbox
+                    if not (it.get("kind") == "out" and it.get("partial")
+                            and it.get("stream_id") == sid_stream)
+                )
             self._outbox.append(item)
 
     # ---- run loop ----
@@ -344,9 +359,18 @@ class MeetingRelay(QObject):
         self._gen = 0                   # tunnel-start generation (stale-signal guard)
         self._last_tunnel_failed = False
 
+        # Streaming relay state: _stream_ids maps a session id to the stream_id of
+        # its in-flight assistant turn so the final messageAdded reuses it (replace
+        # the in-flight entry in place, no duplicate bubble); _stream_last_pub
+        # throttles partial posts per session.
+        self._stream_ids: dict[str, str] = {}
+        self._stream_last_pub: dict[str, float] = {}
+
         cw = window.chat_widget() if hasattr(window, "chat_widget") else None
         if cw is not None and hasattr(cw, "messageAdded"):
             cw.messageAdded.connect(self._on_message_added)
+        if cw is not None and hasattr(cw, "messageStreaming"):
+            cw.messageStreaming.connect(self._on_message_streaming)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(1000)
@@ -684,14 +708,59 @@ class MeetingRelay(QObject):
         # out: send gate — publish ONLY host-local messages of a published
         # session. origin=="remote" (guest user re-emit) and non-published
         # sessions never reach out: (echo suppression + no TTL-window leak).
+        # Pop the in-flight stream_id regardless of the gate so a later turn can't
+        # inherit a stale id (the gate can flip mid-turn). getattr guards: a
+        # mid-meeting scope=patch reload can patch this method onto an instance
+        # predating these fields (mirrors the _backfilled_ids guard below).
+        stream_ids = getattr(self, "_stream_ids", None)
+        sid_stream = stream_ids.pop(sid, None) if stream_ids is not None else None
+        last_pub = getattr(self, "_stream_last_pub", None)
+        if last_pub is not None:
+            last_pub.pop(sid, None)
         if not (self._sharing and origin == "local" and sid in self._published_session_ids):
             return
         if not content or not content.strip():
             return
         name = tr("meeting.assistant_name_default") if role == "assistant" else self._host_name
         body = {"text": content, "name": name, "role": role}
+        item = {"kind": "out", "sid": sid, "body": body}
+        # Final of a streamed assistant turn: reuse its stream_id with partial=False
+        # so the relay replaces the in-flight entry in place (no duplicate bubble).
+        if role == "assistant" and sid_stream:
+            body["stream_id"] = sid_stream
+            body["partial"] = False
+            item["stream_id"] = sid_stream
+            item["partial"] = False
         if self._worker is not None:
-            self._worker.enqueue({"kind": "out", "sid": sid, "body": body})
+            self._worker.enqueue(item)
+
+    def _on_message_streaming(self, sid: str, content: str, origin: str,
+                              stream_id: str) -> None:
+        # Live partial of an in-flight assistant turn — same out: gate as
+        # _on_message_added, throttled to _STREAM_MIN_INTERVAL per session so a
+        # fast token stream doesn't flood the relay. The final full text still
+        # arrives via _on_message_added, so a throttled-away partial is loss-free.
+        if not (self._sharing and origin == "local" and sid in self._published_session_ids):
+            return
+        if not content or not content.strip() or not stream_id:
+            return
+        # getattr guard: mid-meeting scope=patch reload may patch this onto an
+        # instance predating these fields (see _on_message_added).
+        if not hasattr(self, "_stream_ids"):
+            self._stream_ids = {}
+        if not hasattr(self, "_stream_last_pub"):
+            self._stream_last_pub = {}
+        self._stream_ids[sid] = stream_id
+        now = time.monotonic()
+        if now - self._stream_last_pub.get(sid, 0.0) < _STREAM_MIN_INTERVAL:
+            return
+        self._stream_last_pub[sid] = now
+        name = tr("meeting.assistant_name_default")
+        body = {"text": content, "name": name, "role": "assistant",
+                "stream_id": stream_id, "partial": True}
+        if self._worker is not None:
+            self._worker.enqueue({"kind": "out", "sid": sid, "body": body,
+                                  "stream_id": stream_id, "partial": True})
 
     def _backfill_session(self, sid: str, cw) -> None:
         """Stage a published session's existing transcript into the relay so guests

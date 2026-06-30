@@ -86,6 +86,50 @@ def test_assistant_message_emit(widget):
     assert sum(1 for g in got if g[1] == "assistant") == 1
 
 
+def test_start_turn_assigns_stream_id(qapp, widget):
+    """Every turn gets a stable, non-empty stream_id at start (relay correlation)."""
+    widget._input.setPlainText("hi")
+    widget._on_send()
+    sid = widget._active.id
+    assert widget._turns[sid].stream_id   # assigned synchronously at _start_turn
+    _drain(qapp, widget)
+
+
+def test_on_chunk_emits_cumulative_partials_with_stream_id(qapp, widget):
+    """_on_chunk emits messageStreaming with the CUMULATIVE buffer + the turn's
+    stream_id, BEFORE the active-session check (so background sessions stream to
+    guests too). Driven directly on a non-active session to isolate the signal
+    from the live-document render path."""
+    from gui.chat import _Turn
+    from PySide6.QtCore import QTimer
+    from llm_bridge import chat_store
+
+    bg = chat_store.new_session("mock", "sys", dataset=None, title="BG")
+    widget._sessions.append(bg)
+    assert bg is not widget._active   # non-active → _on_chunk returns after emitting
+
+    class B:
+        name = "mock"
+        last_usage = None
+
+    turn = _Turn(bg, B(), object(), QTimer(widget))
+    turn.stream_id = "STREAM123"
+    widget._turns[bg.id] = turn
+
+    streamed = []
+    widget.messageStreaming.connect(lambda *a: streamed.append(a))
+    for piece in ("Hel", "lo wor", "ld"):
+        widget._on_chunk(bg.id, piece)
+
+    assert streamed == [
+        (bg.id, "Hel", "local", "STREAM123"),
+        (bg.id, "Hello wor", "local", "STREAM123"),
+        (bg.id, "Hello world", "local", "STREAM123"),
+    ]
+    assert turn.buffer == "Hello world"
+    widget._turns.pop(bg.id, None)   # don't leave a dangling busy session for teardown
+
+
 def test_inject_unknown_session_is_noop(widget):
     before = len(widget._active.messages)
     widget.inject_remote_message("hi", "X", session_id="does-not-exist")
