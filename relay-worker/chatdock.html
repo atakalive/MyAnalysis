@@ -34,6 +34,7 @@
   .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
+  select.tabbtn { color: #ddd; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
   #canvaswrap { flex: 1; overflow: hidden; position: relative; background: #111; }
   #view { position: absolute; transform-origin: 0 0; image-rendering: auto; }
   #chatlog { flex: 1; overflow-y: auto; padding: 8px; font-size: 13px; }
@@ -85,7 +86,7 @@
     <div id="right">
       <div class="bar" id="sessionBar"></div>
       <div id="sessNotice" class="notice" style="display:none"></div>
-      <div class="bar" id="histBar" style="display:none"><button id="histBtn" class="tabbtn"></button></div>
+      <div class="bar" id="histBar" style="display:none"><button id="histBtn" class="tabbtn"></button><select id="toolDisplaySel" class="tabbtn" style="margin-left:auto"></select></div>
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
@@ -108,14 +109,16 @@ const T = {
         connected: "connected", badToken: "Invalid token.",
         sending: "Sending…", sent: "Sent ✓",
         hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…",
-        loadOlder: "Load older history", loadingHistory: "Loading…", noMoreHistory: "No older messages" },
+        loadOlder: "Load older history", loadingHistory: "Loading…", noMoreHistory: "No older messages",
+        toolDisplay: "Tool calls", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
         gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
         connected: "接続OK", badToken: "トークンが不正です。",
         sending: "送信中…", sent: "送信済 ✓",
         hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…",
-        loadOlder: "過去履歴を取得", loadingHistory: "取得中…", noMoreHistory: "これ以上の履歴はありません" },
+        loadOlder: "過去履歴を取得", loadingHistory: "取得中…", noMoreHistory: "これ以上の履歴はありません",
+        toolDisplay: "ツール呼び出し表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示" },
 }[LANG];
 
 // ---- constants (mirror worker.js) ----
@@ -123,6 +126,52 @@ const LOOKBACK_MS = 15000;
 const POLL_MIN = 1000, POLL_MAX = 30000;
 const FETCH_TIMEOUT_MS = 10000;
 const PRESENCE_INTERVAL_MS = 20000;
+
+// ---- tool-call display (本体 gui/chat.py の3段階表示をミラー。受信した生テキストは
+// 常に保持し、描画時にモードで簡略化する＝表示のみ・可逆。各ゲストのローカル設定で、
+// ワイヤ上の送信内容は変えない) ----
+const TOOL_CALL_MARKER = "🔧", TOOL_RESULT_MARKER = "↳", TOOL_ERROR_MARKER = "✗";
+const TOOL_RESULT_INDENT = "   ";          // 3 spaces, mirror llm_backend/base.py
+const TOOL_DISPLAY_KEY = "ma_tool_display";
+const TOOL_DISPLAY_MODES = ["full", "compact", "hidden"];
+function loadToolDisplay() {
+  try { const v = localStorage.getItem(TOOL_DISPLAY_KEY);
+        return TOOL_DISPLAY_MODES.includes(v) ? v : "compact"; }   // 既定 compact
+  catch (e) { return "compact"; }
+}
+function saveToolDisplay(m) { try { localStorage.setItem(TOOL_DISPLAY_KEY, m); } catch (e) {} }
+let toolDisplay = loadToolDisplay();
+
+function isToolCall(l)   { return l.startsWith(TOOL_CALL_MARKER + " "); }
+function isToolResult(l) { return l.startsWith(TOOL_RESULT_INDENT + TOOL_RESULT_MARKER + " ")
+                               || l.startsWith(TOOL_RESULT_INDENT + TOOL_ERROR_MARKER + " "); }
+function isToolLine(l)   { return isToolCall(l) || isToolResult(l); }
+
+// Display-only transform of an assistant message, mirroring本体 _simplify_tool_text.
+// plain-text 版（guest は pre-wrap のテキスト描画なので markdown 用の空行挿入はしない）:
+//   full    = 無変換
+//   compact = ツール結果行(↳/✗)のみ削除し、呼び出し行(🔧)と本文は残す
+//   hidden  = ツール行(呼び出し+結果)を run ごと全削除
+// ツール行除去で空いた連続空行は1つに畳み、前後の余り空行は trim する。本文(prose)は維持。
+// 本体との差は「呼び出しの無い結果のみの run」を残さない点のみ（display 目的では十分）。
+function simplifyToolText(content, mode) {
+  if (!content || mode === "full") return content;
+  const lines = content.split("\n");
+  if (!lines.some(isToolLine)) return content;
+  const kept = [];
+  for (const l of lines) {
+    if (mode === "hidden" && isToolLine(l)) continue;
+    if (mode === "compact" && isToolResult(l)) continue;
+    kept.push(l);
+  }
+  const out = [];
+  for (const l of kept) {
+    if (l === "" && (out.length === 0 || out[out.length - 1] === "")) continue;  // collapse gaps
+    out.push(l);
+  }
+  while (out.length && out[out.length - 1] === "") out.pop();
+  return out.join("\n");
+}
 
 // ---- state ----
 let cfg = null;                 // {base_url, channel, secret}
@@ -228,7 +277,9 @@ function renderMsgEl(m) {
   who.className = "who";
   who.textContent = m.name || (m.role === "assistant" ? "AI" : "Guest");
   const txt = document.createElement("div");
-  txt.textContent = m.text;
+  // m.text は生のフルテキストのまま保持し、表示時だけモードで簡略化（assistant のみ）。
+  const shown = (m.role === "assistant") ? simplifyToolText(m.text, toolDisplay) : m.text;
+  txt.textContent = shown;
   div.appendChild(who);
   div.appendChild(txt);
   if (m.mine === true) {
@@ -237,6 +288,9 @@ function renderMsgEl(m) {
     st.textContent = m.status === "sent" ? T.sent : (m.status === "failed" ? T.sendFail : T.sending);
     div.appendChild(st);
   }
+  // hidden 等で本文が空になった assistant バブルは出さない（本体 _render_session と同様）。
+  // store からは消さないので、full に戻して再描画すれば復活する。
+  if (m.role === "assistant" && !shown.trim()) div.style.display = "none";
   m._el = div;
   return div;
 }
@@ -627,6 +681,28 @@ function setupSplitter() {
   });
 }
 
+// ---- tool-call display selector (3段階; join 時に構築) ----
+// 表示のみ。選択をローカル保存し、生テキストを保持したまま現在セッションを再描画する。
+function setupToolDisplaySel() {
+  const sel = document.getElementById("toolDisplaySel");
+  if (!sel) return;
+  sel.title = T.toolDisplay;
+  sel.innerHTML = "";
+  const labels = { full: T.toolFull, compact: T.toolCompact, hidden: T.toolHidden };
+  for (const mode of TOOL_DISPLAY_MODES) {
+    const o = document.createElement("option");
+    o.value = mode;
+    o.textContent = labels[mode];
+    if (mode === toolDisplay) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.onchange = () => {
+    toolDisplay = TOOL_DISPLAY_MODES.includes(sel.value) ? sel.value : "compact";
+    saveToolDisplay(toolDisplay);
+    if (cur) rerenderAll(cur);     // 他セッションは selectSession 経由で切替時に反映
+  };
+}
+
 // ---- send ----
 async function send() {
   if (!curSid || stopped) return;
@@ -709,6 +785,7 @@ function join(tok, name) {
   setupSplitter();
   document.getElementById("sendBtn").onclick = send;
   document.getElementById("histBtn").onclick = loadHistory;
+  setupToolDisplaySel();
   updateHistBtn();
   document.getElementById("msg").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
