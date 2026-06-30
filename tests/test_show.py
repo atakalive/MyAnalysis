@@ -268,6 +268,62 @@ def test_show_invalid_slot(win, png_path):
         win.dispatch_command("show", path=str(png_path), slot="center")
 
 
+# ---- grab_full: full-extent capture for meeting share (Issue: guest scroll) ----
+
+def test_grab_full_single_figure_is_full_source(win, png_path, qapp):
+    """単一 FigurePanel タブ → ホストのズームに依存せず原寸の全図を返す。"""
+    win.dispatch_command("show", path=str(png_path))
+    tab = win.active_tab()
+    panel = tab.panel("figure")
+    panel.scale(3.0, 3.0)                       # ホスト側ズームを模す（grab_full は無視すべき）
+    full = tab.grab_full()
+    assert full.cacheKey() == panel._pixmap.cacheKey()   # 原寸オリジナルそのもの（viewport grab でない）
+    assert full.size() == panel._pixmap.size()
+
+
+def test_grab_full_two_figures_composite(win, png_path, png_path2, qapp):
+    """figure + figure-2（slot=right）→ splitter 方向で合成して全域送出。"""
+    win.dispatch_command("show", path=str(png_path))                                  # figure 10x10
+    win.dispatch_command("show", path=str(png_path2), name="viewer", slot="right")    # figure-2 20x20
+    tab = win.active_tab()
+    full = tab.grab_full()
+    # 横分割: 共通高さ=max(10,20)=20、幅=20(10x10を高さ20へ拡大)+20+gap8
+    assert not full.isNull()
+    assert full.height() == 20
+    assert full.width() == 48
+    assert full.cacheKey() != tab.panel("figure")._pixmap.cacheKey()   # 新規合成（元図そのものでない）
+
+
+def test_grab_full_error_falls_back_to_grab(win, png_path, tmp_path, qapp):
+    """FigurePanel がエラー状態（_pixmap None）→ grab() にフォールバック。"""
+    win.dispatch_command("show", path=str(png_path))
+    tab = win.active_tab()
+    panel = tab.panel("figure")
+    orig_key = panel._pixmap.cacheKey()
+    panel.set_path(tmp_path / "does_not_exist.png")     # _pixmap -> None
+    assert panel.full_pixmap() is None
+    full = tab.grab_full()
+    assert full.cacheKey() != orig_key                  # 旧ソースを送らない
+    assert full.size() == tab.grab().size()             # タブの grab（フォールバック）
+
+
+def test_grab_full_mixed_panel_falls_back(win, png_path, qapp):
+    """全域不可パネル（QLabel）が可視で混在 → 兄弟を落とさず grab() フォールバック。"""
+    from gui.tab import AnalysisTab
+    from gui.panels import FigurePanel
+    from PySide6.QtWidgets import QLabel
+    tab = AnalysisTab("mixed")
+    fig = FigurePanel()
+    fig.set_path(str(png_path))
+    tab.add_panel("figure", fig, "left")
+    tab.add_panel("extra", QLabel("x"), "right")
+    tab.set_pane_visible("right", True)
+    win.add_tab(tab)
+    full = tab.grab_full()
+    assert full.cacheKey() != fig._pixmap.cacheKey()    # 図そのものでなくタブ grab
+    assert full.size() == tab.grab().size()
+
+
 def test_cli_tab_gate_relaxed_for_viewer(monkeypatch):
     import llm_bridge.commands as cmds
     from llm_bridge.__main__ import main

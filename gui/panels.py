@@ -305,6 +305,15 @@ class FigurePanel(QGraphicsView):
             self._user_zoomed = True
         event.accept()
 
+    def full_pixmap(self) -> QPixmap | None:
+        """ズーム/パンに依存しない原寸の全図。未ロード/読込失敗時は None。
+
+        ミーティング共有/全域キャプチャ用。view の transform（ホスト側ズーム）に
+        関係なくロード済みオリジナルを返すので、ゲストは全図を受け取り自分で
+        ズーム/パンできる。copy_image_to_clipboard と同一ソース。
+        """
+        return self._pixmap
+
     def copy_image_to_clipboard(self) -> bool:
         """表示中の原寸オリジナル画像をシステムクリップボードへコピー。
 

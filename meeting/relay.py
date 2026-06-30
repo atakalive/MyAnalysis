@@ -58,7 +58,14 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _HEARTBEAT_SEC = 20.0
 _PRESENCE_POLL_SEC = 5.0
 _FAIL_THRESHOLD = 5
-_VIEW_MAX_EDGE = 1920
+# Full-extent view PNGs (full figures, not viewport crops) can be large. Cap by
+# total area (megapixels) — not max-edge — so long/wide figures keep their long
+# axis (and thus legible labels) instead of having the short axis crushed. A hard
+# per-edge ceiling guards browser max-texture/decode limits; a byte cap bounds
+# host+relay memory. RELAY_VIEW_MAX_MP lets a thin-uplink host dial the area down.
+_VIEW_MAX_MEGAPIXELS = float(os.environ.get("RELAY_VIEW_MAX_MP", "8") or 8)
+_VIEW_MAX_EDGE = 8192
+_VIEW_MAX_PNG_BYTES = 6 * 1024 * 1024
 # Min seconds between partial /out posts per session while an assistant streams.
 # The guest polls at ~1s when busy, so finer-grained posts are wasted; the final
 # full text is unthrottled (messageAdded), so a throttled-away partial is loss-free.
@@ -347,6 +354,11 @@ class MeetingRelay(QObject):
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
         self._view_hashes: dict[str, bytes] = {}
+        # cacheKey() of the last captured pixmap per tab. full_pixmap() returns the
+        # same shared QPixmap until the figure is swapped, so an unchanged cacheKey
+        # lets us skip the expensive toImage()+SHA1 entirely (grab() fallback always
+        # mints a fresh cacheKey, so it harmlessly falls through to the hash gate).
+        self._view_cachekeys: dict[str, int] = {}
         self._admin_key = os.environ.get("RELAY_ADMIN_KEY", "") or ""
         # Legacy remote-relay override: when set, no local server / tunnel is
         # started and this URL is the shared host+guest base_url.
@@ -590,6 +602,7 @@ class MeetingRelay(QObject):
         self._last_sessions_json = None
         self._last_tabs_json = None
         self._view_hashes = {}
+        self._view_cachekeys = {}
 
         self._worker = _RelayWorker(self._host_base_url, self._admin_key, ch,
                                     poll_ms=self._poll_ms)
@@ -856,10 +869,19 @@ class MeetingRelay(QObject):
 
     def _capture_tab(self, tab, name: str) -> bytes | None:
         try:
-            pixmap = tab.grab()
+            # Full content extent (decoupled from host zoom/pan/scroll) when the
+            # tab supports it; else the on-screen viewport. getattr guard tolerates
+            # a non-AnalysisTab entry in window.tabs().
+            grab_full = getattr(tab, "grab_full", None)
+            pixmap = grab_full() if callable(grab_full) else tab.grab()
         except Exception:
             return None
         if pixmap is None or pixmap.isNull() or pixmap.width() <= 0 or pixmap.height() <= 0:
+            return None
+        # Fast path: a full_pixmap-backed view returns the same shared QPixmap until
+        # the figure changes, so an unchanged cacheKey skips toImage()+SHA1 entirely.
+        cache_key = pixmap.cacheKey()
+        if cache_key and self._view_cachekeys.get(name) == cache_key:
             return None
         digest = None
         try:
@@ -868,24 +890,54 @@ class MeetingRelay(QObject):
         except Exception:
             digest = None
         if digest is not None and self._view_hashes.get(name) == digest:
+            self._view_cachekeys[name] = cache_key   # remember so we short-circuit next tick
             return None    # unchanged (fast path, no PNG encode)
-        if max(pixmap.width(), pixmap.height()) > _VIEW_MAX_EDGE:
-            pixmap = pixmap.scaled(
-                _VIEW_MAX_EDGE, _VIEW_MAX_EDGE,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        pixmap = self._fit_for_wire(pixmap)
         png = self._pixmap_png(pixmap)
         if png is None:
             return None
+        if len(png) > _VIEW_MAX_PNG_BYTES:
+            # One corrective downscale; 0.95 fudge for PNG nonlinearity. Still over →
+            # skip this frame (leaving the prior good frame on guests).
+            s = (_VIEW_MAX_PNG_BYTES / len(png)) ** 0.5 * 0.95
+            pixmap = pixmap.scaled(
+                max(1, round(pixmap.width() * s)), max(1, round(pixmap.height() * s)),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            png = self._pixmap_png(pixmap)
+            if png is None or len(png) > _VIEW_MAX_PNG_BYTES:
+                # Record cacheKey so an identical oversized pixmap short-circuits
+                # next tick (no re-encode loop); a changed figure mints a new key.
+                if cache_key:
+                    self._view_cachekeys[name] = cache_key
+                return None
         if digest is None:
             # constBits failed — fall back to hashing the PNG bytes (correctness
             # kept; only the no-encode fast path is lost).
             digest = hashlib.sha1(png).digest()
             if self._view_hashes.get(name) == digest:
+                self._view_cachekeys[name] = cache_key
                 return None
         self._view_hashes[name] = digest
+        self._view_cachekeys[name] = cache_key
         return png
+
+    @staticmethod
+    def _fit_for_wire(pixmap):
+        """Downscale to the megapixel/edge budget, preserving aspect exactly."""
+        w, h = pixmap.width(), pixmap.height()
+        area = w * h
+        s_area = (_VIEW_MAX_MEGAPIXELS * 1e6 / area) ** 0.5 if area > _VIEW_MAX_MEGAPIXELS * 1e6 else 1.0
+        s_edge = min(1.0, _VIEW_MAX_EDGE / max(w, h))
+        s = min(s_area, s_edge)
+        if s >= 1.0:
+            return pixmap
+        return pixmap.scaled(
+            max(1, round(w * s)), max(1, round(h * s)),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
 
     @staticmethod
     def _pixmap_png(pixmap) -> bytes | None:
