@@ -406,12 +406,17 @@ def open_dataset(window, dataset: str) -> str:
             if active_tab is not None:
                 # 開いた dataset に属するタブのときだけ focus する（同名衝突で別
                 # dataset の同名タブを誤 focus しないため。reviewer P1 R2）。
+                # ⚠️ 存在チェックの next() も (dataset, name) で照合する（reviewer code
+                # P2）。bare name だと先に開いた別 dataset の同名タブに当たり、対象
+                # dataset 内に active_tab があっても t_ds != dataset で復元されない。
                 t = next(
-                    (t for t in window.tabs() if t.name == active_tab), None
+                    (t for t in window.tabs()
+                     if t.name == active_tab
+                     and (getattr(t, "session_spec", None) or {}).get("dataset")
+                     == dataset),
+                    None,
                 )
-                t_ds = (getattr(t, "session_spec", None) or {}).get("dataset") \
-                    if t is not None else None
-                if t is not None and t_ds == dataset:
+                if t is not None:
                     # Explicit dataset= so a same-named tab in another dataset is
                     # never focused instead (B4 / reviewer P2-e).
                     try:

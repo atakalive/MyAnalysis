@@ -188,7 +188,8 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         if existing is not None:
             ex_spec = getattr(existing, "session_spec", None) or {}
             ex_kind = ex_spec.get("kind")
-            ex_ds = ex_spec.get("dataset") or getattr(existing, "dataset", None)
+            # (existing is already resolved within `dataset` by _find_in_dataset,
+            # so its dataset is `dataset` — no need to recompute it here.)
             if ex_kind == "analysis":
                 _set_active_tab(window, name, dataset=dataset)
                 return f"already-present:{name}"
@@ -228,6 +229,12 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         new_tab.setParent(None)
         sandbox.deleteLater()
         window.add_tab(new_tab)
+        # 新規タブも focus して current_dataset を同期する（idempotent 経路・_show と
+        # 対称）。window.add_tab は _ensure_group+addTab のみで current_dataset を
+        # 動かさないため、これが無いと active.json が dataset:null のまま publish され
+        # （active タブは current group 内という不変条件に反する）、直後の dataset 省略
+        # add-tab が current_dataset=None で ValueError になり看板動線が degrade する。
+        _set_active_tab(window, name, dataset=dataset)
         # note_dataset only AFTER a successful insert (see _build_analysis doc).
         spec = getattr(new_tab, "session_spec", None)
         if spec and spec.get("dataset"):

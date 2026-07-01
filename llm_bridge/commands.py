@@ -123,7 +123,10 @@ def _append_log(entry: dict) -> None:
 def _execute(window, payload: dict) -> None:
     tier = payload.get("tier")
     verb = payload.get("verb")
-    args = payload.get("args") or {}
+    # Copy so the tab-tier `args.pop("dataset", ...)` below mutates a local dict,
+    # not payload["args"] (which the audit log re-reads at the end; a pop there
+    # would drop `dataset` from the logged args). reviewer code P2-1.
+    args = dict(payload.get("args") or {})
     target = payload.get("target")
     status = "ok"
     error = None

@@ -155,3 +155,29 @@ def test_restore_last_session_additive(win, tmp_path, monkeypatch):
     assert win.current_dataset == "dsB"          # active restored
     assert win.tab_names().count("a") == 1       # dsA not duplicated
     assert win.find_tab("b", "dsB") is not None
+
+
+def test_add_tab_new_path_syncs_current_dataset(win, tmp_path, monkeypatch):
+    """reviewer code P1: the NEW-tab path of add-tab must sync current_dataset,
+    like the idempotent path and _show. Without it, window.add_tab only does
+    _ensure_group+addTab (Qt auto-selects the first group's tab as active) while
+    current_dataset stays None → active.json publishes dataset:null with
+    active_analysis_dataset:dsA (violating the "active tab is in current group"
+    invariant), chat never switches, and a follow-up dataset-less add-tab raises
+    'no dataset open' — degrading the #51 marquee flow."""
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsA", "b")
+    assert win.current_dataset is None                 # fresh window
+    assert win.dispatch_command("add-tab", name="a", dataset="dsA") == "added:a"
+    # the new tab's dataset becomes the explicit current dataset (was None = bug).
+    assert win.current_dataset == "dsA"
+    # active.json serializes it (dataset / active_dataset == dsA, not null).
+    active = tmp_path / "active.json"
+    monkeypatch.setattr(llm_bridge, "active_state_path", lambda: active)
+    llm_bridge._write_active(win)
+    data = json.loads(active.read_text(encoding="utf-8"))
+    assert data["dataset"] == "dsA"
+    assert data["active_dataset"] == "dsA"
+    # a follow-up add-tab WITHOUT dataset= now resolves via current_dataset
+    # (raised ValueError 'no dataset open' before the fix).
+    assert win.dispatch_command("add-tab", name="b") == "added:b"

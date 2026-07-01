@@ -554,17 +554,25 @@ class MeetingRelay(QObject):
             if cw is None:
                 return []
             summaries = cw.session_summaries()
-        new = [s for s in summaries if s["id"] not in self._session_known]
+        # Decide (mark observed / auto-publish) only sessions in the ACTIVE
+        # dataset, mirroring absorb_new_tabs (Issue #51 B5 / reviewer code P1). A
+        # hidden dataset's sessions stay "undecided" (not marked known) so that
+        # switching to that dataset later default-shares them; publishing a
+        # hidden dataset's chat would also leak it to guests.
+        cur = self._active_dataset()
+        new = [
+            s for s in summaries
+            if s["id"] not in self._session_known and s.get("dataset") == cur
+        ]
         if not new:
             return []
-        # always mark observed (privacy invariant)
+        # always mark observed (privacy invariant, Issue #48): a session created
+        # while the auto-share toggle was OFF stays known → not retroactively
+        # published on OFF→ON. Scoped to the active dataset per the filter above.
         self._session_known.update(s["id"] for s in new)
         if not self._auto_share_new_sessions:
             return []                            # toggle off: known but NOT published
-        # Publish only sessions bound to the ACTIVE dataset (Issue #51 B5): a
-        # hidden dataset's chat must not leak to guests.
-        cur = self._active_dataset()
-        to_pub = [s["id"] for s in new if s.get("dataset") == cur]
+        to_pub = [s["id"] for s in new]
         self._published_session_ids.update(to_pub)
         return to_pub
 
@@ -581,10 +589,13 @@ class MeetingRelay(QObject):
         """Create the channel, start the worker + capture timer; deliver the token
         asynchronously via ``tokenReady`` (the tunnel URL resolves off-thread).
 
-        The default published set is a SNAPSHOT of ALL sessions (every dataset)
-        at start time. This set is NOT recomputed on dataset switch, so in-flight
-        replies keep flowing even after the host moves to another dataset, and
-        sessions can still be deselected per-session from the share window.
+        The default published set is the ACTIVE dataset's sessions/tabs at start
+        time. ``_session_known``/``_tab_known`` are scoped to the active dataset
+        too, so a hidden dataset's items stay "undecided" and are auto-absorbed
+        (default-shared) when the host switches to that dataset (Issue #51 B5:
+        the shared set swaps to the newly-active dataset). Explicit per-item
+        deselection persists across switches (deselected items stay in ``_known``
+        and are not re-absorbed).
 
         No ``self`` state is mutated until the ``admin/channel`` POST succeeds, so
         a POST failure propagates cleanly with ``_sharing`` still False.
@@ -620,17 +631,20 @@ class MeetingRelay(QObject):
         self._expires_at = int(data.get("expires_at", 0) or 0)
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
-        # Publish only the ACTIVE dataset's sessions/tabs (Issue #51 B5); _known
-        # tracks ALL current ids/names so hidden-dataset items aren't treated as
-        # "new" and auto-absorbed later.
+        # Publish AND "know" only the ACTIVE dataset's sessions/tabs (Issue #51
+        # B5 / reviewer code P1). Scoping _known to the active dataset (not ALL
+        # ids/names) is what lets a hidden dataset's items be treated as "new"
+        # and auto-absorbed (default-shared) when the host switches to that
+        # dataset — absorb_new_tabs/absorb_new_sessions both only decide the
+        # active dataset, mirroring each other.
         cur = self._active_dataset()
         active_ids = {s["id"] for s in summaries if s.get("dataset") == cur}
         self._published_session_ids = set(active_ids)
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         self._meeting_start_ids = set(self._published_session_ids)
-        self._session_known = {s["id"] for s in summaries}
+        self._session_known = set(active_ids)
         self._published_tabs = self._active_ds_tab_names()
-        self._tab_known = set(self._window.tab_names())
+        self._tab_known = self._active_ds_tab_names()
         self._channel = ch
         self._secret = secret
         self._sharing = True
@@ -855,9 +869,10 @@ class MeetingRelay(QObject):
             cw = win.chat_widget()
 
             # Active-dataset scope (Issue #51 B5): the effective publish set is the
-            # host's selection ∩ the ACTIVE dataset. _published_* keep the full
-            # selection so a DS switch swaps the shared set (hidden DS content is
-            # withheld, not forgotten).
+            # host's selection ∩ the ACTIVE dataset. absorb_new_* only decide the
+            # active dataset, so switching to another dataset auto-absorbs (default-
+            # shares) its tabs/sessions on the next tick, while previously-active
+            # ones drop out of the ∩ (still selected, just not the active scope).
             cur = self._active_dataset()
 
             # Sessions: publish only ids in (_published_session_ids ∩ existing ∩
@@ -891,14 +906,20 @@ class MeetingRelay(QObject):
                 self._worker.enqueue({"kind": "sessions", "data": pub})
 
             # Tabs: new tabs auto-join the published set (default-share, active DS
-            # only); publish the selection ∩ active-ds tabs.
+            # only); publish the selection ∩ active-ds tabs. Build the guest list
+            # from the active dataset's own tab objects (dataset-checked, deduped,
+            # in window order) — NOT the flat bare-name tab_names(), which can hold
+            # a hidden dataset's same-named tab and duplicate it (reviewer code P2).
             self.absorb_new_tabs()
-            active_tab_names = self._active_ds_tab_names()
-            all_tabs = win.tab_names()
-            pub_tabs = [
-                t for t in all_tabs
-                if t in self._published_tabs and t in active_tab_names
-            ]
+            seen_tab: set[str] = set()
+            pub_tabs: list[str] = []
+            for tab in win.tabs():
+                n = getattr(tab, "name", None)
+                if n is None or n in seen_tab:
+                    continue
+                if n in self._published_tabs and self._tab_dataset(tab) == cur:
+                    seen_tab.add(n)
+                    pub_tabs.append(n)
             tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)
             if tj != self._last_tabs_json:
                 self._last_tabs_json = tj

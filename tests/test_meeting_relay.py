@@ -332,15 +332,17 @@ def test_publish_scope(qapp, monkeypatch):
     sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
     assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"a"}
 
-    # Switch to ds2: ds1's "a" is WITHHELD (the shared set swaps to the new
-    # dataset). ds2's pre-existing "b" is not in the host selection, so nothing
-    # from the hidden dataset leaks either — the effective shared set is empty.
+    # Switch to ds2: ds1's "a" drops out of the active scope (the shared set swaps
+    # to the new dataset). ds2's pre-existing "b" was left "undecided" at meeting
+    # start (_session_known scoped to the then-active ds1), so on switch it is
+    # treated as new and default-shared — symmetric with the tab case (Issue #51
+    # B5 / reviewer code P1 R5). The effective shared set becomes {b}.
     win.current_dataset = "ds2"
     r._last_sessions_json = None
     r._worker._outbox.clear()
     r._on_capture_tick()
     sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
-    assert sess_puts and sess_puts[-1]["data"] == []
+    assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"b"}
 
     # a deleted session drops out of the selection via ∩ existing.
     win.current_dataset = "ds1"
@@ -543,16 +545,18 @@ def test_publish_scope_active_dataset_tabs(qapp, monkeypatch):
     assert r.absorb_new_tabs() == ["tA2"]     # tC (hidden dsB) is not absorbed
     assert r.published_tabs() == {"tA", "tA2"}
 
-    # switch to dsB: dsA's tabs (tA, tA2) are withheld — the shared set follows
-    # the active dataset. tC (a dsB tab that appeared mid-meeting) auto-joins now
-    # that dsB is active. tB (present at meeting start in hidden dsB) stays known
-    # and withheld until reselected — a documented v1 limitation.
+    # switch to dsB: dsA's tabs (tA, tA2) drop out of the active scope — the shared
+    # set follows the active dataset (Issue #51 B5). Both dsB tabs auto-join now
+    # that dsB is active: tC (appeared mid-meeting) AND tB (present at meeting start
+    # in then-hidden dsB). _tab_known was scoped to the active dataset at start, so
+    # tB stayed "undecided" and is default-shared on switch — not withheld (reviewer
+    # code P1 R5).
     win.current_dataset = "dsB"
     r._worker._outbox.clear()
     r._last_tabs_json = None
     r._on_capture_tick()
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    assert tab_puts and set(tab_puts[-1]["data"]) == {"tC"}
+    assert tab_puts and set(tab_puts[-1]["data"]) == {"tB", "tC"}
     r.stop()
 
 

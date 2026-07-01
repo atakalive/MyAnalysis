@@ -416,6 +416,22 @@ class ChatWidget(QWidget):
         if self._window is not None:
             self._window.mark_chat_dirty()
 
+    def _notify_dataset_busy_changed(self) -> None:
+        """Refresh the dataset-switcher ● badges on a turn start/end.
+
+        A turn generating in a *hidden* dataset changes dataset_busy() for that
+        dataset, but the window only refreshes switcher badges on dataset/tab
+        switch — so a background dataset's ● would go stale until the next switch
+        (Issue #51 reviewer code P2-2). Push a refresh from each turn-state
+        transition instead. Guarded: the window may be a headless/test double
+        without the switcher (single-dataset / pre-#51 windows)."""
+        w = self._window
+        if w is not None and hasattr(w, "refresh_dataset_badges"):
+            try:
+                w.refresh_dataset_badges()
+            except Exception:
+                pass
+
     # ----- hot-reload accessors -----
 
     def is_busy(self) -> bool:
@@ -929,6 +945,7 @@ class ChatWidget(QWidget):
         worker.start()
         self._update_turn_ui()
         self._refresh_tab_for(sess)
+        self._notify_dataset_busy_changed()   # ● appears on the switcher for this DS
         if not self._spin_timer.isActive():
             self._spin_idx = 0
             self._spin_timer.start()
@@ -1038,6 +1055,7 @@ class ChatWidget(QWidget):
                 if note:
                     self._turn_notes[sid] = note
         self._refresh_tab_for(sess)
+        self._notify_dataset_busy_changed()   # ● clears for this DS if now idle
         self._drain_pending_remote(sid)
         self._stop_spin_if_idle()
 
@@ -1075,6 +1093,7 @@ class ChatWidget(QWidget):
         else:
             self._turn_notes[sid] = error_text.strip()
         self._refresh_tab_for(sess)
+        self._notify_dataset_busy_changed()   # ● clears for this DS if now idle
         self._drain_pending_remote(sid)
         self._stop_spin_if_idle()
 

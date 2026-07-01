@@ -362,6 +362,11 @@ class ToolWindow(QMainWindow):
         if tab is not None:
             self.statusBar().showMessage(tr("status.active", name=tab.name))
 
+    def refresh_dataset_badges(self) -> None:
+        """Public hook for the chat widget to refresh switcher ● on turn state
+        change (a turn starting/ending in a hidden dataset; Issue #51 P2-2)."""
+        self._refresh_switcher_badges()
+
     def _refresh_switcher_badges(self) -> None:
         """Prefix a ● to any switcher tab whose dataset has an in-flight chat turn."""
         cw = self._chat_widget
