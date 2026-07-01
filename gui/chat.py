@@ -454,6 +454,11 @@ class ChatWidget(QWidget):
     def set_input_draft(self, text: str) -> None:
         self._input.setPlainText(text or "")
 
+    def focus_input(self) -> None:
+        """メッセージ入力欄にフォーカスし、カーソルを末尾へ移動。"""
+        self._input.setFocus()
+        self._input.moveCursor(QTextCursor.MoveOperation.End)
+
     def active_session_id(self) -> str:
         return self._active.id
 

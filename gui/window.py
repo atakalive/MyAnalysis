@@ -3,6 +3,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QPoint, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDockWidget,
     QFileDialog,
@@ -844,9 +845,28 @@ class ToolWindow(QMainWindow):
         name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
         ds = grp.name
         menu = QMenu(self)
+
+        copy_action = menu.addAction(tr("menu.tab.copy_name"))
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
+
+        comment_action = menu.addAction(tr("menu.tab.comment"))
+        comment_action.triggered.connect(lambda: self._comment_on_tab(name))
+
+        menu.addSeparator()
+
         close_action = menu.addAction(tr("menu.tab.close"))
         close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
         menu.exec(tab_bar.mapToGlobal(pos))
+
+    def _comment_on_tab(self, name: str) -> None:
+        chat = self.chat_widget()
+        if chat is None:
+            return
+        prefix = tr("menu.tab.comment_prefix", name=name)
+        draft = chat.input_draft()
+        if not draft.startswith(prefix):
+            chat.set_input_draft(prefix + draft)
+        chat.focus_input()
 
     def _register_dataset(self) -> None:
         import socket
