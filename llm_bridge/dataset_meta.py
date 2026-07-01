@@ -24,6 +24,7 @@ import os
 import socket
 import time
 import tomllib
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
@@ -146,13 +147,17 @@ def _merge_meta(existing: dict, computed: dict, *, heavy: bool) -> dict:
             if k in existing:
                 merged[k] = existing[k]  # light update / cancelled → keep last heavy value
         # heavy & not cancelled & missing → genuine failure → drop
-    merged["description"] = existing.get("description", "")
+    desc = existing.get("description")
+    merged["description"] = desc if isinstance(desc, str) else ""   # None/non-str → ""
     merged["version"] = META_VERSION
     merged["updated_at"] = time.time()
     return merged
 
 
-def compute_meta(dataset: str, *, heavy: bool = True, should_stop=None) -> dict:
+def compute_meta(
+    dataset: str, *, heavy: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> dict:
     """Compute display metrics for `dataset`. Never raises.
 
     Returns a dict holding only the metrics successfully obtained (a missing key
@@ -228,11 +233,14 @@ def compute_meta(dataset: str, *, heavy: bool = True, should_stop=None) -> dict:
     open_analysis_names: list[str] = []
     try:
         if sess is not None:
-            tabs = sess.get("tabs", []) or []
+            tabs = sess.get("tabs", [])
+            if not isinstance(tabs, list):
+                tabs = []   # corrupt session.json (e.g. tabs is a string) → no count
             meta["open_tab_count"] = len(tabs)
             open_analysis_names = [
                 e.get("module") for e in tabs
-                if e.get("kind") == "analysis" and e.get("module")
+                if isinstance(e, dict)
+                and e.get("kind") == "analysis" and e.get("module")
             ]
             meta["open_analysis_names"] = open_analysis_names
     except Exception:
@@ -291,7 +299,6 @@ def compute_meta(dataset: str, *, heavy: bool = True, should_stop=None) -> dict:
 
             if not cancelled:
                 total_png = 0
-                png_ok = True
                 for n in analysis_names:
                     if should_stop and should_stop():
                         cancelled = True
@@ -301,9 +308,8 @@ def compute_meta(dataset: str, *, heavy: bool = True, should_stop=None) -> dict:
                         total_png += len(list(bd.glob("*.png")))
                     except (OSError, tomllib.TOMLDecodeError, ValueError,
                             KeyError, RuntimeError):
-                        png_ok = False
-                        continue
-                if not cancelled and png_ok:
+                        continue   # per-analysis failure → skip (0), commit partial sum
+                if not cancelled:
                     meta["export_png_count"] = total_png
 
         # dataset_dir-dependent HEAVY (work_dir-independent): single un-pruned
@@ -381,7 +387,10 @@ def write_meta(dataset: str, meta: dict) -> None:
     tmp.replace(path)
 
 
-def rebuild_meta(dataset: str, *, heavy: bool = True, should_stop=None) -> None:
+def rebuild_meta(
+    dataset: str, *, heavy: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
     """Recompute metrics and merge into meta.json. Never raises.
 
     The heavy compute (incl. os.walk) runs OUTSIDE the lock; only the short
@@ -457,6 +466,6 @@ def load_one(name: str) -> DatasetMeta:
     return base
 
 
-def load_for_picker(names) -> list[DatasetMeta]:
+def load_for_picker(names: Iterable[str]) -> list[DatasetMeta]:
     """Load a DatasetMeta for each name. One corrupt entry can't stop the list."""
     return [load_one(n) for n in names]

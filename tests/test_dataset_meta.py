@@ -117,13 +117,27 @@ def test_walk_permission_error_no_raise(ds_env, monkeypatch):
 
 
 def test_disk_size_includes_work_but_last_meas_excludes(ds_env):
+    import os as _os
+
     _make_analysis(ds_env, "a1")
-    (ds_env / "raw.csv").write_bytes(b"x" * 100)
-    (ds_env / "_work" / "big.png").write_bytes(b"y" * 1000)
+    raw = ds_env / "raw.csv"
+    raw.write_bytes(b"x" * 100)
+    work_png = ds_env / "_work" / "big.png"
+    work_png.write_bytes(b"y" * 1000)
+    # analysis.py under <dataset_dir>/analyses/ must also be excluded from
+    # last_measurement even though it is the newest file on disk.
+    ana_py = ds_env / "analyses" / "a1" / "analysis.py"
+    # Distinct mtimes: raw.csv OLD, _work/big.png and analyses/a1/analysis.py NEW.
+    old_t, new_t = 1_000_000.0, 2_000_000.0
+    _os.utime(raw, (old_t, old_t))
+    _os.utime(work_png, (new_t, new_t))
+    _os.utime(ana_py, (new_t, new_t))
+
     m = dataset_meta.compute_meta("ds", heavy=True)
-    assert m["disk_size_bytes"] >= 1100          # _work counted
-    # last_measurement reflects raw.csv, not _work/analyses/sidecar
-    assert "last_measurement" in m
+    assert m["disk_size_bytes"] >= 1100          # _work counted in disk_size
+    # last_measurement must equal raw.csv's mtime, NOT the newer _work/analyses
+    # files — a regression in the exclusion predicate would leak new_t here.
+    assert m["last_measurement"] == old_t
 
 
 def test_chat_session_count_globs(ds_env):

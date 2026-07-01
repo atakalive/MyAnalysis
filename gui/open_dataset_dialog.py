@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from common.i18n import tr
 from llm_bridge import dataset_meta
-from llm_bridge.dataset_meta import HEAVY_FIELDS
+from llm_bridge.dataset_meta import HEAVY_FIELDS, DatasetMeta
 
 # Column layout.
 COL_NAME = 0
@@ -51,7 +51,7 @@ _NEG_INF = float("-inf")
 
 
 def _fmt_time(epoch, precise: bool = False) -> str:
-    if not isinstance(epoch, (int, float)):
+    if not isinstance(epoch, (int, float)) or isinstance(epoch, bool):
         return tr("picker.unknown")
     fmt = "%Y-%m-%d %H:%M:%S" if precise else "%Y-%m-%d %H:%M"
     try:
@@ -61,7 +61,7 @@ def _fmt_time(epoch, precise: bool = False) -> str:
 
 
 def _fmt_size(nbytes) -> str:
-    if not isinstance(nbytes, (int, float)):
+    if not isinstance(nbytes, (int, float)) or isinstance(nbytes, bool):
         return tr("picker.unknown")
     size = float(nbytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -94,12 +94,12 @@ class DatasetTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else _NCOLS
 
-    def meta_at(self, row: int):
+    def meta_at(self, row: int) -> DatasetMeta | None:
         if 0 <= row < len(self._metas):
             return self._metas[row]
         return None
 
-    def update_meta(self, meta) -> None:
+    def update_meta(self, meta: DatasetMeta) -> None:
         """Replace the row whose name matches meta.name (by name correlation)."""
         for i, m in enumerate(self._metas):
             if m.name == meta.name:
@@ -302,23 +302,26 @@ class OpenDatasetDialog(QDialog):
         self._on_selection_changed()
 
         # Background heavy rebuild for stale rows or rows missing any HEAVY field.
+        # All HEAVY scans (startup stale rows AND the [更新] button) run on the
+        # background worker — never on the GUI thread — so a large synced-drive
+        # os.walk can't freeze the dialog.
+        self._workers: list[_MetaBuildWorker] = []
         stale_names = [
             m.name for m in metas
             if m.name and (m.uncomputed or any(
                 getattr(m, f) is None for f in HEAVY_FIELDS))
         ]
-        self._worker = None
         if stale_names:
             self._start_worker(stale_names)
 
     # ----- worker -----
 
-    def _start_worker(self, names) -> None:
+    def _start_worker(self, names: list[str]) -> None:
         # Qt parent = QApplication.instance() (a guaranteed long-lived QObject).
         # NOT self.window() — a QDialog is its own top-level, so window() returns
         # the dialog (short-lived) and would risk destroy-while-running.
         worker = _MetaBuildWorker(names, QApplication.instance())
-        self._worker = worker
+        self._workers.append(worker)
         workers = getattr(self._main_window, "_meta_workers", None)
         if workers is not None:
             workers.append(worker)
@@ -328,6 +331,10 @@ class OpenDatasetDialog(QDialog):
         worker.start()
 
     def _forget_worker(self, worker) -> None:
+        try:
+            self._workers.remove(worker)
+        except ValueError:
+            pass
         workers = getattr(self._main_window, "_meta_workers", None)
         if workers is not None:
             try:
@@ -335,7 +342,7 @@ class OpenDatasetDialog(QDialog):
             except ValueError:
                 pass
 
-    def _on_meta_built(self, name, meta) -> None:
+    def _on_meta_built(self, name: str, meta: DatasetMeta) -> None:
         self._model.update_meta(meta)
         cur = self._current_meta()
         if cur is not None and cur.name == name:
@@ -343,7 +350,7 @@ class OpenDatasetDialog(QDialog):
 
     # ----- selection / detail -----
 
-    def _current_meta(self):
+    def _current_meta(self) -> DatasetMeta | None:
         idxs = self._view.selectionModel().selectedRows()
         if not idxs:
             return None
@@ -365,7 +372,7 @@ class OpenDatasetDialog(QDialog):
         while self._form.rowCount() > 0:
             self._form.removeRow(0)
 
-    def _render_detail(self, m) -> None:
+    def _render_detail(self, m: DatasetMeta | None) -> None:
         self._clear_form()
         self._thumb.clear()
         if m is None:
@@ -421,16 +428,14 @@ class OpenDatasetDialog(QDialog):
     # ----- actions -----
 
     def _on_refresh(self) -> None:
+        # Route the manual refresh through the SAME background worker as startup
+        # stale rebuilds. The HEAVY os.walk must never run on the GUI thread —
+        # doing it inline here would freeze the dialog on a large synced-drive
+        # dataset (Issue #50 §性能・スレッド設計; the row updates via _on_meta_built).
         m = self._current_meta()
         if m is None or not m.name:
             return
-        try:
-            dataset_meta.rebuild_meta(m.name, heavy=True)
-            fresh = dataset_meta.load_one(m.name)
-        except Exception:
-            return
-        self._model.update_meta(fresh)
-        self._render_detail(fresh)
+        self._start_worker([m.name])
 
     def _on_edit_desc(self) -> None:
         m = self._current_meta()
@@ -461,20 +466,20 @@ class OpenDatasetDialog(QDialog):
             return
         self.accept()
 
-    # ----- lifecycle: interrupt worker but never destroy it (Qt parent owns it) -----
+    # ----- lifecycle: interrupt workers but never destroy them (Qt parent owns them) -----
 
-    def _interrupt_worker(self) -> None:
-        if self._worker is not None:
-            self._worker.requestInterruption()
+    def _interrupt_workers(self) -> None:
+        for worker in list(self._workers):
+            worker.requestInterruption()
 
     def reject(self) -> None:
-        self._interrupt_worker()
+        self._interrupt_workers()
         super().reject()
 
     def accept(self) -> None:
-        self._interrupt_worker()
+        self._interrupt_workers()
         super().accept()
 
     def closeEvent(self, event) -> None:
-        self._interrupt_worker()
+        self._interrupt_workers()
         super().closeEvent(event)

@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QDialog,
@@ -68,7 +68,7 @@ class ToolWindow(QMainWindow):
 
         # Long-lived registry keeping dataset-picker meta-build workers alive
         # while they run (belt-and-braces with their QApplication Qt parent).
-        self._meta_workers: list = []
+        self._meta_workers: list[QThread] = []
 
         self._session_dirty = False
         self._suppress_dirty = False

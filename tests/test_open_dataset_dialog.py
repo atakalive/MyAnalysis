@@ -103,19 +103,32 @@ def test_double_click_accepts(qapp, patch_picker):
     assert accepted["v"] is True
 
 
-def test_refresh_calls_heavy(qapp, patch_picker, monkeypatch):
+def test_refresh_runs_heavy_on_worker_thread(qapp, patch_picker, monkeypatch):
+    # [更新] must route the HEAVY rebuild through the background worker — never
+    # run compute_meta's os.walk inline on the GUI thread (reviewer/reviewer P1).
+    import threading
+
     from gui import open_dataset_dialog as mod
-    patch_picker([_meta("a", uncomputed=False, disk_size_bytes=1,
-                        last_measurement=1, annotation_total=1, export_png_count=1)])
+    patch_picker([_meta("a", uncomputed=False)])   # complete meta → no startup worker
+    main_ident = threading.get_ident()
     calls = []
-    monkeypatch.setattr(mod.dataset_meta, "rebuild_meta",
-                        lambda ds, *, heavy=True, should_stop=None:
-                        calls.append((ds, heavy)))
+
+    def fake_rebuild(ds, *, heavy=True, should_stop=None):
+        calls.append((ds, heavy, should_stop is not None, threading.get_ident()))
+
+    monkeypatch.setattr(mod.dataset_meta, "rebuild_meta", fake_rebuild)
     monkeypatch.setattr(mod.dataset_meta, "load_one",
                         lambda n: _meta(n, uncomputed=False))
     dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._workers == []                       # no worker before refresh
     dlg._on_refresh()
-    assert calls == [("a", True)]
+    assert len(dlg._workers) == 1                   # queued, not run inline
+    worker = dlg._workers[-1]
+    assert worker.wait(5000)                        # let the background run finish
+    assert len(calls) == 1
+    ds, heavy, has_stop, ident = calls[0]
+    assert (ds, heavy, has_stop) == ("a", True, True)   # heavy + cancellable
+    assert ident != main_ident                      # ran off the GUI thread
 
 
 def test_default_order_is_mru_not_name(qapp, patch_picker):
@@ -166,13 +179,16 @@ def test_worker_parent_and_registry(qapp, patch_picker, monkeypatch):
     monkeypatch.setattr(mod.dataset_meta, "load_one", lambda n: _meta(n))
     main = _FakeMain()
     dlg, _m, _h = _make_dialog(qapp, main=main)
-    assert dlg._worker is not None
-    assert dlg._worker.parent() is QApplication.instance()
-    assert dlg._worker in main._meta_workers
+    assert len(dlg._workers) == 1
+    worker = dlg._workers[-1]
+    # Qt parent is the long-lived QApplication (NOT the short-lived dialog),
+    # and the worker is also held in the main window's registry.
+    assert worker.parent() is QApplication.instance()
+    assert worker in main._meta_workers
     # close should request interruption but not destroy
-    dlg._interrupt_worker()
-    assert dlg._worker.isInterruptionRequested()
-    dlg._worker.wait(2000)
+    dlg._interrupt_workers()
+    assert worker.isInterruptionRequested()
+    worker.wait(2000)
 
 
 def test_edit_desc_failure_warns(qapp, patch_picker, monkeypatch):
