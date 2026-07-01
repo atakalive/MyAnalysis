@@ -236,7 +236,7 @@ function escapeHtml(s) {
 // 非許可）。それ以外は null（→ リンク化せずプレーン表示）。
 function safeUrl(raw) {
   if (raw == null) return null;
-  const trimmed = String(raw).replace(/^[\s -]+/, "");
+  const trimmed = String(raw).replace(/^[\s\u0000-\u001f]+/, "");
   const low = trimmed.toLowerCase();
   if (low.startsWith("http:") || low.startsWith("https:") || low.startsWith("mailto:")) return trimmed;
   return null;
@@ -258,7 +258,7 @@ function splitTableRow(line) {
 // （URL 内の _/* で href が壊れるのを防ぐ）。非許可 URL はリンク化せず literal 表示。
 function inlineFormat(s) {
   const prot = [];
-  const hold = (html) => { prot.push(html); return " " + (prot.length - 1) + " "; };
+  const hold = (html) => { prot.push(html); return "\u0000" + (prot.length - 1) + "\u0000"; };
   s = s.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, (m, alt, url) => {   // 画像はリンクより先に処理
     const u = safeUrl(url);                       // 自動フェッチしない: alt(+許可時リンク)のみ
     return u ? hold("<a href=\"" + u + "\">" + alt + "</a>") : alt;
@@ -272,7 +272,7 @@ function inlineFormat(s) {
   s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
   s = s.replace(/_([^_]+)_/g, "<em>$1</em>");
   s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
-  return s.replace(/ (\d+) /g, (m, i) => prot[+i]);    // 保護した <a> を復元
+  return s.replace(/\u0000(\d+)\u0000/g, (m, i) => prot[+i]);    // 保護した <a> を復元
 }
 function renderInline(text) {
   let out = "";
@@ -357,7 +357,7 @@ function renderBlocks(src) {
 // ドコードは境界(``` 行)で非コード片/コード片の交互列に分割し、コード片は escape のみで
 // <pre><code> 化＝プレースホルダ衝突を構造的に排除する。
 function renderMarkdown(text) {
-  const raw = (text == null) ? "" : String(text).replace(/ /g, "");   // sentinel 衝突を構造的に排除
+  const raw = (text == null) ? "" : String(text).replace(/\u0000/g, "");   // sentinel 衝突を構造的に排除
   try {
     const lines = escapeHtml(raw).split("\n");                  // escape-first（& → < > " '）
     const out = [];
@@ -1188,9 +1188,15 @@ function runSelfTest() {
   check("code-dollar", r.indexOf("$1") !== -1 && r.indexOf("$$") !== -1 && r.indexOf("$&amp;") !== -1);
   check("code-lt", r.indexOf("&lt;b&gt;") !== -1 && r.indexOf("<b>") === -1);
   // 4. プレースホルダ/センチネル衝突: 入力にセンチネル相当が含まれても誤マッチしない。
-  r = renderMarkdown("plain   0   text **bold**");
+  r = renderMarkdown("plain \u0000 0 \u0000 text **bold**");
   check("sentinel-no-collide", /<strong>bold<\/strong>/.test(r));
-  // 5. never-throw: 未閉じフェンス/未閉じ強調/null でも例外を投げず文字列を返す。
+  // 5. 構造パース回帰防止: 見出し/リストが実タグへ、スペースが保持されること
+  //    （sentinel は NUL のためスペースは無傷。過去に「全スペース削除」と誤読された箇所の回帰網）。
+  r = renderMarkdown("# Heading\n- Item 1\n- Item 2");
+  check("header-parsed", /<h1>Heading<\/h1>/.test(r));
+  check("list-parsed", /<ul><li>Item 1<\/li><li>Item 2<\/li><\/ul>/.test(r));
+  check("space-preserved", renderMarkdown("a b c").indexOf("a b c") !== -1);
+  // 6. never-throw: 未閉じフェンス/未閉じ強調/null でも例外を投げず文字列を返す。
   let threw = false;
   try {
     [renderMarkdown("```\nunclosed **bold _italic"), renderMarkdown("**"), renderMarkdown(null)]
