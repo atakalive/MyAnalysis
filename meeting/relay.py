@@ -473,6 +473,26 @@ class MeetingRelay(QObject):
                     out.add(n)
         return out
 
+    def _session_in_active_scope(self, sid: str) -> bool:
+        """True iff session ``sid`` is in the host's selection AND bound to the
+        ACTIVE dataset — the live out/in gate for messages (Issue #51 B5 / reviewer
+        code P1 R2). The session list/history are already scoped via ``eff_sids``
+        in the capture tick; the live message paths (out send, in receive) need
+        the same gate so a prior dataset's in-flight replies and remote guest
+        injections do not cross a dataset switch and leak a hidden dataset's chat.
+        A session absent from the current summaries reads as dataset None (matches
+        the active scope only when no dataset is selected)."""
+        if sid not in self._published_session_ids:
+            return False
+        cw = self._window.chat_widget()
+        if cw is None:
+            return False
+        ds = next(
+            (s.get("dataset") for s in cw.session_summaries() if s.get("id") == sid),
+            None,
+        )
+        return ds == self._active_dataset()
+
     def absorb_new_tabs(self) -> list[str]:
         """Auto-share tabs that appeared after the meeting started, limited to the
         ACTIVE dataset (Issue #51 B5).
@@ -758,8 +778,9 @@ class MeetingRelay(QObject):
         # in: receive gate — symmetric to the out: send gate. KV is eventually
         # consistent, so a guest may POST to a just-opted-out sid within the
         # propagation window; drop it here so a private session never drives the
-        # agent (tool-operation rights).
-        if sid not in self._published_session_ids:
+        # agent (tool-operation rights). Active-DS scoped so a guest can't inject
+        # into a hidden dataset's session after a switch (Issue #51 B5 / reviewer P1).
+        if not self._session_in_active_scope(sid):
             return
         cw = self._window.chat_widget()
         if cw is not None:
@@ -779,7 +800,11 @@ class MeetingRelay(QObject):
         last_pub = getattr(self, "_stream_last_pub", None)
         if last_pub is not None:
             last_pub.pop(sid, None)
-        if not (self._sharing and origin == "local" and sid in self._published_session_ids):
+        # out: send only host-local messages of a published session IN THE ACTIVE
+        # dataset — a hidden dataset's in-flight reply must not leak after a switch
+        # (Issue #51 B5 / reviewer P1). stream_id pop above runs regardless of the gate.
+        if not (self._sharing and origin == "local"
+                and self._session_in_active_scope(sid)):
             return
         if not content or not content.strip():
             return
@@ -799,10 +824,12 @@ class MeetingRelay(QObject):
     def _on_message_streaming(self, sid: str, content: str, origin: str,
                               stream_id: str) -> None:
         # Live partial of an in-flight assistant turn — same out: gate as
-        # _on_message_added, throttled to _STREAM_MIN_INTERVAL per session so a
-        # fast token stream doesn't flood the relay. The final full text still
-        # arrives via _on_message_added, so a throttled-away partial is loss-free.
-        if not (self._sharing and origin == "local" and sid in self._published_session_ids):
+        # _on_message_added (published ∩ active dataset), throttled to
+        # _STREAM_MIN_INTERVAL per session so a fast token stream doesn't flood the
+        # relay. The final full text still arrives via _on_message_added, so a
+        # throttled-away partial is loss-free.
+        if not (self._sharing and origin == "local"
+                and self._session_in_active_scope(sid)):
             return
         if not content or not content.strip() or not stream_id:
             return

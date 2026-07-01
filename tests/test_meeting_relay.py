@@ -226,6 +226,45 @@ def test_in_gate(qapp, monkeypatch):
     assert len(chat.injected) == 1
 
 
+def test_live_message_gate_active_dataset(qapp, monkeypatch):
+    """Issue #51 B5 / reviewer code P1 R2: the LIVE out (added/streaming) and in
+    (remote injection) gates are scoped to the active dataset, not just the
+    selection. After a switch, a session bound to the now-hidden dataset must not
+    leak its in-flight reply to guests nor receive a guest injection."""
+    chat = FakeChat([
+        {"id": "a", "title": "A", "busy": False, "dataset": "dsA"},
+        {"id": "b", "title": "B", "busy": False, "dataset": "dsB"},
+    ])
+    win = FakeWindow(chat, dataset="dsA")
+    mr, r = _make_relay(monkeypatch, win)
+    w = mr._RelayWorker("http://relay.test", "ADMIN", "ch")
+    r._worker = w
+    r._sharing = True
+    r._published_session_ids = {"a", "b"}          # both selected by the host
+
+    # dsA active: a's local message goes out; b (hidden dsB) is withheld.
+    r._on_message_added("a", "assistant", "hi from a", "local")
+    assert [i["sid"] for i in w._outbox] == ["a"]
+    w._outbox.clear()
+    r._on_message_added("b", "assistant", "hi from b", "local")
+    assert not w._outbox
+
+    # switch to dsB: a (now hidden dsA) is withheld even though still "published".
+    win.current_dataset = "dsB"
+    r._on_message_added("a", "assistant", "still a", "local")
+    assert not w._outbox                            # hidden dsA reply does NOT leak
+    r._on_message_streaming("a", "partial a", "local", "sid1")
+    assert not w._outbox                            # nor its streaming partial
+    r._on_message_added("b", "assistant", "hi b", "local")
+    assert [i["sid"] for i in w._outbox] == ["b"]   # active dsB flows
+
+    # in: a guest message to hidden dsA session a is dropped; to active b it injects.
+    r._on_remote_message("a", "Bob", "to hidden a")
+    assert chat.injected == []
+    r._on_remote_message("b", "Bob", "to active b")
+    assert chat.injected == [("to active b", "Bob", "b")]
+
+
 def _mid(ts):
     return f"{ts:013d}-{'0' * 13}"
 
