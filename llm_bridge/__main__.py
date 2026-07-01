@@ -88,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't auto-open the dataset in a running GUI (skip the 10s wait)",
     )
 
+    p_sd = sub.add_parser("set-description",
+                          help="Set a dataset's picker description (meta.json)")
+    p_sd.add_argument("dataset")
+    p_sd.add_argument("text")
+
     p_lc = sub.add_parser("list-commands", help="List registered verbs (informational)")
     p_lc.add_argument("name", nargs="?")
 
@@ -200,8 +205,24 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:
                 entry["format"] = None
                 print(f"warning: could not read format for {name!r}: {e}", file=sys.stderr)
+            from llm_bridge import dataset_meta
+            entry["description"] = (dataset_meta.read_meta(name) or {}).get("description", "")
             result.append(entry)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "set-description":
+        import config
+        config.reload_datasets()
+        if args.dataset not in config.DATASETS:
+            print(f"error: unknown dataset {args.dataset!r}", file=sys.stderr)
+            return 1
+        from llm_bridge import dataset_meta
+        try:
+            dataset_meta.patch_description(args.dataset, args.text)
+        except (KeyError, RuntimeError, OSError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
         return 0
 
     if args.cmd == "register-dataset":

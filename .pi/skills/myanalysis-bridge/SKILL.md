@@ -154,6 +154,9 @@ path = get_dataset_dir("dataset_a")
 Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-datasets`
 shows the full registry; datasets without a path entry for the current host will
 raise `RuntimeError` on `load_dataset()`.
+Set a dataset's picker description with
+`python -m llm_bridge set-description <dataset> "<text>"` (writes
+`<dataset_dir>/meta.json`; shown in the "Open dataset" picker).
 Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 **Never modify measurement files (CSV etc.).** Analysis output is written by the
 tools to the dataset's `work_dir` (default `<dataset_dir>/_work`, set per dataset in

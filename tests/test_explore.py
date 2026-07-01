@@ -285,7 +285,8 @@ def test_list_datasets_json_structure(monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     assert isinstance(data, list)
     for entry in data:
-        assert set(entry) == {"name", "path", "format"}
+        # #50: description added as a non-breaking superset (name/path/format kept).
+        assert {"name", "path", "format", "description"} <= set(entry)
 
 
 def test_list_datasets_json_format_null_on_error(monkeypatch, capsys):

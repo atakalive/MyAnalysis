@@ -91,6 +91,10 @@ def save_all(window) -> tuple[list[str], list[str]]:
 
     Returns (saved, failed): dataset names saved successfully and those that
     raised. Clears window dirty only if `failed` is empty.
+
+    New side effect: rebuilds each saved dataset's `<dataset_dir>/meta.json`
+    (rebuild_meta, heavy=False) as a ride-along — does not affect saved/failed
+    or the dirty-clear gate.
     """
     # 1. Group session-tracked tabs by dataset, preserving tab order.
     grouped: dict[str, list[dict]] = {}
@@ -164,6 +168,18 @@ def save_all(window) -> tuple[list[str], list[str]]:
     # the headless _FakeWindow / CLI skip it entirely.
     _save_chat_sessions(window)
 
+    # Materialize display meta (LIGHT only) for each successfully saved dataset.
+    # Ride-along side effect (like chat above): never touches saved/failed or the
+    # dirty-clear gate; each dataset isolated. Lazy import breaks the cycle.
+    for ds in saved:
+        try:
+            from llm_bridge import dataset_meta
+            dataset_meta.rebuild_meta(ds, heavy=False)
+        except Exception:
+            _log.warning(
+                "save_all: failed to update meta for %r", ds, exc_info=True
+            )
+
     if not failed:
         window.clear_session_dirty()
     return saved, failed
@@ -225,6 +241,10 @@ def open_dataset(window, dataset: str) -> str:
     chat_sessions/ but no session.json (opened, chatted, saved). Chat restore +
     the final current-dataset push therefore run on every non-`error:` path
     (including `no-session:`), not just `restored:N`.
+
+    New side effects (on the resolved path only): rebuilds the synced
+    `<dataset_dir>/meta.json` (rebuild_meta, heavy=False) and stamps the
+    PC-local `data/llm_state/recent_datasets.json` (note_recent_dataset).
     """
     was_dirty = window.is_session_dirty()
     cw = getattr(window, "chat_widget", lambda: None)()
@@ -342,6 +362,19 @@ def open_dataset(window, dataset: str) -> str:
                     "open_dataset: failed to notify chat dataset for %r", dataset,
                     exc_info=True,
                 )
+        # Materialize display meta (LIGHT only — keep this GUI-thread path fast)
+        # and stamp the PC-local MRU. Lazy import breaks the
+        # session→dataset_meta→session cycle; isolated so a failure never
+        # affects the restore result.
+        try:
+            from llm_bridge import dataset_meta, paths as lb_paths
+            dataset_meta.rebuild_meta(dataset, heavy=False)
+            lb_paths.note_recent_dataset(dataset)
+        except Exception:
+            _log.warning(
+                "open_dataset: failed to update meta/MRU for %r", dataset,
+                exc_info=True,
+            )
     return result
 
 

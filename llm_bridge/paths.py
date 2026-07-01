@@ -1,5 +1,6 @@
 """LLM bridge specific paths. Lives parallel to common.paths but owns its own dir."""
 import json
+import time
 from pathlib import Path
 from common.paths import repo_root
 
@@ -59,6 +60,52 @@ def update_ui_pref(key: str, value) -> None:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
     except (OSError, ValueError, TypeError):        # 非 JSON-serializable value の TypeError も吸収（never-raise 厳守）
+        pass
+
+
+def recent_datasets_path() -> Path:
+    """Return data/llm_state/recent_datasets.json (file may not exist yet).
+
+    PC-local MRU (most-recently-opened) order for the dataset picker. Kept out of
+    the synced meta.json so open-order does not mix across PCs.
+    """
+    return global_state_dir() / "recent_datasets.json"
+
+
+def read_recent_datasets() -> dict:
+    """Read the MRU map {name: epoch_float}. never raise; corrupt → fresh {}.
+
+    Values are type-normalized: only str keys mapped to non-bool int/float epochs
+    survive, so a hand-edited/corrupt entry can't poison the picker's sort.
+    """
+    try:
+        data = json.loads(recent_datasets_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: v for k, v in data.items()
+        if isinstance(k, str) and isinstance(v, (int, float))
+        and not isinstance(v, bool)
+    }
+
+
+def note_recent_dataset(name: str) -> None:
+    """Record that `name` was just opened (MRU). atomic(temp+replace)·never raise.
+
+    Distinct from session.note_dataset (tracks empty-tabs persistence) and
+    window.note_current_dataset (pushes the current dataset to chat) — this only
+    stamps the PC-local recent_datasets.json used for the picker's default sort.
+    """
+    try:
+        data = read_recent_datasets()
+        data[name] = time.time()
+        path = recent_datasets_path()
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except (OSError, ValueError, TypeError):
         pass
 
 

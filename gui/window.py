@@ -3,6 +3,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
+    QDialog,
     QDockWidget,
     QFileDialog,
     QInputDialog,
@@ -64,6 +65,10 @@ class ToolWindow(QMainWindow):
         self._chat_widget = None
 
         self._command_handlers: dict[str, Callable[..., object]] = {}
+
+        # Long-lived registry keeping dataset-picker meta-build workers alive
+        # while they run (belt-and-braces with their QApplication Qt parent).
+        self._meta_workers: list = []
 
         self._session_dirty = False
         self._suppress_dirty = False
@@ -357,11 +362,12 @@ class ToolWindow(QMainWindow):
                 self, tr("dlg.open_dataset.title"), tr("dlg.open_dataset.empty")
             )
             return
-        name, ok = QInputDialog.getItem(
-            self, tr("dlg.open_dataset.title"), tr("dlg.open_dataset.label"),
-            names, 0, False
-        )
-        if not ok or not name:
+        from gui.open_dataset_dialog import OpenDatasetDialog
+        dlg = OpenDatasetDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dlg.selected_dataset()
+        if not name:
             return
         if not self.has_command("open-dataset"):
             QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
@@ -514,13 +520,18 @@ class ToolWindow(QMainWindow):
             if ok and analysis_name:
                 try:
                     create_analysis(analysis_name, dataset=name)
-                except (ValueError, FileExistsError) as e:
+                except (ValueError, FileExistsError, KeyError, RuntimeError) as e:
                     QMessageBox.warning(
                         self,
                         tr("err.template_failed.title"),
                         tr("register.template_failed", name=name, error=e),
                     )
                     return
+                try:
+                    from llm_bridge import dataset_meta
+                    dataset_meta.rebuild_meta(name, heavy=False)
+                except Exception:
+                    pass
                 QMessageBox.information(
                     self,
                     tr("dlg.register_done.title"),
