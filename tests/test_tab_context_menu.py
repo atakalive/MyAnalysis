@@ -78,3 +78,72 @@ def test_focus_input_moves_cursor_to_end():
     w.set_input_draft("hello")
     w.focus_input()
     assert w._input.textCursor().position() == len("hello")
+
+
+def test_analysis_tab_default_not_placeholder():
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from gui.tab import AnalysisTab
+
+    assert AnalysisTab(name="x").is_placeholder is False
+
+
+def test_build_placeholder_tab_is_flagged():
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from tool import build_placeholder_tab
+
+    tab, _sp, _ah = build_placeholder_tab()
+    assert tab.is_placeholder is True
+
+
+class _MenuHost:
+    """`_populate_tab_menu` の self 代役。将来 lambda を直接メソッド参照
+    (`triggered.connect(self.close_tab)` 等) に置き換えても AttributeError に
+    ならないよう、参照されうるメソッドを実体として持つダミー。"""
+
+    def _comment_on_tab(self, name: str) -> None:
+        pass
+
+    def close_tab(self, name: str, dataset: str | None = None) -> bool:
+        return False
+
+
+def test_placeholder_menu_shows_close_only():
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    QApplication.instance() or QApplication([])
+    from gui.window import ToolWindow
+
+    class _Widget:
+        name = "(empty)"
+        is_placeholder = True
+
+    menu = QMenu()
+    ToolWindow._populate_tab_menu(_MenuHost(), menu, _Widget(), None)
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert texts == [tr("menu.tab.close")]
+    assert tr("menu.tab.copy_name") not in texts
+    assert tr("menu.tab.comment") not in texts
+
+
+def test_real_tab_menu_shows_all_items():
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    QApplication.instance() or QApplication([])
+    from gui.window import ToolWindow
+
+    class _Widget:
+        name = "myanalysis"
+        is_placeholder = False
+
+    menu = QMenu()
+    ToolWindow._populate_tab_menu(_MenuHost(), menu, _Widget(), "ds1")
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert texts == [
+        tr("menu.tab.copy_name"),
+        tr("menu.tab.comment"),
+        tr("menu.tab.close"),
+    ]

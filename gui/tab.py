@@ -14,9 +14,10 @@ RESERVED_TAB_VERBS = frozenset(["set-split"])
 class AnalysisTab(QWidget):
     """1 解析あたりのタブ内容。汎用器なので、パネル構成は外から組み立てる。"""
 
-    def __init__(self, name: str, parent=None):
+    def __init__(self, name: str, parent=None, *, is_placeholder: bool = False):
         super().__init__(parent)
         self.name = name
+        self.is_placeholder = is_placeholder
         self._panels: dict[str, QWidget] = {}
         self._state_provider: Callable[[], dict] | None = None
         self._snapshot_writer: Callable[["AnalysisTab"], None] | None = None

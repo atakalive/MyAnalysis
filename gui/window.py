@@ -842,21 +842,31 @@ class ToolWindow(QMainWindow):
         widget = grp.tabs.widget(index)
         if widget is None:
             return
-        name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
-        ds = grp.name
         menu = QMenu(self)
+        self._populate_tab_menu(menu, widget, grp.name)
+        menu.exec(tab_bar.mapToGlobal(pos))
 
-        copy_action = menu.addAction(tr("menu.tab.copy_name"))
-        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
+    def _populate_tab_menu(
+        self, menu: QMenu, widget: AnalysisTab, ds: str | None
+    ) -> None:
+        """タブ右クリックメニューを *menu* に構築する（exec はしない）。
 
-        comment_action = menu.addAction(tr("menu.tab.comment"))
-        comment_action.triggered.connect(lambda: self._comment_on_tab(name))
-
-        menu.addSeparator()
-
+        プレースホルダタブ（データセット未登録時の空スタブ、is_placeholder=True）
+        では「タブ名をコピー」「このタブにコメント」は無意味なので出さず、
+        「タブを閉じる」のみ表示する。実体タブ（解析／demo／inferred viewer）は
+        従来どおり全項目を出す。exec を分離しているのでヘッドレステスト可能。
+        """
+        name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
+        # is_placeholder は実 AnalysisTab では常に存在（__init__ で無条件初期化）。
+        # duck-typed テスト widget / headless fake でも呼べるよう fail-open。
+        if not getattr(widget, "is_placeholder", False):
+            copy_action = menu.addAction(tr("menu.tab.copy_name"))
+            copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
+            comment_action = menu.addAction(tr("menu.tab.comment"))
+            comment_action.triggered.connect(lambda: self._comment_on_tab(name))
+            menu.addSeparator()
         close_action = menu.addAction(tr("menu.tab.close"))
         close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
-        menu.exec(tab_bar.mapToGlobal(pos))
 
     def _comment_on_tab(self, name: str) -> None:
         chat = self.chat_widget()

@@ -90,7 +90,7 @@ def build_demo_tab() -> tuple[
 def build_placeholder_tab() -> tuple[
     AnalysisTab, Callable[[], dict] | None, Callable[[dict], None] | None
 ]:
-    tab = AnalysisTab(name="(empty)")
+    tab = AnalysisTab(name="(empty)", is_placeholder=True)
     tab.add_panel(
         "msg",
         QLabel("No analyses defined yet. Try: python tool.py --demo"),
