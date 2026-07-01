@@ -218,18 +218,43 @@ Key verbs:
 |---|---|
 | `list-datasets [--json]` | List registered datasets |
 | `register-dataset <name> <path> ...` | Register a dataset (optionally scaffold + auto-open) |
-| `list-analyses` | List analyses |
-| `active` | Active tab and currently open dataset |
+| `list-analyses [--dataset <ds>] [--json]` | List analyses across all open datasets (`{dataset: [names]}` with `--json`) |
+| `list-open-datasets` | Datasets open in the window + the active one |
+| `active` | Active tab, active dataset, and `open_datasets` |
 | `state [name]` | An analysis's `state.json` (active tab if omitted) |
-| `window <verb> [k=v] [--wait]` | Window ops (`open-dataset` / `add-tab` / `reload`, etc.) |
+| `window <verb> [k=v] [--wait]` | Window ops (`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload`, etc.) |
 | `tab <target> <verb> [k=v]` | Tab ops (`set-split` / `snapshot` / `refresh-state`, etc.) |
 | `annotate` / `clear-annotations` | Add/clear annotations (marker / note) |
+
+### Multiple datasets
+
+Several datasets can be open in one process; the top-level dataset switcher swaps
+between each dataset's tabs and chat sessions. `open-dataset` adds a dataset to the
+workspace (others stay open); `set-active-dataset name=<ds>` (alias `switch-dataset`)
+brings one to the front; `close-dataset name=<ds>` flushes its layout to
+`session.json` then drops it. When the same tab name exists in two open datasets,
+pass `dataset=<ds>` to any tab-addressing verb (`add-tab` / `show` / `set-active-tab`
+/ `close-tab` / `tab <name> <verb>`) to disambiguate.
+
+**Workspace restore.** File → "Restore last session" re-opens the datasets that were
+open together (recorded in the gitignored `data/llm_state/last_window.json`); restore
+is additive (it never closes already-open datasets). No automatic restore at startup.
+
+**Meeting share** broadcasts only the ACTIVE dataset's tabs and chat sessions
+(switching datasets swaps the shared set; same-named cross-dataset tabs are not
+co-shared in v1).
+
+**Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
+resident while open, so opening many large datasets at once can pressure memory
+(lazy load/unload is a future item).
 
 Examples:
 
 ```bash
 python -m llm_bridge list-datasets --json
 python -m llm_bridge window open-dataset name=my_dataset --wait 30
+python -m llm_bridge window set-active-dataset name=other_dataset --wait
+python -m llm_bridge tab summary snapshot dataset=other_dataset --wait
 ```
 
 ---

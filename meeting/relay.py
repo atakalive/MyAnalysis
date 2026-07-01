@@ -455,17 +455,42 @@ class MeetingRelay(QObject):
     def set_published_tabs(self, names) -> None:
         self._published_tabs = set(names)
 
-    def absorb_new_tabs(self) -> list[str]:
-        """Auto-share tabs that appeared after the meeting started.
+    def _active_dataset(self):
+        """The window's currently-selected dataset (meeting publish scope, B5)."""
+        return getattr(self._window, "current_dataset", None)
 
-        Tabs default to shared: a tab opened mid-meeting joins the published set
-        without the host having to click. Explicitly deselected tabs are NOT
-        re-added because they stay in `_tab_known` (only genuinely-new names are
-        absorbed). Returns the names newly absorbed (for logging/UI), [] if idle.
+    def _tab_dataset(self, tab):
+        return (getattr(tab, "session_spec", None) or {}).get("dataset")
+
+    def _active_ds_tab_names(self) -> set[str]:
+        """Tab names belonging to the active dataset (None-safe filter, B5)."""
+        cur = self._active_dataset()
+        out: set[str] = set()
+        for tab in self._window.tabs():
+            if self._tab_dataset(tab) == cur:
+                n = getattr(tab, "name", None)
+                if n is not None:
+                    out.add(n)
+        return out
+
+    def absorb_new_tabs(self) -> list[str]:
+        """Auto-share tabs that appeared after the meeting started, limited to the
+        ACTIVE dataset (Issue #51 B5).
+
+        Tabs default to shared: a tab opened mid-meeting in the active dataset
+        joins the published set without the host having to click. A same-named
+        tab in a hidden dataset is NOT absorbed (its view PNG would otherwise
+        overwrite the active one under the shared bare-name relay id).
+        Explicitly deselected tabs stay in `_tab_known` and are not re-added.
+        Returns the names newly absorbed (for logging/UI), [] if idle.
         """
         if not self._sharing:
             return []
-        new = [t for t in self._window.tab_names() if t not in self._tab_known]
+        active_names = self._active_ds_tab_names()
+        new = [
+            t for t in self._window.tab_names()
+            if t not in self._tab_known and t in active_names
+        ]
         if new:
             self._published_tabs.update(new)
             self._tab_known.update(new)
@@ -529,14 +554,19 @@ class MeetingRelay(QObject):
             if cw is None:
                 return []
             summaries = cw.session_summaries()
-        new = [s["id"] for s in summaries if s["id"] not in self._session_known]
+        new = [s for s in summaries if s["id"] not in self._session_known]
         if not new:
             return []
-        self._session_known.update(new)          # always mark observed (privacy invariant)
+        # always mark observed (privacy invariant)
+        self._session_known.update(s["id"] for s in new)
         if not self._auto_share_new_sessions:
             return []                            # toggle off: known but NOT published
-        self._published_session_ids.update(new)
-        return new
+        # Publish only sessions bound to the ACTIVE dataset (Issue #51 B5): a
+        # hidden dataset's chat must not leak to guests.
+        cur = self._active_dataset()
+        to_pub = [s["id"] for s in new if s.get("dataset") == cur]
+        self._published_session_ids.update(to_pub)
+        return to_pub
 
     # ---- lifecycle ----
 
@@ -590,12 +620,17 @@ class MeetingRelay(QObject):
         self._expires_at = int(data.get("expires_at", 0) or 0)
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
-        self._published_session_ids = {s["id"] for s in summaries}
+        # Publish only the ACTIVE dataset's sessions/tabs (Issue #51 B5); _known
+        # tracks ALL current ids/names so hidden-dataset items aren't treated as
+        # "new" and auto-absorbed later.
+        cur = self._active_dataset()
+        active_ids = {s["id"] for s in summaries if s.get("dataset") == cur}
+        self._published_session_ids = set(active_ids)
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         self._meeting_start_ids = set(self._published_session_ids)
-        self._session_known = set(self._published_session_ids)
-        self._published_tabs = set(self._window.tab_names())
-        self._tab_known = set(self._published_tabs)
+        self._session_known = {s["id"] for s in summaries}
+        self._published_tabs = self._active_ds_tab_names()
+        self._tab_known = set(self._window.tab_names())
         self._channel = ch
         self._secret = secret
         self._sharing = True
@@ -819,12 +854,21 @@ class MeetingRelay(QObject):
             win = self._window
             cw = win.chat_widget()
 
-            # Sessions: publish only ids in (_published_session_ids ∩ existing) so a
-            # deleted session drops out and dataset switch can't leak others.
+            # Active-dataset scope (Issue #51 B5): the effective publish set is the
+            # host's selection ∩ the ACTIVE dataset. _published_* keep the full
+            # selection so a DS switch swaps the shared set (hidden DS content is
+            # withheld, not forgotten).
+            cur = self._active_dataset()
+
+            # Sessions: publish only ids in (_published_session_ids ∩ existing ∩
+            # active-ds) so a deleted session drops out and a hidden dataset's
+            # chat never leaks.
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
+            active_sids = {s["id"] for s in summaries if s.get("dataset") == cur}
             self.absorb_new_sessions(summaries)
             self._published_session_ids &= existing
+            eff_sids = self._published_session_ids & active_sids
             # Stage each newly-published session's pre-meeting transcript once so
             # guests can fetch history older than meeting start (GET /history).
             # getattr guard: a mid-meeting hot-reload patches new code onto the
@@ -834,32 +878,40 @@ class MeetingRelay(QObject):
             if not hasattr(self, "_backfilled_ids"):
                 self._backfilled_ids = set()
             if cw is not None:
-                for sid in list(self._published_session_ids - self._backfilled_ids):
+                for sid in list(eff_sids - self._backfilled_ids):
                     self._backfill_session(sid, cw)
                     self._backfilled_ids.add(sid)
             pub = [
                 {"id": s["id"], "title": s["title"], "busy": s["busy"]}
-                for s in summaries if s["id"] in self._published_session_ids
+                for s in summaries if s["id"] in eff_sids
             ]
             sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
             if sj != self._last_sessions_json:
                 self._last_sessions_json = sj
                 self._worker.enqueue({"kind": "sessions", "data": pub})
 
-            # Tabs: new tabs auto-join the published set (default-share); then publish
-            # the published ∩ existing.
+            # Tabs: new tabs auto-join the published set (default-share, active DS
+            # only); publish the selection ∩ active-ds tabs.
             self.absorb_new_tabs()
+            active_tab_names = self._active_ds_tab_names()
             all_tabs = win.tab_names()
-            pub_tabs = [t for t in all_tabs if t in self._published_tabs]
+            pub_tabs = [
+                t for t in all_tabs
+                if t in self._published_tabs and t in active_tab_names
+            ]
             tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)
             if tj != self._last_tabs_json:
                 self._last_tabs_json = tj
                 self._worker.enqueue({"kind": "tabs", "data": pub_tabs})
 
-            # Views: grab published tabs (GUI thread), hash-gate, enqueue PNG bytes.
+            # Views: grab published tabs in the ACTIVE dataset only (GUI thread),
+            # hash-gate, enqueue PNG bytes. Restricting to the active DS keeps a
+            # same-named tab in a hidden dataset from overwriting the shared view.
             for tab in win.tabs():
                 name = getattr(tab, "name", None)
                 if name is None or name not in self._published_tabs:
+                    continue
+                if self._tab_dataset(tab) != cur:
                     continue
                 png = self._capture_tab(tab, name)
                 if png is not None:

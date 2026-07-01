@@ -5,13 +5,49 @@ from llm_bridge import commands, state
 from llm_bridge.paths import active_state_path
 import dataset_config
 
+# Optional `dataset` disambiguator shared by tab-addressing tools: when two open
+# datasets hold a same-named tab, dataset= selects which one.
+_DATASET_PROP = {
+    "type": "string",
+    "description": "Optional dataset name to disambiguate a tab that exists in "
+    "more than one open dataset. Omit to use the active dataset.",
+}
+
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "list_analyses",
-            "description": "List analysis names available under the currently open dataset.",
+            "description": "List analysis names across ALL open datasets as a map "
+            "{dataset: [names]}. Pass dataset= to restrict to one dataset "
+            "(same {dataset: [names]} shape).",
+            "parameters": {
+                "type": "object",
+                "properties": {"dataset": _DATASET_PROP},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_open_datasets",
+            "description": "List the datasets currently open in the window and "
+            "which one is active: {\"open\": [names], \"active\": name|null}.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_active_dataset",
+            "description": "Switch the top-level dataset switcher to the named open "
+            "dataset (its analysis tabs + chat sessions become visible).",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
         },
     },
     {
@@ -26,7 +62,9 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_active_tab",
-            "description": "Return the currently focused tab name and the currently open dataset (null if none).",
+            "description": "Return the currently focused tab name, the active dataset, "
+            "and the open-datasets list (active.json: active_tab, dataset, "
+            "active_dataset, open_datasets).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -34,10 +72,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "open_analysis",
-            "description": "Open an analysis as a new tab (or focus if already open).",
+            "description": "Open an analysis as a new tab (or focus if already open). "
+            "Pass dataset= to open it under a specific open dataset.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "dataset": _DATASET_PROP,
+                },
                 "required": ["name"],
             },
         },
@@ -49,7 +91,10 @@ TOOLS = [
             "description": "Focus the named tab.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "dataset": _DATASET_PROP,
+                },
                 "required": ["name"],
             },
         },
@@ -61,7 +106,10 @@ TOOLS = [
             "description": "Save a PNG snapshot of the named tab's current view.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "dataset": _DATASET_PROP,
+                },
                 "required": ["name"],
             },
         },
@@ -85,6 +133,7 @@ TOOLS = [
                         "enum": ["left", "right", "top", "bottom"],
                         "description": "Pane position. Omit for default (primary/full-width).",
                     },
+                    "dataset": _DATASET_PROP,
                 },
                 "required": ["path"],
             },
@@ -105,6 +154,7 @@ TOOLS = [
                     "name": {"type": "string"},
                     "left": {"type": "number"},
                     "right": {"type": "number"},
+                    "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "left", "right"],
             },
@@ -118,7 +168,10 @@ TOOLS = [
             "Empty {} if the tab has not pushed state yet.",
             "parameters": {
                 "type": "object",
-                "properties": {"name": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "dataset": _DATASET_PROP,
+                },
                 "required": ["name"],
             },
         },
@@ -138,23 +191,39 @@ def make_dispatch(window):
     return dispatch
 
 
+def _analyses_for(dataset: str) -> list[str]:
+    """Analysis names (dirs with analysis.py) under one dataset's analyses_root."""
+    try:
+        root = dataset_config.analyses_root(dataset)
+    except (KeyError, RuntimeError):
+        return []
+    if not root.is_dir():
+        return []
+    return sorted(
+        d.name for d in root.glob("*") if (d / "analysis.py").is_file()
+    )
+
+
 def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
     if "__parse_error__" in args:
         return json.dumps({"error": args["__parse_error__"]})
     if name == "list_analyses":
-        cur = window.current_dataset
-        if cur is None:
-            return json.dumps([])
-        try:
-            root = dataset_config.analyses_root(cur)
-        except (KeyError, RuntimeError):
-            return json.dumps([])
-        if not root.is_dir():
-            return json.dumps([])
-        names = [
-            d.name for d in root.glob("*") if (d / "analysis.py").is_file()
-        ]
-        return json.dumps(sorted(names))
+        want = args.get("dataset")
+        if want is not None:
+            targets = [want]
+        elif hasattr(window, "open_dataset_names"):
+            targets = list(window.open_dataset_names())
+        else:
+            cur = window.current_dataset
+            targets = [cur] if cur else []
+        return json.dumps({ds: _analyses_for(ds) for ds in targets})
+    if name == "list_open_datasets":
+        return _via_bridge("window", None, "list-open-datasets", {}, cancelled=cancelled)
+    if name == "set_active_dataset":
+        return _via_bridge(
+            "window", None, "set-active-dataset",
+            {"name": args["name"]}, cancelled=cancelled,
+        )
     if name == "list_open_tabs":
         return _via_bridge("window", None, "list-tabs", {}, cancelled=cancelled)
     if name == "get_active_tab":
@@ -163,40 +232,38 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
             return json.dumps({"active_tab": None})
         return p.read_text(encoding="utf-8")
     if name == "open_analysis":
+        bargs = {"name": args["name"]}
+        if "dataset" in args:
+            bargs["dataset"] = args["dataset"]
         return _via_bridge(
-            "window",
-            None,
-            "add-tab",
-            {"name": args["name"]},
-            timeout=30.0,
-            cancelled=cancelled,
+            "window", None, "add-tab", bargs, timeout=30.0, cancelled=cancelled
         )
     if name == "set_active_tab":
+        bargs = {"name": args["name"]}
+        if "dataset" in args:
+            bargs["dataset"] = args["dataset"]
         return _via_bridge(
-            "window",
-            None,
-            "set-active-tab",
-            {"name": args["name"]},
-            cancelled=cancelled,
+            "window", None, "set-active-tab", bargs, cancelled=cancelled
         )
     if name == "snapshot":
+        targs = {}
+        if "dataset" in args:
+            targs["dataset"] = args["dataset"]
         return _via_bridge(
-            "tab", args["name"], "snapshot", {}, timeout=30.0, cancelled=cancelled
+            "tab", args["name"], "snapshot", targs, timeout=30.0, cancelled=cancelled
         )
     if name == "show":
         kwargs = {"path": args["path"]}
-        if "name" in args:
-            kwargs["name"] = args["name"]
-        if "slot" in args:
-            kwargs["slot"] = args["slot"]
+        for k in ("name", "slot", "dataset"):
+            if k in args:
+                kwargs[k] = args[k]
         return _via_bridge("window", None, "show", kwargs, cancelled=cancelled)
     if name == "set_split":
+        targs = {"left": args["left"], "right": args["right"]}
+        if "dataset" in args:
+            targs["dataset"] = args["dataset"]
         return _via_bridge(
-            "tab",
-            args["name"],
-            "set-split",
-            {"left": args["left"], "right": args["right"]},
-            cancelled=cancelled,
+            "tab", args["name"], "set-split", targs, cancelled=cancelled
         )
     if name == "get_state":
         tab_name = args["name"]
@@ -208,8 +275,17 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         ):
             return json.dumps({"error": f"invalid name: {tab_name!r}"})
         # named tab の state は、その名前で開いている解析タブ自身の dataset から
-        # 引く（current_dataset と乖離し得るため）。解析タブでなければ {} を返す。
-        t = next((t for t in window.tabs() if t.name == tab_name), None)
+        # 引く（current_dataset と乖離し得るため）。(name, dataset) で解決する。
+        want_ds = args.get("dataset")
+        t = None
+        finder = getattr(window, "find_tab", None)
+        if finder is not None:
+            try:
+                t = finder(tab_name, want_ds)
+            except LookupError:
+                t = None
+        else:
+            t = next((x for x in window.tabs() if x.name == tab_name), None)
         spec = getattr(t, "session_spec", None) if t is not None else None
         if not isinstance(spec, dict) or spec.get("kind") != "analysis":
             return json.dumps({})

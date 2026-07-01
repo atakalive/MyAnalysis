@@ -120,16 +120,29 @@ def write_manifest(window) -> None:
             datasets.append(spec["dataset"])
     active = window.active_tab()
     cw = window.chat_widget()
+    # view_state_by_dataset is nested {dataset: {tab_name: view}} keyed by a name
+    # distinct from flat view_state so restore disambiguates by KEY, not by an
+    # isinstance heuristic (a flat value {panels,splitter} and a nested value
+    # {name: view} are both dicts). dataset-less tabs ((empty)/inferred viewer,
+    # session_spec=None) are excluded — json would coerce a None key to "null".
+    view_by_ds: dict[str, dict] = {}
+    for tab in window.tabs():
+        spec = getattr(tab, "session_spec", None)
+        ds = spec.get("dataset") if isinstance(spec, dict) else None
+        if ds is None:
+            continue
+        view_by_ds.setdefault(ds, {})[tab.name] = _capture_view(tab)
     data = {
         "datasets": datasets,
         "active_tab": active.name if active is not None else None,
+        "active_dataset": getattr(window, "current_dataset", None),
         "geometry": _hex(window.saveGeometry()),
         "window_state": _hex(window.saveState()),
         "chat_draft": cw.input_draft() if hasattr(cw, "input_draft") else "",
         "chat_active_id": (
             cw.active_session_id() if hasattr(cw, "active_session_id") else None
         ),
-        "view_state": {tab.name: _capture_view(tab) for tab in window.tabs()},
+        "view_state_by_dataset": view_by_ds,
     }
     _m("llm_bridge.paths").reload_manifest_path().write_text(
         json.dumps(data, ensure_ascii=False), encoding="utf-8"
@@ -182,15 +195,37 @@ def _restore_from_manifest(window, data: dict) -> None:
             window.restoreState(QByteArray.fromHex(bytes(ws, "ascii")))
         except Exception:
             pass
+    # Bring the saved active dataset group to the front BEFORE focusing its
+    # active tab (else set_active_tab can't surface the right group). Uses
+    # set_active_dataset (= _select_dataset_group), not note_current_dataset.
+    active_ds = data.get("active_dataset")
+    if active_ds is not None:
+        try:
+            window.set_active_dataset(active_ds)
+        except Exception:
+            pass
     active = data.get("active_tab")
     if active:
         try:
-            window.set_active_tab(active)
+            window.set_active_tab(active, dataset=active_ds)
         except Exception:
-            pass
-    view_state = data.get("view_state", {}) or {}
+            try:
+                window.set_active_tab(active)
+            except Exception:
+                pass
+    # view_state: new nested form (keyed by dataset) wins; fall back to the old
+    # flat form for a mid-migration manifest. Key name disambiguates — no
+    # isinstance guessing.
+    view_by_ds = data.get("view_state_by_dataset")
+    flat_view = data.get("view_state", {}) or {}
     for tab in window.tabs():
-        v = view_state.get(tab.name)
+        spec = getattr(tab, "session_spec", None)
+        ds = spec.get("dataset") if isinstance(spec, dict) else None
+        v = None
+        if isinstance(view_by_ds, dict) and ds is not None:
+            v = (view_by_ds.get(ds) or {}).get(tab.name)
+        if v is None:
+            v = flat_view.get(tab.name)
         if v:
             _restore_view(tab, v)
     cw = window.chat_widget()
@@ -253,7 +288,21 @@ class HotReloadController(QObject):
         import dataset_config
 
         window = self._window
-        old_tab = next((t for t in window.tabs() if t.name == name), None)
+        # Resolve by (name, current dataset) so a same-named analysis in another
+        # dataset is neither reloaded nor closed by mistake. find_tab prefers the
+        # current dataset and raises on an unresolved ambiguity.
+        finder = getattr(window, "find_tab", None)
+        old_tab = None
+        if finder is not None:
+            try:
+                old_tab = finder(name, None)
+            except LookupError:
+                return (
+                    f"reload-tab-error:tab {name!r} is open in multiple datasets; "
+                    f"switch to the target dataset first"
+                )
+        if old_tab is None:
+            old_tab = next((t for t in window.tabs() if t.name == name), None)
         if old_tab is None:
             return f"reload-tab-error:no open tab named {name!r}"
         old_spec = getattr(old_tab, "session_spec", None) or {}
@@ -299,12 +348,13 @@ class HotReloadController(QObject):
             return (
                 "reload-tab-error:apply_state / refresh-state failed (old tab retained)"
             )
-        # All good — swap the old tab for the new one.
+        # All good — swap the old tab for the new one (dataset-scoped so a
+        # same-named tab in another dataset is untouched).
         new_tab.setParent(None)
         sandbox.deleteLater()
-        window.close_tab(name)
+        window.close_tab(name, dataset=dataset)
         window.add_tab(new_tab)
-        window.set_active_tab(name)
+        window.set_active_tab(name, dataset=dataset)
         _restore_view(new_tab, view)
         self._reloader.mark_analysis_clean(dataset, name)
         return f"reloaded-tab:{name}"

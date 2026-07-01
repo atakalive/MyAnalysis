@@ -84,9 +84,10 @@ def _avail_text(meta) -> str:
 class DatasetTableModel(QAbstractTableModel):
     """Holds a list[DatasetMeta]; DisplayRole = formatted, UserRole = sort value."""
 
-    def __init__(self, metas, parent=None):
+    def __init__(self, metas, parent=None, open_names=()):
         super().__init__(parent)
         self._metas = list(metas)
+        self._open_names = set(open_names)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._metas)
@@ -128,6 +129,9 @@ class DatasetTableModel(QAbstractTableModel):
         col = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             if col == COL_NAME:
+                # Mark datasets already open in this window (Issue #51 B1b).
+                if m.name in self._open_names:
+                    return f"● {m.name or ''}"
                 return m.name or ""
             if col == COL_DESC:
                 return m.description or tr("picker.unwritten")
@@ -236,7 +240,9 @@ class OpenDatasetDialog(QDialog):
             m.name or "",
         ))
 
-        self._model = DatasetTableModel(metas, self)
+        open_names = getattr(main_window, "open_dataset_names", lambda: [])()
+        self._open_names = set(open_names)
+        self._model = DatasetTableModel(metas, self, open_names=self._open_names)
         self._proxy = DatasetFilterProxyModel(self)
         self._proxy.setSourceModel(self._model)
 
@@ -382,6 +388,10 @@ class OpenDatasetDialog(QDialog):
         def _txt(v, missing=None):
             return v if v else (missing or tr("picker.unknown"))
 
+        if m.name in self._open_names:
+            open_lbl = QLabel(tr("picker.badge.open"))
+            open_lbl.setStyleSheet("color:#6ec1e4;font-weight:bold")
+            add("", open_lbl)
         add(tr("picker.col.description"),
             QLabel(m.description or tr("picker.unwritten")))
         add(tr("picker.detail.format"), QLabel(_txt(m.format)))

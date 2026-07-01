@@ -39,7 +39,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
     analyses/<name>/batch/       ← export 出力 PNG
 ```
 
-パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。同一ウィンドウ内で別データセットの同名解析を同時に開くことは非サポート（タブ論理 ID は `name` 単独）。
+パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。**別データセットの同名解析を同時に開くのは Issue #51 で対応済み**：タブはデータセットごとの `_DatasetGroup`（トップの `DatasetSwitcher` で切替）にグループ化され、タブ ID は「グループ内で一意」になる。エージェント/CLI は衝突時のみ `dataset=` でアドレッシングを修飾する（`add-tab`/`show`/`set-active-tab`/`close-tab`/tab-tier verb が任意 `dataset=` を受ける）。
 
 リポジトリ直下の旧 `analyses/`（4 件）はコードから参照されなくなり不活性化済み（物理削除はせず、手動移行は範囲外）。`data/analyses/` への書き込みは全廃。
 
@@ -127,12 +127,21 @@ to discover registered dataset names.
 
 ## Session save/restore
 
-データセット単位のセッション（開いていたタブ構成・アクティブタブ）を `<work_dir>/session.json` に保存・復元する。repo-local のグローバル last-session は無い。現在開いているデータセットは `python -m llm_bridge active` の `dataset` フィールドで取得できる（null なら未オープン）。
+データセット単位のセッション（開いていたタブ構成・アクティブタブ）は引き続き `<work_dir>/session.json` に保存・復元する（データバインドの真実ソース＝同期ドライブでどこでも開ける）。現在開いているデータセットは `python -m llm_bridge active` の `active_dataset`/`dataset` フィールド、開いているデータセット一覧は `open_datasets` フィールド（または `list-open-datasets`）で取得できる。
 
 - 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
 - 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。
 - `llm_bridge/session.py` が中核。`show` verb の `dataset=` 引数でタブ→データセット紐付け。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
+
+### Multiple datasets（Issue #51 — ワークスペース）
+
+1 プロセスに複数データセットを同時に開ける。トップの `DatasetSwitcher` で切り替えると、そのデータセットの解析タブ群とチャットセッション群に入れ替わる。
+
+- **ワークスペースメンバー一覧**（どのデータセットが一緒に開いていたか＋アクティブ）だけを repo-local・gitignored の `data/llm_state/last_window.json`（`{version, datasets, active}`）に集約する。#50 の `recent_datasets.json`（MRU＝履歴順）の隣に並ぶ 2 つ目の PC ローカルレコード（workspace＝同時開き集合）。両者とも **PC 間同期はしない** machine/window 状態で、per-dataset のタブ内容 `session.json` が同期側を担う。Tier 4 の `reload_manifest.json`（transient）とも別レコード。
+- 復元は **手動**：File →「前回のセッションを復元」（起動時自動復元はしない）。復元は **ADDITIVE**（既に開いているデータセット/タブは閉じない・上書きしない）。
+- 会議共有（meeting relay）は **アクティブデータセットのタブおよびチャットのみ** ゲストへ配信する（DS 切替で共有対象も切替）。同名タブのクロス DS 共有は v1 非サポート。
+- **メモリ天井（既知の制約・v1）**: 各解析タブは開いた時点で `mod.load()` を eager 実行し、開いている限り DataFrame を常駐させる。複数データセットを同時に開くと全データセットの全解析の DataFrame が同時常駐するため、大きな測定データを多数開くとメモリを圧迫し得る（遅延ロード/アンロードは将来課題）。
 
 ## ホットリロード — `devtools/`
 

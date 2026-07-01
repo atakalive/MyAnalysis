@@ -131,10 +131,10 @@ def test_toolwindow_context_menu_path(qapp):
     from gui.tab import AnalysisTab
     from gui.tabbar import MultiRowTabBar
     win = ToolWindow()
-    bar = win._tabs.tabBar()
-    assert isinstance(bar, MultiRowTabBar)
     for i in range(12):
         win.add_tab(AnalysisTab(f"analysis{i}"))
+    bar = win._current_group().tabs.tabBar()
+    assert isinstance(bar, MultiRowTabBar)
     bar._relayout(300)
     second = [i for i in range(12) if bar.tabRect(i).y() == bar._row_height]
     assert second
@@ -169,9 +169,9 @@ def test_toolwindow_layout_wrap(qapp):
     from gui.window import ToolWindow
     from gui.tab import AnalysisTab
     win = ToolWindow()
-    bar = win._tabs.tabBar()
     for i in range(16):
         win.add_tab(AnalysisTab(f"analysis{i:02d}"))
+    bar = win._current_group().tabs.tabBar()
     win.show()
     qapp.processEvents()
     win.resize(520, 800)
@@ -199,8 +199,8 @@ def test_min_width_independent_of_tab_count(qapp):
     win16.show()
     qapp.processEvents()
     assert (
-        win4._tabs.tabBar().minimumSizeHint().width()
-        == win16._tabs.tabBar().minimumSizeHint().width()
+        win4._current_group().tabs.tabBar().minimumSizeHint().width()
+        == win16._current_group().tabs.tabBar().minimumSizeHint().width()
     )
 
 
@@ -213,14 +213,14 @@ def test_min_width_independent_of_label_length(qapp):
         winA.add_tab(AnalysisTab(f"analysis{i:02d}"))
     winA.show()
     qapp.processEvents()
-    barA = winA._tabs.tabBar()
+    barA = winA._current_group().tabs.tabBar()
     winB = ToolWindow()
     winB.add_tab(AnalysisTab("VERY_LONG_ANALYSIS_NAME_" * 4))
     for i in range(15):
         winB.add_tab(AnalysisTab(f"analysis{i:02d}"))
     winB.show()
     qapp.processEvents()
-    barB = winB._tabs.tabBar()
+    barB = winB._current_group().tabs.tabBar()
     assert barA.minimumSizeHint().width() == barB.minimumSizeHint().width()
     winB.resize(520, 800)
     qapp.processEvents()

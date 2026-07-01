@@ -449,3 +449,89 @@ def test_open_dataset_active_tab_focus_dataset_guard(ds_env):
     result = session.open_dataset(win, "ds_b")
     assert result == "restored:0"  # collision → demo skipped
     assert win.activated == []  # foreign dsA/demo NOT focused
+
+
+# ---- Issue #51: save_dataset / forget_dataset / last_window ride-along ----
+
+def test_save_dataset_writes_one(ds_env):
+    session._touched.clear()
+    spec = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+            "figure": str(ds_env["ds_a"] / "_work" / "fa.png")}
+    win = _FakeWindow([_FakeTab("fa", spec)], active=None)
+    assert session.save_dataset(win, "ds_a") is True
+    data = session.read_session("ds_a")
+    assert data["tabs"] == [{"name": "fa", "kind": "figure", "figure": "fa.png"}]
+    # per-dataset save must NOT touch the global dirty-clear gate.
+    assert win.dirty_cleared is False
+
+
+def test_save_dataset_zero_tabs_skips_write(ds_env):
+    """0 tabs → True but nothing written (never persist an empty layout)."""
+    win = _FakeWindow([], active=None)
+    assert session.save_dataset(win, "ds_a") is True
+    assert session.read_session("ds_a") is None
+
+
+def test_save_dataset_failure_returns_false(ds_env, monkeypatch):
+    spec = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+            "figure": str(ds_env["ds_a"] / "_work" / "fa.png")}
+    win = _FakeWindow([_FakeTab("fa", spec)], active=None)
+    monkeypatch.setattr(
+        dataset_config, "get_work_dir",
+        lambda name, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert session.save_dataset(win, "ds_a") is False
+
+
+def test_forget_dataset():
+    session._touched.clear()
+    session.note_dataset("dsx")
+    assert "dsx" in session._touched
+    session.forget_dataset("dsx")
+    assert "dsx" not in session._touched
+    session.forget_dataset("dsx")  # idempotent, no raise
+
+
+def test_save_all_writes_last_window(ds_env, monkeypatch, tmp_path):
+    import json
+
+    from llm_bridge import paths as lb_paths
+    lw = tmp_path / "last_window.json"
+    monkeypatch.setattr(lb_paths, "last_window_path", lambda: lw)
+    session._touched.clear()
+
+    class _WSWindow(_FakeWindow):
+        current_dataset = "ds_a"
+
+        def open_dataset_names(self):
+            return ["ds_a", "ds_b"]
+
+    spec = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+            "figure": str(ds_env["ds_a"] / "_work" / "fa.png")}
+    win = _WSWindow([_FakeTab("fa", spec)], active=None)
+    session.save_all(win)
+    data = json.loads(lw.read_text(encoding="utf-8"))
+    assert data == {"version": 1, "datasets": ["ds_a", "ds_b"], "active": "ds_a"}
+
+
+def test_save_all_last_window_isolated_from_contract(ds_env, monkeypatch, tmp_path):
+    """A last_window write failure must not affect (saved, failed) / dirty gate."""
+    from llm_bridge import paths as lb_paths
+    monkeypatch.setattr(
+        lb_paths, "last_window_path",
+        lambda: (_ for _ in ()).throw(RuntimeError("disk gone")),
+    )
+    session._touched.clear()
+    spec = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+            "figure": str(ds_env["ds_a"] / "_work" / "fa.png")}
+    win = _FakeWindow([_FakeTab("fa", spec)], active=None)
+    saved, failed = session.save_all(win)
+    assert saved == ["ds_a"]
+    assert failed == []
+    assert win.dirty_cleared  # dirty still cleared despite last_window failure
+
+
+def test_read_last_window_missing_returns_empty(monkeypatch, tmp_path):
+    from llm_bridge import paths as lb_paths
+    monkeypatch.setattr(lb_paths, "last_window_path", lambda: tmp_path / "absent.json")
+    assert session.read_last_window() == {}

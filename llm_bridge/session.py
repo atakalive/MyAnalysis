@@ -43,6 +43,34 @@ def note_dataset(name: str) -> None:
     _touched.add(name)
 
 
+def forget_dataset(name: str) -> None:
+    """Drop *name* from the save-target set (_touched).
+
+    Called by ToolWindow.close_dataset AFTER flushing that dataset's layout, so
+    a later window-wide save_all won't write an empty ``tabs:[]`` over the
+    flushed layout (close ≠ forget). Idempotent.
+    """
+    _touched.discard(name)
+
+
+def _spec_to_tab(spec: dict, work_dir: Path) -> dict | None:
+    """Reduce a live tab's session_spec to its persisted form (figure/analysis)."""
+    if spec.get("kind") == "figure":
+        fig = spec.get("figure")
+        try:
+            rel = str(Path(fig).relative_to(work_dir))
+        except (ValueError, TypeError):
+            rel = fig
+        return {"name": spec.get("name"), "kind": "figure", "figure": rel}
+    if spec.get("kind") == "analysis":
+        return {
+            "name": spec.get("name"),
+            "kind": "analysis",
+            "module": spec.get("module"),
+        }
+    return None
+
+
 def _resolve_work_dir_readonly(dataset: str) -> Path:
     """Resolve a dataset's work_dir WITHOUT side effects (no toml/dir creation).
 
@@ -123,27 +151,9 @@ def save_all(window) -> tuple[list[str], list[str]]:
             tabs: list[dict] = []
             ds_tab_names: set[str] = set()
             for spec in specs:
-                if spec.get("kind") == "figure":
-                    fig = spec.get("figure")
-                    try:
-                        rel = str(Path(fig).relative_to(work_dir))
-                    except (ValueError, TypeError):
-                        rel = fig
-                    tabs.append(
-                        {
-                            "name": spec.get("name"),
-                            "kind": "figure",
-                            "figure": rel,
-                        }
-                    )
-                elif spec.get("kind") == "analysis":
-                    tabs.append(
-                        {
-                            "name": spec.get("name"),
-                            "kind": "analysis",
-                            "module": spec.get("module"),
-                        }
-                    )
+                entry = _spec_to_tab(spec, work_dir)
+                if entry is not None:
+                    tabs.append(entry)
                 ds_tab_names.add(spec.get("name"))
             # active_tab is this dataset's tab name only (else null).
             ds_active = active_name if active_name in ds_tab_names else None
@@ -180,9 +190,93 @@ def save_all(window) -> tuple[list[str], list[str]]:
                 "save_all: failed to update meta for %r", ds, exc_info=True
             )
 
+    # Record the open-dataset workspace (3rd ride-along, like chat/meta above):
+    # which datasets were open together + the active one. Fully isolated — never
+    # touches saved/failed or the dirty-clear gate.
+    try:
+        write_last_window(window)
+    except Exception:
+        _log.warning("save_all: failed to write last_window", exc_info=True)
+
     if not failed:
         window.clear_session_dirty()
     return saved, failed
+
+
+def save_dataset(window, dataset: str) -> bool:
+    """Write ONLY *dataset*'s current tab layout to <work_dir>/session.json.
+
+    A thin per-dataset variant of save_all's write logic used by
+    ToolWindow.close_dataset to flush one dataset before dropping its group.
+    Deliberately does NOT touch save_all's (saved, failed) contract, the global
+    dirty-clear gate, the chat/meta/last_window ride-alongs, or _touched.
+
+    Returns True on success — INCLUDING the zero-tab case, where it writes
+    nothing (persisting an empty layout would erase a synced session.json;
+    close ≠ forget). Returns False only on disk / work_dir-resolve / unexpected
+    failure, so close_dataset can abort rather than lose unsaved edits.
+    """
+    try:
+        specs = [
+            spec for tab in window.tabs()
+            if (spec := getattr(tab, "session_spec", None))
+            and spec.get("dataset") == dataset
+        ]
+        if not specs:
+            return True   # zero tabs → do not persist an empty layout
+        active = window.active_tab()
+        active_name = active.name if active is not None else None
+        work_dir = dataset_config.get_work_dir(dataset)
+        tabs: list[dict] = []
+        ds_tab_names: set[str] = set()
+        for spec in specs:
+            entry = _spec_to_tab(spec, work_dir)
+            if entry is not None:
+                tabs.append(entry)
+            ds_tab_names.add(spec.get("name"))
+        ds_active = active_name if active_name in ds_tab_names else None
+        write_session(dataset, {
+            "version": SCHEMA_VERSION,
+            "dataset": dataset,
+            "active_tab": ds_active,
+            "tabs": tabs,
+        })
+        return True
+    except Exception:
+        _log.warning("save_dataset: failed to save %r", dataset, exc_info=True)
+        return False
+
+
+def write_last_window(window) -> None:
+    """Persist the open-dataset workspace to data/llm_state/last_window.json.
+
+    {version, datasets, active}: datasets from window.open_dataset_names()
+    (the group registry — includes zero-tab datasets), active from
+    current_dataset. Duck-typed via getattr so a headless fake window records an
+    empty workspace instead of raising.
+    """
+    from llm_bridge import paths as lb_paths
+    names = list(getattr(window, "open_dataset_names", lambda: [])())
+    active = getattr(window, "current_dataset", None)
+    payload = {"version": 1, "datasets": names, "active": active}
+    path = lb_paths.last_window_path()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    tmp.replace(path)
+
+
+def read_last_window() -> dict:
+    """Read last_window.json → {version, datasets, active}. never raise; {} on failure."""
+    from llm_bridge import paths as lb_paths
+    try:
+        data = json.loads(
+            lb_paths.last_window_path().read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _save_chat_sessions(window) -> None:
@@ -318,9 +412,18 @@ def open_dataset(window, dataset: str) -> str:
                 t_ds = (getattr(t, "session_spec", None) or {}).get("dataset") \
                     if t is not None else None
                 if t is not None and t_ds == dataset:
-                    window.set_active_tab(active_tab)
+                    # Explicit dataset= so a same-named tab in another dataset is
+                    # never focused instead (B4 / reviewer P2-e).
+                    try:
+                        window.set_active_tab(active_tab, dataset=dataset)
+                    except TypeError:
+                        window.set_active_tab(active_tab)   # headless fake fallback
 
-            if restored >= 1:
+            # The (empty) placeholder is retired at real-group creation
+            # (_ensure_group), so no explicit close_tab("(empty)") is needed on
+            # the restored>=1 path. Kept as a fallback for headless windows that
+            # have no group model but still hold an "(empty)" tab.
+            if restored >= 1 and not hasattr(window, "_ensure_group"):
                 window.close_tab("(empty)")
 
             result = f"restored:{restored}"
@@ -345,23 +448,39 @@ def open_dataset(window, dataset: str) -> str:
     # current dataset / adoption on no-session / restored:0 paths where no
     # currentChanged fired. Idempotent no-op on restored:N≥1.
     if resolved:
-        note = getattr(window, "note_current_dataset", None)
-        if note is not None:
+        ensure = getattr(window, "_ensure_group", None)
+        set_active_ds = getattr(window, "set_active_dataset", None)
+        if ensure is not None and set_active_ds is not None:
+            # New group model: register the group (covers the zero-tab
+            # no-session/restored:0 case, so the workspace registry is the truth)
+            # then bring it to the front — QStackedWidget page switch +
+            # current_dataset + chat push all via _select_dataset_group.
             try:
-                note(dataset)
+                ensure(dataset)
+                set_active_ds(dataset)
             except Exception:
                 _log.warning(
-                    "open_dataset: failed to notify window dataset for %r", dataset,
+                    "open_dataset: failed to select dataset group for %r", dataset,
                     exc_info=True,
                 )
-        elif cw is not None:
-            try:
-                cw.set_current_dataset(dataset)
-            except Exception:
-                _log.warning(
-                    "open_dataset: failed to notify chat dataset for %r", dataset,
-                    exc_info=True,
-                )
+        else:
+            note = getattr(window, "note_current_dataset", None)
+            if note is not None:
+                try:
+                    note(dataset)
+                except Exception:
+                    _log.warning(
+                        "open_dataset: failed to notify window dataset for %r",
+                        dataset, exc_info=True,
+                    )
+            elif cw is not None:
+                try:
+                    cw.set_current_dataset(dataset)
+                except Exception:
+                    _log.warning(
+                        "open_dataset: failed to notify chat dataset for %r",
+                        dataset, exc_info=True,
+                    )
         # Materialize display meta (LIGHT only — keep this GUI-thread path fast)
         # and stamp the PC-local MRU. Lazy import breaks the
         # session→dataset_meta→session cycle; isolated so a failure never

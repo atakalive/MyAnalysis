@@ -40,7 +40,7 @@ def _building(dataset: str | None):
 def _write_active(window) -> None:
     tab = window.active_tab()
     name = tab.name if tab is not None else None
-    current = getattr(window, "current_dataset", None)          # sticky（既存意味）
+    current = getattr(window, "current_dataset", None)          # 明示選択された dataset
     # active_analysis_dataset: active タブが解析タブのときだけその dataset。
     # figure/viewer/dataset-less は None（同名 viewer による誤読を防ぐ）。
     active_analysis_ds = None
@@ -48,17 +48,49 @@ def _write_active(window) -> None:
         spec = getattr(tab, "session_spec", None)
         if isinstance(spec, dict) and spec.get("kind") == "analysis":
             active_analysis_ds = spec.get("dataset")
+    # open_datasets: workspace membership from the group registry (includes
+    # zero-tab datasets). active_dataset: the explicitly-selected current dataset
+    # (same value as legacy `dataset`, kept for a clearer agent-facing name).
+    open_datasets = list(getattr(window, "open_dataset_names", lambda: [])())
     p = active_state_path()
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(
         json.dumps(
             {"active_tab": name, "dataset": current,
-             "active_analysis_dataset": active_analysis_ds},
+             "active_analysis_dataset": active_analysis_ds,
+             "open_datasets": open_datasets, "active_dataset": current},
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
     tmp.replace(p)
+
+
+def _find_in_dataset(window, name: str, dataset):
+    """Find a tab by (name, dataset). Uses window.find_tab when present, else a
+    bare-scan fallback for headless/duck windows without the group model."""
+    finder = getattr(window, "find_tab", None)
+    if finder is not None:
+        try:
+            return finder(name, dataset)
+        except LookupError:
+            return None
+    for t in window.tabs():
+        if getattr(t, "name", None) != name:
+            continue
+        spec = getattr(t, "session_spec", None) or {}
+        ds = spec.get("dataset") or getattr(t, "dataset", None)
+        if dataset is None or ds == dataset:
+            return t
+    return None
+
+
+def _set_active_tab(window, name: str, dataset=None) -> bool:
+    """Focus a tab, passing dataset= when the window supports it (group model)."""
+    try:
+        return window.set_active_tab(name, dataset=dataset)
+    except TypeError:
+        return window.set_active_tab(name)
 
 
 def _resolve_analysis_file(dataset, name: str):
@@ -147,22 +179,23 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
                 raise ValueError("no dataset open; cannot resolve analysis")
         # Resolve/validate up front so a bad name reports before any build.
         _resolve_analysis_file(dataset, name)
-        # 同名タブのガード（前提 1: name はウィンドウ内で単一のタブ ID）。
-        # already-present として focus してよいのは「同じ dataset の解析タブ」だけ。
-        # 別 dataset の同名解析タブ、または同名の figure/viewer タブ（kind!=analysis）は
-        # この解析を開けないので fail-fast する（同名 viewer を解析と取り違えない）。
-        existing = next((t for t in window.tabs() if t.name == name), None)
+        # 同名タブのガードは (dataset, name) 単位（タブ ID はグループ内で一意）。
+        # 同一 (dataset, name) の解析タブは focus して already-present を返す。
+        # 別 dataset の同名解析は「開いてよい」— その dataset のグループに新規タブを
+        # 作る（本 Issue #51 の看板動線）。同一 dataset・同名の figure/viewer タブ
+        # （kind!=analysis）は解析として開けないので fail-fast する。
+        existing = _find_in_dataset(window, name, dataset)
         if existing is not None:
             ex_spec = getattr(existing, "session_spec", None) or {}
             ex_kind = ex_spec.get("kind")
             ex_ds = ex_spec.get("dataset") or getattr(existing, "dataset", None)
-            if ex_kind == "analysis" and ex_ds == dataset:
-                window.set_active_tab(name)
+            if ex_kind == "analysis":
+                _set_active_tab(window, name, dataset=dataset)
                 return f"already-present:{name}"
             raise ValueError(
-                f"tab {name!r} is already open (kind={ex_kind!r}, dataset={ex_ds!r}); "
-                f"cannot open analysis {name!r} for dataset {dataset!r} in the same "
-                f"window (name is the single tab id)"
+                f"tab {name!r} is already open in dataset {dataset!r} "
+                f"(kind={ex_kind!r}); cannot open analysis {name!r} there "
+                f"(name is the tab id within a dataset group)"
             )
         from PySide6.QtWidgets import QWidget
 
@@ -279,11 +312,13 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
             FigurePanel,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
-        # Locate an existing tab by name WITHOUT activating it — separating the
-        # existence check from activation so that, when we finally activate, the
-        # currentChanged it fires sees the NEW session_spec (avoiding a stale
-        # dataset push to the chat widget). See Issue #26 (reviewer R4 / reviewer R4).
-        existing = next((t for t in window.tabs() if t.name == name), None)
+        # Locate an existing tab by (dataset, name) WITHOUT activating it —
+        # separating the existence check from activation so that, when we finally
+        # activate, the currentChanged it fires sees the NEW session_spec
+        # (avoiding a stale dataset push to the chat widget). Resolving by
+        # (dataset, name) keeps a same-named viewer in another dataset from being
+        # absorbed/overwritten (Issue #51 A1b / #26 reviewer R4).
+        existing = _find_in_dataset(window, name, dataset)
         if existing is not None:
             tab = existing
             is_viewer = any(
@@ -344,9 +379,13 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                         tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                         session.note_dataset(inferred)
                         window.mark_session_dirty()
-            # Activate now — spec is final, so this currentChanged pushes the
-            # right dataset to the chat widget.
-            window.set_active_tab(name)
+            # Activate now — spec is final, so this focus surfaces the right
+            # dataset group + chat. Pass the resolved dataset so a same-named tab
+            # in another dataset is never focused instead.
+            _set_active_tab(
+                window, name,
+                dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+            )
             # Backstop when the tab was already current (no currentChanged fired).
             getattr(window, "notify_chat_dataset", lambda: None)()
             return f"updated:{name}"
@@ -380,11 +419,45 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                     tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                     session.note_dataset(inferred)
         window.add_tab(tab)
-        window.set_active_tab(name)
+        _set_active_tab(
+            window, name,
+            dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+        )
         panel.set_path(p)
         return f"shown:{name}"
 
     return _show
+
+
+def _list_tabs(window, detail: bool = False):
+    """list-tabs handler. detail=false → [name]; detail=true → [{name,dataset,kind}]."""
+    if not detail:
+        return window.tab_names()
+    out = []
+    for t in window.tabs():
+        spec = getattr(t, "session_spec", None) or {}
+        out.append({
+            "name": getattr(t, "name", None),
+            "dataset": spec.get("dataset"),
+            "kind": spec.get("kind"),
+        })
+    return out
+
+
+def _do_set_active_dataset(window, name: str) -> str:
+    """set-active-dataset / switch-dataset handler. LookupError if not open."""
+    if not window.set_active_dataset(name):
+        raise LookupError(f"dataset {name!r} is not open")
+    return f"active:{name}"
+
+
+def _do_close_dataset(window, name: str) -> str:
+    """close-dataset handler. `closed:<name>:<n>` (n>=0) / `error:<name>` on
+    save-failure abort (close_dataset returned -1) / LookupError if not open."""
+    n = window.close_dataset(name)
+    if n < 0:
+        return f"error:{name}"
+    return f"closed:{name}:{n}"
 
 
 def _rewire_window(window) -> None:
@@ -401,12 +474,27 @@ def _rewire_window(window) -> None:
       - `commands.start_watcher` (a second watcher would double-drain).
     """
     window.register_command("add-tab", _make_add_tab_handler(window))
-    window.register_command("close-tab", lambda name: window.close_tab(name))
-    window.register_command("list-tabs", lambda: window.tab_names())
-    window.register_command("set-active-tab", lambda name: window.set_active_tab(name))
+    window.register_command(
+        "close-tab", lambda name, dataset=None: window.close_tab(name, dataset=dataset)
+    )
+    window.register_command("list-tabs", lambda detail=False: _list_tabs(window, detail))
+    window.register_command(
+        "set-active-tab",
+        lambda name, dataset=None: window.set_active_tab(name, dataset=dataset),
+    )
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
     window.register_command("open-dataset", lambda name: session.open_dataset(window, name))
+    # Top-level "open datasets" layer verbs (Issue #51).
+    window.register_command(
+        "list-open-datasets",
+        lambda: {"open": list(window.open_dataset_names()),
+                 "active": window.current_dataset},
+    )
+    _set_active_ds = lambda name: _do_set_active_dataset(window, name)  # noqa: E731
+    window.register_command("set-active-dataset", _set_active_ds)
+    window.register_command("switch-dataset", _set_active_ds)  # 別名
+    window.register_command("close-dataset", lambda name: _do_close_dataset(window, name))
     # Meeting relay verbs (Issue #42). The relay is resolved at call time via
     # `window._meeting_relay` so a hot-reload re-run of _rewire_window picks up
     # the live relay instance.
@@ -460,6 +548,12 @@ def attach_window(window, *, watcher_resume_after: float | None = None) -> list[
     window.tab_changed.connect(lambda _i: _write_active(window))
     if hasattr(window, "dataset_changed"):
         window.dataset_changed.connect(lambda _ds: _write_active(window))
+    # add-tab/close-dataset on a NON-active dataset don't fire tab_changed/
+    # dataset_changed, so active.json's open_datasets would go stale. The window
+    # emits open_datasets_changed on those (gui→llm_bridge stays signal-driven,
+    # no top-level import / circular-import risk).
+    if hasattr(window, "open_datasets_changed"):
+        window.open_datasets_changed.connect(lambda: _write_active(window))
     _write_active(window)  # initial write
 
     window.clear_session_dirty()  # 起動時のプレースホルダ追加等を clean ベースライン化

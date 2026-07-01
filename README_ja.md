@@ -218,18 +218,31 @@ python -m llm_bridge <verb> ...
 |---|---|
 | `list-datasets [--json]` | 登録済みデータセット一覧 |
 | `register-dataset <name> <path> ...` | データセット登録（+ 任意で雛形生成・自動オープン） |
-| `list-analyses` | 解析一覧 |
-| `active` | アクティブタブと現在開いているデータセット |
+| `list-analyses [--dataset <ds>] [--json]` | 開いている全データセット横断の解析一覧（`--json` で `{dataset: [names]}` マップ） |
+| `list-open-datasets` | 開いているデータセット一覧＋アクティブ |
+| `active` | アクティブタブ・アクティブデータセット・`open_datasets` |
 | `state [name]` | 解析の `state.json`（省略時はアクティブタブ） |
-| `window <verb> [k=v] [--wait]` | ウィンドウ操作（`open-dataset` / `add-tab` / `reload` 等） |
+| `window <verb> [k=v] [--wait]` | ウィンドウ操作（`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload` 等） |
 | `tab <target> <verb> [k=v]` | タブ操作（`set-split` / `snapshot` / `refresh-state` 等） |
 | `annotate` / `clear-annotations` | 注釈（marker / note）の追加・削除 |
+
+### 複数データセット
+
+1 プロセスに複数データセットを開ける。トップのデータセット・スイッチャーで、各データセットのタブ群とチャットが入れ替わる。`open-dataset` はデータセットをワークスペースに追加（他は開いたまま）、`set-active-dataset name=<ds>`（別名 `switch-dataset`）で前面化、`close-dataset name=<ds>` はレイアウトを `session.json` へ退避してからグループを撤去する。同名タブが 2 データセットにある場合は、タブ系 verb（`add-tab` / `show` / `set-active-tab` / `close-tab` / `tab <name> <verb>`）に `dataset=<ds>` を付けて曖昧性を解消する。
+
+**ワークスペース復元**：File →「前回のセッションを復元」で、一緒に開いていたデータセット群（gitignore された `data/llm_state/last_window.json` に記録）を再オープンする。復元は ADDITIVE（既に開いているデータセットは閉じない）。起動時自動復元は無い。
+
+**会議共有**はアクティブデータセットのタブおよびチャットのみをゲストへ配信する（DS 切替で共有対象も切替。同名タブのクロス DS 共有は v1 非サポート）。
+
+**メモリ注意（v1）**：各解析タブは開いた時点で DataFrame を eager load し、開いている限り常駐する。大きな測定データを多数同時に開くとメモリを圧迫し得る（遅延ロード/アンロードは将来課題）。
 
 例:
 
 ```bash
 python -m llm_bridge list-datasets --json
 python -m llm_bridge window open-dataset name=my_dataset --wait 30
+python -m llm_bridge window set-active-dataset name=other_dataset --wait
+python -m llm_bridge tab summary snapshot dataset=other_dataset --wait
 ```
 
 ---

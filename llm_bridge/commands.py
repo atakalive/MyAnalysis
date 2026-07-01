@@ -74,15 +74,34 @@ def wait_for(cmd_id: str, timeout: float = 30.0, poll: float = 0.1) -> dict | No
 
 # ---- GUI-side dispatcher ----
 
-def _find_tab(window, name: str):
-    """Find a tab by name and focus it, using only public ToolWindow API.
+def _find_tab(window, name: str, dataset: str | None = None):
+    """Find a tab by (name, dataset) and focus it, using only public ToolWindow API.
 
-    Returns the AnalysisTab, or None if no tab with that name exists.
+    Returns the tab, or None if none matches. On an ambiguous bare name (same
+    name in multiple datasets, no dataset= given), window.find_tab raises
+    LookupError, which propagates to the caller as an error result.
 
     By design this focuses the target tab (via set_active_tab) before returning.
     Routing a command to a tab and surfacing that tab to the user are the same
-    user-facing operation, so coupling them is intentional, not accidental.
+    user-facing operation, so coupling them is intentional, not accidental. The
+    focus carries the RESOLVED dataset so a same-named tab in the active dataset
+    is never surfaced instead.
     """
+    finder = getattr(window, "find_tab", None)
+    if finder is not None:
+        tab = finder(name, dataset)
+        if tab is None:
+            return None
+        resolved_ds = dataset
+        if resolved_ds is None:
+            spec = getattr(tab, "session_spec", None) or {}
+            resolved_ds = spec.get("dataset")
+        try:
+            window.set_active_tab(name, dataset=resolved_ds)
+        except TypeError:
+            window.set_active_tab(name)
+        return tab
+    # Legacy fallback (windows without the group model).
     if not window.set_active_tab(name):
         return None
     return window.active_tab()
@@ -113,7 +132,11 @@ def _execute(window, payload: dict) -> None:
         if tier == "window":
             dispatcher = window
         elif tier == "tab":
-            tab = _find_tab(window, target) if target else None
+            # `dataset=` is an optional ambiguity resolver for the tab address —
+            # pop it so it is not forwarded to the tab verb (snapshot/set-split
+            # etc. take no dataset). Non-tab verbs keep their args intact.
+            ds = args.pop("dataset", None)
+            tab = _find_tab(window, target, ds) if target else None
             if tab is None:
                 raise LookupError(f"no tab named {target!r}")
             dispatcher = tab

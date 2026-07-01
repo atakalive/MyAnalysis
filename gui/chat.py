@@ -422,6 +422,15 @@ class ChatWidget(QWidget):
         """True if any session has an in-flight (streaming) turn."""
         return bool(self._turns)
 
+    def dataset_busy(self, dataset) -> bool:
+        """True if any session bound to *dataset* has an in-flight turn.
+
+        Drives the dataset-switcher ● badge (Issue #51): a turn generating in a
+        hidden dataset stays visible at the top level."""
+        return any(
+            s.dataset == dataset and s.id in self._turns for s in self._sessions
+        )
+
     def input_draft(self) -> str:
         """Current unsent message text."""
         return self._input.toPlainText()

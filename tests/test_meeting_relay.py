@@ -72,11 +72,23 @@ class FakeChat:
         self.injected.append((text, sender, session_id))
 
 
+class _FakeTabObj:
+    """A window tab carrying a session_spec dataset (for B5 active-DS filtering)."""
+    def __init__(self, name, dataset):
+        self.name = name
+        self.session_spec = {"kind": "analysis", "name": name, "dataset": dataset}
+
+
 class FakeWindow:
-    def __init__(self, chat, dataset=None, tabs=None):
+    def __init__(self, chat, dataset=None, tabs=None, tab_datasets=None):
         self._chat = chat
         self.current_dataset = dataset
         self._tabs = tabs or []
+        # Each tab's owning dataset (fixed at construction; defaults to the
+        # window's dataset). Switching current_dataset later does NOT change a
+        # tab's dataset — that's exactly what drives the B5 publish swap.
+        self._tab_datasets = dict(tab_datasets or {})
+        self._default_ds = dataset
 
     def chat_widget(self):
         return self._chat
@@ -85,7 +97,10 @@ class FakeWindow:
         return list(self._tabs)
 
     def tabs(self):
-        return []
+        return [
+            _FakeTabObj(n, self._tab_datasets.get(n, self._default_ds))
+            for n in self._tabs
+        ]
 
     def register_retranslate_hook(self, fn):
         pass
@@ -153,8 +168,9 @@ def test_meeting_start_and_token(qapp, monkeypatch):
     assert captured["method"] == "POST"
     assert captured["auth"] == "Bearer ADMIN"
     assert r.expires_at() == 9999999999
-    # default publish scope = ALL sessions across every dataset
-    assert r.published_session_ids() == {"a", "b"}
+    # publish scope = the ACTIVE dataset's sessions only (Issue #51 B5); "b"
+    # belongs to hidden ds2 and is withheld.
+    assert r.published_session_ids() == {"a"}
 
     pad = token + "=" * (-len(token) % 4)
     obj = json.loads(base64.urlsafe_b64decode(pad))
@@ -309,20 +325,25 @@ def test_publish_scope(qapp, monkeypatch):
                         lambda req, timeout=None: FakeResp(
                             json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
-    # default = ALL sessions across every dataset
-    assert r.published_session_ids() == {"a", "b"}
-
-    # deselect one, then switch dataset: the snapshot must NOT be recomputed
-    # (otherwise ds2's "b" would re-enter). Proves dataset-switch invariance.
-    r.set_published_sessions({"a"})
-    win.current_dataset = "ds2"
+    # publish scope = the ACTIVE dataset only (Issue #51 B5).
+    assert r.published_session_ids() == {"a"}
     r._last_sessions_json = None
     r._on_capture_tick()
-    assert r.published_session_ids() == {"a"}
     sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
     assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"a"}
 
-    # a deleted session drops out via ∩ existing.
+    # Switch to ds2: ds1's "a" is WITHHELD (the shared set swaps to the new
+    # dataset). ds2's pre-existing "b" is not in the host selection, so nothing
+    # from the hidden dataset leaks either — the effective shared set is empty.
+    win.current_dataset = "ds2"
+    r._last_sessions_json = None
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
+    assert sess_puts and sess_puts[-1]["data"] == []
+
+    # a deleted session drops out of the selection via ∩ existing.
+    win.current_dataset = "ds1"
     chat._summaries = [s for s in chat._summaries if s["id"] != "a"]
     r._last_sessions_json = None
     r._on_capture_tick()
@@ -496,6 +517,56 @@ def test_tab_auto_share(qapp, monkeypatch):
     win._tabs = ["t1", "t2", "t3", "t4"]
     assert r.absorb_new_tabs() == ["t4"]
     assert r.published_tabs() == {"t1", "t3", "t4"}
+    r.stop()
+
+
+def test_publish_scope_active_dataset_tabs(qapp, monkeypatch):
+    """Issue #51 B5: a tab in a hidden dataset is not published; a tab newly
+    created in the active dataset auto-joins; dataset-less tabs don't crash."""
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsA", tabs=["tA", "tB"],
+                     tab_datasets={"tA": "dsA", "tB": "dsB"})
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    # only the active dataset's tab is in the publish scope; dsB's tB is withheld.
+    assert r.published_tabs() == {"tA"}
+    r._on_capture_tick()
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and set(tab_puts[-1]["data"]) == {"tA"}
+
+    # a new tab created in the active dataset auto-joins; a hidden one does not.
+    win._tabs = ["tA", "tB", "tA2", "tC"]
+    win._tab_datasets.update({"tA2": "dsA", "tC": "dsB"})
+    assert r.absorb_new_tabs() == ["tA2"]     # tC (hidden dsB) is not absorbed
+    assert r.published_tabs() == {"tA", "tA2"}
+
+    # switch to dsB: dsA's tabs (tA, tA2) are withheld — the shared set follows
+    # the active dataset. tC (a dsB tab that appeared mid-meeting) auto-joins now
+    # that dsB is active. tB (present at meeting start in hidden dsB) stays known
+    # and withheld until reselected — a documented v1 limitation.
+    win.current_dataset = "dsB"
+    r._worker._outbox.clear()
+    r._last_tabs_json = None
+    r._on_capture_tick()
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and set(tab_puts[-1]["data"]) == {"tC"}
+    r.stop()
+
+
+def test_active_ds_filter_none_safe(qapp, monkeypatch):
+    """Issue #51 B5: a dataset-less tab (session_spec dataset None) doesn't break
+    the active-dataset filter when current_dataset is also None."""
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset=None, tabs=["v"], tab_datasets={"v": None})
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r.published_tabs() == {"v"}
     r.stop()
 
 

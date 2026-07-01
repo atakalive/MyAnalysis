@@ -11,7 +11,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QStackedWidget,
     QTabWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -23,12 +25,58 @@ from gui.tabbar import MultiRowTabBar
 RESERVED_WINDOW_VERBS = frozenset([
     "add-tab", "close-tab", "list-tabs", "open-dataset",
     "set-active-tab", "show", "toggle-chat-float",
+    "list-open-datasets", "set-active-dataset", "switch-dataset", "close-dataset",
 ])
+
+
+class _DatasetGroup(QWidget):
+    """One page of the dataset stack: a QTabWidget holding one dataset's tabs.
+
+    ``name`` is the dataset this group represents (``None`` for the dataset-less
+    group that holds the ``(empty)`` placeholder / inferred viewers). Tab IDs are
+    unique *within a group*, so two datasets may each hold a same-named tab.
+    """
+
+    def __init__(self, name: str | None, parent=None):
+        super().__init__(parent)
+        self.name = name
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs = QTabWidget()
+        self.tabs.setTabBar(MultiRowTabBar())   # 多段（N段）タブ：横スクロール廃止
+        self.tabs.setMovable(True)
+        layout.addWidget(self.tabs)
+
+    def find(self, name: str) -> tuple[int, QWidget | None]:
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if getattr(w, "name", None) == name:
+                return i, w
+        return -1, None
+
+    def names(self) -> list[str]:
+        return [self.tabs.widget(i).name for i in range(self.tabs.count())]
+
+    def widgets(self) -> list[QWidget]:
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
+
+class DatasetSwitcher(MultiRowTabBar):
+    """Top-level bar: one tab per open dataset. Selecting one switches the stack.
+
+    Reuses ``MultiRowTabBar`` verbatim but disables tab dragging (datasets are
+    not reorderable) — the drag path is gated on ``isMovable()``.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMovable(False)
 
 
 class ToolWindow(QMainWindow):
     tab_changed = Signal(int)
     dataset_changed = Signal(object)  # str | None
+    open_datasets_changed = Signal()  # open-dataset set / active membership changed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,15 +87,25 @@ class ToolWindow(QMainWindow):
         self.resize(1400, 800)
         self._current_dataset: str | None = None
 
-        self._tabs = QTabWidget()
-        self._tabs.setTabBar(MultiRowTabBar())   # 多段（N段）タブ：横スクロール廃止
-        self._tabs.setMovable(True)
-        self.setCentralWidget(self._tabs)
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-        tab_bar = self._tabs.tabBar()
-        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
-        tab_bar.tabMoved.connect(lambda *_: self.mark_session_dirty())
+        # Two-layer central widget: the DatasetSwitcher (top) selects a page in
+        # the QStackedWidget, each page a _DatasetGroup with its own tab bar.
+        # `_groups` is the workspace registry (first-seen order) and the single
+        # source of truth for "which datasets are open" — NOT the tabs, since a
+        # dataset may be open with zero tabs (no-session / restored:0).
+        self._groups: dict[str | None, _DatasetGroup] = {}
+        self._suppress_switch = False
+
+        central = QWidget()
+        v = QVBoxLayout(central)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self._switcher = DatasetSwitcher()
+        self._switcher.currentChanged.connect(self._on_switcher_changed)
+        v.addWidget(self._switcher)
+        self._stack = QStackedWidget()
+        v.addWidget(self._stack, 1)
+        self.setCentralWidget(central)
+        self._update_switcher_visibility()
         self.statusBar()
 
         self._chat_dock = QDockWidget(tr("dock.chat"), self)
@@ -84,6 +142,9 @@ class ToolWindow(QMainWindow):
         self._register_action.triggered.connect(self._register_dataset)
         self._open_dataset_action = self._file_menu.addAction(tr("menu.file.open_dataset"))
         self._open_dataset_action.triggered.connect(self._open_dataset)
+        self._restore_session_action = self._file_menu.addAction(
+            tr("menu.file.restore_session"))
+        self._restore_session_action.triggered.connect(self._restore_last_session)
         self._file_menu.addSeparator()
         self._save_session_action = self._file_menu.addAction(tr("menu.file.save_session"))
         self._save_session_action.triggered.connect(self._save_session)
@@ -135,6 +196,7 @@ class ToolWindow(QMainWindow):
     def retranslate(self) -> None:
         self._file_menu.setTitle(tr("menu.file"))
         self._open_dataset_action.setText(tr("menu.file.open_dataset"))
+        self._restore_session_action.setText(tr("menu.file.restore_session"))
         self._register_action.setText(tr("menu.file.register"))
         self._save_session_action.setText(tr("menu.file.save_session"))
         self._save_quit_action.setText(tr("menu.file.save_quit"))
@@ -193,39 +255,311 @@ class ToolWindow(QMainWindow):
                 and hasattr(self._chat_widget, "set_tool_display_default"):
             self._chat_widget.set_tool_display_default(mode)
 
+    # ------------------------------------------------------------------ #
+    # Dataset groups (top-level "open datasets" layer)                   #
+    # ------------------------------------------------------------------ #
+
+    def _current_group(self) -> _DatasetGroup | None:
+        w = self._stack.currentWidget()
+        return w if isinstance(w, _DatasetGroup) else None
+
+    def _update_switcher_visibility(self) -> None:
+        # Hide the switcher when ≤1 dataset is open (single-dataset look).
+        self._switcher.setVisible(self._switcher.count() > 1)
+
+    def _ensure_group(self, ds: str | None) -> _DatasetGroup:
+        """Return the group for *ds*, creating (and registering) it if absent.
+
+        Creating the first REAL dataset group retires the None/(empty) group so a
+        zero-tab real group and the (empty) placeholder never coexist (invariant).
+        """
+        grp = self._groups.get(ds)
+        if grp is not None:
+            return grp
+        if ds is not None and None in self._groups:
+            # Retire the None group ONLY when it just holds the (empty)
+            # placeholder (or nothing) — a None group carrying real dataset-less
+            # viewers must survive alongside the new real group.
+            none_names = self._groups[None].names()
+            if not none_names or none_names == ["(empty)"]:
+                self._remove_group(None)
+        grp = _DatasetGroup(ds)
+        self._groups[ds] = grp
+        self._stack.addWidget(grp)
+        grp.tabs.currentChanged.connect(
+            lambda _i, g=grp: self._on_tab_changed(g)
+        )
+        tab_bar = grp.tabs.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(
+            lambda pos, g=grp: self._on_tab_context_menu(g, pos)
+        )
+        tab_bar.tabMoved.connect(lambda *_: self.mark_session_dirty())
+        if ds is not None:
+            self._suppress_switch = True
+            try:
+                idx = self._switcher.addTab(str(ds))
+                self._switcher.setTabData(idx, ds)
+            finally:
+                self._suppress_switch = False
+            self._update_switcher_visibility()
+        self.open_datasets_changed.emit()
+        return grp
+
+    def _remove_group(self, ds: str | None) -> None:
+        grp = self._groups.pop(ds, None)
+        if grp is None:
+            return
+        if ds is not None:
+            for i in range(self._switcher.count()):
+                if self._switcher.tabData(i) == ds:
+                    self._suppress_switch = True
+                    try:
+                        self._switcher.removeTab(i)
+                    finally:
+                        self._suppress_switch = False
+                    break
+            self._update_switcher_visibility()
+        self._stack.removeWidget(grp)
+        grp.deleteLater()
+
+    def _on_switcher_changed(self, idx: int) -> None:
+        if self._suppress_switch or idx < 0:
+            return
+        ds = self._switcher.tabData(idx)
+        self._select_dataset_group(ds)
+
+    def _select_dataset_group(self, ds: str | None) -> None:
+        """Bring dataset *ds*'s group to the front and sync current/chat/status.
+
+        Single switch path (switcher click, restore, reload, set_active_dataset).
+        Resolves by name key — the switcher index and stack page index diverge
+        because the None group has no switcher tab.
+        """
+        grp = self._groups.get(ds)
+        if grp is None:
+            return
+        self._suppress_switch = True
+        try:
+            self._stack.setCurrentWidget(grp)
+            if ds is not None:
+                for i in range(self._switcher.count()):
+                    if self._switcher.tabData(i) == ds:
+                        self._switcher.setCurrentIndex(i)
+                        break
+        finally:
+            self._suppress_switch = False
+        self._set_current_dataset(ds)
+        # Chat push runs unconditionally (even when ds is unchanged) so a
+        # same-dataset re-select still drives the chat's adoption machinery.
+        if self._chat_widget is not None:
+            self._chat_widget.set_current_dataset(ds)
+        self._refresh_switcher_badges()
+        self._update_status_for_active()
+
+    def _update_status_for_active(self) -> None:
+        tab = self.active_tab()
+        if tab is not None:
+            self.statusBar().showMessage(tr("status.active", name=tab.name))
+
+    def _refresh_switcher_badges(self) -> None:
+        """Prefix a ● to any switcher tab whose dataset has an in-flight chat turn."""
+        cw = self._chat_widget
+        for i in range(self._switcher.count()):
+            ds = self._switcher.tabData(i)
+            busy = False
+            if cw is not None and hasattr(cw, "dataset_busy"):
+                try:
+                    busy = cw.dataset_busy(ds)
+                except Exception:
+                    busy = False
+            self._switcher.setTabText(i, ("● " if busy else "") + str(ds))
+
+    def open_datasets(self) -> list["_DatasetGroup"]:
+        """The open real-dataset groups (excludes the None/(empty) group), first-seen order."""
+        return [g for ds, g in self._groups.items() if ds is not None]
+
+    def open_dataset_names(self) -> list[str]:
+        """Names of open datasets (workspace membership) in first-seen order.
+
+        Derived from the group registry — NOT from tabs — so a dataset opened
+        with zero tabs (no-session / restored:0) still counts as open.
+        """
+        return [ds for ds in self._groups if ds is not None]
+
+    def set_active_dataset(self, name: str) -> bool:
+        """Bring dataset *name* to the front. False if it is not open."""
+        if name not in self.open_dataset_names():
+            return False
+        # Select the group FIRST (works even for a zero-tab dataset), then focus
+        # an intra-group tab if one exists.
+        self._select_dataset_group(name)
+        grp = self._groups.get(name)
+        if grp is not None and grp.tabs.count() > 0 and grp.tabs.currentIndex() < 0:
+            grp.tabs.setCurrentIndex(0)
+        self.open_datasets_changed.emit()
+        return True
+
+    def close_dataset(self, name: str) -> int:
+        """Close dataset *name*'s group. Returns closed-tab count (>=0), or -1
+        (abort sentinel) if flushing its layout failed.
+
+        Order: flush this dataset's current layout to session.json → forget it in
+        session._touched (so save_all can't clobber it with empty tabs) → close
+        its tabs under suppressed dirty → drop the group. close ≠ forget:
+        session.json / chat are never deleted.
+        """
+        if name is None or name not in self._groups:
+            raise LookupError(f"dataset {name!r} is not open")
+        from llm_bridge import session
+        grp = self._groups[name]
+        # 1. flush the current layout (save_dataset skips an all-tabs-closed
+        #    dataset — it must not persist an empty layout).
+        try:
+            ok = session.save_dataset(self, name)
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                QMessageBox.warning(
+                    self,
+                    tr("err.save.title"),
+                    tr("err.close_dataset_save_failed", dataset=name),
+                )
+            except Exception:
+                pass
+            return -1
+        # 2. forget so the eventual save_all won't overwrite the flushed layout.
+        session.forget_dataset(name)
+        # 3. close its tabs without raising a spurious "unsaved" dirty flag.
+        n = grp.tabs.count()
+        self.set_suppress_dirty(True)
+        try:
+            while grp.tabs.count() > 0:
+                w = grp.tabs.widget(0)
+                grp.tabs.removeTab(0)
+                w.deleteLater()
+            was_current = self._current_group() is grp
+            self._remove_group(name)
+            # 4. re-anchor current if we just closed it.
+            if self._current_dataset == name or was_current:
+                remaining = self.open_dataset_names()
+                if remaining:
+                    self._select_dataset_group(remaining[0])
+                elif None in self._groups:
+                    # A dataset-less group (inferred viewers) survives.
+                    self._select_dataset_group(None)
+                else:
+                    self._reseed_empty_group()
+        finally:
+            self.set_suppress_dirty(False)
+        self.open_datasets_changed.emit()
+        return n
+
+    def _reseed_empty_group(self) -> None:
+        """Recreate the None/(empty) placeholder after the last dataset closed."""
+        from tool import build_placeholder_tab
+        tab, _sp, _ah = build_placeholder_tab()
+        self.add_tab(tab)          # → _ensure_group(None)
+        self._select_dataset_group(None)
+
     def add_tab(self, tab: AnalysisTab) -> None:
-        for i in range(self._tabs.count()):
-            if self._tabs.widget(i).name == tab.name:
-                raise KeyError(f"tab name {tab.name!r} already exists")
-        self._tabs.addTab(tab, tab.name)
+        spec = getattr(tab, "session_spec", None)
+        ds = spec.get("dataset") if isinstance(spec, dict) else None
+        grp = self._ensure_group(ds)
+        _, existing = grp.find(tab.name)
+        if existing is not None:
+            raise KeyError(f"tab name {tab.name!r} already exists")
+        grp.tabs.addTab(tab, tab.name)
         self.mark_session_dirty()
 
-    def close_tab(self, name: str) -> bool:
-        for i in range(self._tabs.count()):
-            if self._tabs.widget(i).name == name:
-                widget = self._tabs.widget(i)
-                self._tabs.removeTab(i)
+    def close_tab(self, name: str, dataset: str | None = None) -> bool:
+        """Close a tab. With *dataset* given, only that group is searched;
+        otherwise the active group wins, then the first match across groups."""
+        for grp in self._groups_to_search(dataset):
+            idx, widget = grp.find(name)
+            if widget is not None:
+                grp.tabs.removeTab(idx)
                 widget.deleteLater()
                 self.mark_session_dirty()
                 return True
         return False
 
-    def active_tab(self) -> AnalysisTab | None:
-        idx = self._tabs.currentIndex()
-        return self._tabs.widget(idx) if idx >= 0 else None
+    def _groups_to_search(self, dataset: str | None) -> list["_DatasetGroup"]:
+        if dataset is not None:
+            grp = self._groups.get(dataset)
+            return [grp] if grp is not None else []
+        cur = self._current_group()
+        ordered = [cur] if cur is not None else []
+        ordered += [g for g in self._groups.values() if g is not cur]
+        return ordered
 
-    def set_active_tab(self, name: str) -> bool:
-        for i in range(self._tabs.count()):
-            if self._tabs.widget(i).name == name:
-                self._tabs.setCurrentIndex(i)
-                return True
-        return False
+    def active_tab(self) -> AnalysisTab | None:
+        grp = self._current_group()
+        if grp is None:
+            return None
+        idx = grp.tabs.currentIndex()
+        return grp.tabs.widget(idx) if idx >= 0 else None
+
+    def set_active_tab(self, name: str, dataset: str | None = None) -> bool:
+        target_group = None
+        target_idx = -1
+        for grp in self._groups_to_search(dataset):
+            idx, w = grp.find(name)
+            if w is not None:
+                target_group, target_idx = grp, idx
+                break
+        if target_group is None:
+            return False
+        # Always select (idempotent) so current_dataset / chat sync even when the
+        # group is already the front page — the front stack widget and
+        # current_dataset can otherwise diverge (e.g. right after add_tab).
+        self._select_dataset_group(target_group.name)
+        target_group.tabs.setCurrentIndex(target_idx)
+        return True
+
+    def find_tab(self, name: str, dataset: str | None = None):
+        """Resolve a tab by (name, dataset) WITHOUT focusing it. Generic over tab
+        kinds (analysis / figure / viewer).
+
+        0 matches → None; 1 → that tab; multiple → current_dataset's if present,
+        else raise LookupError naming the candidate datasets.
+        """
+        if dataset is not None:
+            grp = self._groups.get(dataset)
+            if grp is None:
+                return None
+            _, w = grp.find(name)
+            return w
+        matches: list[tuple[str | None, QWidget]] = []
+        for ds, grp in self._groups.items():
+            _, w = grp.find(name)
+            if w is not None:
+                matches.append((ds, w))
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0][1]
+        for ds, w in matches:
+            if ds == self._current_dataset:
+                return w
+        cands = [ds for ds, _ in matches]
+        raise LookupError(
+            f"tab {name!r} exists in multiple datasets {cands!r}; "
+            f"pass dataset= to disambiguate"
+        )
 
     def tab_names(self) -> list[str]:
-        return [self._tabs.widget(i).name for i in range(self._tabs.count())]
+        out: list[str] = []
+        for grp in self._groups.values():
+            out.extend(grp.names())
+        return out
 
     def tabs(self) -> list[AnalysisTab]:
-        return [self._tabs.widget(i) for i in range(self._tabs.count())]
+        out: list[AnalysisTab] = []
+        for grp in self._groups.values():
+            out.extend(grp.widgets())
+        return out
 
     def set_session_saver(self, fn: Callable[[], object] | None) -> None:
         self._session_saver = fn
@@ -258,9 +592,9 @@ class ToolWindow(QMainWindow):
         self._chat_widget = widget
         if hasattr(widget, "bind_window"):
             widget.bind_window(self)
-        # Push the initial dataset (the active tab's dataset, if any).
+        # Push the initial dataset (the explicitly-selected current dataset).
         if hasattr(widget, "set_current_dataset"):
-            widget.set_current_dataset(self._active_tab_dataset())
+            widget.set_current_dataset(self._current_dataset)
         # Sync the View-menu tool-display radio to the widget's current default.
         if hasattr(widget, "tool_display_default"):
             cur = widget.tool_display_default()
@@ -286,12 +620,11 @@ class ToolWindow(QMainWindow):
             self._chat_widget.clear_deleted(applied)
 
     def current_chat_dataset(self) -> str | None:
-        return self._active_tab_dataset()
+        return self._current_dataset
 
     def notify_chat_dataset(self) -> None:
-        self._sync_current_from_active_tab()
         if self._chat_widget is not None:
-            self._chat_widget.set_current_dataset(self._active_tab_dataset())
+            self._chat_widget.set_current_dataset(self._current_dataset)
 
     def _active_tab_dataset(self) -> str | None:
         tab = self.active_tab()
@@ -302,18 +635,19 @@ class ToolWindow(QMainWindow):
 
     @property
     def current_dataset(self) -> str | None:
-        """The currently open dataset (sticky — survives dataset-less tab switches)."""
+        """The explicitly-selected dataset (the front group in the switcher).
+
+        No longer sticky-follows the active tab: it changes only when a dataset
+        group is selected (switcher click, open-dataset, set_active_dataset,
+        restore/reload). The invariant "the active tab lives in the current
+        group" holds, so readers of current_dataset stay consistent.
+        """
         return self._current_dataset
 
     def _set_current_dataset(self, ds: str | None) -> None:
         if ds != self._current_dataset:
             self._current_dataset = ds
             self.dataset_changed.emit(ds)
-
-    def _sync_current_from_active_tab(self) -> None:
-        ds = self._active_tab_dataset()
-        if ds is not None:
-            self._set_current_dataset(ds)
 
     def note_current_dataset(self, name: str | None) -> None:
         """Set the current dataset and push to the chat widget.
@@ -376,6 +710,41 @@ class ToolWindow(QMainWindow):
             self.dispatch_command("open-dataset", name=name)
         except Exception as e:
             QMessageBox.critical(self, tr("err.open_dataset.title"), str(e))
+
+    def _restore_last_session(self) -> None:
+        """Restore the last saved workspace (which datasets were open + active).
+
+        ADDITIVE: already-open datasets/tabs are never closed or overwritten;
+        open-dataset just focuses an already-open dataset. Missing file/empty →
+        an info message only.
+        """
+        from llm_bridge import session
+        state = session.read_last_window()
+        datasets = state.get("datasets") if isinstance(state, dict) else None
+        if not datasets:
+            QMessageBox.information(
+                self, tr("dlg.restore_session.title"), tr("dlg.restore_session.empty")
+            )
+            return
+        if not self.has_command("open-dataset"):
+            QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
+            return
+        opened: list[str] = []
+        for ds in datasets:
+            try:
+                res = self.dispatch_command("open-dataset", name=ds)
+            except Exception:
+                continue
+            if isinstance(res, str) and res.startswith("error:"):
+                continue
+            opened.append(ds)
+        active = state.get("active") if isinstance(state, dict) else None
+        target = active if active in opened else (opened[0] if opened else None)
+        if target is not None:
+            try:
+                self.set_active_dataset(target)
+            except LookupError:
+                pass
 
     def _save_session(self) -> None:
         if self._session_saver is None:
@@ -459,18 +828,19 @@ class ToolWindow(QMainWindow):
         else:
             event.ignore()
 
-    def _on_tab_context_menu(self, pos: QPoint) -> None:
-        tab_bar = self._tabs.tabBar()
+    def _on_tab_context_menu(self, grp: "_DatasetGroup", pos: QPoint) -> None:
+        tab_bar = grp.tabs.tabBar()
         index = tab_bar.tabAt(pos)
         if index < 0:  # タブ以外（空き領域）を右クリックした場合は何もしない
             return
-        widget = self._tabs.widget(index)
+        widget = grp.tabs.widget(index)
         if widget is None:
             return
         name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
+        ds = grp.name
         menu = QMenu(self)
         close_action = menu.addAction(tr("menu.tab.close"))
-        close_action.triggered.connect(lambda: self.close_tab(name))
+        close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
         menu.exec(tab_bar.mapToGlobal(pos))
 
     def _register_dataset(self) -> None:
@@ -544,12 +914,14 @@ class ToolWindow(QMainWindow):
             self, tr("dlg.register_done.title"), tr("register.done", name=name)
         )
 
-    def _on_tab_changed(self, idx: int) -> None:
-        tab = self._tabs.widget(idx)
+    def _on_tab_changed(self, grp: "_DatasetGroup") -> None:
+        # Only the visible group's intra-tab change drives status/active.json;
+        # a background group's tab churn (e.g. restore adding tabs) must not.
+        if grp is not self._current_group():
+            return
+        tab = self.active_tab()
         if tab is not None:
             self.statusBar().showMessage(tr("status.active", name=tab.name))
-        self.tab_changed.emit(idx)
+        self.tab_changed.emit(grp.tabs.currentIndex())
         self.mark_session_dirty()
-        self._sync_current_from_active_tab()
-        if self._chat_widget is not None:
-            self._chat_widget.set_current_dataset(self._active_tab_dataset())
+        self._refresh_switcher_badges()

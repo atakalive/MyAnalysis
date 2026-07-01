@@ -381,8 +381,15 @@ class MeetingShareWindow(QWidget):
 
         # Mid-meeting tabs auto-join the published set before we read it, so a
         # newly-opened tab renders checked immediately (no one-tick flicker).
+        # Scope the list to the ACTIVE dataset (Issue #51 B5) so the UI matches
+        # the real relay publish scope (a hidden DS's same-named tab is not shown
+        # as a shareable item).
         self._relay.absorb_new_tabs()
-        tabs = self._window.tab_names()
+        tabs = [
+            t.name for t in self._window.tabs()
+            if (getattr(t, "session_spec", None) or {}).get("dataset") == cur_ds
+            and getattr(t, "name", None) is not None
+        ]
         pub_tabs = self._relay.published_tabs()
         tsig = tuple(tabs) + (sharing,)
         if tsig != self._tab_sig:

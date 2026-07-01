@@ -200,10 +200,14 @@ class _FakeTab:
 
 
 class _FakeWindow:
-    """Minimal Qt-free window for gui.tools._dispatch (current_dataset + tabs)."""
-    def __init__(self, current_dataset=None, tabs=()):
+    """Minimal Qt-free window for gui.tools._dispatch.
+
+    open_dataset_names() drives the multi-dataset list_analyses map (Issue #51);
+    absent it, dispatch falls back to [current_dataset]."""
+    def __init__(self, current_dataset=None, tabs=(), open_names=None):
         self._current_dataset = current_dataset
         self._tabs = list(tabs)
+        self._open_names = open_names
 
     @property
     def current_dataset(self):
@@ -212,22 +216,46 @@ class _FakeWindow:
     def tabs(self):
         return self._tabs
 
+    def open_dataset_names(self):
+        if self._open_names is None:
+            return [self._current_dataset] if self._current_dataset else []
+        return list(self._open_names)
+
+
+def _make_analyses(tmp_path, dataset, names):
+    root = tmp_path / dataset / "analyses"
+    root.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (root / n).mkdir()
+        (root / n / "analysis.py").write_text("# ok")
+
 
 class TestDispatchDirectReads:
     def test_list_analyses(self, tmp_path, monkeypatch):
         monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
-        analyses = tmp_path / DS / "analyses"
-        analyses.mkdir(parents=True)
-        (analyses / "alpha").mkdir()
-        (analyses / "alpha" / "analysis.py").write_text("# ok")
-        (analyses / "beta").mkdir()
-        # beta has no analysis.py — should be excluded
+        _make_analyses(tmp_path, DS, ["alpha"])
+        (tmp_path / DS / "analyses" / "beta").mkdir()  # no analysis.py → excluded
 
         from gui.tools import _dispatch
 
-        win = _FakeWindow(current_dataset=DS)
+        win = _FakeWindow(current_dataset=DS, open_names=[DS])
+        # New shape: a keyed map {dataset: [names]} across open datasets.
         result = json.loads(_dispatch(win, "list_analyses", {}))
-        assert result == ["alpha"]
+        assert result == {DS: ["alpha"]}
+
+    def test_list_analyses_across_open_datasets(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)
+        _make_analyses(tmp_path, "dsA", ["summary", "shared"])
+        _make_analyses(tmp_path, "dsB", ["shared"])  # same-named analysis in 2 DS
+
+        from gui.tools import _dispatch
+
+        win = _FakeWindow(current_dataset="dsA", open_names=["dsA", "dsB"])
+        result = json.loads(_dispatch(win, "list_analyses", {}))
+        assert result == {"dsA": ["shared", "summary"], "dsB": ["shared"]}
+        # dataset= restricts to one dataset (same map shape).
+        one = json.loads(_dispatch(win, "list_analyses", {"dataset": "dsB"}))
+        assert one == {"dsB": ["shared"]}
 
     def test_get_active_tab_missing(self, tmp_path, monkeypatch):
         p = tmp_path / "active.json"

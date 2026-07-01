@@ -109,6 +109,18 @@ def note_recent_dataset(name: str) -> None:
         pass
 
 
+def last_window_path() -> Path:
+    """Return data/llm_state/last_window.json (file may not exist yet).
+
+    PC-local workspace record: which datasets were open together + the active
+    one, so File → "前回のセッションを復元" can re-open them. A second PC-local
+    record next to recent_datasets.json (MRU) — MRU is open-order history,
+    last_window is the co-open set. Not synced across PCs (per-dataset tab
+    contents in session.json carry the syncable state).
+    """
+    return global_state_dir() / "last_window.json"
+
+
 def reload_manifest_path() -> Path:
     """Return data/llm_state/reload_manifest.json (file may not exist yet).
 

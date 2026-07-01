@@ -65,18 +65,64 @@ class _FakeWin:
         return True
 
 
-def test_add_tab_same_name_other_dataset_raises(monkeypatch, tmp_path):
-    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
-    # The requested analysis must resolve to an existing file under dsB.
-    d = tmp_path / "dsB" / "analyses" / "demo"
+def _write_analysis(tmp_path, ds, name):
+    d = tmp_path / ds / "analyses" / name
     d.mkdir(parents=True)
-    (d / "analysis.py").write_text("def build_tab(p, d): ...\n", encoding="utf-8")
+    (d / "analysis.py").write_text(
+        "import llm_bridge\n"
+        "from gui.tab import AnalysisTab\n"
+        "def load():\n    return None\n"
+        "def build_tab(parent, data):\n"
+        f"    tab = AnalysisTab({name!r})\n"
+        "    llm_bridge.attach_tab(tab, lambda: {})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
 
-    existing = _FakeTab("demo", "dsA")
-    win = _FakeWin([existing], current="dsB")
+
+def test_add_tab_same_name_other_dataset_creates_second(qapp, monkeypatch, tmp_path):
+    """Issue #51: the same analysis name in a DIFFERENT dataset is allowed — it
+    creates a second tab (one per dataset group), not a fail-fast collision."""
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    (tmp_path / "dsB").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    _write_analysis(tmp_path, "dsB", "demo")
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
     add_tab = llm_bridge._make_add_tab_handler(win)
-    with pytest.raises(ValueError, match="already open"):
-        add_tab("demo", dataset="dsB")
+    assert add_tab("demo", dataset="dsA").startswith("added")
+    # Same (dataset, name) → focus (already-present), no duplicate.
+    assert add_tab("demo", dataset="dsA") == "already-present:demo"
+    # Same name, other dataset → a NEW tab in dsB's group.
+    assert add_tab("demo", dataset="dsB").startswith("added")
+    assert sorted(win.open_dataset_names()) == ["dsA", "dsB"]
+    assert win.find_tab("demo", "dsA") is not None
+    assert win.find_tab("demo", "dsB") is not None
+    assert win.find_tab("demo", "dsA") is not win.find_tab("demo", "dsB")
+
+
+def test_find_tab_ambiguous_bare_name(qapp, monkeypatch, tmp_path):
+    """A bare name matching two datasets → LookupError unless current resolves it."""
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    (tmp_path / "dsB").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    _write_analysis(tmp_path, "dsB", "demo")
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    add_tab("demo", dataset="dsA")
+    add_tab("demo", dataset="dsB")
+    # No match → None; explicit dataset → resolves; ambiguous bare → LookupError.
+    assert win.find_tab("missing") is None
+    assert win.find_tab("demo", "dsA") is not None
+    win.set_active_dataset("dsB")
+    assert win.find_tab("demo") is win.find_tab("demo", "dsB")  # current wins
+    win.set_active_dataset("dsA")
+    assert win.find_tab("demo") is win.find_tab("demo", "dsA")
 
 
 def test_add_tab_same_name_same_dataset_focuses(monkeypatch, tmp_path):

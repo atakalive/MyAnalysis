@@ -22,16 +22,33 @@ user's chat messages are instructions.
 
 ## Reading state (no GUI required)
 
-- `python -m llm_bridge active` — print the active tab name and currently open dataset.
+- `python -m llm_bridge active` — print `active.json`:
+  `{active_tab, dataset, active_dataset, open_datasets, active_analysis_dataset}`.
+  `active_dataset` (= `dataset`) is the front dataset; `open_datasets` lists every
+  dataset currently open in the window.
+- `python -m llm_bridge list-open-datasets` — print `{"open": [...], "active": ...}`
+  read from `active.json` (headless; no GUI drive).
 - `python -m llm_bridge state [name] [--dataset <ds>]` — print `current.json` for
   an analysis. With no `name`, prints state for the active analysis tab. Resolves
   the dataset from the open GUI (`active.json`) unless `--dataset` is given.
-- `python -m llm_bridge list-analyses [--dataset <ds>]` — list the open dataset's
-  `analyses/` subdirs that define an `analysis.py` (current dataset only).
+- `python -m llm_bridge list-analyses [--dataset <ds>] [--json]` — list analyses
+  across ALL open datasets. Plain output prints names (one per line); `--json`
+  prints a `{dataset: [names]}` map. `--dataset` restricts to one dataset.
 - `python -m llm_bridge list-commands [name]` — list registered verbs
   (informational). With `name`, lists tab-tier verbs.
 
-Always check `active` or `state` before operating on a tab. `active` also shows the currently open dataset — check it before dataset operations.
+Always check `active` or `state` before operating on a tab. `active` also shows
+the open datasets and the active one — check it before dataset operations.
+
+### Multiple datasets
+
+Several datasets can be open at once; the top-level dataset switcher swaps between
+each dataset's tabs + chat sessions. When the same tab name exists in two open
+datasets, pass `dataset=<ds>` to any tab-addressing verb (`add-tab`, `show`,
+`set-active-tab`, `close-tab`, `tab <name> <verb>`) to disambiguate — otherwise the
+active dataset wins, or an ambiguous bare name errors. Meeting share broadcasts
+only the ACTIVE dataset's tabs and chat (switching datasets swaps the shared set;
+same-named cross-dataset tabs are not co-shared in v1).
 
 ## Driving the GUI (GUI must be running)
 
@@ -41,11 +58,18 @@ GUI is running, so these drive it live. Add `--wait` to block for the result
 asynchronously.
 
 - `python -m llm_bridge window <verb> [k=v ...] [--wait]`
-  Window verbs: `add-tab name=<analysis>`, `close-tab name=<tab>`,
-  `set-active-tab name=<tab>`,
-  `show path=<abs> [name=<tab>] [slot=left|right|top|bottom]`,
+  Window verbs: `add-tab name=<analysis> [dataset=<ds>]`,
+  `close-tab name=<tab> [dataset=<ds>]`,
+  `set-active-tab name=<tab> [dataset=<ds>]`,
+  `show path=<abs> [name=<tab>] [slot=left|right|top|bottom] [dataset=<ds>]`,
   `toggle-chat-float`,
-  `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions).
+  `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions;
+  adds it to the workspace — other open datasets stay open),
+  `list-open-datasets`, `set-active-dataset name=<ds>` (alias `switch-dataset`;
+  brings a dataset to the front), `close-dataset name=<ds>` (flushes its layout to
+  session.json, then drops its group; `closed:<ds>:<n>` on success, `error:<ds>`
+  if the flush failed). The optional `dataset=` on tab-addressing verbs resolves a
+  same-named tab that exists in more than one open dataset.
   `show` default is a full-width single pane. `slot` splits automatically by
   axis: `left|right` → horizontal, `top|bottom` → vertical, placing a second
   figure in the opposite pane. `slot=left|top` keeps the split while updating

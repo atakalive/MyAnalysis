@@ -41,6 +41,28 @@ def _check_analysis_exists(dataset: str, name: str) -> None:
         raise SystemExit(f"error: no analysis named {name!r} under {dataset!r}")
 
 
+def _list_analysis_names(dataset: str) -> list[str]:
+    """Containment-checked analysis names under one dataset (sorted, _ prefixed skipped)."""
+    try:
+        root = dataset_config.analyses_root(dataset)
+    except (KeyError, RuntimeError):
+        return []
+    if not root.is_dir():
+        return []
+    root_resolved = root.resolve()
+    names = []
+    for d in sorted(root.glob("*")):
+        if d.name.startswith("_"):
+            continue
+        resolved = d.resolve()
+        if not resolved.is_relative_to(root_resolved):
+            continue
+        af = (resolved / "analysis.py").resolve()
+        if resolved.is_dir() and af.is_relative_to(root_resolved) and af.is_file():
+            names.append(d.name)
+    return names
+
+
 def _resolve_dataset(args, active: dict | None = None, *,
                      use_active_analysis: bool = False) -> str | None:
     """優先順: --dataset 明示 → active.json の該当フィールド。解決不能なら None。"""
@@ -63,8 +85,15 @@ def main(argv: list[str] | None = None) -> int:
     p_state.add_argument("--dataset", default=None)
 
     sub.add_parser("active", help="Print active tab name and currently open dataset")
-    p_la = sub.add_parser("list-analyses", help="List the open dataset's analyses")
+    p_la = sub.add_parser(
+        "list-analyses",
+        help="List analyses across all open datasets (or one via --dataset)")
     p_la.add_argument("--dataset", default=None)
+    p_la.add_argument("--json", action="store_true", dest="json_out", default=False,
+                      help="Output as JSON map {dataset: [names]}")
+    sub.add_parser(
+        "list-open-datasets",
+        help="List datasets open in the running GUI (reads active.json)")
     p_lds = sub.add_parser("list-datasets", help="List registered dataset names")
     p_lds.add_argument("--json", action="store_true", dest="json_out", default=False,
                         help="Output as JSON with format and path info")
@@ -165,26 +194,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "list-analyses":
-        ds = _resolve_dataset(args)
-        if ds is None:
+        # Targets: --dataset overrides; else all datasets open in the GUI
+        # (active.json's open_datasets), falling back to the single active one.
+        if args.dataset:
+            targets = [args.dataset]
+        else:
+            active = json.loads(active_state_path().read_text(encoding="utf-8")) \
+                if active_state_path().exists() else {}
+            targets = active.get("open_datasets") or []
+            if not targets and active.get("dataset"):
+                targets = [active["dataset"]]
+        if not targets:
             print("no dataset open; pass --dataset", file=sys.stderr)
             return 0
-        try:
-            root = dataset_config.analyses_root(ds)
-        except (KeyError, RuntimeError) as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 0
-        if root.is_dir():
-            root_resolved = root.resolve()
-            for d in sorted(root.glob("*")):
-                if d.name.startswith("_"):
-                    continue
-                resolved = d.resolve()
-                if not resolved.is_relative_to(root_resolved):
-                    continue
-                af = (resolved / "analysis.py").resolve()
-                if resolved.is_dir() and af.is_relative_to(root_resolved) and af.is_file():
-                    print(d.name)
+        result = {ds: _list_analysis_names(ds) for ds in targets}
+        if args.json_out:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            for ds in targets:
+                for n in result[ds]:
+                    print(n)
+        return 0
+
+    if args.cmd == "list-open-datasets":
+        active = json.loads(active_state_path().read_text(encoding="utf-8")) \
+            if active_state_path().exists() else {}
+        print(json.dumps(
+            {"open": active.get("open_datasets") or [],
+             "active": active.get("active_dataset") or active.get("dataset")},
+            ensure_ascii=False,
+        ))
         return 0
 
     if args.cmd == "list-datasets":

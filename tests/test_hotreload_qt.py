@@ -144,6 +144,62 @@ def test_manifest_write_consume_roundtrip(window, monkeypatch, tmp_path):
     assert not mpath.exists()  # consumed → deleted
 
 
+def test_manifest_view_state_by_dataset_shape(window, probe_analysis, monkeypatch, tmp_path):
+    """Issue #51 B4: write_manifest nests view_state under dataset in a
+    distinctly-keyed field, and records active_dataset."""
+    import json
+
+    from devtools import qt_integration
+    from llm_bridge import paths
+
+    mpath = tmp_path / "reload_manifest.json"
+    monkeypatch.setattr(paths, "reload_manifest_path", lambda: mpath)
+
+    name, _af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    window.set_active_dataset(HR_DS)
+
+    qt_integration.write_manifest(window)
+    data = json.loads(mpath.read_text(encoding="utf-8"))
+    # New nested key present; the flat legacy key is NOT written.
+    assert "view_state_by_dataset" in data
+    assert "view_state" not in data
+    assert HR_DS in data["view_state_by_dataset"]
+    assert name in data["view_state_by_dataset"][HR_DS]
+    assert data["active_dataset"] == HR_DS
+
+
+def test_manifest_restore_reads_nested_and_flat_view_state(window, probe_analysis, monkeypatch, tmp_path):
+    """Restore reads view_state_by_dataset when present, and falls back to the
+    old flat view_state for a mid-migration manifest (no crash either way)."""
+    import json
+
+    from devtools import qt_integration
+    from llm_bridge import paths
+
+    mpath = tmp_path / "reload_manifest.json"
+    monkeypatch.setattr(paths, "reload_manifest_path", lambda: mpath)
+
+    from llm_bridge import session as lbsession
+
+    name, _af = probe_analysis
+    # A session.json so open-dataset restores the analysis tab, then the flat
+    # (legacy) view_state applies to it without crashing.
+    lbsession.write_session(HR_DS, {
+        "version": 1, "dataset": HR_DS, "active_tab": name,
+        "tabs": [{"name": name, "kind": "analysis", "module": name}],
+    })
+    mpath.write_text(json.dumps({
+        "datasets": [HR_DS],
+        "active_tab": name,
+        "active_dataset": HR_DS,
+        "view_state": {name: {"panels": {}, "splitter": None}},
+    }), encoding="utf-8")
+    assert qt_integration.consume_manifest(window) is True
+    assert name in window.tab_names()
+    assert window.current_dataset == HR_DS
+
+
 def test_consume_missing_manifest_is_noop(window, monkeypatch, tmp_path):
     from llm_bridge import paths
 

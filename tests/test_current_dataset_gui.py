@@ -38,8 +38,11 @@ def test_dataset_tab_switch_updates_current(qapp):
     assert "ds_b" in signals
 
 
-def test_datasetless_tab_preserves_sticky(qapp):
-    """dataset 無しタブ切替で sticky 保持。"""
+def test_datasetless_tab_switches_current_to_none(qapp):
+    """明示選択モデル: dataset 無しタブ（None グループ）へ切替えると current は None。
+
+    旧 sticky（追従保持）は廃止。current_dataset は「明示的に選択された
+    データセット」で、None グループを前面化すれば None になる。"""
     from gui.window import ToolWindow
     from gui.tab import AnalysisTab
 
@@ -52,17 +55,17 @@ def test_datasetless_tab_preserves_sticky(qapp):
 
     tab_plain = AnalysisTab("plain")
     tab_plain.session_spec = None
-    win.add_tab(tab_plain)
+    win.add_tab(tab_plain)   # → None グループ（実 ds_x グループと共存）
 
     win.set_active_tab("ds_tab")
     assert win.current_dataset == "ds_x"
 
     win.set_active_tab("plain")
-    assert win.current_dataset == "ds_x"  # sticky
+    assert win.current_dataset is None  # 明示選択（sticky ではない）
 
 
-def test_notify_chat_dataset_updates_sticky(qapp):
-    """notify_chat_dataset 経由で sticky 更新。"""
+def test_set_active_tab_selects_dataset(qapp):
+    """figure タブへの set_active_tab がその dataset グループを前面化し current を更新。"""
     from gui.window import ToolWindow
     from gui.tab import AnalysisTab
 
@@ -74,5 +77,6 @@ def test_notify_chat_dataset_updates_sticky(qapp):
     win.add_tab(tab)
 
     win.set_active_tab("t")
-    win.notify_chat_dataset()
+    assert win.current_dataset == "ds_y"
+    win.notify_chat_dataset()  # チャット push のみ、current は変えない
     assert win.current_dataset == "ds_y"
