@@ -646,6 +646,32 @@ def test_session_auto_share(qapp, monkeypatch):
     r.stop()
 
 
+def test_deselect_hidden_session_persists_across_switch(qapp, monkeypatch):
+    """Issue #51 / reviewer code P2 R3: a hidden dataset's session that the host
+    explicitly deselected stays deselected after switching to that dataset.
+    set_published_sessions records the opted-out id in _session_known so a later
+    absorb_new_sessions does not treat it as undecided-new and re-share it."""
+    chat = FakeChat([
+        {"id": "a", "title": "A", "busy": False, "dataset": "dsA"},
+        {"id": "b", "title": "B", "busy": False, "dataset": "dsB"},
+    ])
+    win = FakeWindow(chat, dataset="dsA")
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"a"}      # dsA active; hidden b withheld
+    # host makes hidden b visible+selected, then explicitly deselects it.
+    r.set_published_sessions({"a", "b"})
+    r.set_published_sessions({"a"})                # b explicitly opted out
+    # switch to dsB: b must NOT be auto-re-shared (deselection persists).
+    win.current_dataset = "dsB"
+    assert r.absorb_new_sessions() == []
+    assert "b" not in r.published_session_ids()
+    r.stop()
+
+
 def test_session_auto_share_off(qapp, monkeypatch):
     chat = FakeChat([_sess("s1")])
     win = FakeWindow(chat, dataset="ds1", tabs=[])

@@ -443,6 +443,16 @@ class MeetingRelay(QObject):
         new = set(ids)
         removed = self._published_session_ids - new
         self._published_session_ids = new
+        # Record every session the host explicitly decided (published OR opted
+        # out) as "known" so a hidden dataset's session that was explicitly
+        # deselected is NOT treated as an undecided-new item and re-absorbed
+        # (default-shared) on a later dataset switch — "explicit deselection
+        # persists across switches" (Issue #51 / reviewer code P2 R3). hasattr guard:
+        # a mid-meeting hot-reload can patch this onto an instance predating
+        # _session_known.
+        if not hasattr(self, "_session_known"):
+            self._session_known = set(self._published_session_ids)
+        self._session_known |= new | removed
         # Drop any pending remote turns queued for sessions just opted out, so a
         # later FIFO drain can't inject into a now-private session.
         if removed:
@@ -453,7 +463,17 @@ class MeetingRelay(QObject):
                     pend.pop(sid, None)
 
     def set_published_tabs(self, names) -> None:
-        self._published_tabs = set(names)
+        # Symmetric to set_published_sessions (Issue #51 / reviewer code P2 R3):
+        # record every explicitly-decided tab (published OR deselected) as known
+        # so a deselected tab is not re-absorbed (default-shared) on a dataset
+        # switch. Active-dataset tabs are already in _tab_known from meeting_start,
+        # so this only matters if the share UI ever exposes a hidden dataset's tab.
+        new = set(names)
+        removed = self._published_tabs - new
+        if not hasattr(self, "_tab_known"):
+            self._tab_known = set(self._published_tabs)
+        self._tab_known |= new | removed
+        self._published_tabs = new
 
     def _active_dataset(self):
         """The window's currently-selected dataset (meeting publish scope, B5)."""
