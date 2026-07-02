@@ -111,7 +111,7 @@ class _MenuHost:
         return False
 
 
-def test_placeholder_menu_shows_close_only():
+def test_placeholder_menu_is_empty():
     from PySide6.QtWidgets import QApplication, QMenu
 
     QApplication.instance() or QApplication([])
@@ -123,10 +123,31 @@ def test_placeholder_menu_shows_close_only():
 
     menu = QMenu()
     ToolWindow._populate_tab_menu(_MenuHost(), menu, _Widget(), None)
-    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert texts == [tr("menu.tab.close")]
-    assert tr("menu.tab.copy_name") not in texts
-    assert tr("menu.tab.comment") not in texts
+    assert menu.actions() == []  # プレースホルダは項目ゼロ（close も出さない）
+
+
+def test_close_tab_refuses_placeholder():
+    from gui.window import ToolWindow
+
+    class _Ph:
+        name = "(empty)"
+        is_placeholder = True
+
+        def deleteLater(self):  # 呼ばれたらガード漏れ
+            raise AssertionError("placeholder must not be closed")
+
+    class _Grp:
+        def find(self, name):
+            return (0, _Ph()) if name == "(empty)" else (None, None)
+
+    class _Self:
+        def _groups_to_search(self, dataset):
+            return [_Grp()]
+
+        def mark_session_dirty(self):
+            pass
+
+    assert ToolWindow.close_tab(_Self(), "(empty)") is False
 
 
 def test_real_tab_menu_shows_all_items():

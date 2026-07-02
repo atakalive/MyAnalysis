@@ -481,10 +481,13 @@ class ToolWindow(QMainWindow):
 
     def close_tab(self, name: str, dataset: str | None = None) -> bool:
         """Close a tab. With *dataset* given, only that group is searched;
-        otherwise the active group wins, then the first match across groups."""
+        otherwise the active group wins, then the first match across groups.
+        プレースホルダタブ（is_placeholder=True）は close しない（#54, ゼロタブ窓防止）。"""
         for grp in self._groups_to_search(dataset):
             idx, widget = grp.find(name)
             if widget is not None:
+                if getattr(widget, "is_placeholder", False):
+                    return False  # プレースホルダは閉じない（システムスタブ）
                 grp.tabs.removeTab(idx)
                 widget.deleteLater()
                 self.mark_session_dirty()
@@ -844,6 +847,9 @@ class ToolWindow(QMainWindow):
             return
         menu = QMenu(self)
         self._populate_tab_menu(menu, widget, grp.name)
+        if not menu.actions():  # プレースホルダ等、項目が無ければ空ポップアップを出さない
+            menu.deleteLater()
+            return
         menu.exec(tab_bar.mapToGlobal(pos))
 
     def _populate_tab_menu(
@@ -851,22 +857,22 @@ class ToolWindow(QMainWindow):
     ) -> None:
         """タブ右クリックメニューを *menu* に構築する（exec はしない）。
 
-        プレースホルダタブ（データセット未登録時の空スタブ、is_placeholder=True）
-        では「タブ名をコピー」「このタブにコメント」は無意味なので出さず、
-        「タブを閉じる」のみ表示する。実体タブ（解析／demo／inferred viewer）は
-        従来どおり全項目を出す。exec を分離しているのでヘッドレステスト可能。
+        プレースホルダタブ（is_placeholder=True）はシステムスタブでありユーザー content
+        ではないため、メニュー項目を一切出さない（コピー / コメントは無意味、「タブを
+        閉じる」はゼロタブ空ウィンドウを生む — #54）。実体タブ（解析 / demo / inferred
+        viewer）は従来どおり全項目を出す。exec を分離しているのでヘッドレステスト可能。
         """
         name = widget.name  # 全タブ AnalysisTab なので .name は必ず存在
         # is_placeholder は実 AnalysisTab では常に存在（__init__ で無条件初期化）。
-        # duck-typed テスト widget / headless fake でも呼べるよう fail-open。
+        # duck-typed テスト widget / headless fake は非プレースホルダ扱い（fail-open）。
         if not getattr(widget, "is_placeholder", False):
             copy_action = menu.addAction(tr("menu.tab.copy_name"))
             copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
             comment_action = menu.addAction(tr("menu.tab.comment"))
             comment_action.triggered.connect(lambda: self._comment_on_tab(name))
             menu.addSeparator()
-        close_action = menu.addAction(tr("menu.tab.close"))
-        close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
+            close_action = menu.addAction(tr("menu.tab.close"))
+            close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
 
     def _comment_on_tab(self, name: str) -> None:
         chat = self.chat_widget()
