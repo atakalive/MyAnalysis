@@ -288,8 +288,11 @@ class OpenDatasetDialog(QDialog):
         detail_layout.addLayout(btn_row)
         detail_layout.addStretch(1)
         splitter.addWidget(detail)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # Left table keeps its width on window resize; only the right detail
+        # pane absorbs the delta. Handle stays draggable for manual adjustment.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([540, 360])  # sensible initial split (~3:2 at 900px)
         outer.addWidget(splitter, 1)
 
         self._buttons = QDialogButtonBox(
