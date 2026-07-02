@@ -191,6 +191,57 @@ def test_worker_parent_and_registry(qapp, patch_picker, monkeypatch):
     worker.wait(2000)
 
 
+def test_refresh_regrabs_live_thumbnail_when_open(qapp, patch_picker, monkeypatch,
+                                                  tmp_path):
+    # 更新 on an open dataset re-grabs its live active tab via the window and shows
+    # that fresh PNG (precedence over the persisted meta.thumbnail).
+    from PySide6.QtGui import QImage
+
+    from gui import open_dataset_dialog as mod
+    patch_picker([_meta("a", uncomputed=False)])       # complete meta → no startup worker
+    monkeypatch.setattr(mod.dataset_meta, "rebuild_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod.dataset_meta, "load_one",
+                        lambda n: _meta(n, uncomputed=False))
+
+    png = tmp_path / "current_view.png"
+    img = QImage(4, 4, QImage.Format.Format_RGB32)
+    img.fill(0)
+    assert img.save(str(png), "PNG")
+
+    class _Main(_FakeMain):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def snapshot_active_thumbnail(self, dataset):
+            self.calls.append(dataset)
+            return str(png)
+
+    main = _Main()
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_refresh()
+    assert main.calls == ["a"]                          # window asked to re-grab
+    assert dlg._live_thumbs.get("a") == str(png)        # live path recorded, wins
+    assert not dlg._thumb.pixmap().isNull()             # thumbnail rendered
+    if dlg._workers:
+        dlg._workers[-1].wait(5000)
+
+
+def test_refresh_no_regrab_when_window_lacks_hook(qapp, patch_picker, monkeypatch):
+    # A window without snapshot_active_thumbnail (e.g. headless fake) just runs the
+    # metadata worker — no crash, no live thumbnail recorded.
+    from gui import open_dataset_dialog as mod
+    patch_picker([_meta("a", uncomputed=False)])
+    monkeypatch.setattr(mod.dataset_meta, "rebuild_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mod.dataset_meta, "load_one",
+                        lambda n: _meta(n, uncomputed=False))
+    dlg, _m, _h = _make_dialog(qapp)                    # _FakeMain has no hook
+    dlg._on_refresh()
+    assert dlg._live_thumbs == {}
+    assert len(dlg._workers) == 1
+    dlg._workers[-1].wait(5000)
+
+
 def test_edit_desc_failure_warns(qapp, patch_picker, monkeypatch):
     from gui import open_dataset_dialog as mod
     patch_picker([_meta("a")])

@@ -547,6 +547,32 @@ class ToolWindow(QMainWindow):
         idx = grp.tabs.currentIndex()
         return grp.tabs.widget(idx) if idx >= 0 else None
 
+    def snapshot_active_thumbnail(self, dataset: str) -> str | None:
+        """Re-grab *dataset*'s live active tab into its current_view.png and return
+        the absolute PNG path (or None).
+
+        Used by the Open-dataset picker's 更新 button so the thumbnail reflects the
+        on-screen view rather than a stale/absent persisted snapshot (a metadata
+        rebuild re-reads current_view.png but never recaptures it). Returns None
+        when the dataset isn't open, its active tab can't snapshot (e.g. a
+        non-analysis tab with no writer), or nothing was written. GUI-thread only
+        — QWidget.grab() can't run off the main thread."""
+        grp = self._groups.get(dataset)
+        if grp is None:
+            return None
+        idx = grp.tabs.currentIndex()
+        tab = grp.tabs.widget(idx) if idx >= 0 else None
+        name = getattr(tab, "name", None)
+        if tab is None or not name or not hasattr(tab, "take_snapshot"):
+            return None
+        from llm_bridge import snapshots
+        try:
+            tab.take_snapshot()          # no-op if this tab has no snapshot writer
+            p = snapshots.path(dataset, name)
+            return str(p) if p.exists() else None
+        except Exception:
+            return None
+
     def set_active_tab(self, name: str, dataset: str | None = None) -> bool:
         target_group = None
         target_idx = -1

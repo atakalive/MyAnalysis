@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QThread,
     Signal,
 )
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -242,6 +242,10 @@ class OpenDatasetDialog(QDialog):
 
         open_names = getattr(main_window, "open_dataset_names", lambda: [])()
         self._open_names = set(open_names)
+        # dataset name → absolute current_view.png path from a live 更新 re-grab.
+        # Takes precedence over the persisted meta.thumbnail so the pane shows the
+        # freshly captured on-screen view (see _on_refresh / _render_detail).
+        self._live_thumbs: dict[str, str] = {}
         self._model = DatasetTableModel(metas, self, open_names=self._open_names)
         self._proxy = DatasetFilterProxyModel(self)
         self._proxy.setSourceModel(self._model)
@@ -428,15 +432,25 @@ class OpenDatasetDialog(QDialog):
         else:
             add(tr("picker.detail.updated_at"), QLabel(_fmt_time(m.updated_at, precise=True)))
 
-        # thumbnail: only if the path exists and is loadable.
-        if m.thumbnail and m.host_path:
-            from pathlib import Path
-            p = Path(m.host_path) / m.thumbnail
-            if p.exists():
-                pix = QPixmap(str(p))
-                if not pix.isNull():
-                    self._thumb.setPixmap(
-                        pix.scaledToWidth(240, Qt.TransformationMode.SmoothTransformation))
+        # thumbnail: a live re-grab (更新 on an open dataset) takes precedence over
+        # the persisted snapshot so the pane shows the current on-screen view;
+        # otherwise fall back to the dataset's stored current_view.png.
+        from pathlib import Path
+        thumb_path = None
+        live = self._live_thumbs.get(m.name)
+        if live and Path(live).exists():
+            thumb_path = Path(live)
+        elif m.thumbnail and m.host_path:
+            cand = Path(m.host_path) / m.thumbnail
+            if cand.exists():
+                thumb_path = cand
+        if thumb_path is not None:
+            # QImage reads straight from disk; QPixmap(str) goes through
+            # QPixmapCache, so a just-regrabbed file is always shown fresh here.
+            img = QImage(str(thumb_path))
+            if not img.isNull():
+                self._thumb.setPixmap(QPixmap.fromImage(img).scaledToWidth(
+                    240, Qt.TransformationMode.SmoothTransformation))
 
     # ----- actions -----
 
@@ -448,6 +462,20 @@ class OpenDatasetDialog(QDialog):
         m = self._current_meta()
         if m is None or not m.name:
             return
+        # If the dataset is open, re-grab its live active tab so the thumbnail
+        # shows the current on-screen view. The metadata rebuild below only
+        # re-reads the persisted current_view.png (possibly stale or absent) and
+        # never recaptures it. GUI-thread only; no-op if the dataset isn't open or
+        # its active tab isn't a snapshot-capable analysis (e.g. a non-image tab).
+        grab = getattr(self._main_window, "snapshot_active_thumbnail", None)
+        if grab is not None:
+            try:
+                png = grab(m.name)
+            except Exception:
+                png = None
+            if png:
+                self._live_thumbs[m.name] = png
+                self._render_detail(m)   # reflect the fresh grab immediately
         self._start_worker([m.name])
 
     def _on_edit_desc(self) -> None:
