@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from common import i18n
 from common.i18n import tr
+from gui.floating_window import FloatingTabWindow
 from gui.tab import AnalysisTab
 from gui.tabbar import MultiRowTabBar
 
@@ -47,19 +48,31 @@ class _DatasetGroup(QWidget):
         self.tabs.setTabBar(MultiRowTabBar())   # 多段（N段）タブ：横スクロール廃止
         self.tabs.setMovable(True)
         layout.addWidget(self.tabs)
+        # フロート中の解析タブ（親を切り離した独立窓に居るが、概念上はこのグループの
+        # メンバー。列挙メソッドは self.tabs のページと _floated の和を返す）。#56
+        self._floated: dict[str, AnalysisTab] = {}
 
     def find(self, name: str) -> tuple[int, QWidget | None]:
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if getattr(w, "name", None) == name:
                 return i, w
+        floated = getattr(self, "_floated", {})
+        if name in floated:
+            return -1, floated[name]
         return -1, None
 
     def names(self) -> list[str]:
-        return [self.tabs.widget(i).name for i in range(self.tabs.count())]
+        return (
+            [self.tabs.widget(i).name for i in range(self.tabs.count())]
+            + [t.name for t in getattr(self, "_floated", {}).values()]
+        )
 
     def widgets(self) -> list[QWidget]:
-        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+        return (
+            [self.tabs.widget(i) for i in range(self.tabs.count())]
+            + list(getattr(self, "_floated", {}).values())
+        )
 
 
 class DatasetSwitcher(MultiRowTabBar):
@@ -130,6 +143,12 @@ class ToolWindow(QMainWindow):
         # Long-lived registry keeping dataset-picker meta-build workers alive
         # while they run (belt-and-braces with their QApplication Qt parent).
         self._meta_workers: list[QThread] = []
+
+        # Strong refs keep floated windows alive (anti-GC). Keyed by the canonical
+        # (grp.name, tab_name). _shutting_down suppresses re-docking during
+        # app teardown / Tier reload. #56
+        self._float_windows: dict[tuple[str | None, str], object] = {}
+        self._shutting_down = False
 
         self._session_dirty = False
         self._suppress_dirty = False
@@ -298,6 +317,10 @@ class ToolWindow(QMainWindow):
             lambda pos, g=grp: self._on_tab_context_menu(g, pos)
         )
         tab_bar.tabMoved.connect(lambda *_: self.mark_session_dirty())
+        tab_bar.set_detachable(True)
+        tab_bar.tabDetachRequested.connect(
+            lambda name, gp, g=grp: self._on_tab_detach(g, name, gp)
+        )
         if ds is not None:
             self._suppress_switch = True
             try:
@@ -448,6 +471,15 @@ class ToolWindow(QMainWindow):
         n = grp.tabs.count()
         self.set_suppress_dirty(True)
         try:
+            # フロート破棄（両台帳。_floated は name キー、_float_windows は (ds,name) キー）
+            floated = getattr(grp, "_floated", {})
+            n += len(floated)  # 閉じ数に算入
+            for fname in list(floated):
+                win = getattr(self, "_float_windows", {}).pop((grp.name, fname), None)
+                if win is not None:
+                    win.deleteLater()
+                tab = floated.pop(fname)
+                tab.deleteLater()
             while grp.tabs.count() > 0:
                 w = grp.tabs.widget(0)
                 grp.tabs.removeTab(0)
@@ -483,8 +515,81 @@ class ToolWindow(QMainWindow):
         _, existing = grp.find(tab.name)
         if existing is not None:
             raise KeyError(f"tab name {tab.name!r} already exists")
-        grp.tabs.addTab(tab, tab.name)
+        i = grp.tabs.addTab(tab, tab.name)
+        grp.tabs.tabBar().setTabData(i, tab.name)   # tear-off identity（#56）
         self.mark_session_dirty()
+
+    def float_tab(
+        self, name: str, dataset: str | None = None, at: QPoint | None = None
+    ) -> bool:
+        """Pop *name* out into a standalone FloatingTabWindow (Issue #56).
+
+        The tab stays a member of its group (moves to grp._floated), so it still
+        appears in tabs()/tab_names()/find_tab() and is saved/relayed normally.
+        Returns False for an absent or placeholder tab (the single gate).
+        """
+        if not hasattr(self, "_float_windows"):
+            self._float_windows = {}
+        self._shutting_down = False  # 新規フロート＝teardown 中ではない（latch 自己回復）
+        grp = tab = None
+        idx = -1
+        for g in self._groups_to_search(dataset):
+            i, w = g.find(name)
+            if w is not None:
+                grp, idx, tab = g, i, w
+                break
+        if tab is None or getattr(tab, "is_placeholder", False):
+            return False
+        key_ds = grp.name  # 正準キーは解決後の grp.name（呼び出し引数 dataset は使わない）
+        if idx < 0:  # find が (-1, tab) を返した＝既にフロート中 → 前面化のみ
+            win = getattr(self, "_float_windows", {}).get((key_ds, name))
+            if win:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+            return True
+        if not hasattr(grp, "_floated"):
+            grp._floated = {}
+        size = tab.size()
+        # 台帳を Qt tabs 操作より先に更新: removeTab は同期的に currentChanged を
+        # 発火し _on_tab_changed が再入する。_floated 先行更新で単一メンバーシップ維持。
+        grp._floated[tab.name] = tab
+        grp.tabs.removeTab(idx)
+        tab.setParent(None)
+        win = FloatingTabWindow(self, tab, key_ds, name, size)
+        if at is not None:
+            win.move(at)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        self._float_windows[(key_ds, name)] = win
+        self.mark_session_dirty()  # float→redock は tab 順序を変えうる（末尾 addTab）
+        return True
+
+    def _on_tab_detach(
+        self, grp: "_DatasetGroup", name: str, gpos: QPoint
+    ) -> None:
+        # tabDetachRequested 受け口（引数は index でなく name）。全経路が float_tab を通る。
+        self.float_tab(name, dataset=grp.name, at=gpos)
+
+    def _dock_tab(self, ds: str | None, name: str) -> None:
+        """Re-dock a floated tab back into its group. Idempotent (Issue #56)."""
+        grp = self._groups.get(ds)
+        win = getattr(self, "_float_windows", {}).pop((ds, name), None)
+        tab = getattr(grp, "_floated", {}).pop(name, None) if grp else None
+        if tab is not None:
+            tab.setParent(None)
+            i = grp.tabs.addTab(tab, tab.name)
+            grp.tabs.tabBar().setTabData(i, tab.name)
+            self.set_active_tab(name, dataset=ds)
+        if win is not None:
+            win.deleteLater()  # win.setParent(None) は呼ばない（自窓 closeEvent 中の再親付け回避）
+
+    def _close_all_floats(self) -> None:
+        """Re-dock every floated tab before teardown/reload/dataset-close."""
+        self._shutting_down = True
+        for (ds, name) in list(getattr(self, "_float_windows", {})):
+            self._dock_tab(ds, name)
 
     def close_tab(self, name: str, dataset: str | None = None) -> bool:
         """Close a tab. With *dataset* given, only that group is searched;
@@ -499,7 +604,14 @@ class ToolWindow(QMainWindow):
             if widget is not None:
                 if getattr(widget, "is_placeholder", False):
                     return False  # プレースホルダは閉じない（システムスタブ）
-                grp.tabs.removeTab(idx)
+                floated = getattr(grp, "_floated", {})
+                if idx < 0 or name in floated:   # フロート中タブ（#56）
+                    win = getattr(self, "_float_windows", {}).pop((grp.name, name), None)
+                    if win is not None:
+                        win.deleteLater()
+                    floated.pop(name, None)
+                else:
+                    grp.tabs.removeTab(idx)
                 widget.deleteLater()
                 self.mark_session_dirty()
                 self._reanchor_after_close_tab(grp)  # #55: ゼロタブ空ウィンドウ防止
@@ -525,7 +637,7 @@ class ToolWindow(QMainWindow):
             - 実データセットが無い → _reseed_empty_group() で (empty) を再生成し、
               完全な空ウィンドウを防ぐ。
         """
-        if grp.tabs.count() > 0:
+        if grp.tabs.count() > 0 or getattr(grp, "_floated", {}):
             return
         if grp.name is not None:
             return
@@ -590,6 +702,13 @@ class ToolWindow(QMainWindow):
                 break
         if target_group is None:
             return False
+        if target_idx < 0:  # フロート中 → 前面グループは変えず窓を前面化（#56）
+            win = getattr(self, "_float_windows", {}).get((target_group.name, name))
+            if win is not None:
+                win.show()
+                win.raise_()
+                win.activateWindow()
+            return True
         # Always select (idempotent) so current_dataset / chat sync even when the
         # group is already the front page — the front stack widget and
         # current_dataset can otherwise diverge (e.g. right after add_tab).
@@ -873,6 +992,7 @@ class ToolWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         if not self._session_dirty or self._session_saver is None:
             self._stop_meeting_relay()
+            self._close_all_floats()
             event.accept()
             return
         reply = QMessageBox.question(
@@ -900,9 +1020,11 @@ class ToolWindow(QMainWindow):
                 event.ignore()
                 return
             self._stop_meeting_relay()
+            self._close_all_floats()
             event.accept()
         elif reply == QMessageBox.StandardButton.No:
             self._stop_meeting_relay()
+            self._close_all_floats()
             event.accept()
         else:
             event.ignore()
@@ -961,6 +1083,8 @@ class ToolWindow(QMainWindow):
             copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
             comment_action = menu.addAction(tr("menu.tab.comment"))
             comment_action.triggered.connect(lambda: self._comment_on_tab(name))
+            float_action = menu.addAction(tr("menu.tab.float"))
+            float_action.triggered.connect(lambda: self.float_tab(name, dataset=ds))
             menu.addSeparator()
             close_action = menu.addAction(tr("menu.tab.close"))
             close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))

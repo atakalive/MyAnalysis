@@ -20,6 +20,7 @@
 "menu.help"                   = "Help(&H)"
 "menu.help.about"             = "About"
 "menu.tab.close"              = "Close tab"
+"menu.tab.float"              = "Float (detach)"
 "menu.tab.copy_name"          = "Copy tab name"
 "menu.tab.comment"            = "Comment on this tab"
 "menu.tab.comment_prefix"     = "[Comment on tab: {name}] "

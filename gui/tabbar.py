@@ -1,4 +1,4 @@
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPaintEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,6 +29,11 @@ class MultiRowTabBar(QTabBar):
     _press_index = -1
     _dragging = False
     _hover_index = -1
+    _detachable = False
+    _pending_detach = False
+    _press_name = ""
+
+    tabDetachRequested = Signal(str, QPoint)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -43,6 +48,17 @@ class MultiRowTabBar(QTabBar):
         self._press_pos = QPoint()
         self._dragging = False
         self._hover_index = -1
+        self._detachable = False
+        self._pending_detach = False
+        self._press_name = ""
+
+    def set_detachable(self, on: bool) -> None:
+        self._detachable = bool(on)
+
+    def _outside_bar(self, pos: QPoint) -> bool:
+        # 縦方向にバー高さ(row_height)を超えて外れたら「引き出し」とみなす。
+        # 横外れは in-bar 並べ替えでカバーされ得るので縦端で判定する。
+        return pos.y() < -self._row_height or pos.y() > self.height() + self._row_height
 
     # --- 段高 -------------------------------------------------------------
     def _compute_row_height(self) -> int:
@@ -168,6 +184,12 @@ class MultiRowTabBar(QTabBar):
             self._press_index = idx
             self._press_pos = event.position().toPoint()
             self._dragging = False
+            if idx >= 0:
+                data = self.tabData(idx)
+                self._press_name = data if isinstance(data, str) else self.tabText(idx)
+            else:
+                self._press_name = ""
+            self._pending_detach = False
             return  # super() は呼ばない（ネイティブ 1 段ロジックと衝突するため）
         # 右クリック → CustomContextMenu の生成を壊さないよう super() に委譲
         super().mousePressEvent(event)
@@ -186,6 +208,8 @@ class MultiRowTabBar(QTabBar):
                     self._press_index = target
                     self._dragging = True
                     self._relayout(self.width())  # 直後に矩形を更新（古い矩形を見ない）
+            if self._detachable and self._outside_bar(pos):
+                self._pending_detach = True
             return
         # hover 更新（装飾）
         new_hover = self.tabAt(event.position().toPoint())
@@ -196,8 +220,15 @@ class MultiRowTabBar(QTabBar):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            armed = self._pending_detach
+            name = self._press_name
             self._press_index = -1
             self._dragging = False
+            self._pending_detach = False
+            self._press_name = ""
+            if armed and name and self._outside_bar(pos):
+                self.tabDetachRequested.emit(name, event.globalPosition().toPoint())
             return
         super().mouseReleaseEvent(event)
 

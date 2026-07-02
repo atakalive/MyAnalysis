@@ -166,5 +166,6 @@ def test_real_tab_menu_shows_all_items():
     assert texts == [
         tr("menu.tab.copy_name"),
         tr("menu.tab.comment"),
+        tr("menu.tab.float"),
         tr("menu.tab.close"),
     ]

@@ -20,6 +20,7 @@
 "menu.help"                   = "ヘルプ(&H)"
 "menu.help.about"             = "バージョン情報"
 "menu.tab.close"              = "タブを閉じる"
+"menu.tab.float"              = "フロート（切り離し）"
 "menu.tab.copy_name"          = "タブ名をコピー"
 "menu.tab.comment"            = "このタブにコメント"
 "menu.tab.comment_prefix"     = "[タブ「{name}」へのコメント] "

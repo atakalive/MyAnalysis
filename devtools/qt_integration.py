@@ -427,6 +427,12 @@ class HotReloadController(QObject):
             if _relay is not None:
                 _relay.stop()
 
+            # 6b. re-dock any floated tabs before purge (#56). getattr-guarded:
+            # the first patch reload has no _close_all_floats on the old window.
+            _caf = getattr(old_window, "_close_all_floats", None)
+            if _caf:
+                _caf()
+
             # 7. purge repo modules.
             hotreload.purge_project_modules()
 
@@ -457,6 +463,10 @@ class HotReloadController(QObject):
             sys.modules.update(saved_modules)
             _m("llm_bridge.paths").reload_manifest_path().unlink(missing_ok=True)
             self._recover_old_watcher(old_window)
+            # _close_all_floats latched _shutting_down=True; clear it so floats on
+            # the recovered old window re-dock normally afterward (#56).
+            if getattr(old_window, "_shutting_down", False):
+                old_window._shutting_down = False
             try:
                 old_window.show()
             except Exception:
@@ -499,6 +509,7 @@ class HotReloadController(QObject):
         if sys.platform == "win32":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         subprocess.Popen([sys.executable, tool_path, "--resume-session"], **kwargs)
+        window._close_all_floats()  # re-dock floats (#56); after Popen, before clear_dirty
         window.clear_session_dirty()  # avoid the closeEvent save prompt
         QApplication.quit()
 
