@@ -181,3 +181,50 @@ def test_add_tab_new_path_syncs_current_dataset(win, tmp_path, monkeypatch):
     # a follow-up add-tab WITHOUT dataset= now resolves via current_dataset
     # (raised ValueError 'no dataset open' before the fix).
     assert win.dispatch_command("add-tab", name="b") == "added:b"
+
+
+def test_close_tab_reseeds_when_window_empties(win):
+    """#55: 非プレースホルダの dataset-less タブが唯一のタブで実データセットも無い
+    場合、close_tab はゼロタブ窓を作らず (empty) を再生成する。"""
+    from gui.tab import AnalysisTab
+    win.add_tab(AnalysisTab("orphan"))              # → None グループ（唯一のタブ）
+    # 前提固定: win は素の ToolWindow()（create_main_window 非経由）で (empty) 未種まき。
+    # orphan のみが載ることを確認し、close 後の names()==["(empty)"] が既存 (empty) 残存
+    # ではなく真の再シード結果であることを保証する（fixture 変化時の偽陽性 pass 防止）。
+    assert win._groups[None].names() == ["orphan"]
+    assert win.close_tab("orphan") is True
+    grp = win._groups.get(None)
+    assert grp is not None
+    assert grp.names() == ["(empty)"]               # 再シード済み
+    _, ph = grp.find("(empty)")
+    assert ph is not None and ph.is_placeholder is True
+    assert win.current_dataset is None              # None グループが前面
+
+
+def test_close_tab_no_reseed_when_real_dataset_open(win, tmp_path):
+    """#55: dataset-less タブを閉じても実データセットが開いていれば (empty) は作らず、
+    空の None グループを除去して実データセットへ再アンカーする。"""
+    from gui.tab import AnalysisTab
+    _write_analysis(tmp_path, "dsA", "a")
+    win.dispatch_command("add-tab", name="a", dataset="dsA")  # dsA グループ
+    win.add_tab(AnalysisTab("orphan"))                        # None グループ
+    win._select_dataset_group(None)                           # None を前面に
+    assert win.close_tab("orphan", dataset=None) is True
+    assert None not in win._groups                            # 空 None グループを除去
+    assert "dsA" in win.open_dataset_names()                  # dsA は健在
+    assert win.current_dataset == "dsA"                       # 実データセットへ再アンカー
+
+
+def test_close_tab_keeps_zero_tab_real_dataset(win, tmp_path):
+    """#55: 実データセットの最後のタブを閉じても、そのデータセットはゼロタブの開き状態
+    として残す（(empty) は作らない = _ensure_group 不変条件を維持）。これは新コード経路の
+    結果弁別ではなく、grp.name is not None 分岐が (empty) を作らない不変条件を将来の
+    リグレッションから守る回帰ガード（この分岐は現行 close_tab でも実質 no-op のため
+    fix 無しでも pass する）。"""
+    _write_analysis(tmp_path, "dsA", "a")
+    win.dispatch_command("add-tab", name="a", dataset="dsA")
+    assert win.close_tab("a", dataset="dsA") is True
+    assert "dsA" in win.open_dataset_names()
+    grpA = win._groups.get("dsA")
+    assert grpA is not None and grpA.tabs.count() == 0
+    assert None not in win._groups                            # (empty) は作らない

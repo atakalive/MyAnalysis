@@ -482,7 +482,11 @@ class ToolWindow(QMainWindow):
     def close_tab(self, name: str, dataset: str | None = None) -> bool:
         """Close a tab. With *dataset* given, only that group is searched;
         otherwise the active group wins, then the first match across groups.
-        プレースホルダタブ（is_placeholder=True）は close しない（#54, ゼロタブ窓防止）。"""
+        プレースホルダタブ（is_placeholder=True）は close しない（#54, ゼロタブ窓防止）。
+        最後の実タブ除去でウィンドウが空になる場合は再アンカーする（#55, 副作用）:
+        None グループが空になり実データセットが開いていればそれへアクティブを切替＋空 None
+        グループを除去、実データセットも無ければ (empty) を再生成する。実データセットグループは
+        ゼロタブでも有効な開き状態として維持する。"""
         for grp in self._groups_to_search(dataset):
             idx, widget = grp.find(name)
             if widget is not None:
@@ -491,8 +495,41 @@ class ToolWindow(QMainWindow):
                 grp.tabs.removeTab(idx)
                 widget.deleteLater()
                 self.mark_session_dirty()
+                self._reanchor_after_close_tab(grp)  # #55: ゼロタブ空ウィンドウ防止
                 return True
         return False
+
+    def _reanchor_after_close_tab(self, grp: "_DatasetGroup") -> None:
+        """close_tab がタブを1つ除去した後、ウィンドウがゼロタブ空状態に落ちない
+        よう再アンカーする（#55）。close_dataset のステップ4（`# 4. re-anchor
+        current` 以下）と同型のロジック。
+
+        - *grp* にまだタブが残る → 何もしない。
+        - *grp* が実データセットグループ（grp.name is not None）で空になった
+          → 何もしない。ゼロタブの実データセットは有効な開き状態であり（switcher に
+          残り register も効く。#51 test_open_dataset_zero_tabs_comes_to_front と同じ
+          扱い）、ここで (empty) を再生成すると _ensure_group の不変条件
+          「zero-tab real group と (empty) placeholder は共存しない」を破る。
+        - *grp* が None グループ（grp.name is None）で空になった:
+            - 実データセットが1つ以上開いている（open_dataset_names() が非空）
+              → 意味を失った空の None グループを除去し、None グループが前面だった
+              場合のみ先頭の実データセットへ再アンカーする。(empty) は再生成しない
+              （上記の不変条件を維持）。
+            - 実データセットが無い → _reseed_empty_group() で (empty) を再生成し、
+              完全な空ウィンドウを防ぐ。
+        """
+        if grp.tabs.count() > 0:
+            return
+        if grp.name is not None:
+            return
+        was_current = self._current_group() is grp
+        remaining = self.open_dataset_names()
+        if remaining:
+            self._remove_group(None)
+            if was_current:
+                self._select_dataset_group(remaining[0])
+        else:
+            self._reseed_empty_group()
 
     def _groups_to_search(self, dataset: str | None) -> list["_DatasetGroup"]:
         if dataset is not None:
