@@ -102,6 +102,8 @@ class ToolWindow(QMainWindow):
         v.setSpacing(0)
         self._switcher = DatasetSwitcher()
         self._switcher.currentChanged.connect(self._on_switcher_changed)
+        self._switcher.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._switcher.customContextMenuRequested.connect(self._on_dataset_context_menu)
         v.addWidget(self._switcher)
         self._stack = QStackedWidget()
         v.addWidget(self._stack, 1)
@@ -299,7 +301,7 @@ class ToolWindow(QMainWindow):
         if ds is not None:
             self._suppress_switch = True
             try:
-                idx = self._switcher.addTab(str(ds))
+                idx = self._switcher.addTab(self._format_switcher_label(ds, False))
                 self._switcher.setTabData(idx, ds)
             finally:
                 self._suppress_switch = False
@@ -379,7 +381,12 @@ class ToolWindow(QMainWindow):
                     busy = cw.dataset_busy(ds)
                 except Exception:
                     busy = False
-            self._switcher.setTabText(i, ("● " if busy else "") + str(ds))
+            self._switcher.setTabText(i, self._format_switcher_label(ds, busy))
+
+    @staticmethod
+    def _format_switcher_label(ds: str, busy: bool) -> str:
+        """DS 切替タブの表示ラベル。◆ で解析タブと区別、● は in-flight チャット。"""
+        return ("● " if busy else "") + "◆ " + str(ds)
 
     def open_datasets(self) -> list["_DatasetGroup"]:
         """The open real-dataset groups (excludes the None/(empty) group), first-seen order."""
@@ -914,6 +921,27 @@ class ToolWindow(QMainWindow):
             menu.deleteLater()
             return
         menu.exec(tab_bar.mapToGlobal(pos))
+
+    def _on_dataset_context_menu(self, pos: QPoint) -> None:
+        index = self._switcher.tabAt(pos)
+        if index < 0:                       # タブ以外（空き領域）は無視
+            return
+        ds = self._switcher.tabData(index)
+        if ds is None:                      # 念のため（switcher に None タブは無い）
+            return
+        menu = QMenu(self)
+        self._populate_dataset_menu(menu, ds)
+        if not menu.actions():              # 念のための空メニュー抑止（雛形と対称）
+            menu.deleteLater()
+            return
+        menu.exec(self._switcher.mapToGlobal(pos))
+
+    def _populate_dataset_menu(self, menu: QMenu, ds: str) -> None:
+        """DS 切替タブ右クリックメニューを構築（exec はしない＝ヘッドレステスト可能）。"""
+        close_action = menu.addAction(tr("menu.dataset.close"))
+        close_action.triggered.connect(
+            lambda: self.close_dataset(ds) if ds in self._groups else None
+        )
 
     def _populate_tab_menu(
         self, menu: QMenu, widget: AnalysisTab, ds: str | None
