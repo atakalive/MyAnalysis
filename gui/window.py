@@ -147,7 +147,7 @@ class ToolWindow(QMainWindow):
         # Strong refs keep floated windows alive (anti-GC). Keyed by the canonical
         # (grp.name, tab_name). _shutting_down suppresses re-docking during
         # app teardown / Tier reload. #56
-        self._float_windows: dict[tuple[str | None, str], object] = {}
+        self._float_windows: dict[tuple[str | None, str], FloatingTabWindow] = {}
         self._shutting_down = False
 
         self._session_dirty = False

@@ -20,16 +20,27 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 if TYPE_CHECKING:
     from gui.tab import AnalysisTab
+    from gui.window import ToolWindow
 
 
 class FloatingTabWindow(QWidget):
-    def __init__(self, main, tab: "AnalysisTab", dataset, name, size):
-        super().__init__()
+    def __init__(
+        self,
+        main: "ToolWindow",
+        tab: "AnalysisTab",
+        dataset: str | None,
+        name: str,
+        size: QSize,
+    ) -> None:
+        # Owned by *main* (ToolWindow) so parent destruction cleans up even on a
+        # teardown path that bypasses _close_all_floats; the Qt.Window flag keeps
+        # it an independent top-level window (still in topLevelWidgets()). #56
+        super().__init__(main)
         self._main = main
         self._dataset = dataset
         self._name = name
