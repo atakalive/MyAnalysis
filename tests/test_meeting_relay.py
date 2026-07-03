@@ -721,8 +721,14 @@ def test_stream_final_delivered_after_ds_switch(qapp, monkeypatch):
     # a later, non-streamed reply of the hidden session is still withheld
     r._on_message_added("a", "assistant", "later reply", "local")
     assert not w._outbox
-    # and an explicitly unshared session's final is withheld too
-    r._on_message_streaming("a", "x", "local", "st2")          # gated (hidden) → no partial
+    # an explicitly unshared session's final is withheld even for a RECORDED
+    # stream: record st2 while IN scope (switch back so the gate passes and
+    # _stream_ids is set), then unshare and finalize — only the
+    # `sid in _published_session_ids` term withholds it now.
+    win.current_dataset = "dsA"
+    r._on_message_streaming("a", "x", "local", "st2")
+    assert r._stream_ids == {"a": "st2"}
+    w._outbox.clear()
     r._published_session_ids = set()
     r._on_message_added("a", "assistant", "unshared final", "local")
     assert not w._outbox
@@ -741,6 +747,11 @@ def test_tabs_sendfail_resets_latch(qapp, monkeypatch):
     r.meeting_start(3600)
     assert r._last_tabs_json is not None
     assert any(i["kind"] == "tabs" for i in r._worker._outbox)
+    # seed the view dedupe caches: a failed tabs PUT must roll them back too
+    # (its retry wipes the server's view store on a dataset change, and a static
+    # figure would otherwise never re-PUT → guests stuck on 204 + placeholder).
+    r._view_hashes = {"t1": b"h"}
+    r._view_cachekeys = {"t1": 1}
 
     def boom(method, path, data=None, is_png=False):
         raise OSError("network down")
@@ -749,8 +760,15 @@ def test_tabs_sendfail_resets_latch(qapp, monkeypatch):
     r._worker._drain_outbox()          # drops every queued item, sig_sendfail per kind
     assert r._last_tabs_json is None   # latch reset (direct-connection delivery here)
     assert r._last_sessions_json is None
+    assert r._view_hashes == {} and r._view_cachekeys == {}
     r._on_capture_tick()               # re-enqueues at the correct FIFO position
     assert any(i["kind"] == "tabs" for i in r._worker._outbox)
+
+    # a dropped view PUT evicts just that tab's dedupe entry (not the whole cache)
+    r._view_hashes = {"t1": b"a", "t2": b"b"}
+    r._view_cachekeys = {"t1": 1, "t2": 2}
+    r._worker.sig_sendfail.emit("view", "t2")
+    assert r._view_hashes == {"t1": b"a"} and r._view_cachekeys == {"t1": 1}
     r.stop()
 
 

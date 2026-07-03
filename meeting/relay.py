@@ -96,7 +96,7 @@ class _RelayWorker(QThread):
     sig_inbound = Signal(str, str, str)   # (sid, name, text)  — from in: only
     sig_presence = Signal(object)         # list[{pid,name,sid,tab,last}]
     sig_state = Signal(str)               # "expired" | "disconnected" | "ok"
-    sig_sendfail = Signal(str)            # kind of a dropped outbox item (no retry)
+    sig_sendfail = Signal(str, str)       # (kind, tab-or-"") of a dropped outbox item (no retry)
 
     def __init__(self, base_url: str, admin_key: str, channel: str,
                  poll_ms: int = 3000, parent=None):
@@ -214,10 +214,10 @@ class _RelayWorker(QThread):
                 self._emit_expired()
             else:
                 self._note_fail()
-                self.sig_sendfail.emit(str(kind or ""))
+                self.sig_sendfail.emit(str(kind or ""), str(item.get("tab") or ""))
         except Exception:
             self._note_fail()
-            self.sig_sendfail.emit(str(kind or ""))
+            self.sig_sendfail.emit(str(kind or ""), str(item.get("tab") or ""))
 
     def _do_inbound(self) -> None:
         try:
@@ -885,17 +885,28 @@ class MeetingRelay(QObject):
             self._worker.enqueue({"kind": "out", "sid": sid, "body": body,
                                   "stream_id": stream_id, "partial": True})
 
-    def _on_sendfail(self, kind: str) -> None:
+    def _on_sendfail(self, kind: str, detail: str = "") -> None:
         # _send drops a failed item without retry, but the change-detect latch was
         # already advanced at enqueue time — a lost tabs PUT would leave the server
         # on the old dataset (with its view store un-cleared) while new-DS view
         # PUTs land under same-named tabs. Reset the latch so the next capture
         # tick re-enqueues at the correct FIFO position. (Re-enqueueing inside
         # _send instead would reorder the PUT after same-tick view items.)
+        #
+        # The view dedupe caches must also roll back: _capture_tab latches them at
+        # CAPTURE time, decoupled from send success, and a static figure never
+        # mints a new hash — so a dropped view PUT (or the server-side views wipe
+        # triggered by the re-sent dataset-switch tabs PUT) would otherwise leave
+        # guests on 204 + placeholder forever.
         if kind == "tabs":
             self._last_tabs_json = None
+            self._view_hashes = {}
+            self._view_cachekeys = {}
         elif kind == "sessions":
             self._last_sessions_json = None
+        elif kind == "view":
+            self._view_hashes.pop(detail, None)
+            self._view_cachekeys.pop(detail, None)
 
     def _backfill_session(self, sid: str, cw) -> None:
         """Stage a published session's existing transcript into the relay so guests

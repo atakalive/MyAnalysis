@@ -941,7 +941,14 @@ function renderTabs(tabs) {
   }
   // A dataset with zero shared tabs: no fetch will ever replace the placeholder,
   // so swap the "loading" text for a neutral empty state (idempotent per poll).
-  if (!tabs.length) clearViewImage(T.noTabs);
+  // Also drop the selection (remembering it for restore): a stale-truthy curTab
+  // would skip the bootstrap on a later re-share — with unchanged pixels vv never
+  // bumps either, so nothing would ever repaint and the placeholder would stick
+  // forever — and would let an in-flight fetch paint an unshared tab's frame.
+  if (!tabs.length) {
+    if (curTab) { selTabByDs[curDs ?? ""] = curTab; curTab = null; }
+    clearViewImage(T.noTabs);
+  }
 }
 
 // ---- live view ----
