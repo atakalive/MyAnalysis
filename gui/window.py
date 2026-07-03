@@ -31,6 +31,28 @@ RESERVED_WINDOW_VERBS = frozenset([
 ])
 
 
+class _FloatStub(QWidget):
+    """Inert placeholder holding a floated tab's name + tab-bar slot (#56).
+
+    While a tab lives in its FloatingTabWindow, a disabled stub keeps its
+    original position and label in the bar so re-docking can restore the exact
+    slot (the stub is a real tab, so it moves with any reordering). It is a
+    *pure UI marker*: filtered out of the group's find/names/widgets enumeration
+    (the real tab is enumerated via ``_floated``), never selectable
+    (``setTabEnabled(False)``), and destroyed on re-dock / close.
+    """
+
+    is_float_stub = True
+
+    def __init__(self, name: str):
+        super().__init__()
+        self.name = name
+
+
+def _is_stub(w: QWidget | None) -> bool:
+    return bool(getattr(w, "is_float_stub", False))
+
+
 class _DatasetGroup(QWidget):
     """One page of the dataset stack: a QTabWidget holding one dataset's tabs.
 
@@ -51,10 +73,15 @@ class _DatasetGroup(QWidget):
         # フロート中の解析タブ（親を切り離した独立窓に居るが、概念上はこのグループの
         # メンバー。列挙メソッドは self.tabs のページと _floated の和を返す）。#56
         self._floated: dict[str, AnalysisTab] = {}
+        # フロート中タブの「元位置」を保持する無効スタブ（name → _FloatStub）。
+        # バー上の位置・名前だけを持ち、列挙では除外される（#56 位置復元）。
+        self._float_stubs: dict[str, _FloatStub] = {}
 
     def find(self, name: str) -> tuple[int, QWidget | None]:
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
+            if _is_stub(w):
+                continue  # 位置スタブは列挙対象外（実タブは _floated 側で数える）
             if getattr(w, "name", None) == name:
                 return i, w
         floated = getattr(self, "_floated", {})
@@ -64,13 +91,15 @@ class _DatasetGroup(QWidget):
 
     def names(self) -> list[str]:
         return (
-            [self.tabs.widget(i).name for i in range(self.tabs.count())]
+            [self.tabs.widget(i).name for i in range(self.tabs.count())
+             if not _is_stub(self.tabs.widget(i))]
             + [t.name for t in getattr(self, "_floated", {}).values()]
         )
 
     def widgets(self) -> list[QWidget]:
         return (
-            [self.tabs.widget(i) for i in range(self.tabs.count())]
+            [self.tabs.widget(i) for i in range(self.tabs.count())
+             if not _is_stub(self.tabs.widget(i))]
             + list(getattr(self, "_floated", {}).values())
         )
 
@@ -432,7 +461,10 @@ class ToolWindow(QMainWindow):
         self._select_dataset_group(name)
         grp = self._groups.get(name)
         if grp is not None and grp.tabs.count() > 0 and grp.tabs.currentIndex() < 0:
-            grp.tabs.setCurrentIndex(0)
+            for i in range(grp.tabs.count()):  # 位置スタブは飛ばして最初の実タブへ（#56）
+                if not _is_stub(grp.tabs.widget(i)):
+                    grp.tabs.setCurrentIndex(i)
+                    break
         self.open_datasets_changed.emit()
         return True
 
@@ -468,18 +500,20 @@ class ToolWindow(QMainWindow):
         # 2. forget so the eventual save_all won't overwrite the flushed layout.
         session.forget_dataset(name)
         # 3. close its tabs without raising a spurious "unsaved" dirty flag.
-        n = grp.tabs.count()
+        #    widgets() は実タブ（docked + floated）のみで位置スタブを除外するので、
+        #    フロート中タブを二重計上しない正しい閉じ数になる。#56
+        n = len(grp.widgets())
         self.set_suppress_dirty(True)
         try:
             # フロート破棄（両台帳。_floated は name キー、_float_windows は (ds,name) キー）
             floated = getattr(grp, "_floated", {})
-            n += len(floated)  # 閉じ数に算入
             for fname in list(floated):
                 win = getattr(self, "_float_windows", {}).pop((grp.name, fname), None)
                 if win is not None:
                     win.deleteLater()
                 tab = floated.pop(fname)
                 tab.deleteLater()
+            # 残りのバー内タブ（実タブ＋位置スタブ）を破棄。スタブも deleteLater される。
             while grp.tabs.count() > 0:
                 w = grp.tabs.widget(0)
                 grp.tabs.removeTab(0)
@@ -550,12 +584,21 @@ class ToolWindow(QMainWindow):
             return True
         if not hasattr(grp, "_floated"):
             grp._floated = {}
+        if not hasattr(grp, "_float_stubs"):
+            grp._float_stubs = {}
         size = tab.size()
         # 台帳を Qt tabs 操作より先に更新: removeTab は同期的に currentChanged を
         # 発火し _on_tab_changed が再入する。_floated 先行更新で単一メンバーシップ維持。
         grp._floated[tab.name] = tab
         grp.tabs.removeTab(idx)
         tab.setParent(None)
+        # 元 index に無効スタブを差し込み、タブ名と位置を保持する（再ドックで元位置へ
+        # 復元。スタブは実タブと共にバー内で並べ替わるので位置は頑健に追随する）。#56
+        stub = _FloatStub(name)
+        si = grp.tabs.insertTab(idx, stub, name)
+        grp.tabs.tabBar().setTabData(si, name)
+        grp.tabs.setTabEnabled(si, False)  # 選択不可（名前と位置だけを保持）
+        grp._float_stubs[name] = stub
         win = FloatingTabWindow(self, tab, key_ds, name, size)
         if at is not None:
             win.move(at)
@@ -563,7 +606,7 @@ class ToolWindow(QMainWindow):
         win.raise_()
         win.activateWindow()
         self._float_windows[(key_ds, name)] = win
-        self.mark_session_dirty()  # float→redock は tab 順序を変えうる（末尾 addTab）
+        self.mark_session_dirty()  # docked タブ集合が変わる（再ドックは元位置へ復元）#56
         return True
 
     def _on_tab_detach(
@@ -573,13 +616,24 @@ class ToolWindow(QMainWindow):
         self.float_tab(name, dataset=grp.name, at=gpos)
 
     def _dock_tab(self, ds: str | None, name: str) -> None:
-        """Re-dock a floated tab back into its group. Idempotent (Issue #56)."""
+        """Re-dock a floated tab back into its group at its original slot. Idempotent (#56)."""
         grp = self._groups.get(ds)
         win = getattr(self, "_float_windows", {}).pop((ds, name), None)
         tab = getattr(grp, "_floated", {}).pop(name, None) if grp else None
         if tab is not None:
+            # 位置スタブがバーに残っていれば、その現在位置へ実タブを差し込んで元の
+            # タブ順序を復元する（フロート中に他タブが増減/並べ替えされてもスタブが
+            # 一緒に動くので位置は正しく追随する）。スタブが無ければ末尾へフォールバック。#56
+            stub = getattr(grp, "_float_stubs", {}).pop(name, None)
+            insert_at = grp.tabs.count()
+            if stub is not None:
+                si = grp.tabs.indexOf(stub)
+                if si >= 0:
+                    insert_at = si
+                    grp.tabs.removeTab(si)
+                stub.deleteLater()
             tab.setParent(None)
-            i = grp.tabs.addTab(tab, tab.name)
+            i = grp.tabs.insertTab(insert_at, tab, tab.name)
             grp.tabs.tabBar().setTabData(i, tab.name)
             self.set_active_tab(name, dataset=ds)
         if win is not None:
@@ -610,6 +664,13 @@ class ToolWindow(QMainWindow):
                     if win is not None:
                         win.deleteLater()
                     floated.pop(name, None)
+                    # 位置スタブもバーから除去して破棄（#56）
+                    stub = getattr(grp, "_float_stubs", {}).pop(name, None)
+                    if stub is not None:
+                        si = grp.tabs.indexOf(stub)
+                        if si >= 0:
+                            grp.tabs.removeTab(si)
+                        stub.deleteLater()
                 else:
                     grp.tabs.removeTab(idx)
                 widget.deleteLater()
@@ -664,7 +725,10 @@ class ToolWindow(QMainWindow):
         if grp is None:
             return None
         idx = grp.tabs.currentIndex()
-        return grp.tabs.widget(idx) if idx >= 0 else None
+        if idx < 0:
+            return None
+        w = grp.tabs.widget(idx)
+        return None if _is_stub(w) else w  # 位置スタブが current になる退化ケースを除外（#56）
 
     def snapshot_active_thumbnail(self, dataset: str) -> str | None:
         """Re-grab *dataset*'s live active tab into its current_view.png and return
@@ -1035,8 +1099,8 @@ class ToolWindow(QMainWindow):
         if index < 0:  # タブ以外（空き領域）を右クリックした場合は何もしない
             return
         widget = grp.tabs.widget(index)
-        if widget is None:
-            return
+        if widget is None or _is_stub(widget):
+            return  # 位置スタブ（フロート中タブの元位置ホルダ）はメニューを出さない（#56）
         menu = QMenu(self)
         self._populate_tab_menu(menu, widget, grp.name)
         if not menu.actions():  # プレースホルダ等、項目が無ければ空ポップアップを出さない

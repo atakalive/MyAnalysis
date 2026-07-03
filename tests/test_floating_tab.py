@@ -55,12 +55,27 @@ def _add(win, ds, name, tmp_path):
 
 
 def _docked_names(grp):
-    return [grp.tabs.widget(i).name for i in range(grp.tabs.count())]
+    # Real docked tabs only — skip float-position stubs (#56), which hold the
+    # slot+label of a floated tab but are not enumerated as real tabs.
+    return [
+        grp.tabs.widget(i).name
+        for i in range(grp.tabs.count())
+        if not getattr(grp.tabs.widget(i), "is_float_stub", False)
+    ]
+
+
+def _bar_names(grp):
+    """Raw tab-bar labels including any float-position stubs (#56)."""
+    return [grp.tabs.tabText(i) for i in range(grp.tabs.count())]
 
 
 def _n_float_windows(win, qapp):
-    """Live FloatingTabWindows owned by *win* (scoped so a shared-QApplication
-    session isn't polluted by float windows other tests left open)."""
+    """Live FloatingTabWindows belonging to *win* (scoped so a shared-QApplication
+    session isn't polluted by float windows other tests left open).
+
+    Float windows are ownerless top-levels (no Qt parent — #56 dropped the owner
+    to avoid always-on-top), so they can't be found via win.findChildren(); scan
+    topLevelWidgets() and scope by their _main back-reference instead."""
     from PySide6.QtCore import QEvent
     from PySide6.QtWidgets import QApplication
     from gui.floating_window import FloatingTabWindow
@@ -69,7 +84,11 @@ def _n_float_windows(win, qapp):
     # drain on its own — force it so destroyed windows actually drop out.
     QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.processEvents()
-    return len(win.findChildren(FloatingTabWindow))
+    return sum(
+        1
+        for w in QApplication.topLevelWidgets()
+        if isinstance(w, FloatingTabWindow) and getattr(w, "_main", None) is win
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -266,12 +285,90 @@ def test_set_active_tab_on_floated_returns_true(win, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 11. FloatingTabWindow is owned by the ToolWindow (parent-cleanup net)         #
+# 11. FloatingTabWindow is an ownerless top-level (no always-on-top) — #56      #
 # --------------------------------------------------------------------------- #
 
-def test_floating_window_parented_to_toolwindow(win, tmp_path):
+def test_floating_window_is_ownerless_toplevel(win, tmp_path):
     _add(win, "ds", "T", tmp_path)
     win.float_tab("T", dataset="ds")
     fw = win._float_windows[("ds", "T")]
-    assert fw.parent() is win        # owned by ToolWindow (destroyed with parent)
-    assert fw.isWindow()             # still an independent top-level window
+    # No Qt/native owner: an owned top-level is forced above its owner on Windows
+    # (de-facto always-on-top). Ownerless → the user can send it behind main. #56
+    assert fw.parent() is None
+    assert fw.isWindow()                          # independent top-level window
+    assert win._float_windows[("ds", "T")] is fw  # registry strong ref = anti-GC
+
+
+# --------------------------------------------------------------------------- #
+# 12. floating an *inactive* tab keeps it visible (blank-window regression) #56  #
+# --------------------------------------------------------------------------- #
+
+def test_float_inactive_tab_is_visible(win, tmp_path):
+    # QTabWidget explicitly hides non-current pages; that hidden flag survives
+    # removeTab/setParent and win.show() won't re-show it, so an inactive tab
+    # floated via the right-click menu came up blank. FloatingTabWindow now
+    # re-shows the tab after re-parenting.
+    _add(win, "ds", "a", tmp_path)
+    _add(win, "ds", "b", tmp_path)
+    win.set_active_tab("a", dataset="ds")          # a = active, b = inactive (hidden)
+    grp = win._groups["ds"]
+    _, docked_b = grp.find("b")
+    assert docked_b.isHidden() is True             # precondition: non-current page hidden
+    assert win.float_tab("b", dataset="ds") is True
+    assert grp._floated["b"].isHidden() is False   # pre-fix: True (blank window)
+
+
+# --------------------------------------------------------------------------- #
+# 13. float leaves an inert position stub; re-dock restores the original slot   #
+# --------------------------------------------------------------------------- #
+
+def test_float_leaves_inert_position_stub(win, tmp_path):
+    _add(win, "ds", "a", tmp_path)
+    _add(win, "ds", "b", tmp_path)
+    _add(win, "ds", "c", tmp_path)
+    grp = win._groups["ds"]
+    assert win.float_tab("b", dataset="ds") is True
+    # A stub holds b's slot (index 1) and label, but is NOT a real enumerated tab.
+    assert _bar_names(grp) == ["a", "b", "c"]        # bar still shows b's slot+label
+    assert _docked_names(grp) == ["a", "c"]          # ...but b is not a real docked tab
+    stub_idx = grp.tabs.indexOf(grp._float_stubs["b"])
+    assert stub_idx == 1
+    assert grp.tabs.isTabEnabled(stub_idx) is False  # stub is not selectable
+    # single membership preserved despite the stub sharing b's name
+    assert [w.name for w in win.tabs()].count("b") == 1
+    assert win.tab_names().count("b") == 1
+
+
+def test_redock_restores_original_position(win, tmp_path):
+    _add(win, "ds", "a", tmp_path)
+    _add(win, "ds", "b", tmp_path)
+    _add(win, "ds", "c", tmp_path)
+    grp = win._groups["ds"]
+    win.float_tab("b", dataset="ds")                 # float the MIDDLE tab
+    win._float_windows[("ds", "b")].close()          # [X] → re-dock
+    assert _docked_names(grp) == ["a", "b", "c"]     # b back in its original slot, not appended
+    assert not grp._float_stubs                       # stub cleaned up
+
+
+def test_redock_position_robust_to_reorder(win, tmp_path):
+    # The stub is a real bar tab, so it tracks position through other tabs
+    # closing while floated — re-dock uses the stub's *current* slot.
+    _add(win, "ds", "a", tmp_path)
+    _add(win, "ds", "b", tmp_path)
+    _add(win, "ds", "c", tmp_path)
+    grp = win._groups["ds"]
+    win.float_tab("a", dataset="ds")                 # float the FIRST tab (stub at 0)
+    win.close_tab("b", dataset="ds")                 # close a middle real tab while floated
+    win._float_windows[("ds", "a")].close()          # re-dock a
+    assert _docked_names(grp) == ["a", "c"]          # a restored ahead of c (relative order kept)
+
+
+def test_close_floated_tab_removes_stub(win, tmp_path):
+    _add(win, "ds", "a", tmp_path)
+    _add(win, "ds", "b", tmp_path)
+    grp = win._groups["ds"]
+    win.float_tab("b", dataset="ds")
+    assert win.close_tab("b", dataset="ds") is True
+    assert _bar_names(grp) == ["a"]                   # stub gone from the bar
+    assert not grp._float_stubs
+    assert win.find_tab("b", "ds") is None            # gone from enumeration too

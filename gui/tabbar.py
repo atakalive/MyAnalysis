@@ -137,7 +137,8 @@ class MultiRowTabBar(QTabBar):
             opt = QStyleOptionTab()
             self.initStyleOption(opt, i)
             opt.rect = self._rects[i]
-            if i == self._hover_index and i != cur:
+            # 無効タブ（フロート中タブの位置スタブ #56）は hover ハイライトしない。
+            if i == self._hover_index and i != cur and self.isTabEnabled(i):
                 opt.state |= QStyle.StateFlag.State_MouseOver
             else:
                 opt.state &= ~QStyle.StateFlag.State_MouseOver
@@ -177,6 +178,14 @@ class MultiRowTabBar(QTabBar):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             idx = self.tabAt(event.position().toPoint())
+            if idx >= 0 and not self.isTabEnabled(idx):
+                # 無効タブ（フロート中タブの位置スタブ #56）は選択・並べ替え・detach を
+                # 一切しない。押下を消費して inert 化（super のネイティブ選択も走らせない）。
+                self._press_index = -1
+                self._press_name = ""
+                self._dragging = False
+                self._pending_detach = False
+                return
             if idx >= 0:
                 self.setCurrentIndex(idx)
             # super() をバイパスするため focus が来ない → 明示要求（矢印キー操作維持）

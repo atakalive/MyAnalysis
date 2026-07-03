@@ -37,10 +37,14 @@ class FloatingTabWindow(QWidget):
         name: str,
         size: QSize,
     ) -> None:
-        # Owned by *main* (ToolWindow) so parent destruction cleans up even on a
-        # teardown path that bypasses _close_all_floats; the Qt.Window flag keeps
-        # it an independent top-level window (still in topLevelWidgets()). #56
-        super().__init__(main)
+        # Ownerless top-level: do NOT pass *main* as the Qt parent. On Windows an
+        # owned top-level is kept permanently above its owner by the OS (de-facto
+        # always-on-top), which users found intrusive. Lifecycle is instead held
+        # by ToolWindow._float_windows (strong ref = anti-GC) and always re-docked
+        # before teardown via _close_all_floats (closeEvent / close_tab /
+        # close_dataset / hot-reload Tier 3+4), so no float ever outlives *main*.
+        # _main is kept purely as a back-reference for re-docking. #56
+        super().__init__()
         self._main = main
         self._dataset = dataset
         self._name = name
@@ -50,6 +54,11 @@ class FloatingTabWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(tab)
+        # A non-current QTabWidget page is *explicitly* hidden by the QStackedWidget;
+        # that flag survives removeTab/setParent and win.show() won't re-show it, so
+        # floating an inactive tab (e.g. via the right-click menu) would show a blank
+        # window. Force it visible again after re-parenting. #56
+        tab.setVisible(True)
         self.resize(
             size.width() if size.width() > 0 else 900,
             size.height() if size.height() > 0 else 700,
