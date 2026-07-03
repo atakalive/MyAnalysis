@@ -228,3 +228,76 @@ def test_close_tab_keeps_zero_tab_real_dataset(win, tmp_path):
     grpA = win._groups.get("dsA")
     assert grpA is not None and grpA.tabs.count() == 0
     assert None not in win._groups                            # (empty) は作らない
+
+
+# ---- Issue #59: DS タブのドラッグ並べ替え＋順序永続化 ----
+
+def _open_three(win, tmp_path):
+    """dsA/dsB/dsC を挿入順に open（switcher タブ [dsA, dsB, dsC]）。"""
+    for ds, name in (("dsA", "a"), ("dsB", "b"), ("dsC", "c")):
+        _write_analysis(tmp_path, ds, name)
+        win.dispatch_command("add-tab", name=name, dataset=ds)
+
+
+def test_dataset_reorder_syncs_groups_and_marks_dirty(win, tmp_path):
+    _open_three(win, tmp_path)
+    win._session_dirty = False                       # add-tab が dirty 済み → リセット
+    win._switcher.moveTab(0, 2)                       # dsA を末尾へ ⇒ [dsB, dsC, dsA]
+    assert win.open_dataset_names() == ["dsB", "dsC", "dsA"]
+    assert win._session_dirty is True
+    assert win.dispatch_command("list-open-datasets")["open"] == ["dsB", "dsC", "dsA"]
+
+
+def test_dataset_reorder_switch_still_correct(win, tmp_path):
+    _open_three(win, tmp_path)
+    win._switcher.moveTab(0, 2)                       # ⇒ [dsB, dsC, dsA]
+    win.set_active_dataset("dsA")
+    assert win.current_dataset == "dsA"
+    assert win._switcher.tabData(win._switcher.currentIndex()) == "dsA"
+
+
+def test_dataset_reorder_persists_to_last_window(win, tmp_path, monkeypatch):
+    _open_three(win, tmp_path)
+    win._switcher.moveTab(0, 2)                       # ⇒ [dsB, dsC, dsA]
+    from llm_bridge import paths as lb_paths, session
+    lw = tmp_path / "last_window.json"
+    monkeypatch.setattr(lb_paths, "last_window_path", lambda: lw)
+    session.write_last_window(win)
+    assert json.loads(lw.read_text(encoding="utf-8"))["datasets"] == ["dsB", "dsC", "dsA"]
+
+
+def test_dataset_order_restored(win, tmp_path, monkeypatch):
+    _write_analysis(tmp_path, "dsB", "b")
+    _write_analysis(tmp_path, "dsA", "a")
+    from llm_bridge import paths, session
+    session.write_session("dsB", {
+        "version": 1, "dataset": "dsB", "active_tab": "b",
+        "tabs": [{"name": "b", "kind": "analysis", "module": "b"}]})
+    session.write_session("dsA", {
+        "version": 1, "dataset": "dsA", "active_tab": "a",
+        "tabs": [{"name": "a", "kind": "analysis", "module": "a"}]})
+    lw = tmp_path / "last_window.json"
+    lw.write_text(json.dumps(
+        {"version": 1, "datasets": ["dsB", "dsA"], "active": "dsB"}), encoding="utf-8")
+    monkeypatch.setattr(paths, "last_window_path", lambda: lw)
+
+    win._restore_last_session()                      # pre-open せず純粋な保存順再現
+    assert win.open_dataset_names() == ["dsB", "dsA"]
+
+
+def test_dataset_switcher_is_movable(win):
+    assert win._switcher.isMovable() is True
+
+
+def test_dataset_reorder_keeps_none_group(win, tmp_path):
+    from gui.tab import AnalysisTab
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsB", "b")
+    win.dispatch_command("add-tab", name="a", dataset="dsA")
+    win.dispatch_command("add-tab", name="b", dataset="dsB")
+    win.add_tab(AnalysisTab("orphan"))               # None グループ（switcher タブ無し）
+    win._switcher.moveTab(0, 1)                       # [dsA, dsB] ⇒ [dsB, dsA]
+    assert win.open_dataset_names() == ["dsB", "dsA"]
+    assert None in win._groups
+    assert list(win._groups)[-1] is None
+    assert win.find_tab("orphan", dataset=None) is not None

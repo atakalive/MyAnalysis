@@ -138,7 +138,7 @@ to discover registered dataset names.
 
 1 プロセスに複数データセットを同時に開ける。トップの `DatasetSwitcher` で切り替えると、そのデータセットの解析タブ群とチャットセッション群に入れ替わる。
 
-- **ワークスペースメンバー一覧**（どのデータセットが一緒に開いていたか＋アクティブ）だけを repo-local・gitignored の `data/llm_state/last_window.json`（`{version, datasets, active}`）に集約する。#50 の `recent_datasets.json`（MRU＝履歴順）の隣に並ぶ 2 つ目の PC ローカルレコード（workspace＝同時開き集合）。両者とも **PC 間同期はしない** machine/window 状態で、per-dataset のタブ内容 `session.json` が同期側を担う。Tier 4 の `reload_manifest.json`（transient）とも別レコード。
+- **ワークスペースメンバー一覧**（どのデータセットが一緒に開いていたか＋アクティブ）だけを repo-local・gitignored の `data/llm_state/last_window.json`（`{version, datasets, active}`）に集約する。#50 の `recent_datasets.json`（MRU＝履歴順）の隣に並ぶ 2 つ目の PC ローカルレコード（workspace＝同時開き集合）。両者とも **PC 間同期はしない** machine/window 状態で、per-dataset のタブ内容 `session.json` が同期側を担う。Tier 4 の `reload_manifest.json`（transient）とも別レコード。`datasets` は DS タブの表示順（ドラッグ並べ替えを反映し、復元で再現される。Issue #59）。
 - 復元は **手動**：File →「前回のセッションを復元」（起動時自動復元はしない）。復元は **ADDITIVE**（既に開いているデータセット/タブは閉じない・上書きしない）。
 - 会議共有（meeting relay）は **アクティブデータセットのタブおよびチャットのみ** ゲストへ配信する（DS 切替で共有対象も切替）。同名タブのクロス DS 共有は v1 非サポート。ゲスト HTML はホストの「DS レイヤー → タブレイヤー」をミラーする: DS バーがアクティブ DS を表示し、ホストの DS 切替に追従（チャットは新 DS のセッションへ自動追従、タブ選択・履歴は DS 単位で保持）。**既知の v1 制約**: DS が非表示の間に丸ごと生成されたメッセージは切替復帰後もゲストへ届かない（ストリーミング途中で切替えた場合の最終メッセージだけは配信される）。
 - **メモリ天井（既知の制約・v1）**: 各解析タブは開いた時点で `mod.load()` を eager 実行し、開いている限り DataFrame を常駐させる。複数データセットを同時に開くと全データセットの全解析の DataFrame が同時常駐するため、大きな測定データを多数開くとメモリを圧迫し得る（遅延ロード/アンロードは将来課題）。

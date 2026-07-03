@@ -116,13 +116,15 @@ class _DatasetGroup(QWidget):
 class DatasetSwitcher(MultiRowTabBar):
     """Top-level bar: one tab per open dataset. Selecting one switches the stack.
 
-    Reuses ``MultiRowTabBar`` verbatim but disables tab dragging (datasets are
-    not reorderable) — the drag path is gated on ``isMovable()``.
+    Reuses ``MultiRowTabBar`` verbatim with tab dragging enabled — datasets are
+    reorderable by drag, and the resulting order is synced into ``_groups`` and
+    persisted to last_window.json (Issue #59). The drag path is gated on
+    ``isMovable()``.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMovable(False)
+        self.setMovable(True)
 
 
 class ToolWindow(QMainWindow):
@@ -141,7 +143,8 @@ class ToolWindow(QMainWindow):
 
         # Two-layer central widget: the DatasetSwitcher (top) selects a page in
         # the QStackedWidget, each page a _DatasetGroup with its own tab bar.
-        # `_groups` is the workspace registry (first-seen order) and the single
+        # `_groups` is the workspace registry (display order — reflects DS-tab
+        # drag reorder, persisted to last_window.json, Issue #59) and the single
         # source of truth for "which datasets are open" — NOT the tabs, since a
         # dataset may be open with zero tabs (no-session / restored:0).
         self._groups: dict[str | None, _DatasetGroup] = {}
@@ -153,6 +156,7 @@ class ToolWindow(QMainWindow):
         v.setSpacing(0)
         self._switcher = DatasetSwitcher()
         self._switcher.currentChanged.connect(self._on_switcher_changed)
+        self._switcher.tabMoved.connect(self._on_dataset_tab_moved)
         self._switcher.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._switcher.customContextMenuRequested.connect(self._on_dataset_context_menu)
         v.addWidget(self._switcher)
@@ -393,6 +397,32 @@ class ToolWindow(QMainWindow):
         ds = self._switcher.tabData(idx)
         self._select_dataset_group(ds)
 
+    def _on_dataset_tab_moved(self, *_) -> None:
+        """DS タブのドラッグ並べ替えをワークスペースレジストリ (_groups) に同期する。
+
+        _groups の挿入順が DS 順序の真実ソース（open_dataset_names →
+        last_window.json）なので、スイッチャーの視覚順に合わせて再構築する。
+        解析タブ並べ替え（window.py:357）と同じく mark_session_dirty() のみで、
+        即時のファイル書き込みは行わない（active.json は次に _write_active が
+        走ったときに新順序へ更新される）。
+
+        switcher に現れないキー（None グループ＝(empty) プレースホルダや
+        dataset-less な inferred viewer。tabData が None のもの含む）は末尾の
+        leftover ループで必ず保持する。これを落とすと None グループが _groups
+        から消え、その viewer タブが到達不能になる（データ消失）。
+        """
+        order = [self._switcher.tabData(i) for i in range(self._switcher.count())]
+        new_groups = {
+            ds: self._groups[ds]
+            for ds in order
+            if ds in self._groups and ds is not None
+        }
+        for k, g in self._groups.items():
+            if k not in new_groups:
+                new_groups[k] = g
+        self._groups = new_groups
+        self.mark_session_dirty()
+
     def _select_dataset_group(self, ds: str | None) -> None:
         """Bring dataset *ds*'s group to the front and sync current/chat/status.
 
@@ -450,11 +480,11 @@ class ToolWindow(QMainWindow):
         return ("● " if busy else "") + "◆ " + str(ds)
 
     def open_datasets(self) -> list["_DatasetGroup"]:
-        """The open real-dataset groups (excludes the None/(empty) group), first-seen order."""
+        """The open real-dataset groups (excludes the None/(empty) group), in display order (reflects drag reorder, persisted to last_window.json)."""
         return [g for ds, g in self._groups.items() if ds is not None]
 
     def open_dataset_names(self) -> list[str]:
-        """Names of open datasets (workspace membership) in first-seen order.
+        """Names of open datasets (workspace membership) in display order (reflects drag reorder, persisted to last_window.json).
 
         Derived from the group registry — NOT from tabs — so a dataset opened
         with zero tabs (no-session / restored:0) still counts as open.
