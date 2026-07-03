@@ -328,12 +328,15 @@ def test_float_leaves_inert_position_stub(win, tmp_path):
     _add(win, "ds", "c", tmp_path)
     grp = win._groups["ds"]
     assert win.float_tab("b", dataset="ds") is True
-    # A stub holds b's slot (index 1) and label, but is NOT a real enumerated tab.
-    assert _bar_names(grp) == ["a", "b", "c"]        # bar still shows b's slot+label
-    assert _docked_names(grp) == ["a", "c"]          # ...but b is not a real docked tab
+    # A stub holds b's slot (index 1), but is NOT a real enumerated tab.
+    assert _docked_names(grp) == ["a", "c"]          # b is not a real docked tab
     stub_idx = grp.tabs.indexOf(grp._float_stubs["b"])
-    assert stub_idx == 1
+    assert stub_idx == 1                             # stub holds b's original slot
     assert grp.tabs.isTabEnabled(stub_idx) is False  # stub is not selectable
+    # label keeps the name but is visually marked distinct from a normal tab (#56)
+    label = grp.tabs.tabText(stub_idx)
+    assert "b" in label and label != "b"
+    assert grp.tabs.tabBar().tabData(stub_idx) == "b"  # identity stays the bare name
     # single membership preserved despite the stub sharing b's name
     assert [w.name for w in win.tabs()].count("b") == 1
     assert win.tab_names().count("b") == 1

@@ -31,6 +31,15 @@ RESERVED_WINDOW_VERBS = frozenset([
 ])
 
 
+# フロート中タブの位置スタブ（無効タブ）ラベルに付ける識別記号。通常タブと一目で
+# 区別するため名前の前に置く（バーが狭くて右省略されても記号は残る）。#56
+_FLOAT_STUB_MARK = "↗"
+
+
+def _float_stub_label(name: str) -> str:
+    return f"{_FLOAT_STUB_MARK} {name}"
+
+
 class _FloatStub(QWidget):
     """Inert placeholder holding a floated tab's name + tab-bar slot (#56).
 
@@ -593,9 +602,11 @@ class ToolWindow(QMainWindow):
         grp.tabs.removeTab(idx)
         tab.setParent(None)
         # 元 index に無効スタブを差し込み、タブ名と位置を保持する（再ドックで元位置へ
-        # 復元。スタブは実タブと共にバー内で並べ替わるので位置は頑健に追随する）。#56
+        # 復元。スタブは実タブと共にバー内で並べ替わるので位置は頑健に追随する）。
+        # ラベルは ↗ 記号付きにして通常タブと視覚的に区別する（tabData は素の name の
+        # まま＝同一性は不変）。#56
         stub = _FloatStub(name)
-        si = grp.tabs.insertTab(idx, stub, name)
+        si = grp.tabs.insertTab(idx, stub, _float_stub_label(name))
         grp.tabs.tabBar().setTabData(si, name)
         grp.tabs.setTabEnabled(si, False)  # 選択不可（名前と位置だけを保持）
         grp._float_stubs[name] = stub
