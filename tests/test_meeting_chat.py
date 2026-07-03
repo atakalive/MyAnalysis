@@ -35,7 +35,22 @@ def qapp(monkeypatch):
 @pytest.fixture()
 def widget(qapp):
     from gui.chat import ChatWidget
-    return ChatWidget(EmptyBackend, dispatch=lambda *a, **k: None)
+    w = ChatWidget(EmptyBackend, dispatch=lambda *a, **k: None)
+    yield w
+    # ターン完了（_turns が空になる）は worker QThread の deleteLater 処理より
+    # 先に起きる。widget をここで決定的に破棄してイベントを流し切らないと、
+    # 後続テストの processEvents 中に GC 経由で widget→子 QThread の破棄
+    # カスケードが走り Qt が abort する（QThreadStorage: entry 0 destroyed
+    # before end of thread / PySide6 6.10.1）。
+    deadline = time.time() + 5.0
+    while w._turns and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    w._shutdown_worker()
+    w.deleteLater()
+    for _ in range(10):
+        qapp.processEvents()
+        time.sleep(0.01)
 
 
 def _drain(qapp, widget, timeout=5.0):
