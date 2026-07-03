@@ -1157,18 +1157,25 @@ class ToolWindow(QMainWindow):
             copy_action = menu.addAction(tr("menu.tab.copy_name"))
             copy_action.triggered.connect(lambda: QApplication.clipboard().setText(name))
             comment_action = menu.addAction(tr("menu.tab.comment"))
-            comment_action.triggered.connect(lambda: self._comment_on_tab(name))
+            comment_action.triggered.connect(
+                lambda: self._comment_on_tab(name, dataset=ds)
+            )
             float_action = menu.addAction(tr("menu.tab.float"))
             float_action.triggered.connect(lambda: self.float_tab(name, dataset=ds))
             menu.addSeparator()
             close_action = menu.addAction(tr("menu.tab.close"))
             close_action.triggered.connect(lambda: self.close_tab(name, dataset=ds))
 
-    def _comment_on_tab(self, name: str) -> None:
+    def _comment_on_tab(self, name: str, dataset: str | None = None) -> None:
         chat = self.chat_widget()
         if chat is None:
             return
-        prefix = tr("menu.tab.comment_prefix", name=name)
+        # マルチDS時はタブ名だけでは一意にならない（#51: タブ ID はグループ内一意）
+        # ので、CLI verb が逐語で受け取れる dataset= 表記で修飾する。
+        if dataset is not None and len(self.open_dataset_names()) > 1:
+            prefix = tr("menu.tab.comment_prefix_ds", name=name, dataset=dataset)
+        else:
+            prefix = tr("menu.tab.comment_prefix", name=name)
         draft = chat.input_draft()
         if not draft.startswith(prefix):
             chat.set_input_draft(prefix + draft)

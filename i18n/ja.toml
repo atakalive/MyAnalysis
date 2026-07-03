@@ -24,6 +24,7 @@
 "menu.tab.copy_name"          = "タブ名をコピー"
 "menu.tab.comment"            = "このタブにコメント"
 "menu.tab.comment_prefix"     = "[タブ「{name}」へのコメント] "
+"menu.tab.comment_prefix_ds"  = "[タブ「{name}」(dataset={dataset}) へのコメント] "
 "menu.dataset.close"          = "データセットを閉じる"
 "menu.dev"                    = "開発(&D)"
 "menu.dev.reload"             = "コード再読み込み"

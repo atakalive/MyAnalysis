@@ -24,6 +24,7 @@
 "menu.tab.copy_name"          = "Copy tab name"
 "menu.tab.comment"            = "Comment on this tab"
 "menu.tab.comment_prefix"     = "[Comment on tab: {name}] "
+"menu.tab.comment_prefix_ds"  = "[Comment on tab: {name} (dataset={dataset})] "
 "menu.dataset.close"          = "Close dataset"
 "menu.dev"                    = "Develop(&D)"
 "menu.dev.reload"             = "Reload code"

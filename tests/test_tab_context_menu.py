@@ -28,17 +28,21 @@ class _FakeChat:
 
 
 class _FakeWin:
-    def __init__(self, chat) -> None:
+    def __init__(self, chat, datasets: list[str] | None = None) -> None:
         self._chat = chat
+        self._datasets = ["ds1"] if datasets is None else datasets
 
     def chat_widget(self):
         return self._chat
 
+    def open_dataset_names(self) -> list[str]:
+        return self._datasets
 
-def _comment_on_tab(win, name: str) -> None:
+
+def _comment_on_tab(win, name: str, dataset: str | None = None) -> None:
     from gui.window import ToolWindow
 
-    ToolWindow._comment_on_tab(win, name)
+    ToolWindow._comment_on_tab(win, name, dataset=dataset)
 
 
 def test_comment_prepends_prefix_and_focuses():
@@ -62,6 +66,35 @@ def test_comment_is_idempotent():
 
 def test_comment_none_chat_is_noop():
     _comment_on_tab(_FakeWin(None), "x")   # 例外を投げないこと
+
+
+def test_comment_multi_ds_qualifies_with_dataset():
+    chat = _FakeChat()
+    _comment_on_tab(_FakeWin(chat, ["dsA", "dsB"]), "myanalysis", dataset="dsA")
+    prefix = tr("menu.tab.comment_prefix_ds", name="myanalysis", dataset="dsA")
+    assert "dataset=dsA" in prefix         # キー存在＋{dataset}補間の確認
+    assert chat.draft == prefix
+
+
+def test_comment_single_ds_stays_unqualified():
+    chat = _FakeChat()
+    _comment_on_tab(_FakeWin(chat, ["dsA"]), "myanalysis", dataset="dsA")
+    assert chat.draft == tr("menu.tab.comment_prefix", name="myanalysis")
+
+
+def test_comment_multi_ds_none_group_stays_unqualified():
+    chat = _FakeChat()
+    _comment_on_tab(_FakeWin(chat, ["dsA", "dsB"]), "demo", dataset=None)
+    assert chat.draft == tr("menu.tab.comment_prefix", name="demo")
+
+
+def test_comment_multi_ds_is_idempotent():
+    chat = _FakeChat()
+    win = _FakeWin(chat, ["dsA", "dsB"])
+    _comment_on_tab(win, "myanalysis", dataset="dsA")
+    after_first = chat.draft
+    _comment_on_tab(win, "myanalysis", dataset="dsA")
+    assert chat.draft == after_first       # 二重付与しない
 
 
 def test_focus_input_moves_cursor_to_end():
@@ -104,7 +137,7 @@ class _MenuHost:
     (`triggered.connect(self.close_tab)` 等) に置き換えても AttributeError に
     ならないよう、参照されうるメソッドを実体として持つダミー。"""
 
-    def _comment_on_tab(self, name: str) -> None:
+    def _comment_on_tab(self, name: str, dataset: str | None = None) -> None:
         pass
 
     def close_tab(self, name: str, dataset: str | None = None) -> bool:
