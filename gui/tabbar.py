@@ -1,5 +1,11 @@
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPaintEvent, QResizeEvent, QShowEvent
+from PySide6.QtGui import (
+    QMouseEvent,
+    QPaintEvent,
+    QPalette,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -12,6 +18,7 @@ from PySide6.QtWidgets import (
 _DEFAULT_ROW_PAD = 10  # 0 タブ時の段高フォールバック余白（潰れ防止用の既定値）
 _ELIDE_PAD = 12        # 省略表示時に矩形幅から差し引く左右マージン
 _MIN_BAR_WIDTH = 80    # minimumSizeHint 幅の固定下限（タブ数・ラベル長に非依存）
+_STUB_TEXT_ALPHA = 105  # 無効タブ（フロート位置スタブ #56）の文字を暗く見せる不透明度
 
 
 class MultiRowTabBar(QTabBar):
@@ -146,6 +153,23 @@ class MultiRowTabBar(QTabBar):
                 self.tabText(i), Qt.TextElideMode.ElideRight,
                 max(0, self._rects[i].width() - _ELIDE_PAD),
             )
+            if not self.isTabEnabled(i):
+                # 位置スタブ（#56）: テキストを暗く（半透明）にして通常タブと明確に区別。
+                # スタイルは drawItemText で pal.brush(WindowText) を現在グループから引くので、
+                # 全グループの文字ロールを暗色で上書きしてどの経路でも確実に暗くする。
+                dim = self.palette().color(QPalette.ColorRole.WindowText)
+                dim.setAlpha(_STUB_TEXT_ALPHA)
+                for cg in (
+                    QPalette.ColorGroup.Active,
+                    QPalette.ColorGroup.Inactive,
+                    QPalette.ColorGroup.Disabled,
+                ):
+                    for role in (
+                        QPalette.ColorRole.WindowText,
+                        QPalette.ColorRole.ButtonText,
+                        QPalette.ColorRole.Text,
+                    ):
+                        opt.palette.setColor(cg, role, dim)
             painter.drawControl(QStyle.ControlElement.CE_TabBarTab, opt)
 
     # --- 再レイアウトの起点（いずれも super() を先に呼ぶ）---------------

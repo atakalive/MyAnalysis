@@ -226,3 +226,47 @@ def test_min_width_independent_of_label_length(qapp):
     qapp.processEvents()
     assert winB.width() <= 560
     assert barB._row_count > 1
+
+
+def test_disabled_stub_tab_text_is_dimmed(qapp):
+    """A disabled tab (the #56 float-position stub) renders its label clearly
+    dimmer than a normal enabled tab (MultiRowTabBar.paintEvent). Guards the
+    regression where setTabEnabled(False) alone did NOT dim the label, because
+    the dark theme leaves the Disabled-group WindowText role bright.
+
+    Rendered under the real production theme (apply_dark_theme = Fusion + dark
+    palette), since the dimming is a Fusion/dark-palette effect; the global
+    style+palette are saved and restored so nothing leaks into other tests."""
+    from PySide6.QtWidgets import QStyleFactory
+    from gui import apply_dark_theme
+    orig_pal = qapp.palette()
+    orig_style = qapp.style().objectName()
+    try:
+        apply_dark_theme(qapp)                       # Fusion + dark, exactly as production
+        host, bar = _make_bar(qapp, 2, labels=["WWWWWW", "WWWWWW"], width=500)
+        host.show()
+        qapp.processEvents()
+        host.setTabEnabled(1, False)                 # index 1 = float-stub-like
+        bar.resize(host.width(), bar.height())
+        bar._relayout(bar.width())
+        qapp.processEvents()
+        img = bar.grab().toImage()
+
+        def brightest(rect):
+            r = rect.intersected(img.rect())
+            best = 0.0
+            for y in range(r.top(), r.bottom() + 1):
+                for x in range(r.left(), r.right() + 1):
+                    c = img.pixelColor(x, y)
+                    best = max(best, 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+            return best
+
+        enabled_lum = brightest(bar.tabRect(0))
+        stub_lum = brightest(bar.tabRect(1))
+        assert stub_lum < enabled_lum - 40           # stub label is clearly dimmed
+        host.deleteLater()
+    finally:
+        restored = QStyleFactory.create(orig_style)
+        if restored is not None:
+            qapp.setStyle(restored)
+        qapp.setPalette(orig_pal)
