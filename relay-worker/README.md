@@ -41,7 +41,9 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"
 
 生成値を `.env` の `RELAY_ADMIN_KEY=…` に書く（gitignore 済み）。`RELAY_BASE_URL` は**未設定が既定**。
 設定するとローカルサーバ + トンネルを起動せず、その URL を remote relay として使う legacy override に
-なる（旧構成の延命用）。
+なる（旧構成の延命用）。**注意: DS レイヤー（#51 追従）以降のホストは `/tabs` を新形式
+（`{active_dataset, tabs}`）で送るため、旧 worker.js デプロイ相手ではタブが全滅する — この
+override は DS プロトコル非対応（ローカルリレー必須）。**
 
 ## cloudflared named tunnel のワンタイム設定
 
@@ -102,7 +104,8 @@ CLOUDFLARE_TUNNEL_HOSTNAME=relay.example.com
 
 既に `worker.js` を Cloudflare にデプロイ済みなら、`relay-worker/` で `wrangler delete` を実行して
 workers.dev の残留トラフィック・課金を止める（**人間が実施する運用手順**）。`wrangler.toml` /
-`worker.js` のコードは**参照用に残置**（移植元の Single Source of Truth）。再デプロイは不要。
+`worker.js` のコードは**参照用に残置**（pre-#51 プロトコルの移植元。DS レイヤー以降 `/tabs`・
+`/poll`・`/history` は分岐済みで、これらのルートの SSOT は `meeting/local_relay.py`）。再デプロイは不要。
 
 ## トラブルシュート
 

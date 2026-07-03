@@ -5,10 +5,13 @@ Re-implements every route of ``relay-worker/worker.js`` against a process-local,
 runs this on ``127.0.0.1:<ephemeral>`` and exposes it to guests through a
 Tailscale Funnel (see ``meeting/tunnel.py``).
 
-``relay-worker/worker.js`` is the single source of truth for the routes it
-defines: response shapes, ``server_now_ms``, the ``ts13-rand13`` mid format, and
-the ``{"error": "..."}`` error bodies all match it exactly so the guest client
-(``relay-worker/chatdock.html``) works unchanged.
+``relay-worker/worker.js`` documents the pre-#51 wire format: response shapes,
+``server_now_ms``, the ``ts13-rand13`` mid format, and the ``{"error": "..."}``
+error bodies originate there. Since the dataset layer (Issue #51 follow-up) the
+protocol has DIVERGED on ``PUT /tabs`` (object body with ``active_dataset``),
+``GET /poll`` (``active_dataset`` field) and ``GET /history`` (``has_more`` on
+unpublished sids) — for those routes THIS module is the single source of truth;
+worker.js is kept as a pre-DS reference only.
 
 Two routes are local-relay-only extensions, NOT present in worker.js (the Worker
 path is no longer in the data path — the runtime is this module, the HTML is
@@ -134,6 +137,7 @@ class RelayState:
             "hb": now_sec_val,
             "sessions": [],
             "tabs": [],
+            "dataset": None,   # active dataset the published tabs belong to (DS layer)
             "in_msgs": [],
             "out_msgs": [],
             "backlog": {},     # sid -> [msg, ...] pre-meeting transcript (no TTL compaction)
@@ -264,11 +268,32 @@ class RelayState:
         if seg[:1] == ["tabs"] and len(seg) == 2 and method == "PUT":
             if not self._is_admin(headers):
                 return self._json({"error": "unauthorized"}, 401)
+            # _parse_json (not _json_obj): a pre-DS host sends a bare name list,
+            # which must stay accepted as active_dataset=None — _json_obj would
+            # coerce it to {} and silently unpublish every tab.
             obj = self._parse_json(body)
             if obj is _BAD:
                 return self._json({"error": "bad json"}, 400)
+            if isinstance(obj, dict):
+                ds = obj.get("active_dataset")
+                ds = ds if isinstance(ds, str) else None
+                tabs = obj.get("tabs")
+                tabs = [str(t) for t in tabs] if isinstance(tabs, list) else []
+            else:
+                ds = None
+                tabs = [str(t) for t in obj] if isinstance(obj, list) else []
             cs = self._ensure_channel(seg[1], now_s)
-            cs["tabs"] = obj if isinstance(obj, list) else []
+            # Dataset switch: drop every stored view. Tab names are unique only
+            # WITHIN a dataset, so a same-named tab in the new dataset must never
+            # serve the old dataset's PNG. Tab-list-only changes within one
+            # dataset keep the store (stale vv entries are unreachable: /view
+            # 403s unpublished tabs). .get(): a channel created before this field
+            # existed (mid-meeting hot-reload) lacks the key.
+            if ds != cs.get("dataset"):
+                cs["views"] = {}
+                cs["vv"] = {}
+            cs["dataset"] = ds
+            cs["tabs"] = tabs
             return self._json({"ok": True})
 
         if seg[:1] == ["heartbeat"] and len(seg) == 2 and method == "PUT":
@@ -466,6 +491,7 @@ class RelayState:
                 )
             return self._json({
                 "messages": messages, "sessions": sessions, "tabs": cs["tabs"],
+                "active_dataset": cs.get("dataset"),
                 "view_versions": dict(cs["vv"]), "alive": True, "server_now_ms": now_m,
             })
 
@@ -480,7 +506,11 @@ class RelayState:
                 return self._json({"error": "not live"}, status)
             cs = self._ch[ch]
             if not any(s.get("id") == sid for s in cs["sessions"]):
-                return self._json({"messages": [], "has_more": False, "server_now_ms": now_m})
+                # has_more=True, not False: a dataset switch swaps the published
+                # session set, and an in-flight history fetch landing here would
+                # otherwise make the guest latch histExhausted permanently (the
+                # backlog is still staged — a retry after switch-back succeeds).
+                return self._json({"messages": [], "has_more": True, "server_now_ms": now_m})
             try:
                 turns = int(self._q1(query, "turns") or 5)
             except (TypeError, ValueError):

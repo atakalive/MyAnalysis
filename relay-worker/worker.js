@@ -3,6 +3,11 @@ import CHATDOCK_HTML from "./chatdock.html";
 
 // MyAnalysis meeting relay — Cloudflare Worker (Issue #42).
 //
+// ⚠ FROZEN at the pre-dataset-layer protocol (Issue #44 state). Since the DS
+// layer (Issue #51 follow-up), /tabs, /poll and /history have DIVERGED — see
+// meeting/local_relay.py, which is the live server and the SSOT for those
+// routes. This file is kept as a pre-DS reference only; do not redeploy.
+//
 // Bridges the host ToolWindow (chat dock + analysis view) and remote guests
 // over HTTP. Storage = KV (metadata, sessions, tabs, messages, presence) + R2
 // (view PNGs). Durable Objects are intentionally out of scope (KV/R2 access is

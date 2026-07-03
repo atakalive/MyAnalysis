@@ -96,6 +96,7 @@ class _RelayWorker(QThread):
     sig_inbound = Signal(str, str, str)   # (sid, name, text)  — from in: only
     sig_presence = Signal(object)         # list[{pid,name,sid,tab,last}]
     sig_state = Signal(str)               # "expired" | "disconnected" | "ok"
+    sig_sendfail = Signal(str)            # kind of a dropped outbox item (no retry)
 
     def __init__(self, base_url: str, admin_key: str, channel: str,
                  poll_ms: int = 3000, parent=None):
@@ -213,8 +214,10 @@ class _RelayWorker(QThread):
                 self._emit_expired()
             else:
                 self._note_fail()
+                self.sig_sendfail.emit(str(kind or ""))
         except Exception:
             self._note_fail()
+            self.sig_sendfail.emit(str(kind or ""))
 
     def _do_inbound(self) -> None:
         try:
@@ -353,6 +356,7 @@ class MeetingRelay(QObject):
         self._participants: list = []
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
+        self._last_pub_dataset: str | None = None   # dataset of the last published tick
         self._view_hashes: dict[str, bytes] = {}
         # cacheKey() of the last captured pixmap per tab. full_pixmap() returns the
         # same shared QPixmap until the figure is swapped, so an unchanged cacheKey
@@ -690,6 +694,7 @@ class MeetingRelay(QObject):
         self._sharing = True
         self._last_sessions_json = None
         self._last_tabs_json = None
+        self._last_pub_dataset = cur
         self._view_hashes = {}
         self._view_cachekeys = {}
 
@@ -698,6 +703,7 @@ class MeetingRelay(QObject):
         self._worker.sig_inbound.connect(self._on_remote_message)
         self._worker.sig_presence.connect(self._on_participants)
         self._worker.sig_state.connect(self._on_state)
+        self._worker.sig_sendfail.connect(self._on_sendfail)
         self._worker.start()
         self._capture_timer.start()
         # Push the initial snapshots immediately (don't wait for the first tick).
@@ -823,8 +829,16 @@ class MeetingRelay(QObject):
         # out: send only host-local messages of a published session IN THE ACTIVE
         # dataset — a hidden dataset's in-flight reply must not leak after a switch
         # (Issue #51 B5 / reviewer P1). stream_id pop above runs regardless of the gate.
+        # Exception: the FINAL of a streamed turn whose partials already reached
+        # guests (sid_stream) passes even after a dataset switch hid its session —
+        # withholding it would leave the guest bubble a truncated partial forever
+        # (chatdock finalizes only on partial=false). This completes an already-
+        # public message; it does not newly expose a hidden dataset's session, and
+        # an explicit unshare (sid dropped from _published_session_ids) still wins.
+        stream_final = (role == "assistant" and sid_stream is not None
+                        and sid in self._published_session_ids)
         if not (self._sharing and origin == "local"
-                and self._session_in_active_scope(sid)):
+                and (self._session_in_active_scope(sid) or stream_final)):
             return
         if not content or not content.strip():
             return
@@ -870,6 +884,18 @@ class MeetingRelay(QObject):
         if self._worker is not None:
             self._worker.enqueue({"kind": "out", "sid": sid, "body": body,
                                   "stream_id": stream_id, "partial": True})
+
+    def _on_sendfail(self, kind: str) -> None:
+        # _send drops a failed item without retry, but the change-detect latch was
+        # already advanced at enqueue time — a lost tabs PUT would leave the server
+        # on the old dataset (with its view store un-cleared) while new-DS view
+        # PUTs land under same-named tabs. Reset the latch so the next capture
+        # tick re-enqueues at the correct FIFO position. (Re-enqueueing inside
+        # _send instead would reorder the PUT after same-tick view items.)
+        if kind == "tabs":
+            self._last_tabs_json = None
+        elif kind == "sessions":
+            self._last_sessions_json = None
 
     def _backfill_session(self, sid: str, cw) -> None:
         """Stage a published session's existing transcript into the relay so guests
@@ -922,6 +948,15 @@ class MeetingRelay(QObject):
             # ones drop out of the ∩ (still selected, just not the active scope).
             cur = self._active_dataset()
 
+            # Dataset switch: the relay server clears its view store when the
+            # published dataset changes, so every active tab must re-PUT even if
+            # its pixels are unchanged — otherwise guests sit on 204 forever.
+            # getattr: hot-reload compatibility (mirrors _backfilled_ids below).
+            if getattr(self, "_last_pub_dataset", object()) != cur:
+                self._last_pub_dataset = cur
+                self._view_hashes = {}
+                self._view_cachekeys = {}
+
             # Sessions: publish only ids in (_published_session_ids ∩ existing ∩
             # active-ds) so a deleted session drops out and a hidden dataset's
             # chat never leaks.
@@ -967,10 +1002,14 @@ class MeetingRelay(QObject):
                 if n in self._published_tabs and self._tab_dataset(tab) == cur:
                     seen_tab.add(n)
                     pub_tabs.append(n)
-            tj = json.dumps(pub_tabs, sort_keys=True, ensure_ascii=False)
+            # active_dataset rides in the same payload (atomic with the tab list)
+            # AND in the change-detect JSON, so switching between two datasets
+            # with identical published tab names still re-publishes.
+            tabs_payload = {"active_dataset": cur, "tabs": pub_tabs}
+            tj = json.dumps(tabs_payload, sort_keys=True, ensure_ascii=False)
             if tj != self._last_tabs_json:
                 self._last_tabs_json = tj
-                self._worker.enqueue({"kind": "tabs", "data": pub_tabs})
+                self._worker.enqueue({"kind": "tabs", "data": tabs_payload})
 
             # Views: grab published tabs in the ACTIVE dataset only (GUI thread),
             # hash-gate, enqueue PNG bytes. Restricting to the active DS keeps a

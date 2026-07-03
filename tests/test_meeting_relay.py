@@ -80,7 +80,7 @@ class _FakeTabObj:
 
 
 class FakeWindow:
-    def __init__(self, chat, dataset=None, tabs=None, tab_datasets=None):
+    def __init__(self, chat, dataset=None, tabs=None, tab_datasets=None, tab_objs=None):
         self._chat = chat
         self.current_dataset = dataset
         self._tabs = tabs or []
@@ -89,14 +89,21 @@ class FakeWindow:
         # tab's dataset — that's exactly what drives the B5 publish swap.
         self._tab_datasets = dict(tab_datasets or {})
         self._default_ds = dataset
+        # Explicit (name, dataset) pairs — the only way to model two same-named
+        # tabs living in different datasets (the name-keyed dict above can't).
+        self._tab_objs = list(tab_objs or [])
 
     def chat_widget(self):
         return self._chat
 
     def tab_names(self):
+        if self._tab_objs:
+            return [n for n, _ in self._tab_objs]
         return list(self._tabs)
 
     def tabs(self):
+        if self._tab_objs:
+            return [_FakeTabObj(n, ds) for n, ds in self._tab_objs]
         return [
             _FakeTabObj(n, self._tab_datasets.get(n, self._default_ds))
             for n in self._tabs
@@ -547,7 +554,8 @@ def test_tab_auto_share(qapp, monkeypatch):
     assert r.published_tabs() == {"t1", "t2", "t3"}
     r._on_capture_tick()
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    assert tab_puts and set(tab_puts[-1]["data"]) == {"t1", "t2", "t3"}
+    assert tab_puts and set(tab_puts[-1]["data"]["tabs"]) == {"t1", "t2", "t3"}
+    assert tab_puts[-1]["data"]["active_dataset"] is None   # dataset-less window
 
     # an explicitly deselected tab is NOT re-added on the next absorb.
     r.set_published_tabs(["t1", "t3"])     # host unchecks t2
@@ -576,7 +584,8 @@ def test_publish_scope_active_dataset_tabs(qapp, monkeypatch):
     assert r.published_tabs() == {"tA"}
     r._on_capture_tick()
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    assert tab_puts and set(tab_puts[-1]["data"]) == {"tA"}
+    assert tab_puts and set(tab_puts[-1]["data"]["tabs"]) == {"tA"}
+    assert tab_puts[-1]["data"]["active_dataset"] == "dsA"
 
     # a new tab created in the active dataset auto-joins; a hidden one does not.
     win._tabs = ["tA", "tB", "tA2", "tC"]
@@ -592,10 +601,12 @@ def test_publish_scope_active_dataset_tabs(qapp, monkeypatch):
     # code P1 R5).
     win.current_dataset = "dsB"
     r._worker._outbox.clear()
-    r._last_tabs_json = None
+    # (no manual _last_tabs_json reset: the name list AND active_dataset both
+    # change, so the change-detect JSON differs on its own)
     r._on_capture_tick()
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    assert tab_puts and set(tab_puts[-1]["data"]) == {"tB", "tC"}
+    assert tab_puts and set(tab_puts[-1]["data"]["tabs"]) == {"tB", "tC"}
+    assert tab_puts[-1]["data"]["active_dataset"] == "dsB"
     r.stop()
 
 
@@ -610,6 +621,136 @@ def test_active_ds_filter_none_safe(qapp, monkeypatch):
                             json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
     assert r.published_tabs() == {"v"}
+    r.stop()
+
+
+# ---- DS layer: tabs payload carries the active dataset (guest DS bar) ----
+
+def test_tabs_payload_carries_dataset(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsA", tabs=["t1"], tab_datasets={"t1": "dsA"})
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and tab_puts[-1]["data"] == {"active_dataset": "dsA", "tabs": ["t1"]}
+    r.stop()
+
+    # dataset-less window → active_dataset None in the payload
+    win2 = FakeWindow(chat, dataset=None, tabs=["v"], tab_datasets={"v": None})
+    mr2, r2 = _make_relay(monkeypatch, win2)
+    r2.meeting_start(3600)
+    tab_puts = [i for i in r2._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and tab_puts[-1]["data"] == {"active_dataset": None, "tabs": ["v"]}
+    r2.stop()
+
+
+def test_dataset_switch_resets_view_caches(qapp, monkeypatch):
+    """The relay server clears its view store on a dataset switch, so the host
+    must drop its hash/cacheKey dedupe caches on the switch tick (else a
+    pixel-identical same-named tab never re-PUTs and guests 204 forever)."""
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsA", tab_objs=[("t1", "dsA"), ("t1", "dsB")])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    r._view_hashes = {"t1": b"h"}       # as if t1@dsA had been captured
+    r._view_cachekeys = {"t1": 1}
+    win.current_dataset = "dsB"
+    r._on_capture_tick()
+    assert r._view_hashes == {} and r._view_cachekeys == {}
+    # latched: another tick on the same dataset does not re-clear
+    r._view_hashes = {"t1": b"h2"}
+    r._on_capture_tick()
+    assert r._view_hashes == {"t1": b"h2"}
+    r.stop()
+
+
+def test_dataset_switch_republishes_identical_tab_list(qapp, monkeypatch):
+    """Two datasets each publishing the same tab NAME: the switch must still
+    re-PUT (active_dataset rides in the change-detect JSON) — pre-DS-layer the
+    identical name list suppressed the publish and guests never saw the switch."""
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsA", tab_objs=[("t1", "dsA"), ("t1", "dsB")])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and tab_puts[-1]["data"] == {"active_dataset": "dsA", "tabs": ["t1"]}
+    r._worker._outbox.clear()           # deliberately NOT resetting _last_tabs_json
+    win.current_dataset = "dsB"
+    r._on_capture_tick()
+    tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
+    assert tab_puts and tab_puts[-1]["data"] == {"active_dataset": "dsB", "tabs": ["t1"]}
+    r.stop()
+
+
+def test_stream_final_delivered_after_ds_switch(qapp, monkeypatch):
+    """A streamed turn whose partials already reached guests must deliver its
+    FINAL even if a dataset switch hid the session mid-stream — otherwise the
+    guest bubble stays a truncated partial forever (chatdock finalizes only on
+    partial=false). Fresh messages of the hidden session stay withheld."""
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "dsA"}])
+    win = FakeWindow(chat, dataset="dsA")
+    mr, r = _make_relay(monkeypatch, win)
+    w = mr._RelayWorker("http://relay.test", "ADMIN", "ch")
+    r._worker = w
+    r._sharing = True
+    r._published_session_ids = {"a"}
+
+    r._on_message_streaming("a", "Hel", "local", "st1")       # public partial
+    assert [i["body"]["partial"] for i in w._outbox] == [True]
+    w._outbox.clear()
+
+    win.current_dataset = "dsB"                                # switch mid-stream
+    r._on_message_streaming("a", "Hello wor", "local", "st1")  # gated
+    assert not w._outbox
+    r._on_message_added("a", "assistant", "Hello world", "local")   # final passes
+    outs = [i for i in w._outbox if i["kind"] == "out"]
+    assert len(outs) == 1
+    assert outs[0]["body"]["stream_id"] == "st1" and outs[0]["body"]["partial"] is False
+    assert outs[0]["body"]["text"] == "Hello world"
+    w._outbox.clear()
+
+    # a later, non-streamed reply of the hidden session is still withheld
+    r._on_message_added("a", "assistant", "later reply", "local")
+    assert not w._outbox
+    # and an explicitly unshared session's final is withheld too
+    r._on_message_streaming("a", "x", "local", "st2")          # gated (hidden) → no partial
+    r._published_session_ids = set()
+    r._on_message_added("a", "assistant", "unshared final", "local")
+    assert not w._outbox
+
+
+def test_tabs_sendfail_resets_latch(qapp, monkeypatch):
+    """A dropped tabs PUT (network hiccup) must reset the change-detect latch so
+    the next tick re-sends — otherwise the server keeps the OLD dataset (and its
+    un-cleared view store) while new-DS views land under same-named tabs."""
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsA", tabs=["t1"], tab_datasets={"t1": "dsA"})
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    r.meeting_start(3600)
+    assert r._last_tabs_json is not None
+    assert any(i["kind"] == "tabs" for i in r._worker._outbox)
+
+    def boom(method, path, data=None, is_png=False):
+        raise OSError("network down")
+
+    r._worker._req = boom
+    r._worker._drain_outbox()          # drops every queued item, sig_sendfail per kind
+    assert r._last_tabs_json is None   # latch reset (direct-connection delivery here)
+    assert r._last_sessions_json is None
+    r._on_capture_tick()               # re-enqueues at the correct FIFO position
+    assert any(i["kind"] == "tabs" for i in r._worker._outbox)
     r.stop()
 
 

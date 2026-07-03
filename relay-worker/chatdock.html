@@ -1,8 +1,11 @@
 <!DOCTYPE html>
 <!--
   MyAnalysis meeting guest client (Issue #42). Single file, pure fetch, zero deps.
-  Served by the Worker at GET / (same origin → no CORS needed). Strings carry a
-  minimal ja/en switch in-file (the Python i18n catalog is not shipped to guests).
+  Served by meeting/local_relay.py at GET / (and mirrored to GitLab Pages).
+  Strings carry a minimal ja/en switch in-file (the Python i18n catalog is not
+  shipped to guests). Since the dataset layer (Issue #51 follow-up) the wire
+  format diverged from relay-worker/worker.js — worker.js documents the pre-DS
+  protocol only; meeting/local_relay.py is the live server.
 -->
 <html lang="en">
 <head>
@@ -34,6 +37,15 @@
   .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
+  /* DS layer above the tab bar — mirrors the host's DatasetSwitcher (host-driven,
+     not clickable in v1). The ◆ prefix mirrors the host's DS tab label (#57). */
+  #dsBar { border-bottom: 1px solid #333; }
+  .dschip { background: #3a3d41; color: #ddd; padding: 3px 10px; font-size: 12px;
+            border-radius: 4px; }
+  .dschip::before { content: "◆ "; color: #6ec1e4; }
+  .viewempty { position: absolute; inset: 0; display: flex; align-items: center;
+               justify-content: center; color: #888; font-size: 13px;
+               font-style: italic; pointer-events: none; }
   select.tabbtn { color: #ddd; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
   .ctxmenu { position: fixed; z-index: 1000; background: #252526; border: 1px solid #454545;
              border-radius: 4px; padding: 4px 0; min-width: 160px; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
@@ -103,9 +115,11 @@
 <div id="app">
   <div id="cols">
     <div id="left">
+      <div class="bar" id="dsBar" style="display:none"><span id="dsChip" class="dschip"></span></div>
       <div class="bar" id="tabBar"></div>
       <div id="canvaswrap">
         <img id="view" alt="">
+        <div id="viewEmpty" class="viewempty" style="display:none"></div>
       </div>
       <div class="bar">
         <button id="copyBtn">Copy image</button>
@@ -151,6 +165,8 @@ const T = {
         toolDisplay: "Tool calls", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden",
         copyTabName: "Copy tab name", commentOnTab: "Comment on this tab",
         tabCommentPrefix: "[Comment on tab: {name}] ",
+        noDataset: "(no dataset)", switchingDs: "Dataset switched — loading view…",
+        noTabs: "(no shared tabs)",
         viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
@@ -162,6 +178,8 @@ const T = {
         toolDisplay: "ツール呼び出し表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示",
         copyTabName: "タブ名をコピー", commentOnTab: "このタブにコメント",
         tabCommentPrefix: "[タブ「{name}」へのコメント] ",
+        noDataset: "（データセットなし）", switchingDs: "データセット切替中 — ビューを読込中…",
+        noTabs: "（共有中のタブなし）",
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
@@ -389,13 +407,23 @@ let pid = null;                 // participant id (high-entropy)
 let myName = "Guest";
 let curSid = null;              // selected chat session id
 let curTab = null;             // selected analysis tab name
+let curDs;                      // active dataset mirrored from the host's poll.
+                                // undefined = server never said (pre-DS host) → DS bar
+                                // hidden, no switch logic. null = dataset-less group.
+let viewGen = 0;                // bumped on a dataset switch; in-flight /view results
+                                // of an older generation are discarded, never painted
+let optOutStrikes = 0;          // consecutive polls with curSid unpublished (the
+                                // opt-out notice is debounced to 2 so a dataset
+                                // switch doesn't flash it for one cycle)
+const selTabByDs = {};          // dsKey ("" for null) → last selected tab (switch-back)
+const selSidByDs = {};          // dsKey → last selected session (switch-back)
 let pollInterval = 3000;
 let pollTimer = null;
 let pollGen = 0;                // generation token: only the latest poll() renders/reschedules
 let stopped = false;
 let lastViewVersions = {};      // last-received vv map (per tab)
 const appliedVv = {};           // tab → version successfully decoded+painted
-const viewInflight = new Set(); // tabs with an in-flight /view fetch (de-dupe)
+const viewInflight = new Set(); // "gen:tab" keys with an in-flight /view fetch (de-dupe)
 let lastPresenceMs = 0;
 let histInflight = false;       // one /history fetch in flight at a time
 
@@ -681,13 +709,40 @@ async function poll(reanchor = false) {
       showGapIfNeeded(serverNow);
       cur.latestSeenTs = serverNow;
     }
+    // ---- DS layer: mirror the host's dataset switch (Issue #51 follow-up) ----
+    // Absent field = pre-DS host → curDs stays undefined, no switch logic runs.
+    // First poll with the field: curDs undefined skips the switch branch (join
+    // is not a "switch"). active_dataset and tabs travel in one server-side
+    // store write, so this snapshot is internally consistent.
+    let dsFollowSid = null;
+    if ("active_dataset" in data) {
+      const ds = data.active_dataset == null ? null : String(data.active_dataset);
+      if (curDs !== undefined && ds !== curDs) {
+        if (curTab) selTabByDs[curDs ?? ""] = curTab;
+        if (curSid) selSidByDs[curDs ?? ""] = curSid;
+        onDatasetSwitch();
+        // Auto-follow: the session set swaps with the dataset — without this
+        // the guest would be stranded on the opt-out notice, send disabled.
+        const sids2 = (data.sessions || []).map((s) => s.id);
+        if (curSid && !sids2.includes(curSid) && sids2.length) {
+          const remembered = selSidByDs[ds ?? ""];
+          dsFollowSid = sids2.includes(remembered) ? remembered : sids2[0];
+        }
+      }
+      curDs = ds;
+      renderDatasetBar(ds);
+    }
     renderSessions(data.sessions || []);
     renderTabs(data.tabs || []);
     applyViewVersions(data.view_versions || {});
-    // session opt-out detection
+    // session opt-out detection — debounced to 2 consecutive polls so a dataset
+    // switch (incl. the ms window where the sessions PUT landed before the tabs
+    // PUT) never flashes the notice / disables send for one cycle. A genuine
+    // opt-out shows one poll (~3s) later than before, which was already racy.
     const sids = (data.sessions || []).map((s) => s.id);
     const notice = document.getElementById("sessNotice");
-    if (curSid && !sids.includes(curSid)) {
+    optOutStrikes = (curSid && !sids.includes(curSid)) ? optOutStrikes + 1 : 0;
+    if (optOutStrikes >= 2 && !dsFollowSid) {
       notice.style.display = "block";
       notice.textContent = T.optedOut;
       document.getElementById("sendBtn").disabled = true;
@@ -714,6 +769,11 @@ async function poll(reanchor = false) {
     }
     document.getElementById("status").textContent = T.connected;
     maybePresence();
+    // Deferred DS auto-follow: MUST run after the message loop — this response's
+    // messages belong to the old sid, and selectSession swaps `cur` (the store).
+    // Its internal poll(false) bumps pollGen, so our finally won't reschedule
+    // (same re-entrancy pattern as the renderSessions bootstrap).
+    if (dsFollowSid) selectSession(dsFollowSid);
   } catch (e) {
     if (myGen === pollGen) document.getElementById("status").textContent = T.retrying;
   } finally {
@@ -734,6 +794,10 @@ function schedulePoll() {
 }
 
 // ---- presence (every ~20s, or immediately on sid/tab switch) ----
+// The reported tab is the bare name (no dataset): guests only ever view the
+// active dataset, so it is unambiguous for the host's participant list — except
+// for ≤1 presence interval right after a host dataset switch, where the previous
+// dataset's tab name may linger (accepted v1 imprecision).
 async function maybePresence(force = false) {
   const now = Date.now();
   if (!force && now - lastPresenceMs < PRESENCE_INTERVAL_MS) return;
@@ -770,6 +834,7 @@ function selectSession(sid) {
   if (sid === curSid) return;
   curSid = sid;
   cur = getState(sid);
+  optOutStrikes = 0;             // fresh selection → notice debounce restarts
   rerenderAll(cur);              // restore this session's retained history (no wipe)
   updateHistBtn();
   maybePresence(true);
@@ -816,6 +881,38 @@ async function loadHistory() {
   }
 }
 
+// ---- DS layer bar (mirrors the host's DatasetSwitcher above the tab layer;
+// host-driven in v1 — the chip is a label, not a switcher) ----
+function renderDatasetBar(ds) {
+  document.getElementById("dsBar").style.display = "";
+  document.getElementById("dsChip").textContent = ds === null ? T.noDataset : ds;
+}
+
+// Dataset-scoped state swap: same-named tabs in the new dataset are DIFFERENT
+// tabs — every per-tab cache resets and in-flight fetches must not paint.
+// viewInflight is NOT cleared: its keys are generation-scoped ("gen:tab"), so
+// stale entries self-delete when their fetch settles (a wholesale clear would
+// let an old fetch's finally release a NEW fetch's de-dupe marker).
+function onDatasetSwitch() {
+  viewGen++;
+  for (const k of Object.keys(appliedVv)) delete appliedVv[k];
+  lastViewVersions = {};
+  curTab = null;                 // renderTabs re-selects (selTabByDs preferred)
+  resetView();
+  clearViewImage(T.switchingDs);
+}
+
+function clearViewImage(text) {
+  const img = document.getElementById("view");
+  const old = img.dataset.url;
+  img.removeAttribute("src");
+  delete img.dataset.url;        // Copy/Download guard keys on dataset.url — must trip
+  if (old) URL.revokeObjectURL(old);
+  const ph = document.getElementById("viewEmpty");
+  ph.textContent = text || "";
+  ph.style.display = "";
+}
+
 function renderTabs(tabs) {
   const bar = document.getElementById("tabBar");
   bar.innerHTML = "";
@@ -825,6 +922,7 @@ function renderTabs(tabs) {
     b.textContent = name;
     b.onclick = () => {
       curTab = name;
+      selTabByDs[curDs ?? ""] = name;   // remember per dataset (switch-back restore)
       resetView();                // start fitted on the new figure (zoom/pan persist across images)
       delete appliedVv[curTab];   // force re-fetch of the new tab (img is shared); use updated curTab, not loop var
       renderTabs(tabs);
@@ -835,11 +933,15 @@ function renderTabs(tabs) {
     bar.appendChild(b);
   }
   if (!curTab && tabs.length) {
-    curTab = tabs[0];
+    const remembered = selTabByDs[curDs ?? ""];
+    curTab = tabs.includes(remembered) ? remembered : tabs[0];
     resetView();
     delete appliedVv[curTab];
     fetchView();
   }
+  // A dataset with zero shared tabs: no fetch will ever replace the placeholder,
+  // so swap the "loading" text for a neutral empty state (idempotent per poll).
+  if (!tabs.length) clearViewImage(T.noTabs);
 }
 
 // ---- live view ----
@@ -853,9 +955,11 @@ function applyViewVersions(vv) {
 async function fetchView(targetVer) {
   if (!curTab || stopped) return;
   const tab = curTab;
+  const g = viewGen;                                  // dataset-switch generation guard
+  const key = g + ":" + tab;                          // de-dupe scoped per generation
   const ver = (targetVer != null) ? targetVer : (lastViewVersions[tab] || 0);
-  if (viewInflight.has(tab)) return;                  // de-dupe concurrent fetches per tab
-  viewInflight.add(tab);
+  if (viewInflight.has(key)) return;                  // de-dupe concurrent fetches per tab
+  viewInflight.add(key);
   try {
     const r = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(tab),
                         { expect: "blob" });
@@ -870,7 +974,9 @@ async function fetchView(targetVer) {
       probe.onerror = () => resolve(false);
       probe.src = url;
     });
-    if (!decoded || tab !== curTab || stopped) {      // decode failed or tab changed/stopped mid-fetch
+    // g !== viewGen: the host switched datasets mid-fetch — a same-named tab in
+    // the new dataset is a DIFFERENT tab, so this frame must never paint.
+    if (!decoded || tab !== curTab || g !== viewGen || stopped) {
       URL.revokeObjectURL(url);                        // release the new URL (leak guard)
       return;                                          // appliedVv unadvanced → next poll retries
     }
@@ -880,8 +986,9 @@ async function fetchView(targetVer) {
     img.dataset.url = url;
     if (old) URL.revokeObjectURL(old);                // revoke old URL synchronously (no onload race; reviewer P2-2)
     appliedVv[tab] = ver;                             // advance only on a painted frame
+    document.getElementById("viewEmpty").style.display = "none";
   } catch (e) { /* transient: appliedVv unadvanced → next poll retries */ }
-  finally { viewInflight.delete(tab); }
+  finally { viewInflight.delete(key); }
 }
 
 // ---- zoom / pan ----
@@ -1203,6 +1310,21 @@ function runSelfTest() {
       .forEach((x) => { if (typeof x !== "string") threw = true; });
   } catch (e) { threw = true; }
   check("never-throw", !threw);
+  // 7. DS切替の状態リセット: 世代++・per-tab キャッシュ全消去・選択解除・画像クリア
+  //    （dataset.url が消え Copy/Download ガードが効く）・プレースホルダ表示。
+  //    viewInflight は世代キーのため onDatasetSwitch では消さない（自滅する）。
+  appliedVv["t1"] = 5;
+  lastViewVersions = { t1: 5 };
+  curTab = "t1";
+  const g0 = viewGen;
+  const vimg = document.getElementById("view");
+  vimg.dataset.url = "blob:fake";
+  onDatasetSwitch();
+  check("ds-switch-reset",
+        viewGen === g0 + 1 && Object.keys(appliedVv).length === 0 &&
+        Object.keys(lastViewVersions).length === 0 && curTab === null &&
+        !vimg.dataset.url &&
+        document.getElementById("viewEmpty").style.display !== "none");
 
   const failed = cases.filter((c) => !c.pass);
   const ok = failed.length === 0;

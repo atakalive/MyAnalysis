@@ -242,7 +242,11 @@ is additive (it never closes already-open datasets). No automatic restore at sta
 
 **Meeting share** broadcasts only the ACTIVE dataset's tabs and chat sessions
 (switching datasets swaps the shared set; same-named cross-dataset tabs are not
-co-shared in v1).
+co-shared in v1). The guest page mirrors the host's DS-above-tabs structure: a DS
+bar shows the active dataset and follows host switches, auto-following the guest's
+chat to the new dataset's sessions. Known v1 limit: messages generated entirely
+while their dataset was hidden are not delivered to guests, even after switching
+back (an in-flight streamed reply still delivers its final).
 
 **Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
 resident while open, so opening many large datasets at once can pressure memory
