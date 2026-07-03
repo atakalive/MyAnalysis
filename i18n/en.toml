@@ -135,6 +135,7 @@
 "meeting.btn.stop"               = "Stop"
 "meeting.btn.copy"               = "Copy"
 "meeting.btn.copy_link"          = "Copy link"
+"meeting.btn.copied"             = "Copied"
 "meeting.btn.qr"                 = "QR"
 "meeting.btn.reveal"             = "Reveal"
 "meeting.btn.hide"               = "Hide"

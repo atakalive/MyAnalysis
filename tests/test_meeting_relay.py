@@ -1172,3 +1172,65 @@ def test_share_url_and_copy_link(qapp, monkeypatch):
     monkeypatch.setattr(r, "base_url", lambda: "")
     assert sw._share_url() == ""
     r.stop()   # relay 後始末。姉妹テスト（test_share_window_adopts_running_token 末尾）と同様、冪等
+
+
+def test_copy_buttons_flash_copied(qapp, monkeypatch):
+    # Issue #58: コピー2ボタンに1秒間「コピー完了」フィードバック
+    chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _make_relay(monkeypatch, win)
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    tokens = []
+    r.tokenReady.connect(tokens.append)
+    r.meeting_start(3600)
+    tok = tokens[-1]
+
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()   # 姉妹テスト同様、周期リフレッシュを止める
+    assert sw._token == tok
+
+    # (1) リンクをコピー（happy path + 言語切替ガード）
+    sw._on_copy_link()
+    assert qapp.clipboard().text() == sw._share_url()
+    assert sw._copy_link_btn.text() == tr("meeting.btn.copied")
+    assert sw._copy_link_feedback.isActive()
+    assert sw._copy_link_feedback.interval() == 1000
+    # フィードバック中に言語切替(retranslate)が来ても「コピー完了」(現言語)を維持する
+    sw.retranslate()
+    assert sw._copy_link_btn.text() == tr("meeting.btn.copied")
+    # 発火を決定的に再現: emit で復元 → stop で active を落とす
+    sw._copy_link_feedback.timeout.emit()
+    sw._copy_link_feedback.stop()
+    assert sw._copy_link_btn.text() == tr("meeting.btn.copy_link")
+    assert not sw._copy_link_feedback.isActive()
+    # 復元後の retranslate は通常ラベルを設定する
+    sw.retranslate()
+    assert sw._copy_link_btn.text() == tr("meeting.btn.copy_link")
+
+    # (2) コピー（トークン、happy path）
+    sw._on_copy()
+    assert qapp.clipboard().text() == sw._token
+    assert sw._copy_btn.text() == tr("meeting.btn.copied")
+    assert sw._copy_feedback.isActive()
+    assert sw._copy_feedback.interval() == 1000
+    sw._copy_feedback.timeout.emit()
+    sw._copy_feedback.stop()
+    assert sw._copy_btn.text() == tr("meeting.btn.copy")
+    assert not sw._copy_feedback.isActive()
+
+    # (3) 空トークン → フィードバックなし（この時点で両タイマーとも inactive）
+    sw._token = ""
+    sw._on_copy()
+    sw._on_copy_link()
+    assert sw._copy_btn.text() == tr("meeting.btn.copy")
+    assert sw._copy_link_btn.text() == tr("meeting.btn.copy_link")
+    assert not sw._copy_feedback.isActive()
+    assert not sw._copy_link_feedback.isActive()
+
+    # (4) 後始末
+    sw._copy_feedback.stop()
+    sw._copy_link_feedback.stop()
+    r.stop()   # relay 後始末（冪等。姉妹テスト末尾と同様）

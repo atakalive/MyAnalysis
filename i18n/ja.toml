@@ -135,6 +135,7 @@
 "meeting.btn.stop"               = "停止"
 "meeting.btn.copy"               = "コピー"
 "meeting.btn.copy_link"          = "リンクをコピー"
+"meeting.btn.copied"             = "コピー完了"
 "meeting.btn.qr"                 = "QR"
 "meeting.btn.reveal"             = "表示"
 "meeting.btn.hide"               = "隠す"

@@ -99,6 +99,8 @@ class MeetingShareWindow(QWidget):
         self._copy_btn.clicked.connect(self._on_copy)
         self._copy_link_btn = QPushButton(tr("meeting.btn.copy_link"))
         self._copy_link_btn.clicked.connect(self._on_copy_link)
+        self._copy_feedback = self._make_copied_timer(self._copy_btn, "meeting.btn.copy")
+        self._copy_link_feedback = self._make_copied_timer(self._copy_link_btn, "meeting.btn.copy_link")
         self._reveal_btn = QPushButton(tr("meeting.btn.reveal"))
         self._reveal_btn.clicked.connect(self._on_reveal)
         self._qr_btn = QPushButton(tr("meeting.btn.qr"))
@@ -248,6 +250,7 @@ class MeetingShareWindow(QWidget):
     def _on_copy(self) -> None:
         if self._token:
             QApplication.clipboard().setText(self._token)
+            self._show_copied(self._copy_btn, self._copy_feedback)
 
     def _share_url(self) -> str:
         base = self._relay.base_url()
@@ -259,6 +262,18 @@ class MeetingShareWindow(QWidget):
         url = self._share_url()
         if url:
             QApplication.clipboard().setText(url)
+            self._show_copied(self._copy_link_btn, self._copy_link_feedback)
+
+    def _make_copied_timer(self, btn: QPushButton, restore_key: str) -> QTimer:
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.setInterval(1000)
+        t.timeout.connect(lambda: btn.setText(tr(restore_key)))
+        return t
+
+    def _show_copied(self, btn: QPushButton, timer: QTimer) -> None:
+        btn.setText(tr("meeting.btn.copied"))
+        timer.start()
 
     def _on_reveal(self) -> None:
         self._token_revealed = not self._token_revealed
@@ -530,8 +545,14 @@ class MeetingShareWindow(QWidget):
         self._name_caption.setText(tr("meeting.label.host_name"))
         self._start_btn.setText(tr("meeting.btn.start"))
         self._token_caption.setText(tr("meeting.label.token"))
-        self._copy_btn.setText(tr("meeting.btn.copy"))
-        self._copy_link_btn.setText(tr("meeting.btn.copy_link"))
+        if self._copy_feedback.isActive():
+            self._copy_btn.setText(tr("meeting.btn.copied"))
+        else:
+            self._copy_btn.setText(tr("meeting.btn.copy"))
+        if self._copy_link_feedback.isActive():
+            self._copy_link_btn.setText(tr("meeting.btn.copied"))
+        else:
+            self._copy_link_btn.setText(tr("meeting.btn.copy_link"))
         self._reveal_btn.setText(
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )
