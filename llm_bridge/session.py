@@ -62,6 +62,13 @@ def _spec_to_tab(spec: dict, work_dir: Path) -> dict | None:
         except (ValueError, TypeError):
             rel = fig
         return {"name": spec.get("name"), "kind": "figure", "figure": rel}
+    if spec.get("kind") == "image":
+        img = spec.get("image")
+        try:
+            rel = str(Path(img).relative_to(work_dir))
+        except (ValueError, TypeError):
+            rel = img
+        return {"name": spec.get("name"), "kind": "image", "image": rel}
     if spec.get("kind") == "analysis":
         return {
             "name": spec.get("name"),
@@ -386,6 +393,24 @@ def open_dataset(window, dataset: str) -> str:
                             continue
                         window.dispatch_command(
                             "show",
+                            path=str(abs_path),
+                            name=entry.get("name"),
+                            dataset=dataset,
+                        )
+                        restored += 1
+                    elif kind == "image":
+                        img = entry.get("image")
+                        ip = Path(img)
+                        abs_path = ip if ip.is_absolute() else work_dir / ip
+                        if not abs_path.is_file():
+                            _log.warning(
+                                "open_dataset: missing image %s (tab %r)",
+                                abs_path,
+                                entry.get("name"),
+                            )
+                            continue
+                        window.dispatch_command(
+                            "show-image",
                             path=str(abs_path),
                             name=entry.get("name"),
                             dataset=dataset,

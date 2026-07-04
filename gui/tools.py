@@ -118,7 +118,9 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "show",
-            "description": "Display an image file in a viewer tab. "
+            "description": "Display a generated result figure (PNG etc.) statically "
+            "in a viewer tab. For raw/source images (TIFF/16bit/stacks) that need "
+            "ImageJ-style interactive viewing, use show_image instead. "
             "Default (no slot) is full-width single pane; re-showing without slot "
             "collapses any existing split back to single pane. "
             "Use slot to place a second image alongside "
@@ -157,6 +159,173 @@ TOOLS = [
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "left", "right"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_image",
+            "description": "Open a raw/source image (TIFF, 16bit, z/t stack, "
+            "multi-channel) for ImageJ-style INTERACTIVE viewing (dynamic range / "
+            "LUT / composite). Use this ONLY when the user explicitly asks to view "
+            "a raw image / TIFF, or says 'open in ImageJ'. Do NOT open one on your "
+            "own initiative. For a generated result figure (PNG) use `show`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to image file"},
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "panel": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Pane position (default: left / main pane).",
+                    },
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_lut",
+            "description": "Set the LUT for a channel of an open image-viewer tab. "
+            "`name` is the tab name. `lut` is one of Grays/Red/Green/Blue/Magenta/"
+            "Cyan/Yellow/Fire/Ice/Spectrum. `channel` (0-based) omitted = active "
+            "channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "lut": {"type": "string"},
+                    "channel": {"type": "integer", "description": "0-based; omit for active channel"},
+                    "invert": {"type": "boolean"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "lut"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_range",
+            "description": "Set the min/max display range for a channel of an "
+            "image-viewer tab. `channel` (0-based) omitted = active channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "min": {"type": "number"},
+                    "max": {"type": "number"},
+                    "channel": {"type": "integer", "description": "0-based; omit for active channel"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "min", "max"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_mode",
+            "description": "Set the display mode of an image-viewer tab: "
+            "'single' or 'composite'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "mode": {"type": "string", "enum": ["single", "composite"]},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "mode"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_channel",
+            "description": "Set the active channel (0-based) of an image-viewer tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "index": {"type": "integer", "description": "0-based channel index"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_visible",
+            "description": "Show/hide a channel (0-based) in an image-viewer "
+            "composite.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "channel": {"type": "integer", "description": "0-based channel index"},
+                    "visible": {"type": "boolean"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "channel", "visible"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_z",
+            "description": "Set the Z-slice index (0-based) of an image-viewer tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "index": {"type": "integer", "description": "0-based Z index"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_t",
+            "description": "Set the T-frame index (0-based) of an image-viewer tab.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "index": {"type": "integer", "description": "0-based T index"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "auto_contrast",
+            "description": "Auto-contrast a channel of an image-viewer tab "
+            "(percentile 0.35/99.65). `channel` (0-based) omitted = active channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "channel": {"type": "integer", "description": "0-based; omit for active channel"},
+                    "low": {"type": "number"},
+                    "high": {"type": "number"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name"],
             },
         },
     },
@@ -258,6 +427,22 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
             if k in args:
                 kwargs[k] = args[k]
         return _via_bridge("window", None, "show", kwargs, cancelled=cancelled)
+    if name == "show_image":
+        kwargs = {"path": args["path"]}
+        for k in ("name", "panel", "dataset"):
+            if k in args:
+                kwargs[k] = args[k]
+        return _via_bridge("window", None, "show-image", kwargs, cancelled=cancelled)
+    if name in (
+        "set_lut", "set_range", "set_mode", "set_channel", "set_visible",
+        "set_z", "set_t", "auto_contrast",
+    ):
+        verb = name.replace("_", "-")
+        tab_name = args.get("name", "viewer")
+        verb_args = {k: v for k, v in args.items() if k not in ("name", "dataset")}
+        return _via_bridge(
+            "tab", tab_name, verb, verb_args, cancelled=cancelled
+        )
     if name == "set_split":
         targs = {"left": args["left"], "right": args["right"]}
         if "dataset" in args:

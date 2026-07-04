@@ -436,6 +436,99 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     return _show
 
 
+def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
+    """Build the `show-image` window verb handler.
+
+    Opens a raw/source image (TIFF/16bit/stack/multi-channel) in an interactive
+    ImageViewerPanel tab — the ImageJ-style onramp (Issue #60). Mirrors
+    `_make_show_handler` (see its docstring) but targets ImageViewerPanel under
+    key "viewer"; the primary pane defaults to "left".
+
+    Existing-tab handling is structure-based: a tab is a viewer iff it holds an
+    ImageViewerPanel under key "viewer". A name collision with a non-viewer tab
+    raises LookupError rather than clobbering it (static `show`/FigurePanel path
+    is preserved without regression).
+    """
+
+    def _show_image(
+        path: str,
+        name: str = "viewer",
+        panel: str = "left",
+        dataset: str | None = None,
+    ) -> str:
+        if panel not in ("left", "right"):
+            raise ValueError(f"panel must be 'left' or 'right', got {panel!r}")
+        p = Path(path).resolve()
+        if not p.is_file():
+            raise LookupError(f"not a file: {path}")
+        from gui.imageviewer import (
+            ImageViewerPanel,
+            attach_image_viewer,
+        )  # 関数内 import（CLI に PySide6 を引き込まない）
+
+        existing = _find_in_dataset(window, name, dataset)
+        if existing is not None:
+            tab = existing
+            if not isinstance(tab._panels.get("viewer"), ImageViewerPanel):
+                raise LookupError(
+                    f"tab {name!r} is not an image-viewer tab"
+                )
+            tab.panel("viewer").set_image(p)
+            # session_spec / note_dataset / dirty only when a dataset resolves.
+            if dataset is not None:
+                ds = str(dataset)
+                tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
+                session.note_dataset(ds)
+                window.mark_session_dirty()
+            else:
+                inferred = session.infer_dataset(str(p))
+                if inferred is not None:
+                    tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
+                    session.note_dataset(inferred)
+                    window.mark_session_dirty()
+            _set_active_tab(
+                window, name,
+                dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+            )
+            getattr(window, "notify_chat_dataset", lambda: None)()
+            return f"updated:{name}"
+
+        from gui.tab import (
+            AnalysisTab,
+        )  # 関数内 import（CLI に PySide6 を引き込まない）
+
+        tab = AnalysisTab(name)
+        tab.set_pane_visible("left", False)
+        tab.set_pane_visible("right", False)
+        attach_image_viewer(tab, p, panel=panel)
+        tab.set_pane_visible(panel, True)
+        tab.register_command(
+            "set-split",
+            lambda left, right: tab.set_split_ratio(float(left), float(right)),
+        )
+        tab.register_command("snapshot", lambda: None)
+        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
+        # that add_tab/set_active_tab fires sees the final spec. ds None → no
+        # session_spec (volatile tab), same as `show`.
+        if dataset is not None:
+            ds = str(dataset)
+            tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
+            session.note_dataset(ds)
+        else:
+            inferred = session.infer_dataset(str(p))
+            if inferred is not None:
+                tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
+                session.note_dataset(inferred)
+        window.add_tab(tab)
+        _set_active_tab(
+            window, name,
+            dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+        )
+        return f"shown:{name}"
+
+    return _show_image
+
+
 def _list_tabs(window, detail: bool = False):
     """list-tabs handler. detail=false → [name]; detail=true → [{name,dataset,kind}]."""
     if not detail:
@@ -491,6 +584,7 @@ def _rewire_window(window) -> None:
     )
     window.register_command("toggle-chat-float", window.toggle_chat_floating)
     window.register_command("show", _make_show_handler(window))
+    window.register_command("show-image", _make_show_image_handler(window))
     window.register_command("open-dataset", lambda name: session.open_dataset(window, name))
     # Top-level "open datasets" layer verbs (Issue #51).
     window.register_command(
