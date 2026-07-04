@@ -2,18 +2,21 @@
 import numpy as np
 import pytest
 
-from common import image_io
 from common.image_io import (
-    ImageMeta,
     _infer_meta,
     _normalize_axes,
     load_image,
 )
 
-tifffile = pytest.importorskip("tifffile")
+
+@pytest.fixture
+def tifffile():
+    """tifffile only for the TIFF-positive tests; the PIL and graceful-
+    ImportError tests must still run when tifffile is absent (design §4)."""
+    return pytest.importorskip("tifffile")
 
 
-def test_tiff_16bit_roundtrip(tmp_path):
+def test_tiff_16bit_roundtrip(tmp_path, tifffile):
     arr = (np.arange(64 * 48, dtype=np.uint16).reshape(64, 48) * 7) % 65535
     p = tmp_path / "g.tif"
     tifffile.imwrite(str(p), arr)
@@ -26,7 +29,7 @@ def test_tiff_16bit_roundtrip(tmp_path):
     assert np.array_equal(out, arr)
 
 
-def test_tiff_ndim_tzcyx(tmp_path):
+def test_tiff_ndim_tzcyx(tmp_path, tifffile):
     arr = np.zeros((2, 3, 4, 16, 20), dtype=np.uint16)
     p = tmp_path / "stack.tif"
     tifffile.imwrite(str(p), arr, imagej=True)
@@ -37,7 +40,7 @@ def test_tiff_ndim_tzcyx(tmp_path):
     assert out.shape == (2, 3, 4, 16, 20)
 
 
-def test_tiff_naive_multipage_q_to_z(tmp_path):
+def test_tiff_naive_multipage_q_to_z(tmp_path, tifffile):
     """Plain multi-page TIFF (series.axes == 'QYX') opens as a Z=5 stack."""
     arr = np.zeros((5, 64, 64), dtype=np.uint16)
     p = tmp_path / "pages.tif"
@@ -83,7 +86,7 @@ def _save_rgb(path, saver):
     return rgb
 
 
-def test_is_rgb_structure_png_and_tiff(tmp_path):
+def test_is_rgb_structure_png_and_tiff(tmp_path, tifffile):
     from PIL import Image as PILImage
 
     png = tmp_path / "c.png"
@@ -91,14 +94,19 @@ def test_is_rgb_structure_png_and_tiff(tmp_path):
     tif = tmp_path / "c.tif"
     tifffile.imwrite(str(tif), rgb, photometric="rgb")
 
+    expected = np.moveaxis(rgb, -1, 0)   # (3, Y, X) canonical CYX
+    outs = []
     for path in (png, tif):
         out, meta = load_image(path)
         assert meta.is_rgb is True
         assert meta.axes == "CYX"
         assert meta.channels == 3
+        assert np.array_equal(out, expected)   # pixel-equivalent to source
+        outs.append(out)
+    assert np.array_equal(outs[0], outs[1])    # png and tif identical
 
 
-def test_multichannel_fluor_not_rgb(tmp_path):
+def test_multichannel_fluor_not_rgb(tmp_path, tifffile):
     arr = np.zeros((3, 16, 16), dtype=np.uint16)  # true C axis (CYX)
     p = tmp_path / "fl.tif"
     tifffile.imwrite(str(p), arr, imagej=True, metadata={"axes": "CYX"})
@@ -106,7 +114,7 @@ def test_multichannel_fluor_not_rgb(tmp_path):
     assert meta.is_rgb is False
 
 
-def test_zstack_rgb_not_rgb(tmp_path):
+def test_zstack_rgb_not_rgb(tmp_path, tifffile):
     arr = np.zeros((4, 8, 8, 3), dtype=np.uint8)  # ZYXS
     p = tmp_path / "zrgb.tif"
     tifffile.imwrite(str(p), arr)
@@ -147,6 +155,24 @@ def test_pil_16bit_gray(tmp_path):
     assert out.dtype == np.uint16
     assert meta.channels == 1
     assert meta.is_rgb is False
+    assert np.array_equal(out, arr)   # 16bit values preserved (no 8bit downscale)
+
+
+def test_pil_float_mode_preserved(tmp_path, monkeypatch):
+    """PIL mode 'F' (float32) grayscale loads as 1ch float, dtype preserved."""
+    from PIL import Image as PILImage
+
+    farr = np.linspace(-1.0, 5.0, 10 * 12, dtype=np.float32).reshape(10, 12)
+    fimg = PILImage.fromarray(farr)   # float32 2D -> mode "F"
+    assert fimg.mode == "F"
+    p = tmp_path / "f.bmp"            # a PIL-routed extension
+    p.write_bytes(b"stub")
+    monkeypatch.setattr(PILImage, "open", lambda _p: fimg)
+    out, meta = load_image(p)
+    assert out.dtype == np.float32
+    assert meta.channels == 1
+    assert meta.is_rgb is False
+    assert np.allclose(out, farr)
 
 
 def test_pil_la_drops_alpha(tmp_path):
@@ -161,7 +187,7 @@ def test_pil_la_drops_alpha(tmp_path):
     assert meta.is_rgb is False
 
 
-def test_rgba_symmetry_png_tiff(tmp_path):
+def test_rgba_symmetry_png_tiff(tmp_path, tifffile):
     from PIL import Image as PILImage
 
     rgba = np.zeros((10, 12, 4), dtype=np.uint8)
@@ -186,10 +212,13 @@ def test_rgba_symmetry_png_tiff(tmp_path):
 def test_infer_meta():
     assert _infer_meta(np.zeros((8, 8))).axes == "YX"
     assert _infer_meta(np.zeros((3, 8, 8))).axes == "CYX"
+    assert _infer_meta(np.zeros((5, 4, 8, 8))).axes == "ZCYX"
     assert _infer_meta(np.zeros((2, 3, 4, 8, 8))).axes == "TZCYX"
     assert _infer_meta(np.zeros((3, 8, 8))).is_rgb is False
     with pytest.raises(ValueError):
-        _infer_meta(np.zeros((2, 2, 3, 4, 8, 8)))
+        _infer_meta(np.zeros(8))               # 1D unsupported
+    with pytest.raises(ValueError):
+        _infer_meta(np.zeros((2, 2, 3, 4, 8, 8)))   # 6D unsupported
 
 
 def test_infer_meta_bit_depth():

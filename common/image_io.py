@@ -30,8 +30,8 @@ class ImageMeta:
     """Metadata for a loaded image (attribute access, e.g. `meta.axes`)."""
 
     axes: str                # canonical axis string, Y/X last (e.g. "TZCYX")
-    shape: tuple             # arr.shape
-    sizes: dict              # axis -> size (includes C/Z/T when present)
+    shape: tuple[int, ...]   # arr.shape
+    sizes: dict[str, int]    # axis -> size (includes C/Z/T when present)
     channels: int            # size of C axis, or 1 when absent
     dtype: np.dtype
     bit_depth: int           # dtype.itemsize * 8 (display hint only)
@@ -44,13 +44,15 @@ _LOADERS: dict[str, Callable[[Path], tuple[np.ndarray, ImageMeta]]] = {}
 _PIL_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ppm", ".pgm", ".tga")
 
 
-def register_loader(exts, loader) -> None:
+def register_loader(
+    exts: list[str], loader: Callable[[Path], tuple[np.ndarray, ImageMeta]]
+) -> None:
     """Register `loader` for each extension in `exts` (lower-case, dot-prefixed)."""
     for ext in exts:
         _LOADERS[ext.lower()] = loader
 
 
-def load_image(path) -> tuple[np.ndarray, ImageMeta]:
+def load_image(path: str | Path) -> tuple[np.ndarray, ImageMeta]:
     """Load `path` into `(ndarray, ImageMeta)` via the extension registry."""
     p = Path(path)
     ext = p.suffix.lower()
@@ -119,20 +121,19 @@ def _normalize_axes(arr: np.ndarray, axes: str) -> tuple[np.ndarray, str]:
         if c not in ("T", "Z", "C", "Y", "X"):
             raise ValueError(f"unsupported TIFF axes: {axes}")
     axes = "".join(chars)
-    # Move Y, X to the last two axes (data + label together).
-    if "Y" not in axes or "X" not in axes:
+    # Validate the canonical axis set BEFORE moving: exactly one Y and X, at most
+    # one T/Z/C. Duplicate Y/X would otherwise make the moveaxis order malformed
+    # and raise an opaque numpy error instead of this clear non-canonical one.
+    if axes.count("Y") != 1 or axes.count("X") != 1:
         raise ValueError(f"non-canonical axes after normalize: {axes}")
+    for c in ("T", "Z", "C"):
+        if axes.count(c) > 1:
+            raise ValueError(f"non-canonical axes after normalize: {axes}")
+    # Move Y, X to the last two axes (data + label together).
     order = [i for i, c in enumerate(axes) if c not in ("Y", "X")]
     order += [axes.index("Y"), axes.index("X")]
     arr = np.moveaxis(arr, order, range(arr.ndim))
     axes = "".join(axes[i] for i in order)
-    # Validate the canonical axis set: exactly one Y and X, at most one T/Z/C.
-    for c in ("Y", "X"):
-        if axes.count(c) != 1:
-            raise ValueError(f"non-canonical axes after normalize: {axes}")
-    for c in ("T", "Z", "C"):
-        if axes.count(c) > 1:
-            raise ValueError(f"non-canonical axes after normalize: {axes}")
     return arr, axes
 
 
@@ -168,6 +169,12 @@ def _load_tiff(p: Path) -> tuple[np.ndarray, ImageMeta]:
 
 
 def _load_pil(p: Path) -> tuple[np.ndarray, ImageMeta]:
+    """PIL loader. Grayscale family (1/L/LA/I/F and I;16*) -> single channel with
+    dtype preserved: I->int32, F->float32, I;16*->uint16, 1->uint8, LA->uint8
+    (alpha dropped). Everything else (P/RGB/RGBA/CMYK/YCbCr/...) -> convert("RGB")
+    3ch, is_rgb=True (alpha/extra samples dropped; CMYK/YCbCr go through PIL's
+    ICC-free approximation, so exact source colour is not guaranteed).
+    """
     try:
         from PIL import Image as PILImage
     except ImportError as e:

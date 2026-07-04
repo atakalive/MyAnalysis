@@ -15,6 +15,7 @@ stays untouched. It holds: the LUT registry, `ImageViewerPanel`,
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
@@ -34,6 +35,12 @@ from PySide6.QtWidgets import (
 )
 
 from common.image_io import ImageMeta, load_image, _infer_meta
+
+if TYPE_CHECKING:
+    from gui.tab import AnalysisTab
+
+    # Accepted image inputs for set_image / attach_image_viewer.
+    ImageInput = str | Path | np.ndarray | tuple[np.ndarray, ImageMeta]
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +141,12 @@ def _sane_levels(lo, hi, frame) -> tuple[float, float]:
         hi = lo + 1 if np.issubdtype(dt, np.integer) else np.nextafter(float(lo), np.inf)
     if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
         lo, hi = 0.0, 1.0
+    if np.issubdtype(dt, np.integer):
+        # Integer images get integer-valued levels so the decimals=0 spinbox
+        # (the truth-source display) matches the stored levels exactly.
+        lo, hi = float(np.floor(lo)), float(np.ceil(hi))
+        if hi <= lo:
+            hi = lo + 1
     return float(lo), float(hi)
 
 
@@ -242,7 +255,7 @@ class ImageViewerPanel(QWidget):
 
     # ---- axis sliders --------------------------------------------------
 
-    def _make_axis_slider(self, label: str):
+    def _make_axis_slider(self, label: str) -> tuple[QHBoxLayout, QSlider, QLabel]:
         row = QHBoxLayout()
         row.addWidget(QLabel(label))
         slider = QSlider(Qt.Orientation.Horizontal)
@@ -260,7 +273,7 @@ class ImageViewerPanel(QWidget):
 
     # ---- image loading -------------------------------------------------
 
-    def set_image(self, image) -> None:
+    def set_image(self, image: ImageInput) -> None:
         """Load an image (path / ndarray / (ndarray, meta)) into the panel.
 
         Reload contract: keep existing per-channel state (levels/LUT/invert/
@@ -268,10 +281,15 @@ class ImageViewerPanel(QWidget):
         image; otherwise reinitialise all channels and clamp position.
         """
         arr, meta = self._resolve_image(image)
+        # Same-identity reload keeps per-channel state only when shape, axes AND
+        # colour kind match — a same-shape RGB <-> 3ch-fluorescence swap must
+        # reinitialise (different default LUTs / level policy), not reuse.
         same_shape = (
             self._arr is not None
+            and self._meta is not None
             and self._axes == meta.axes
             and self._arr.shape == arr.shape
+            and self._meta.is_rgb == meta.is_rgb
         )
         self._arr = arr
         self._meta = meta
@@ -291,7 +309,7 @@ class ImageViewerPanel(QWidget):
         self._build_dynamic_controls()
         self._render()
 
-    def _resolve_image(self, image) -> tuple[np.ndarray, ImageMeta]:
+    def _resolve_image(self, image: ImageInput) -> tuple[np.ndarray, ImageMeta]:
         if isinstance(image, tuple) and len(image) == 2 and isinstance(image[1], ImageMeta):
             return image[0], image[1]
         if isinstance(image, (str, Path)):
@@ -345,7 +363,11 @@ class ImageViewerPanel(QWidget):
     def _channel_rgb(self, c: int) -> np.ndarray:
         frame = self._plane(c)
         lo, hi = self.channels[c]["levels"]
-        norm = np.clip((frame.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+        # Normalise in float64 when the source is float64 so a high-offset,
+        # small-range image (e.g. 1e12..1e12+1) keeps its detail; float32 would
+        # collapse the difference and render all-black. Other dtypes -> float32.
+        work = np.float64 if frame.dtype == np.float64 else np.float32
+        norm = np.clip((frame.astype(work) - lo) / (hi - lo), 0.0, 1.0)
         norm = np.nan_to_num(norm, nan=0.0)
         idx = (norm * 255).astype(np.uint8)
         ch = self.channels[c]
@@ -462,12 +484,16 @@ class ImageViewerPanel(QWidget):
 
         self._updating_ui = False
 
-    def _configure_spinbox(self, spin, frame, fmin, fmax) -> None:
+    def _configure_spinbox(
+        self, spin: QDoubleSpinBox, frame: np.ndarray, fmin: float, fmax: float
+    ) -> None:
         dt = frame.dtype
         width = fmax - fmin
         if np.issubdtype(dt, np.integer):
             info = np.iinfo(dt)
-            spin.setRange(float(info.min), float(info.max))
+            # +1 on the top so the degenerate constant-max levels (hi = max+1
+            # from _sane_levels) still fit and are not clamped by the spinbox.
+            spin.setRange(float(info.min), float(info.max) + 1)
             spin.setDecimals(0)
             spin.setSingleStep(1)
             return
@@ -568,7 +594,7 @@ class ImageViewerPanel(QWidget):
         self.mode = mode
         self._render()
 
-    def set_active_channel(self, idx) -> None:
+    def set_active_channel(self, idx: int) -> None:
         self.active_channel = _clamp(idx, self.nC)
         if not self._updating_ui:
             self._active_combo.blockSignals(True)
@@ -576,17 +602,17 @@ class ImageViewerPanel(QWidget):
             self._active_combo.blockSignals(False)
         self._render()
 
-    def set_z(self, idx) -> None:
+    def set_z(self, idx: int) -> None:
         self.z_idx = _clamp(idx, self.nZ)
         self._z_label.setText(str(self.z_idx))
         self._render()
 
-    def set_t(self, idx) -> None:
+    def set_t(self, idx: int) -> None:
         self.t_idx = _clamp(idx, self.nT)
         self._t_label.setText(str(self.t_idx))
         self._render()
 
-    def set_channel_visible(self, c, visible) -> None:
+    def set_channel_visible(self, c: int, visible: bool) -> None:
         c = _clamp(c, self.nC)
         self.channels[c]["visible"] = bool(visible)
         self._render()
@@ -599,21 +625,23 @@ class ImageViewerPanel(QWidget):
         self.channels[c]["invert"] = bool(invert)
         self._render()
 
-    def set_channel_range(self, c, lo, hi) -> None:
+    def set_channel_range(self, c: int, lo: float, hi: float) -> None:
         c = _clamp(c, self.nC)
         frame = self._plane(c)
         self.channels[c]["levels"] = _sane_levels(float(lo), float(hi), frame)
         self._sync_spin_widgets(c)
         self._render()
 
-    def auto_contrast_channel(self, c, low=_AUTO_LOW, high=_AUTO_HIGH) -> None:
+    def auto_contrast_channel(
+        self, c: int, low: float = _AUTO_LOW, high: float = _AUTO_HIGH
+    ) -> None:
         c = _clamp(c, self.nC)
         frame = self._plane(c)
         self.channels[c]["levels"] = _percentile_levels(frame, low, high)
         self._sync_spin_widgets(c)
         self._render()
 
-    def resolve_channel(self, channel) -> int:
+    def resolve_channel(self, channel: int | None) -> int:
         """None -> active channel; else clamp into range."""
         if channel is None:
             return self.active_channel
@@ -678,7 +706,12 @@ class ImageViewerPanel(QWidget):
 # Attach helper + verb registration
 # ---------------------------------------------------------------------------
 
-def attach_image_viewer(tab, image=None, panel="left", key="viewer"):
+def attach_image_viewer(
+    tab: AnalysisTab,
+    image: ImageInput | None = None,
+    panel: str = "left",
+    key: str = "viewer",
+) -> ImageViewerPanel:
     """Embed an ImageViewerPanel in `tab`'s split pane and wire its verbs.
 
     The single-line entry point for embedding the viewer in an analysis
@@ -693,7 +726,7 @@ def attach_image_viewer(tab, image=None, panel="left", key="viewer"):
     return p
 
 
-def _register_viewer_verbs(tab, panel) -> None:
+def _register_viewer_verbs(tab: AnalysisTab, panel: ImageViewerPanel) -> None:
     """Register composite-aware viewer verbs on `tab`.
 
     HARD RULE: never (re)register the `set-split`/`snapshot`/`refresh-state`

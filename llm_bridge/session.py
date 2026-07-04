@@ -54,7 +54,11 @@ def forget_dataset(name: str) -> None:
 
 
 def _spec_to_tab(spec: dict, work_dir: Path) -> dict | None:
-    """Reduce a live tab's session_spec to its persisted form (figure/analysis)."""
+    """Reduce a live tab's session_spec to its persisted form.
+
+    Handles kind in {"figure", "image", "analysis"}; figure/image relativise
+    their path against work_dir. Returns None for any other/unknown kind.
+    """
     if spec.get("kind") == "figure":
         fig = spec.get("figure")
         try:

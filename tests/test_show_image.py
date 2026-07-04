@@ -161,4 +161,9 @@ def test_show_image_session_roundtrip(qapp, tif_path, tmp_path, monkeypatch):
     assert result.startswith("restored:")
     t = next((t for t in w2.tabs() if t.name == "v"), None)
     assert t is not None
-    assert isinstance(t.panel("viewer"), ImageViewerPanel)
+    panel = t.panel("viewer")
+    assert isinstance(panel, ImageViewerPanel)
+    # The restored panel must have re-loaded the real image, not an empty shell.
+    assert panel._arr is not None
+    assert panel.nC == 3           # matches the (3, 32, 40) CYX source tif
+    assert (panel.nY, panel.nX) == (32, 40)

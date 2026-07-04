@@ -253,7 +253,6 @@ def test_spinbox_roundtrip_preserves_range(Panel):
         (np.random.default_rng(0).random((1, 8, 8)) * 1e-6).astype(np.float64),
         (np.arange(64, dtype=np.float32).reshape(1, 8, 8) - 30.0),
     ]:
-        arr[0, 0, 0] = arr.min() - 0 if False else arr[0, 0, 0]
         p.set_image(arr)
         w = p._ch_widgets[0]
         lo = w["lo"].value()

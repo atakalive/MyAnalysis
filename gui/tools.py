@@ -440,6 +440,12 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         verb = name.replace("_", "-")
         tab_name = args.get("name", "viewer")
         verb_args = {k: v for k, v in args.items() if k not in ("name", "dataset")}
+        # Forward dataset for tab addressing (commands._execute pops it at the
+        # tab tier); mirrors set_split. Without this the _DATASET_PROP the schema
+        # advertises is dropped and a same-named viewer in a non-active dataset
+        # becomes unaddressable.
+        if "dataset" in args:
+            verb_args["dataset"] = args["dataset"]
         return _via_bridge(
             "tab", tab_name, verb, verb_args, cancelled=cancelled
         )
