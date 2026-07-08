@@ -121,6 +121,12 @@ def create_main_window(
     restore). When the manifest is absent / corrupt / missing required keys,
     falls back to ordinary startup (placeholder tab).
     """
+    # Re-hydrate the active UI language from ui_prefs.json before building the
+    # window. This runs on every window construction — not just process start —
+    # so a Tier 3 (app / blue-green) rebuild restores it too: that path purges
+    # common.i18n and re-imports it fresh (resetting _active to the "en" default)
+    # without going through main(). Read-only/idempotent; safe to call each time.
+    init_language()
     win = ToolWindow()
     tab, state_provider, ann_handler = (
         build_demo_tab() if demo else build_placeholder_tab()
@@ -168,7 +174,7 @@ def create_main_window(
 
 def main() -> None:
     load_env()
-    init_language()
+    # 言語初期化は create_main_window() 側に一本化（Tier 3 再構築でも復元されるよう）。
 
     # 起動時の best-effort config 同期（short timeout で有界・繋がるときだけ）。
     # try_sync が内部で全例外を握りつぶすが、import 失敗等の二重防御で外側も握る。

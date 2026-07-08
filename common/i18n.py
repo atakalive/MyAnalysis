@@ -84,8 +84,10 @@ def set_language(lang: str) -> None:
 
 
 def init_language() -> None:
-    """起動時に 1 回。カタログを読み直し、ui_prefs の "language" で _active を設定。
-    未設定/不正/未知言語なら en。ここでは永続化しない（読むだけ）。"""
+    """ウィンドウ構築ごと（通常起動＋Tier 3 app 再構築）に呼ばれ、カタログを読み直し
+    ui_prefs の "language" で _active を再ハイドレートする。未設定/不正/未知言語なら en。
+    読むだけで永続化しない（冪等）。Tier 3 は common.i18n をパージ→新規 import して
+    _active を en 既定に戻すため、構築点でここを通さないと言語が英語に戻る。"""
     global _active
     _load_catalogs()
     from llm_bridge.paths import read_ui_pref  # 遅延 import

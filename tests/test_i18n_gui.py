@@ -55,3 +55,47 @@ def test_retranslate_hooks_fire_and_never_raise(qapp):
     win.retranslate()  # must not raise despite the first hook throwing
 
     assert calls == [1]
+
+
+def test_language_survives_app_rebuild(qapp, tmp_path, monkeypatch):
+    """Tier 3 (app / blue-green) rebuild calls tool.create_main_window() directly
+    after purging common.i18n — which re-imports fresh and resets _active to the
+    "en" default. The rebuilt window must re-hydrate the saved language from
+    ui_prefs.json instead of reverting to English. Regression for the
+    language-resets-to-English-on-app-rebuild bug.
+    """
+    import json
+
+    from llm_bridge import paths
+
+    llm_state = tmp_path / "llm_state"
+
+    def _fake_global_state_dir():
+        llm_state.mkdir(parents=True, exist_ok=True)
+        return llm_state
+
+    # ui_prefs_path() resolves under global_state_dir(), so this redirect makes
+    # the whole read/write path hermetic (no touch of the real repo tree).
+    monkeypatch.setattr(paths, "global_state_dir", _fake_global_state_dir)
+    llm_state.mkdir(parents=True, exist_ok=True)
+    (llm_state / "ui_prefs.json").write_text(
+        json.dumps({"language": "ja"}), encoding="utf-8"
+    )
+
+    import common.i18n as i18n
+    # Reproduce the state right after purge + fresh re-import of common.i18n:
+    # module global back at the "en" default, catalogs not yet loaded.
+    i18n._active = "en"
+    i18n._catalogs = {}
+
+    import tool
+
+    win = tool.create_main_window(qapp)
+    try:
+        # create_main_window must have called init_language() before building the
+        # window, restoring the persisted language (uses the real i18n/ catalogs).
+        assert i18n.current_language() == "ja"
+        assert win._file_menu.title() == "ファイル(&F)"
+    finally:
+        win._hotreload._teardown_watchers(win)
+        win.deleteLater()
