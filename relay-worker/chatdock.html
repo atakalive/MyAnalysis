@@ -208,30 +208,66 @@ function isToolCall(l)   { return l.startsWith(TOOL_CALL_MARKER + " "); }
 function isToolResult(l) { return l.startsWith(TOOL_RESULT_INDENT + TOOL_RESULT_MARKER + " ")
                                || l.startsWith(TOOL_RESULT_INDENT + TOOL_ERROR_MARKER + " "); }
 function isToolLine(l)   { return isToolCall(l) || isToolResult(l); }
+function toolCallName(l) {
+  const rest = l.slice((TOOL_CALL_MARKER + " ").length);   // "🔧 " を除去
+  const i = rest.indexOf("  ");                            // summary 区切り(半角2スペース)
+  return ((i === -1 ? rest : rest.slice(0, i)).trim()) || "tool";
+}
 
 // Display-only transform of an assistant message, mirroring本体 _simplify_tool_text.
 // plain-text 版（guest は pre-wrap のテキスト描画なので markdown 用の空行挿入はしない）:
 //   full    = 無変換
-//   compact = ツール結果行(↳/✗)のみ削除し、呼び出し行(🔧)と本文は残す
+//   compact = 連続するツール run を、呼び出し名のみの 1 行 `🔧 A · B · C` に集約
+//             （順序・重複保持、引数summary破棄、結果行(↳/✗)破棄）
 //   hidden  = ツール行(呼び出し+結果)を run ごと全削除
 // ツール行除去で空いた連続空行は1つに畳み、前後の余り空行は trim する。本文(prose)は維持。
 // 本体との差は「呼び出しの無い結果のみの run」を残さない点のみ（display 目的では十分）。
 function simplifyToolText(content, mode) {
-  if (!content || mode === "full") return content;
+  if (!content || mode === "full") return content;        // full: 無変換（現状維持）
   const lines = content.split("\n");
   if (!lines.some(isToolLine)) return content;
   const kept = [];
-  for (const l of lines) {
-    if (mode === "hidden" && isToolLine(l)) continue;
-    if (mode === "compact" && isToolResult(l)) continue;
-    kept.push(l);
+  if (mode === "hidden") {
+    // hidden: ツール行を全削除（現行の行フィルタと byte 一致）。prose のみ残す。
+    for (const l of lines) { if (!isToolLine(l)) kept.push(l); }
+  } else {
+    // compact: 連続するツール run（呼び出し・結果＋run 内部の空行を吸収。
+    // 本体 _simplify_tool_text の吸収規則に準拠）を、呼び出し名のみの 1 行
+    // `🔧 A · B · C` に集約。呼び出しの無い結果のみ run は何も出さない
+    // （後述の documented 差異を維持）。prose 行はそのまま。
+    const n = lines.length;
+    let i = 0;
+    while (i < n) {
+      if (isToolLine(lines[i])) {
+        const names = [];
+        let j = i;
+        while (j < n) {
+          if (isToolLine(lines[j])) {
+            if (isToolCall(lines[j])) names.push(toolCallName(lines[j]));
+            j++;
+          } else if (lines[j] === "") {
+            let k = j;
+            while (k < n && lines[k] === "") k++;
+            if (k < n && isToolLine(lines[k])) j = k;      // run 内部の空行 → 吸収
+            else break;                                    // 末尾/区切りの空行 → run 外
+          } else {
+            break;                                         // prose → run 終了
+          }
+        }
+        if (names.length) kept.push(TOOL_CALL_MARKER + " " + names.join(" · "));
+        i = j;
+      } else {
+        kept.push(lines[i]);
+        i++;
+      }
+    }
   }
   const out = [];
   for (const l of kept) {
-    if (l === "" && (out.length === 0 || out[out.length - 1] === "")) continue;  // collapse gaps
+    if (l === "" && (out.length === 0 || out[out.length - 1] === "")) continue;  // 連続空行を畳む
     out.push(l);
   }
-  while (out.length && out[out.length - 1] === "") out.pop();
+  while (out.length && out[out.length - 1] === "") out.pop();                     // 末尾空行 trim
   return out.join("\n");
 }
 
@@ -326,6 +362,7 @@ function renderList(lines, start) {
 // ブロック開始行か（段落の取り込みをここで止める境界）。
 function isBlockStart(lines, i) {
   const line = lines[i], t = line.trim();
+  if (isToolCall(line)) return true;              // ツール行は段落に取り込まず独立ブロックにする
   if (/^(#{1,6})\s+/.test(t)) return true;
   if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) return true;
   if (/^&gt;\s?/.test(t)) return true;                           // 引用 > はエスケープ後 &gt;
@@ -364,6 +401,11 @@ function renderBlocks(src) {
       continue;
     }
     if (/^(\s*)([-*+]\s+|\d+\.\s+)/.test(line)) { const r = renderList(lines, i); html.push(r[0]); i = r[1]; continue; }
+    if (isToolCall(line)) {                        // ツール集約行/呼び出し行は literal 表示
+      html.push("<p>" + line + "</p>");            // line は escapeHtml 済み。inlineFormat を通さず
+      i++;                                         // 語中 _ の誤 <em>/<strong> を防ぐ
+      continue;
+    }
     const para = [];                                             // 段落: 空行/ブロック境界まで収集
     while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines, i)) { para.push(lines[i]); i++; }
     html.push("<p>" + renderInline(para.join("\n")).replace(/\n/g, "<br>") + "</p>");   // 段落内の単一改行のみ <br>
@@ -1333,6 +1375,25 @@ function runSelfTest() {
         !vimg.dataset.url &&
         document.getElementById("viewEmpty").style.display !== "none");
 
+  // 8. ツール集約(simplifyToolText)の host パリティ + 表示経路の literal 化(語中 _ 誤強調防止)。
+  r = simplifyToolText("🔧 Read  a.py\n   ↳ x\n🔧 Grep  q\n   ↳ y\n🔧 Read  b.py", "compact");
+  check("st-compact-aggregate", r === "🔧 Read · Grep · Read");                  // 行A: 順序・重複保持
+  r = simplifyToolText("🔧 A  x\n\n   ↳ r\n\n🔧 B  y", "compact");
+  check("st-compact-blank-absorb", r === "🔧 A · B");                            // 行B: run 内空行吸収→1 run
+  {
+    const rc = simplifyToolText("pre\n🔧 A  x\n   ↳ r\nmid\n🔧 B  y\n   ↳ s\npost", "compact")
+               .split("\n").filter((l) => l.startsWith(TOOL_CALL_MARKER + " "));
+    check("st-compact-prose-split", rc.length === 2 && rc[0] === "🔧 A" && rc[1] === "🔧 B");  // 行C: run 境界
+  }
+  r = simplifyToolText("🔧 write_file  path=b.py", "compact");
+  check("st-compact-single", r === "🔧 write_file");                            // 行D: 単一呼び出し・区切り無し
+  r = simplifyToolText("intro\n   ↳ r1\n   ↳ r2\nend", "compact");
+  check("st-compact-resultonly-drop",                                           // 行E: 結果のみ run は guest では出さない
+        r.indexOf("↳") === -1 && r.indexOf("intro") !== -1 && r.indexOf("end") !== -1);
+  r = renderMarkdown("🔧 read_file · write_file");                              // 表示経路: 語中 _ を強調化しない
+  check("st-toolline-literal",
+        r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
+        r.indexOf("read_file · write_file") !== -1);
   const failed = cases.filter((c) => !c.pass);
   const ok = failed.length === 0;
   for (const c of cases) console.log((c.pass ? "PASS" : "FAIL") + " " + c.name);

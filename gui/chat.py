@@ -100,6 +100,12 @@ def _is_tool_line(line: str) -> bool:
     return _is_tool_call(line) or _is_tool_result(line)
 
 
+def _tool_call_name(line: str) -> str:
+    """'🔧 name  summary' 行からツール名だけを取り出す。summary（2スペース以降）は捨てる。"""
+    rest = line[len(TOOL_CALL_MARKER + " "):]   # "🔧 " を除去
+    return rest.split("  ", 1)[0].strip() or "tool"
+
+
 def _simplify_tool_text(content: str, mode: str) -> str:
     """Display-only transform of tool-call lines in `content` per `mode`.
 
@@ -140,7 +146,8 @@ def _simplify_tool_text(content: str, mode: str) -> str:
             elif mode == "hidden":
                 block = []                               # hidden: run 全体を削除（要約行も出さない）
             elif mode == "compact":
-                block = [r for r in tool_lines if _is_tool_call(r)]
+                names = [_tool_call_name(r) for r in tool_lines if _is_tool_call(r)]
+                block = [f"{TOOL_CALL_MARKER} " + " · ".join(names)]   # run 全体を 1 行に集約
             else:  # full
                 block = tool_lines
             if out and out[-1] != "":               # ① 先行区切り

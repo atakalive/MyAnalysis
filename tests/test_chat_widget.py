@@ -344,16 +344,54 @@ def test_simplify_t1b_full_tool_lines_separated():
 
 
 def test_simplify_t3_compact_drops_results():
-    """T3: compact keeps 🔧 lines, drops ↳/✗, each blank-separated."""
+    """T3: compact aggregates a run into a single 🔧 line of names, drops ↳/✗."""
     from gui.chat import _simplify_tool_text
     text = f"intro\n{CALL_A}\n{RES_A}\n\n{CALL_B}\n{RES_B}\noutro"
     out = _simplify_tool_text(text, "compact")
     lines = out.split("\n")
-    assert lines.count(CALL_A) == 1 and lines.count(CALL_B) == 1
+    tool_lines = [ln for ln in lines if ln.startswith("🔧")]
+    assert len(tool_lines) == 1
+    assert tool_lines[0] == "🔧 read_file · write_file"
     assert RES_A not in lines and RES_B not in lines
-    for i, ln in enumerate(lines):
-        if ln in (CALL_A, CALL_B):
-            assert lines[i - 1] == "" and lines[i + 1] == ""
+    assert CALL_A not in lines and CALL_B not in lines
+
+
+def test_simplify_compact_aggregates_run_names_in_order():
+    """SSOT 行 A: 呼び出し3つ (Read, Grep, Read) が 1 本の 🔧 行に順序・重複保持で集約される。"""
+    from gui.chat import _simplify_tool_text
+    text = "🔧 Read  a.py\n   ↳ x\n🔧 Grep  q\n   ↳ y\n🔧 Read  b.py"
+    out = _simplify_tool_text(text, "compact")
+    tool_lines = [ln for ln in out.split("\n") if ln.startswith("🔧")]
+    assert len(tool_lines) == 1
+    assert tool_lines[0] == "🔧 Read · Grep · Read"
+
+
+def test_simplify_compact_drops_arg_summary():
+    """SSOT 行 D: 引数summary付き呼び出しは名前のみに集約され summary は消える。"""
+    from gui.chat import _simplify_tool_text
+    out = _simplify_tool_text(CALL_B, "compact")
+    tool_lines = [ln for ln in out.split("\n") if ln.startswith("🔧")]
+    assert len(tool_lines) == 1
+    assert tool_lines[0] == "🔧 write_file"
+    assert "path=b.py" not in out
+
+
+def test_simplify_compact_separate_runs_across_prose():
+    """SSOT 行 C: prose を挟んだ 2 つの run は別々の集約行になる (run 境界維持)。"""
+    from gui.chat import _simplify_tool_text
+    text = f"pre\n🔧 A  x\n{RES_A}\nmid\n🔧 B  y\n{RES_B}\npost"
+    out = _simplify_tool_text(text, "compact")
+    tool_lines = [ln for ln in out.split("\n") if ln.startswith("🔧")]
+    assert tool_lines == ["🔧 A", "🔧 B"]
+
+
+def test_simplify_compact_single_call_run():
+    """SSOT 行 D 同型: 単一呼び出しの run は区切り無しで 🔧 <name> になる。"""
+    from gui.chat import _simplify_tool_text
+    text = f"{CALL_A}\n{RES_A}"
+    out = _simplify_tool_text(text, "compact")
+    tool_lines = [ln for ln in out.split("\n") if ln.startswith("🔧")]
+    assert tool_lines == ["🔧 read_file"]
 
 
 def test_simplify_t4_hidden_removes_run():
