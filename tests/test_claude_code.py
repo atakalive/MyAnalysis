@@ -14,8 +14,10 @@ from llm_backend.base import Message
 from llm_backend.claude_code import ClaudeCodeBackend
 
 
-def _capture_prompt(msgs, monkeypatch, *, session_id=None):
-    backend = ClaudeCodeBackend({"bin": "/usr/bin/claude"})
+def _capture_prompt(msgs, monkeypatch, tmp_path, *, session_id=None):
+    # cwd をテスト用 tmp_path に固定し、_agent_home() が実ユーザー home 配下へ
+    # ディレクトリを mkdir する副作用を避ける（hermetic 化）。
+    backend = ClaudeCodeBackend({"bin": "/usr/bin/claude", "cwd": str(tmp_path)})
     if session_id:
         backend._session_id = session_id
     captured = {}
@@ -52,14 +54,14 @@ def _msgs():
     ]
 
 
-def test_fresh_session_replays_history(monkeypatch):
-    prompt = _capture_prompt(_msgs(), monkeypatch, session_id=None)
+def test_fresh_session_replays_history(monkeypatch, tmp_path):
+    prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, session_id=None)
     assert "<prior_conversation>" in prompt
     assert "user1" in prompt
     assert prompt.endswith("user2")
 
 
-def test_resume_session_no_replay(monkeypatch):
-    prompt = _capture_prompt(_msgs(), monkeypatch, session_id="sid")
+def test_resume_session_no_replay(monkeypatch, tmp_path):
+    prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, session_id="sid")
     assert "<prior_conversation>" not in prompt
     assert prompt == "user2"

@@ -677,7 +677,7 @@ def test_fork_includes_assistant_and_empty_draft(widget):
 def test_fork_title_suffix(widget):
     from common.i18n import tr
 
-    src = _make_active_with_messages(widget, dataset="ds", title="my chat")
+    _make_active_with_messages(widget, dataset="ds", title="my chat")
     widget._handle_chat_action("fork", 2)
     assert widget._active.title == "my chat" + tr("chat.fork.title_suffix")
 
@@ -686,7 +686,7 @@ def test_fork_title_suffix_not_doubled(widget):
     from common.i18n import tr
 
     suffix = tr("chat.fork.title_suffix")
-    src = _make_active_with_messages(widget, dataset="ds", title="my chat" + suffix)
+    _make_active_with_messages(widget, dataset="ds", title="my chat" + suffix)
     widget._handle_chat_action("fork", 2)
     assert widget._active.title == "my chat" + suffix
 
@@ -694,7 +694,7 @@ def test_fork_title_suffix_not_doubled(widget):
 def test_draft_protection_no_discards(widget, monkeypatch):
     from gui.chat import QMessageBox
 
-    src = _make_active_with_messages(widget, dataset="ds")
+    _make_active_with_messages(widget, dataset="ds")
     widget.set_input_draft("unsent")
     before = len(widget._sessions)
     monkeypatch.setattr(
@@ -707,7 +707,7 @@ def test_draft_protection_no_discards(widget, monkeypatch):
 def test_draft_protection_yes_proceeds(widget, monkeypatch):
     from gui.chat import QMessageBox
 
-    src = _make_active_with_messages(widget, dataset="ds")
+    _make_active_with_messages(widget, dataset="ds")
     widget.set_input_draft("unsent")
     before = len(widget._sessions)
     monkeypatch.setattr(
@@ -739,7 +739,7 @@ def test_edit_scratch_first_message_visible(widget):
 
 
 def test_action_role_and_range_guards(widget):
-    src = _make_active_with_messages(widget, dataset="ds")
+    _make_active_with_messages(widget, dataset="ds")
     before = len(widget._sessions)
     widget._handle_chat_action("edit", 2)     # assistant index → no-op
     widget._handle_chat_action("fork", 1)     # user index → no-op
@@ -790,3 +790,23 @@ def test_anchor_clicked_external_url(widget, monkeypatch):
     widget._log.anchorClicked.emit(QUrl("http://example.com"))
     assert calls == []
     assert len(opened) == 1
+
+
+def test_render_session_emits_chataction_anchors(widget):
+    """生成側の突合: _render_session が user 行に chataction:edit:<i>、本文あり
+    assistant 行に chataction:fork:<j> を正しい index で描くこと。クリック側テスト
+    (test_anchor_clicked_routes_chataction) は QUrl を直接 emit して _append_block/
+    _render_session を迂回するため、生成 href 書式がパーサとずれても緑になる盲点を塞ぐ
+    (reviewer P2)。"""
+    src = _make_active_with_messages(widget, dataset="ds")
+    widget._render_session(src)
+    html = widget._log.toHtml()
+    # messages = [system(0), user(1)=u1, assistant(2)=a1, user(3)=u2, assistant(4)=a2]
+    assert "chataction:edit:1" in html
+    assert "chataction:edit:3" in html
+    assert "chataction:fork:2" in html
+    assert "chataction:fork:4" in html
+    # role↔action の取り違え・system 行へのリンク付与が無いこと
+    assert "chataction:fork:1" not in html
+    assert "chataction:edit:2" not in html
+    assert "chataction:edit:0" not in html and "chataction:fork:0" not in html
