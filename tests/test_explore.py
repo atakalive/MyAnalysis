@@ -383,6 +383,28 @@ def test_dataset_summary_warns_on_subdir_truncation(monkeypatch, tmp_path, capsy
     assert "first 2" in err
 
 
+def test_dataset_summary_bad_csv_skipped_continues(monkeypatch, tmp_path, capsys):
+    """壊れた CSV（0 バイト → EmptyDataError=ValueError）はヘッダ読取り失敗で
+    csv_samples から除外され警告を出しつつ、同 subdir の正当 CSV は残り探索は継続する。"""
+    root = tmp_path / "root"
+    (root / "sess").mkdir(parents=True)
+    (root / "sess" / "empty.csv").write_bytes(b"")
+    (root / "sess" / "good.csv").write_bytes(b"i,j\n1,2\n")
+
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: root)
+    monkeypatch.setattr(
+        "dataset_config.get_work_dir", lambda name, *, create=True: root / "_work"
+    )
+
+    summary = explore.dataset_summary("test")
+    paths = [c["path"] for c in summary["csv_samples"]]
+    assert "sess/empty.csv" not in paths
+    good = next(c for c in summary["csv_samples"] if c["path"] == "sess/good.csv")
+    assert good["columns"] == ["i", "j"]
+    assert good["rows"] == 1
+    assert "cannot read header" in capsys.readouterr().err
+
+
 def test_dataset_summary_missing_dir_raises(monkeypatch, tmp_path):
     monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / "nope")
     with pytest.raises(FileNotFoundError):
