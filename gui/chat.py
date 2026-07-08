@@ -88,7 +88,7 @@ def _save_tool_display(mode: str) -> None:
     update_ui_pref("tool_display", mode)
 
 
-def _load_use_provider_prompt():        # bool | None（None=未設定）
+def _load_use_provider_prompt() -> bool | None:  # None=未設定
     from llm_bridge.paths import read_ui_pref
     v = read_ui_pref("claude_use_provider_system_prompt", None)
     return v if isinstance(v, bool) else None
