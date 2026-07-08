@@ -21,7 +21,7 @@ import threading
 from collections.abc import Iterator
 
 from common.paths import repo_root
-from llm_backend.base import Message, TextDelta, ToolCallRequest
+from llm_backend.base import Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE
 
 # Mandatory rules + minimal llm_bridge contract injected on every turn via
 # --append-system-prompt. The SKILL.md body is lazily loaded by pi on task
@@ -44,7 +44,7 @@ _SYSTEM_PROMPT_PI = (
     " Never modify measurement files (CSV etc.); analysis output is written by"
     " the tools to the dataset's per-dataset work_dir (default _work, set in"
     " myanalysis.toml)."
-)
+) + "\n" + NO_LOCAL_PERSISTENCE
 
 
 class PiCodingAgentBackend:

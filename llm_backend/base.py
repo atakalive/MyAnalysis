@@ -18,6 +18,23 @@ TOOL_ERROR_MARKER = "✗"
 TOOL_RESULT_INDENT = "   "   # 結果行の 3 スペース字下げ
 
 
+# Shared across ALL backend system prompts (claude / pi / gui-chat). This
+# project's contract is that data AND work live together under the dataset
+# directory (synced), so an analysis resumes identically on any PC. The agent
+# must never stash memory/notes/state on the local machine (e.g. the CC engine's
+# ~/.claude memory). Appended to each backend's prompt so the rule is present
+# regardless of which backend is selected. See tests/test_backend_prompts.py.
+NO_LOCAL_PERSISTENCE = (
+    "Persistence: this project keeps ALL work under the dataset directory "
+    "(synced across machines) so an analysis resumes identically on any PC. "
+    "Never write memory, notes, progress/TODO, or scratch files to the local "
+    "machine — not ~/.claude, ~/.myanalysis, your home dir, the working dir, or "
+    "any path outside a dataset — and do not use any feature that persists "
+    "memory to local disk. Save figures/code only with save_fig / save_code "
+    "(they write to the dataset's work_dir); write nothing outside a dataset dir."
+)
+
+
 @dataclass
 class TextDelta:
     text: str
