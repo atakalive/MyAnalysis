@@ -103,11 +103,6 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("path", help="Absolute path to dataset directory")
     p_reg.add_argument("--host", default=None, help="Hostname (default: current host)")
     p_reg.add_argument(
-        "--with-analysis", nargs="?", const="", default=None,
-        metavar="ANALYSIS_NAME",
-        help="Also create analysis scaffold (default name = dataset name)",
-    )
-    p_reg.add_argument(
         "--format", default="csv_per_subdir",
         choices=("csv_per_subdir", "custom"),
         help="Dataset format (default: csv_per_subdir)",
@@ -295,24 +290,6 @@ def main(argv: list[str] | None = None) -> int:
                 set_format(args.name, args.format)
             except Exception as e:
                 print(f"warning: could not set format in myanalysis.toml: {e}", file=sys.stderr)
-
-        if args.with_analysis is not None:
-            analysis_name = args.with_analysis or args.name
-            # scaffold writes into the dataset directory, so only run it when the
-            # path exists on this host (same gate as set_format above).
-            if is_current_host and Path(args.path).exists():
-                from newanalysis.__main__ import create_analysis
-
-                try:
-                    create_analysis(analysis_name, dataset=args.name, fmt=args.format)
-                    print(f"created {args.name}/analyses/{analysis_name}/")
-                except (ValueError, FileExistsError, KeyError, RuntimeError) as e:
-                    print(f"error creating analysis: {e}", file=sys.stderr)
-            else:
-                print(
-                    "scaffold は当該ホストにパスが無いためスキップしました",
-                    file=sys.stderr,
-                )
 
         verb = "registered" if result["created"] else "updated"
         print(

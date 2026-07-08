@@ -251,6 +251,14 @@ class ToolWindow(QMainWindow):
             )
             self._tool_display_group.addAction(act)
 
+        self._provider_prompt_action = self._view_menu.addAction(tr("menu.view.provider_prompt"))
+        self._provider_prompt_action.setCheckable(True)
+        from gui.chat import _effective_use_provider_prompt
+        self._provider_prompt_action.setChecked(_effective_use_provider_prompt())
+        self._provider_prompt_action.triggered.connect(
+            lambda checked=False: self._set_use_provider_prompt(checked)
+        )
+
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
         self._about_action = self._help_menu.addAction(tr("menu.help.about"))
         self._about_action.triggered.connect(
@@ -273,6 +281,7 @@ class ToolWindow(QMainWindow):
         self._tool_display_actions["full"].setText(tr("menu.view.tool_display.full"))
         self._tool_display_actions["compact"].setText(tr("menu.view.tool_display.compact"))
         self._tool_display_actions["hidden"].setText(tr("menu.view.tool_display.hidden"))
+        self._provider_prompt_action.setText(tr("menu.view.provider_prompt"))
         self._help_menu.setTitle(tr("menu.help"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
@@ -318,6 +327,11 @@ class ToolWindow(QMainWindow):
         if self._chat_widget is not None \
                 and hasattr(self._chat_widget, "set_tool_display_default"):
             self._chat_widget.set_tool_display_default(mode)
+
+    def _set_use_provider_prompt(self, value: bool) -> None:
+        if self._chat_widget is not None \
+                and hasattr(self._chat_widget, "set_use_provider_system_prompt"):
+            self._chat_widget.set_use_provider_system_prompt(value)
 
     # ------------------------------------------------------------------ #
     # Dataset groups (top-level "open datasets" layer)                   #
@@ -1216,7 +1230,6 @@ class ToolWindow(QMainWindow):
 
         import config
         from common.paths import validate_identifier_name
-        from newanalysis.__main__ import create_analysis
 
         name, ok = QInputDialog.getText(
             self, tr("dlg.register.title"), tr("dlg.register.label")
@@ -1246,37 +1259,6 @@ class ToolWindow(QMainWindow):
         # Sticky dataset + chat push. GUI 登録はセッション復元しない — ユーザは
         # File → データセットを開く… で明示的に復元できる。
         self.note_current_dataset(name)
-
-        reply = QMessageBox.question(
-            self, tr("dlg.create_template.title"), tr("dlg.create_template.body")
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            analysis_name, ok = QInputDialog.getText(
-                self, tr("dlg.create_template.title"),
-                tr("dlg.create_template.label"), text=name
-            )
-            if ok and analysis_name:
-                try:
-                    create_analysis(analysis_name, dataset=name)
-                except (ValueError, FileExistsError, KeyError, RuntimeError) as e:
-                    QMessageBox.warning(
-                        self,
-                        tr("err.template_failed.title"),
-                        tr("register.template_failed", name=name, error=e),
-                    )
-                    return
-                try:
-                    from llm_bridge import dataset_meta
-                    dataset_meta.rebuild_meta(name, heavy=False)
-                except Exception:
-                    pass
-                QMessageBox.information(
-                    self,
-                    tr("dlg.register_done.title"),
-                    tr("register.done_with_template",
-                       name=name, analysis=analysis_name),
-                )
-                return
 
         QMessageBox.information(
             self, tr("dlg.register_done.title"), tr("register.done", name=name)

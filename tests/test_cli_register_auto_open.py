@@ -81,3 +81,12 @@ def test_register_open_stale_status(tmp_path):
     )
     assert rc == 0
     assert len(submitted) == 1
+
+
+def test_register_rejects_with_analysis(tmp_path):
+    """--with-analysis は撤去済み: argparse が未知引数として SystemExit する。"""
+    import pytest
+    d = tmp_path / "data"
+    d.mkdir()
+    with pytest.raises(SystemExit):
+        _run_register(["register-dataset", "test", str(d), "--with-analysis", "x"])

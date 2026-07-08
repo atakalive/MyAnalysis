@@ -137,6 +137,12 @@ def _generation_flags(config: dict) -> list[str]:
     return flags
 
 
+def _system_prompt_args(use_provider_default: bool) -> list[str]:
+    """True=CC 既定に追記（現状）／False=CC 既定を置換し MyAnalysis のみ残す。"""
+    flag = "--append-system-prompt" if use_provider_default else "--system-prompt"
+    return [flag, _SYSTEM_PROMPT]
+
+
 class ClaudeCodeBackend:
     name = "claude-code"
 
@@ -150,6 +156,10 @@ class ClaudeCodeBackend:
         # running cost total. Read by the GUI to show usage (see _capture_usage).
         self.last_usage: dict | None = None
         self.total_cost: float = 0.0
+        self._use_provider_system_prompt = bool(self._config.get("use_provider_system_prompt", True))
+
+    def set_use_provider_system_prompt(self, value: bool) -> None:
+        self._use_provider_system_prompt = bool(value)
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -168,11 +178,11 @@ class ClaudeCodeBackend:
             "--input-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--append-system-prompt", _SYSTEM_PROMPT,
             # Repo is reachable (helper APIs) but is NOT the cwd, so the engine
             # is not framed as a developer of it (see _agent_home).
             "--add-dir", str(repo_root()),
         ]
+        cmd += _system_prompt_args(self._use_provider_system_prompt)
         perm = config.get("permission_mode") or _DEFAULT_PERMISSION_MODE
         if perm:
             cmd += ["--permission-mode", perm]

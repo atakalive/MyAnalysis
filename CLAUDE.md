@@ -17,7 +17,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [ANALYSIS_NAME]]`) or GUI (File → データセットを新規登録). Both methods rewrite `config.py` in place (ast-based, atomic). CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
+When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods rewrite `config.py` in place (ast-based, atomic). CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
@@ -108,6 +108,10 @@ guards that every prompt still contains it.
   `llm_bridge`. `[claude_code].permission_mode` defaults to `bypassPermissions` so
   GUI-driving tool calls run unattended (stdin is closed after the prompt, so an
   interactive permission prompt would deadlock); tighten with `allowed_tools`.
+  `[claude_code].use_provider_system_prompt` defaults to `true` (append MyAnalysis's
+  instructions onto CC's built-in system prompt); set it `false` to replace the CC
+  default so only MyAnalysis's instructions remain (`--system-prompt` instead of
+  `--append-system-prompt`; also toggleable per-launch via the View menu).
   **External dependency**: the VS Code Claude Code extension installed + logged in.
 - **pi backend** runs `python -m llm_bridge` via the `.pi/skills/myanalysis-bridge`
   skill to drive the GUI live. **External dependency**: Node + pi

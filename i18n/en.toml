@@ -17,6 +17,7 @@
 "menu.view.tool_display.full"     = "Normal"
 "menu.view.tool_display.compact"  = "Compact"
 "menu.view.tool_display.hidden"   = "Hidden"
+"menu.view.provider_prompt"       = "Provider default system prompt"
 "menu.help"                   = "Help(&H)"
 "menu.help.about"             = "About"
 "menu.tab.close"              = "Close tab"
@@ -49,9 +50,6 @@
 "dlg.register.title"          = "Register dataset"
 "dlg.register.label"          = "Dataset name:"
 "dlg.register_dir.title"      = "Select dataset directory"
-"dlg.create_template.title"   = "Create analysis template"
-"dlg.create_template.body"    = "Also create an analysis template?"
-"dlg.create_template.label"   = "Analysis name:"
 "dlg.register_done.title"     = "Registration complete"
 "dlg.rename.title"            = "Rename"
 "dlg.rename.label"            = "Chat name:"
@@ -68,7 +66,6 @@
 "err.save_partial.title"      = "Some datasets could not be saved"
 "err.save_partial.body"       = "Datasets that failed to save:\n{datasets}"
 "err.register.title"          = "Registration error"
-"err.template_failed.title"   = "Failed to create analysis template"
 
 # --- dev (devtools/qt_integration.py) ---
 "dev.reload.title"            = "Reload code"
@@ -122,8 +119,6 @@
 
 # --- register completion messages ---
 "register.done"               = "Registered dataset '{name}'."
-"register.done_with_template" = "Registered dataset '{name}' and created analysis template '{analysis}'."
-"register.template_failed"    = "Dataset '{name}' was registered.\nFailed to create analysis template: {error}"
 
 # --- meeting share (Issue #42) ---
 "menu.view.meeting_share"        = "Meeting share…"

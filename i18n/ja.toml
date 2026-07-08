@@ -17,6 +17,7 @@
 "menu.view.tool_display.full"     = "通常"
 "menu.view.tool_display.compact"  = "簡略"
 "menu.view.tool_display.hidden"   = "非表示"
+"menu.view.provider_prompt"       = "プロバイダ既定のシステムプロンプト"
 "menu.help"                   = "ヘルプ(&H)"
 "menu.help.about"             = "バージョン情報"
 "menu.tab.close"              = "タブを閉じる"
@@ -49,9 +50,6 @@
 "dlg.register.title"          = "データセット登録"
 "dlg.register.label"          = "データセット名:"
 "dlg.register_dir.title"      = "データセットディレクトリを選択"
-"dlg.create_template.title"   = "解析雛形の作成"
-"dlg.create_template.body"    = "解析雛形も作成しますか?"
-"dlg.create_template.label"   = "解析名:"
 "dlg.register_done.title"     = "登録完了"
 "dlg.rename.title"            = "名前変更"
 "dlg.rename.label"            = "チャット名:"
@@ -68,7 +66,6 @@
 "err.save_partial.title"      = "一部のデータセットを保存できません"
 "err.save_partial.body"       = "保存に失敗したデータセット:\n{datasets}"
 "err.register.title"          = "登録エラー"
-"err.template_failed.title"   = "解析雛形の作成に失敗"
 
 # --- dev (devtools/qt_integration.py) ---
 "dev.reload.title"            = "コード再読み込み"
@@ -122,8 +119,6 @@
 
 # --- register completion messages ---
 "register.done"               = "データセット '{name}' を登録しました。"
-"register.done_with_template" = "データセット '{name}' を登録し、解析雛形 '{analysis}' を作成しました。"
-"register.template_failed"    = "データセット '{name}' の登録は完了しました。\n解析雛形の作成に失敗しました: {error}"
 
 # --- meeting share (Issue #42) ---
 "menu.view.meeting_share"        = "ミーティング共有…"

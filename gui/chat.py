@@ -88,6 +88,30 @@ def _save_tool_display(mode: str) -> None:
     update_ui_pref("tool_display", mode)
 
 
+def _load_use_provider_prompt():        # bool | None（None=未設定）
+    from llm_bridge.paths import read_ui_pref
+    v = read_ui_pref("claude_use_provider_system_prompt", None)
+    return v if isinstance(v, bool) else None
+
+
+def _save_use_provider_prompt(value: bool) -> None:
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("claude_use_provider_system_prompt", bool(value))
+
+
+def _config_use_provider_default() -> bool:  # backend と同一の merged 設定を SSOT として読む（未設定 True）
+    from llm_backend import backend_config
+    from llm_backend.model_settings import merged_settings
+    cfg = merged_settings("claude_code", backend_config().get("claude_code", {}))
+    v = cfg.get("use_provider_system_prompt", True)
+    return v if isinstance(v, bool) else True
+
+
+def _effective_use_provider_prompt() -> bool:  # 上書き > config > True
+    ov = _load_use_provider_prompt()
+    return ov if ov is not None else _config_use_provider_default()
+
+
 def _is_tool_call(line: str) -> bool:
     return line.startswith(TOOL_CALL_MARKER + " ")
 
@@ -587,6 +611,12 @@ class ChatWidget(QWidget):
         # preserve the usage/cost line (status-only) across the re-render.
         self._render_active_preserving_status()
 
+    def use_provider_system_prompt(self) -> bool:
+        return _effective_use_provider_prompt()
+
+    def set_use_provider_system_prompt(self, value: bool) -> None:  # メニューから
+        _save_use_provider_prompt(value)   # 保存のみ（transcript 再描画は不要）
+
     def _set_session_tool_display(self, sess: ChatSession, value: str | None) -> None:
         sess.tool_display = value
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
@@ -1009,7 +1039,12 @@ class ChatWidget(QWidget):
         if is_active:
             self._append_block("user", text)
             self._append_block("assistant", "")
-        backend = self._session_backends.setdefault(sess.id, self._backend_factory())
+        backend = self._session_backends.get(sess.id)
+        if backend is None:
+            backend = self._backend_factory()
+            if hasattr(backend, "set_use_provider_system_prompt"):   # claude のみ
+                backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
+            self._session_backends[sess.id] = backend
         self._load_backend_session(backend, sess)
         kill_timer = QTimer(self)
         kill_timer.setSingleShot(True)

@@ -101,7 +101,7 @@ path = get_dataset_dir("dataset_a")  # 現在のホスト名で解決
 
 ```bash
 # CLI（config.py を ast ベースで原子的に書き換える。GUI 起動中なら自動で開く）
-python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [NAME]] [--no-open]
+python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 
 # GUI: ファイル → データセットを新規登録
 ```
@@ -165,7 +165,7 @@ def build_tab(parent, data) -> AnalysisTab: # GUI タブ構築
 python -m newanalysis <name> --dataset <key>
 ```
 
-`<dataset_dir>/analyses/<name>/` に標準パターン入りの `analysis.py` + `README.md` を生成します。`--dataset` は必須です（雛形は当該データセットのディレクトリに書き込まれます）。`register-dataset --with-analysis [NAME]` からも同じ生成器が呼ばれます（NAME 省略時はデータセット名）。
+`<dataset_dir>/analyses/<name>/` に標準パターン入りの `analysis.py` + `README.md` を生成します。`--dataset` は必須です（雛形は当該データセットのディレクトリに書き込まれます）。
 
 ### ヘッドレス PNG エクスポート
 

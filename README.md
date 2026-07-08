@@ -101,7 +101,7 @@ Unknown dataset names and unregistered hosts raise descriptive errors pointing a
 
 ```bash
 # CLI (rewrites config.py atomically via AST; auto-opens if the GUI is running)
-python -m llm_bridge register-dataset <name> <path> [--host H] [--with-analysis [NAME]] [--no-open]
+python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 
 # GUI: File → データセットを新規登録 (New dataset)
 ```
@@ -165,7 +165,7 @@ Existing examples: `dataset_d` (.h5 camera images), `analysis_c` (scaffold), `ex
 python -m newanalysis <name> --dataset <key>
 ```
 
-Creates `<dataset_dir>/analyses/<name>/` with an `analysis.py` (standard pattern) + `README.md`. `--dataset` is required (the scaffold writes into that dataset's directory). `register-dataset --with-analysis [NAME]` invokes the same generator (name defaults to the dataset name).
+Creates `<dataset_dir>/analyses/<name>/` with an `analysis.py` (standard pattern) + `README.md`. `--dataset` is required (the scaffold writes into that dataset's directory).
 
 ### Headless PNG export
 
