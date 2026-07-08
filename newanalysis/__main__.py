@@ -26,7 +26,9 @@ from dataset_config import KNOWN_FORMATS
 
 
 _LOAD_COMMENT_CSV = '''\
-    # TODO: 実データの読み込みに差し替えてください。例:
+    # TODO: 実データの読み込みに差し替えてください。
+    # 既定の読み込みパターンはありません。まず dataset_summary("<your_dataset_key>") で
+    # 実際のフォルダ構成と CSV 名を確認し、<pattern> / <filename>.csv を実データに合わせて埋めます。
     # from config import get_dataset_dir
     # from common.loaders import load_csv_per_subdir
     # sessions = load_csv_per_subdir(

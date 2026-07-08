@@ -107,8 +107,8 @@ The primary analysis workflow is code execution, not GUI driving.
    Names shown are from the global registry. If the current host has no path
    registered for a dataset, `load_dataset` raises `RuntimeError` with a
    message pointing at `config.py`.
-2. **Load**: `from common.explore import load_dataset; sessions = load_dataset("<name>")`
-3. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → columns, dtypes, row counts.
+2. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → real subdirs + sample csv columns/rows. There is no default load pattern — look before you load.
+3. **Load**: `from common.explore import load_dataset; sessions = load_dataset("<name>", subdir_pattern="<real folder pattern>", csv_name="<real>.csv")` — use the folder pattern and csv filename you saw in step 2.
 4. **Compute**: arbitrary Python on the loaded DataFrames.
 5. **Plot**: `from common.explore import save_fig; save_fig("<name>", fig, "<label>")` → `<work_dir>/figures/<label>.png`.
 6. **Observe** — save_fig の戻り値（絶対パス）で図を確認する。2 つの経路がある：

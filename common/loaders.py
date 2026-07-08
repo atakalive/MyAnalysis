@@ -7,7 +7,7 @@ import pandas as pd
 def load_csv_per_subdir(
     root: Path,
     subdir_pattern: str,
-    csv_name: str = "samples.csv",
+    csv_name: str,
     encoding: str | None = None,
 ) -> list[dict]:
     """Load `<csv_name>` from each subdir of `root` matching `subdir_pattern`.

@@ -128,12 +128,13 @@ LLM エージェント／対話的な探索のために、[common/explore.py](co
 ```python
 from common.explore import load_dataset, save_fig, save_code, dataset_summary
 
-sessions = load_dataset("my_dataset")
+summary = dataset_summary("my_dataset")   # まず INSPECT: 実在の subdirs + 代表 CSV の columns/rows
+# 既定パターンは仮定しない — 上で見た実構成を使ってロードする:
+sessions = load_dataset("my_dataset", subdir_pattern="<real_folder_*>", csv_name="<real>.csv")
 # → list[dict]: 各 {"name": str, "dir": Path, "df": DataFrame}
 
 save_fig("my_dataset", fig, "overview")    # → <work_dir>/figures/overview.png（保存後 fig は close）
 save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py
-summary = dataset_summary("my_dataset")    # カラム・dtype・行数をセッションごとに要約
 ```
 
 下位ローダは [common/loaders.py](common/loaders.py) の `load_csv_per_subdir`（サブディレクトリを glob して `pd.read_csv`）。出力先はデータセットの `work_dir`。

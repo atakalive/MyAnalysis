@@ -115,10 +115,12 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 ## Exploratory analysis — `common/explore.py`
 
 LLM agents analyse data via code execution + CLI, not just GUI remote control.
-`common/explore.py` provides a minimal surface: `load_dataset(name)` (config → loaders
-in one call), `save_fig(name, fig, label)` (saves to `<work_dir>/figures/<label>.png`),
+`common/explore.py` provides a minimal surface: `load_dataset(name, subdir_pattern=..., csv_name=...)`
+(config → loaders in one call — 既定パターンは無い。まず `dataset_summary` で実構成を確認してから
+実在のパターンを渡す), `save_fig(name, fig, label)` (saves to `<work_dir>/figures/<label>.png`),
 `save_code(name, label, content)` (saves to `<work_dir>/code/<label>.py`),
-`dataset_summary(name)` (columns, dtypes, row counts per session). Output goes to the
+`dataset_summary(name)` (データセット直下の実構成＝subdirs と代表 CSV の columns/rows を歩いて報告する
+“まず見る”ステップ). Output goes to the
 dataset's `work_dir` (default `<dataset_dir>/_work`, set in `myanalysis.toml`); the
 sidecar `myanalysis.toml` and `work_dir` are created on first save. Measurement files
 (CSV etc.) are never modified — but a hand-set `work_dir` may place new output files
