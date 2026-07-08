@@ -13,6 +13,7 @@ resolution is the caller's responsibility — every function here takes a
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -138,6 +139,29 @@ def new_session(
         backend_session_id=None,
         created=now,
         updated=now,
+    )
+
+
+def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
+    """src.messages[:cut] を deep-copy した独立の新セッションを mint する。
+
+    非破壊: src は一切変更しない。backend_session_id は必ず None（分岐先は
+    サーバ側会話状態を引き継がない）。`title` は呼び出し側が決めた最終文字列を
+    そのまま採用する — この関数は Qt-free / i18n-free なので tr() や suffix 付与は
+    行わない（センチネル _DEFAULT_TITLE を渡せば据え置き、それ以外はその文字列）。
+    """
+    now = time.time()
+    return ChatSession(
+        id=uuid.uuid4().hex,
+        title=title,
+        messages=copy.deepcopy(src.messages[:cut]),
+        dataset=src.dataset,
+        backend_name=src.backend_name,
+        backend_session_id=None,
+        created=now,
+        updated=now,
+        order=src.order,          # 暫定。保存時に list 位置から再採番される
+        tool_display=src.tool_display,
     )
 
 

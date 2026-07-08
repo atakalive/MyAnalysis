@@ -627,3 +627,166 @@ def test_completed_tool_only_message_no_bare_header(widget):
     text = widget._log.toPlainText()
     assert "assistant" not in text
     assert "🔧" not in text
+
+
+# ---- fork / edit (Issue #63) ----
+
+
+def _make_active_with_messages(widget, *, dataset=None, title="元のタイトル"):
+    """アクティブなセッションに [system, user, assistant, user, assistant] を仕込む。"""
+    from llm_backend.base import Message
+    from llm_bridge import chat_store
+
+    sess = chat_store.new_session("mock", "sys", dataset=dataset, title=title)
+    sess.messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="u1"),
+        Message(role="assistant", content="a1"),
+        Message(role="user", content="u2"),
+        Message(role="assistant", content="a2"),
+    ]
+    widget._sessions.append(sess)
+    widget._current_dataset = dataset
+    widget._active = sess
+    widget._rebuild_tab_bar()
+    return sess
+
+
+def test_edit_forks_and_prefills_single_message(widget):
+    src = _make_active_with_messages(widget, dataset="ds")
+    src_msgs = list(src.messages)
+    before = len(widget._sessions)
+    widget._handle_chat_action("edit", 3)  # user u2
+    assert len(widget._sessions) == before + 1
+    assert widget._active is not src
+    assert widget._active.messages == src_msgs[:3]
+    assert widget._active.backend_session_id is None
+    assert widget.input_draft() == "u2"
+    assert src.messages == src_msgs  # 元は無改変
+
+
+def test_fork_includes_assistant_and_empty_draft(widget):
+    src = _make_active_with_messages(widget, dataset="ds")
+    src_msgs = list(src.messages)
+    widget._handle_chat_action("fork", 2)  # assistant a1
+    assert widget._active.messages == src_msgs[:3]
+    assert widget.input_draft() == ""
+    assert src.messages == src_msgs
+
+
+def test_fork_title_suffix(widget):
+    from common.i18n import tr
+
+    src = _make_active_with_messages(widget, dataset="ds", title="my chat")
+    widget._handle_chat_action("fork", 2)
+    assert widget._active.title == "my chat" + tr("chat.fork.title_suffix")
+
+
+def test_fork_title_suffix_not_doubled(widget):
+    from common.i18n import tr
+
+    suffix = tr("chat.fork.title_suffix")
+    src = _make_active_with_messages(widget, dataset="ds", title="my chat" + suffix)
+    widget._handle_chat_action("fork", 2)
+    assert widget._active.title == "my chat" + suffix
+
+
+def test_draft_protection_no_discards(widget, monkeypatch):
+    from gui.chat import QMessageBox
+
+    src = _make_active_with_messages(widget, dataset="ds")
+    widget.set_input_draft("unsent")
+    before = len(widget._sessions)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
+    widget._handle_chat_action("edit", 3)
+    assert len(widget._sessions) == before
+
+
+def test_draft_protection_yes_proceeds(widget, monkeypatch):
+    from gui.chat import QMessageBox
+
+    src = _make_active_with_messages(widget, dataset="ds")
+    widget.set_input_draft("unsent")
+    before = len(widget._sessions)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    widget._handle_chat_action("edit", 3)
+    assert len(widget._sessions) == before + 1
+
+
+def test_edit_scratch_first_message_visible(widget):
+    # dataset に bound チャットがある状態で、scratch(None) の最初の user 発言を編集。
+    _make_active_with_messages(widget, dataset="ds", title="bound")
+    from llm_backend.base import Message
+    from llm_bridge import chat_store
+
+    scratch = chat_store.new_session("mock", "sys", dataset=None)
+    scratch.messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="uX"),
+    ]
+    widget._sessions.append(scratch)
+    widget._current_dataset = "ds"
+    widget._active = scratch
+    widget._rebuild_tab_bar()
+
+    widget._handle_chat_action("edit", 1)
+    assert widget._active in widget._visible_sessions()
+    assert widget._active.dataset == "ds"
+
+
+def test_action_role_and_range_guards(widget):
+    src = _make_active_with_messages(widget, dataset="ds")
+    before = len(widget._sessions)
+    widget._handle_chat_action("edit", 2)     # assistant index → no-op
+    widget._handle_chat_action("fork", 1)     # user index → no-op
+    widget._handle_chat_action("edit", 99)    # out of range
+    widget._handle_chat_action("fork", -1)    # negative
+    assert len(widget._sessions) == before
+
+
+def test_action_content_none_user_guard(widget):
+    from llm_backend.base import Message
+
+    src = _make_active_with_messages(widget, dataset="ds")
+    src.messages.append(Message(role="user", content=None))
+    idx = len(src.messages) - 1
+    before = len(widget._sessions)
+    widget._handle_chat_action("edit", idx)
+    assert len(widget._sessions) == before
+
+
+def test_action_in_flight_guard(widget):
+    src = _make_active_with_messages(widget, dataset="ds")
+    widget._turns[src.id] = MagicMock()
+    before = len(widget._sessions)
+    widget._handle_chat_action("edit", 3)
+    assert len(widget._sessions) == before
+    del widget._turns[src.id]
+
+
+def test_anchor_clicked_routes_chataction(widget, monkeypatch):
+    from PySide6.QtCore import QUrl
+
+    calls = []
+    monkeypatch.setattr(widget, "_handle_chat_action",
+                        lambda a, i: calls.append((a, i)))
+    widget._log.anchorClicked.emit(QUrl("chataction:edit:2"))
+    assert calls == [("edit", 2)]
+
+
+def test_anchor_clicked_external_url(widget, monkeypatch):
+    from PySide6.QtCore import QUrl
+    from gui.chat import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda u: opened.append(u))
+    calls = []
+    monkeypatch.setattr(widget, "_handle_chat_action",
+                        lambda a, i: calls.append((a, i)))
+    widget._log.anchorClicked.emit(QUrl("http://example.com"))
+    assert calls == []
+    assert len(opened) == 1

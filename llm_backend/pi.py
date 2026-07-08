@@ -21,7 +21,10 @@ import threading
 from collections.abc import Iterator
 
 from common.paths import repo_root
-from llm_backend.base import Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE
+from llm_backend.base import (
+    Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
+    build_prompt_with_history,
+)
 
 # Mandatory rules + minimal llm_bridge contract injected on every turn via
 # --append-system-prompt. The SKILL.md body is lazily loaded by pi on task
@@ -62,12 +65,7 @@ class PiCodingAgentBackend:
     ) -> Iterator[TextDelta | ToolCallRequest]:
         config = self._config
 
-        # Last user message → prompt (defensive reverse scan).
-        prompt = ""
-        for msg in reversed(messages):
-            if msg.role == "user" and msg.content:
-                prompt = msg.content
-                break
+        prompt = build_prompt_with_history(messages, replay=(self._session_id is None))
         if not prompt:
             raise RuntimeError("no user message to send")
 

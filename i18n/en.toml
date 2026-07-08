@@ -56,6 +56,7 @@
 "dlg.rename.title"            = "Rename"
 "dlg.rename.label"            = "Chat name:"
 "dlg.delete.title"            = "Delete chat"
+"dlg.branch.title"            = "Branch / edit"
 
 # --- errors ---
 "err.generic.title"           = "Error"
@@ -96,6 +97,11 @@
 "chat.status.stopping"        = "stopping…"
 "chat.status.waiting"         = "{spinner} waiting…"
 "chat.untitled"               = "New chat"
+"chat.action.edit"            = "✎ edit"
+"chat.action.fork"            = "⑂ fork"
+"chat.fork.title_suffix"      = " (fork)"
+"chat.action.busy"            = "Can't edit/branch while generating"
+"chat.edit.overwrite_draft"   = "You have an unsent draft. Discard it and continue?"
 
 # --- validate (common/paths.py) ---
 "validate.empty"              = "Please enter a name."

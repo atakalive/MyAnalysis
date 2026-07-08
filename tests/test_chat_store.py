@@ -11,7 +11,9 @@ from llm_backend.base import Message
 from llm_bridge.chat_store import (
     ChatSession,
     SCHEMA_VERSION,
+    _DEFAULT_TITLE,
     delete_session_file,
+    fork_session,
     load_dataset_sessions,
     merge_sessions,
     message_from_dict,
@@ -314,3 +316,53 @@ def test_session_from_dict_bad_tool_display_normalized_to_none():
     d = session_to_dict(_sample_session())
     d["tool_display"] = "bogus"
     assert session_from_dict(d).tool_display is None
+
+
+# ---- fork_session (Issue #63) ----
+
+
+def test_fork_session_copies_up_to_cut():
+    src = _sample_session()
+    src.tool_display = "compact"
+    src.order = 3.0
+    new = fork_session(src, 2, title="my chat (fork)")
+    assert new.messages == src.messages[:2]
+    assert new.id != src.id
+    assert new.backend_session_id is None
+    assert new.dataset == src.dataset
+    assert new.backend_name == src.backend_name
+    assert new.tool_display == src.tool_display
+    assert new.order == src.order
+    assert new.title == "my chat (fork)"
+
+
+def test_fork_session_title_sentinel_verbatim():
+    src = _sample_session()
+    new = fork_session(src, 1, title=_DEFAULT_TITLE)
+    assert new.title == _DEFAULT_TITLE
+
+
+def test_fork_session_is_nondestructive_and_deepcopies():
+    src = ChatSession(
+        id="s1",
+        title="t",
+        messages=[
+            Message(role="system", content="sys"),
+            Message(role="assistant", content="a", tool_calls=[{"id": "x"}]),
+        ],
+        dataset="ds",
+        backend_name="claude-code",
+        backend_session_id="sess",
+        created=1.0,
+        updated=2.0,
+    )
+    new = fork_session(src, 2, title="t (fork)")
+    # mutate src post-fork → fork side unaffected
+    src.messages[0].content = "MUTATED"
+    src.messages[1].tool_calls.append({"id": "y"})
+    src.messages.append(Message(role="user", content="later"))
+    assert new.messages[0].content == "sys"
+    assert new.messages[1].tool_calls == [{"id": "x"}]
+    assert len(new.messages) == 2
+    # src itself keeps its own mutations but fork stayed independent
+    assert src.backend_session_id == "sess"

@@ -56,6 +56,7 @@
 "dlg.rename.title"            = "名前変更"
 "dlg.rename.label"            = "チャット名:"
 "dlg.delete.title"            = "チャットを削除"
+"dlg.branch.title"            = "分岐 / 発言編集"
 
 # --- errors ---
 "err.generic.title"           = "エラー"
@@ -96,6 +97,11 @@
 "chat.status.stopping"        = "停止中…"
 "chat.status.waiting"         = "{spinner} 待機中…"
 "chat.untitled"               = "新しいチャット"
+"chat.action.edit"            = "✎ 編集"
+"chat.action.fork"            = "⑂ 分岐"
+"chat.fork.title_suffix"      = " (分岐)"
+"chat.action.busy"            = "生成中は編集/分岐できません"
+"chat.edit.overwrite_draft"   = "入力欄に未送信の下書きがあります。破棄して続けますか？"
 
 # --- validate (common/paths.py) ---
 "validate.empty"              = "名前を入力してください。"

@@ -269,6 +269,8 @@ class TestJSONLParsing:
             json.dumps({"type": "agent_end"}),
         ]
         backend = self._make_backend_with_lines(lines, monkeypatch)
+        # resume 中（session_id あり）は replay=False なので prompt は最後の user のみ。
+        backend._session_id = "sid"
         captured_stdin = {}
 
         orig_popen = subprocess.Popen.__init__
@@ -298,6 +300,60 @@ class TestJSONLParsing:
         ]
         list(backend.stream(msgs))
         assert captured_stdin["data"] == b"second"
+
+
+# ---------------------------------------------------------------------------
+# History replay wiring (Issue #63)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryReplayWiring:
+    """Verify stream() wires build_prompt_with_history with the right replay flag."""
+
+    def _capture_prompt(self, msgs, monkeypatch, *, session_id=None):
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/pi")
+        monkeypatch.setattr(
+            "llm_backend.pi.repo_root", lambda: __import__("pathlib").Path("/repo")
+        )
+        monkeypatch.delenv("PI_API_KEY", raising=False)
+        backend = PiCodingAgentBackend({})
+        if session_id:
+            backend._session_id = session_id
+        captured = {}
+
+        def fake_popen(cmd, **kwargs):
+            proc = MagicMock()
+            proc.stdin = MagicMock()
+            proc.stdin.write = lambda data: captured.__setitem__("data", data)
+            proc.stdout = iter([json.dumps({"type": "agent_end"}).encode() + b"\n"])
+            proc.stderr = iter([])
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.returncode = 0
+            return proc
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        list(backend.stream(msgs))
+        return captured["data"].decode("utf-8")
+
+    def _msgs(self):
+        return [
+            Message(role="system", content="sys"),
+            Message(role="user", content="user1"),
+            Message(role="assistant", content="assistant1"),
+            Message(role="user", content="user2"),
+        ]
+
+    def test_fresh_session_replays_history(self, monkeypatch):
+        prompt = self._capture_prompt(self._msgs(), monkeypatch, session_id=None)
+        assert "<prior_conversation>" in prompt
+        assert "user1" in prompt
+        assert prompt.endswith("user2")
+
+    def test_resume_session_no_replay(self, monkeypatch):
+        prompt = self._capture_prompt(self._msgs(), monkeypatch, session_id="sid")
+        assert "<prior_conversation>" not in prompt
+        assert prompt == "user2"
 
 
 # ---------------------------------------------------------------------------

@@ -10,10 +10,11 @@ from typing import Callable
 
 from common.i18n import tr
 
-from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QActionGroup, QFontInfo, QKeyEvent, QKeySequence, QShortcut, QTextBlockFormat,
-    QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment,
+    QActionGroup, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
+    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextDocumentFragment,
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
@@ -310,6 +311,8 @@ class ChatWidget(QWidget):
 
         self._log = QTextBrowser()
         self._log.setOpenExternalLinks(True)
+        self._log.setOpenLinks(False)
+        self._log.anchorClicked.connect(self._on_anchor_clicked)
         layout.addWidget(self._log, stretch=1)
 
         self._input = QPlainTextEdit()
@@ -605,15 +608,17 @@ class ChatWidget(QWidget):
             f"backend: {self._backend.name} / model: {self._backend.model}"
         )
         mode = self._effective_tool_display(sess)
-        for m in sess.messages:
+        for i, m in enumerate(sess.messages):
             if m.role == "user":
-                self._append_block("user", m.content or "")
+                self._append_block("user", m.content or "", msg_index=i,
+                                   actions=("edit",))
             elif m.role == "assistant" and m.content:
                 # hidden で tool-only メッセージは簡略後に空になる。空ヘッダだけの
                 # ブロックを描かないよう、簡略結果が中身を持つ時だけ描画する。
                 body = _simplify_tool_text(m.content, mode)
                 if body.strip():
-                    self._append_block("assistant", body, markdown=True)
+                    self._append_block("assistant", body, markdown=True,
+                                       msg_index=i, actions=("fork",))
         # If a turn is in-flight for this session, show assistant placeholder +
         # partial buffer. Condition is `is not None` (not `turn.buffer`) so an
         # empty-buffer turn still gets the assistant header — later _on_chunk
@@ -727,6 +732,74 @@ class ChatWidget(QWidget):
         self._rebuild_tab_bar()
         self._render_session(sess)
         self._update_turn_ui()
+
+    # ----- fork / edit (Issue #63) -----
+
+    def _on_anchor_clicked(self, url: QUrl) -> None:
+        s = url.toString()
+        if s.startswith("chataction:"):
+            parts = s.split(":", 2)
+            if len(parts) < 3:
+                return
+            try:
+                idx = int(parts[2])
+            except ValueError:
+                return
+            self._handle_chat_action(parts[1], idx)
+        else:
+            QDesktopServices.openUrl(url)
+
+    def _handle_chat_action(self, action: str, index: int) -> None:
+        """ヘッダ行の ✎編集 / ⑂分岐 リンクのクリックを処理する。"""
+        if self._active.id in self._turns:
+            self._status.setText(tr("chat.action.busy"))
+            return
+        if not (0 <= index < len(self._active.messages)):
+            return
+        msg = self._active.messages[index]
+        if action == "edit":
+            if msg.role != "user" or msg.content is None:
+                return
+        elif action == "fork":
+            if msg.role != "assistant":
+                return
+        else:
+            return
+        # 共有ドラフト保護: 未送信の下書きがあれば破棄を確認（edit=prefill 上書き /
+        # fork=空化 のどちらも composer を置換するため両方に適用）。
+        if self.input_draft().strip():
+            reply = QMessageBox.question(
+                self, tr("dlg.branch.title"), tr("chat.edit.overwrite_draft")
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        if action == "edit":
+            self._fork_from(self._active, cut=index, prefill=msg.content)
+        else:
+            self._fork_from(self._active, cut=index + 1, prefill=None)
+
+    def _fork_from(self, src: ChatSession, *, cut: int, prefill: str | None) -> None:
+        """src.messages[:cut] をコピーした新タブへ分岐し、切替＋composer 設定する。"""
+        suffix = tr("chat.fork.title_suffix")
+        if src.title == chat_store._DEFAULT_TITLE:
+            title = chat_store._DEFAULT_TITLE          # 未命名は据え置き → 次送信で auto-title
+        elif src.title.endswith(suffix):
+            title = src.title                          # 既に分岐済み → suffix を重ねない
+        else:
+            title = src.title + suffix
+        new = chat_store.fork_session(src, cut, title=title)
+        # 可視性保証: scratch(None) の最初のユーザー発言編集で履歴なしタブが
+        # _visible_sessions に隠れ _active が非表示を指す不整合を防ぐ。
+        new.dataset = src.dataset if src.dataset is not None else self._current_dataset
+        self._sessions.insert(self._sessions.index(src) + 1, new)
+        self._active = new
+        if new.dataset is not None:
+            self._mark_chat_dirty()
+        self._rebuild_tab_bar()
+        self._render_session(new)
+        self._update_turn_ui()
+        self.set_input_draft(prefill)   # edit は content を prefill、fork は None → 空
+        self.focus_input()
 
     def _on_tab_context_menu(self, pos) -> None:
         index = self._tab_bar.tabAt(pos)
@@ -1265,9 +1338,15 @@ class ChatWidget(QWidget):
         )
         cursor.insertFragment(QTextDocumentFragment(doc))
 
-    def _append_block(self, role: str, text: str, *, markdown: bool = False) -> None:
+    def _append_block(
+        self, role: str, text: str, *, markdown: bool = False,
+        msg_index: int | None = None, actions: tuple[str, ...] = (),
+    ) -> None:
         """role ヘッダ + 本文を末尾に追加する。markdown=True の場合のみ本文を
-        Markdown 描画する（完了済み assistant メッセージのリプレイ専用）。"""
+        Markdown 描画する（完了済み assistant メッセージのリプレイ専用）。
+
+        msg_index/actions を渡すとヘッダ行に fork/edit のインラインリンク（anchor）
+        を出す（位置に依存せず描画時に <a> を出すだけ）。"""
         doc = self._log.document()
         cursor = QTextCursor(doc)
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -1275,7 +1354,22 @@ class ChatWidget(QWidget):
             cursor.insertBlock(QTextBlockFormat())   # ← 直前 fragment の block format 継承を断つ
         color_map = {"user": "#6ec1e4", "assistant": "#a8d08d"}
         color = color_map.get(role, "#cccccc")
-        cursor.insertHtml(f'<b style="color:{color}">{html.escape(role)}</b>')
+        header = f'<b style="color:{color}">{html.escape(role)}</b>'
+        if msg_index is not None:
+            _labels = {
+                "edit": tr("chat.action.edit"),
+                "fork": tr("chat.action.fork"),
+            }
+            for act in actions:
+                label = _labels.get(act)
+                if label is None:
+                    continue
+                header += (
+                    f' <a href="chataction:{act}:{msg_index}"'
+                    f' style="color:#888888;text-decoration:none">'
+                    f'{html.escape(label)}</a>'
+                )
+        cursor.insertHtml(header)
         cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())
         if text:
