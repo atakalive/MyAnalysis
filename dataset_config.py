@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path, PureWindowsPath
 
 from common.i18n import tr
-from common.paths import validate_identifier_name
+from common.paths import safe_resolve, validate_identifier_name
 
 CONFIG_FILENAME = "myanalysis.toml"
 
@@ -163,7 +163,7 @@ def get_work_dir(name: str, *, create: bool = True) -> Path:
         dataset_dir = get_dataset_dir(name)
         resolved = dataset_dir / p
         # defense-in-depth: re-check containment after resolution.
-        if not resolved.resolve().is_relative_to(dataset_dir.resolve()):
+        if not safe_resolve(resolved).is_relative_to(safe_resolve(dataset_dir)):
             raise ValueError(tr("workdir.escape", resolved=resolved))
     if create:
         resolved.mkdir(parents=True, exist_ok=True)
@@ -183,8 +183,8 @@ def analysis_file(dataset, name: str) -> Path:
     returns it. Does NOT check existence (caller does) and does NOT mkdir.
     """
     validate_identifier_name(name, check_reserved=True)
-    root = analyses_root(dataset).resolve()
-    f = (analyses_root(dataset) / name / "analysis.py").resolve()
+    root = safe_resolve(analyses_root(dataset))
+    f = safe_resolve(analyses_root(dataset) / name / "analysis.py")
     if not f.is_relative_to(root):
         raise ValueError(f"analysis.py escapes analyses/: {name!r}")
     return f

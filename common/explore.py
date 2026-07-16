@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from common.paths import safe_resolve
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
@@ -216,12 +218,12 @@ def dataset_summary(
     root = get_dataset_dir(name)
     if not root.exists():
         raise FileNotFoundError(f"dataset directory not found: {root}")
-    root_r = root.resolve()
+    root_r = safe_resolve(root)
 
     # 除外集合: 固定の analyses + 設定済み work_dir のトップレベル成分。
     exclude = set(_FIXED_EXCLUDE)
     try:
-        wd = dataset_config.get_work_dir(name, create=False).resolve()
+        wd = safe_resolve(dataset_config.get_work_dir(name, create=False))
     except (OSError, ValueError) as e:
         exclude.add("_work")  # 設定読取り失敗 → 既定 work_dir 名を除外
         print(

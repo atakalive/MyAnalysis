@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 import pandas as pd
 
+from common.paths import safe_resolve
+
 
 def load_csv_per_subdir(
     root: Path,
@@ -28,7 +30,7 @@ def load_csv_per_subdir(
         Passed to pd.read_csv(). None uses pandas default (utf-8).
         For Shift-JIS data, pass encoding="cp932".
     """
-    root = Path(root).resolve()
+    root = safe_resolve(root)
     if not root.exists():
         raise FileNotFoundError(f"root not found: {root}")
     out: list[dict] = []

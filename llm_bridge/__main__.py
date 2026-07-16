@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import dataset_config
+from common.paths import safe_resolve
 from llm_bridge import state, annotations, commands
 from llm_bridge.paths import active_state_path
 
@@ -49,15 +50,15 @@ def _list_analysis_names(dataset: str) -> list[str]:
         return []
     if not root.is_dir():
         return []
-    root_resolved = root.resolve()
+    root_resolved = safe_resolve(root)
     names = []
     for d in sorted(root.glob("*")):
         if d.name.startswith("_"):
             continue
-        resolved = d.resolve()
+        resolved = safe_resolve(d)
         if not resolved.is_relative_to(root_resolved):
             continue
-        af = (resolved / "analysis.py").resolve()
+        af = safe_resolve(resolved / "analysis.py")
         if resolved.is_dir() and af.is_relative_to(root_resolved) and af.is_file():
             names.append(d.name)
     return names

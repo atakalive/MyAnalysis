@@ -1,5 +1,6 @@
 """Filesystem path helpers. All paths are derived from __file__ so the module
 location determines repo root. Move this file → repo_root changes accordingly."""
+import os
 from pathlib import Path
 
 # Windows のファイル名に使えない文字。パス区切り (/ \) と制御文字は別途・汎用で拒否。
@@ -76,3 +77,22 @@ def repo_root() -> Path:
 def i18n_dir() -> Path:
     """Return <repo>/i18n/ (committed catalogs; not created)."""
     return repo_root() / "i18n"
+
+
+def safe_resolve(path) -> Path:
+    """resolve() が使えない FS でも死なない絶対パス正規化（.resolve() の drop-in 代替）。
+
+    Path.resolve() / os.path.realpath は Windows で GetFinalPathNameByHandle を呼ぶが、
+    WinFsp/rclone/一部のネットワークマウントはこれを実装しておらず
+    OSError [WinError 1005]「このボリュームは認識可能なファイルシステムではありません」を
+    投げる。通常の FS では resolve() の結果をそのまま返し（symlink 解決・大文字小文字の
+    正準化を保つ＝既存挙動・既存テスト不変）、resolve() が OSError のときだけ
+    os.path.abspath（純 lexical 正規化：絶対化＋'..' の字句畳み込み、FS 問い合わせ無し）に
+    フォールバックしてマウント上でも動く。ここが置換する封じ込めチェックには lexical 正規化で
+    十分であり、symlink を辿らない分だけ（マウント外へ逃げる work_dir に対して）むしろ堅牢。
+    """
+    p = Path(path)
+    try:
+        return p.resolve()
+    except OSError:
+        return Path(os.path.abspath(p))

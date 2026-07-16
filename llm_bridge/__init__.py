@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 import dataset_config
+from common.paths import safe_resolve
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
@@ -309,7 +310,7 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         slot: str | None = None,
         dataset: str | None = None,
     ) -> str:
-        p = Path(path).resolve()
+        p = safe_resolve(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
         if slot not in _SLOT_MAP:
@@ -458,7 +459,7 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
     ) -> str:
         if panel not in ("left", "right"):
             raise ValueError(f"panel must be 'left' or 'right', got {panel!r}")
-        p = Path(path).resolve()
+        p = safe_resolve(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
         from gui.imageviewer import (

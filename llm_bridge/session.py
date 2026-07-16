@@ -20,6 +20,7 @@ from pathlib import Path
 
 import config
 import dataset_config
+from common.paths import safe_resolve
 from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
@@ -545,8 +546,8 @@ def infer_dataset(abs_path: str) -> str | None:
     for ds in config.DATASETS:
         try:
             work_dir = _resolve_work_dir_readonly(ds)
-            wd = work_dir.resolve()
-            if target.resolve().is_relative_to(wd):
+            wd = safe_resolve(work_dir)
+            if safe_resolve(target).is_relative_to(wd):
                 length = len(str(wd))
                 if length > best_len:
                     best_len = length

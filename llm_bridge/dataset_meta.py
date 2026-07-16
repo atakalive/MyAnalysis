@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
+from common.paths import safe_resolve
 import dataset_config
 from common.filelock import exclusive_lock
 
@@ -186,7 +187,7 @@ def compute_meta(
     try:
         root = dataset_config.analyses_root(dataset)
         if root.is_dir():
-            root_resolved = root.resolve()
+            root_resolved = safe_resolve(root)
             for d in sorted(root.glob("*")):
                 if d.name.startswith("_"):
                     continue
@@ -194,7 +195,7 @@ def compute_meta(
                 if not af.is_file():
                     continue
                 try:
-                    if not af.resolve().is_relative_to(root_resolved):
+                    if not safe_resolve(af).is_relative_to(root_resolved):
                         continue
                 except OSError:
                     continue
@@ -318,15 +319,15 @@ def compute_meta(
         try:
             total = 0
             latest = None
-            wd_res = work_dir.resolve() if work_dir is not None else None
-            an_res = dataset_config.analyses_root(dataset).resolve()
+            wd_res = safe_resolve(work_dir) if work_dir is not None else None
+            an_res = safe_resolve(dataset_config.analyses_root(dataset))
             for cur, _dirnames, filenames in os.walk(dataset_dir):
                 if should_stop and should_stop():
                     cancelled = True
                     break
                 cur_p = Path(cur)
                 try:
-                    cr = cur_p.resolve()
+                    cr = safe_resolve(cur_p)
                     excluded = bool(
                         (wd_res and cr.is_relative_to(wd_res))
                         or cr.is_relative_to(an_res)

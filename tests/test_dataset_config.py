@@ -263,6 +263,47 @@ def test_state_dir_create_false_no_mkdir(ds_dir):
     assert not (ds_dir / "_work").exists()
 
 
+# ---- (d) WinFsp/rclone mount: resolve() raises, get_work_dir must survive ----
+
+def test_get_work_dir_survives_winfsp_realpath_failure(ds_dir, monkeypatch):
+    """On a WinFsp/rclone mount Path.resolve() raises OSError [WinError 1005].
+
+    get_work_dir's containment check goes through common.paths.safe_resolve, which
+    falls back to os.path.abspath, so the read path must not raise and must still
+    return <dataset_dir>/_work. This is the exact failure that made a cloud-drive
+    (rclone) dataset open empty — the OSError was swallowed by open_dataset's
+    except and tab restore never ran.
+    """
+    import os
+
+    def _boom(*_a, **_k):
+        raise OSError(1005, "The volume does not contain a recognized file system")
+
+    monkeypatch.setattr(os.path, "realpath", _boom)
+    # Sanity: the mount really would break a naive resolve().
+    with pytest.raises(OSError):
+        (ds_dir / "_work").resolve()
+
+    wd = dataset_config.get_work_dir("ds", create=False)
+    assert wd == ds_dir / "_work"
+
+
+def test_analysis_file_survives_winfsp_realpath_failure(ds_dir, monkeypatch):
+    """analysis_file's containment check also routes through safe_resolve, so it
+    must resolve on a WinFsp/rclone mount (realpath raising) instead of crashing —
+    this is the code path that opening an analysis tab hits."""
+    import os
+
+    def _boom(*_a, **_k):
+        raise OSError(1005, "The volume does not contain a recognized file system")
+
+    monkeypatch.setattr(os.path, "realpath", _boom)
+    f = dataset_config.analysis_file("ds", "an1")  # must not raise
+    assert str(f) == os.path.abspath(
+        str(ds_dir / "analyses" / "an1" / "analysis.py")
+    )
+
+
 def test_state_dir_create_true_makes_tree(ds_dir):
     d = dataset_config.state_dir("ds", "an1", create=True)
     assert d.is_dir()
