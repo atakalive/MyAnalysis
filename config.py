@@ -23,29 +23,29 @@ _HOST_RE = re.compile(r"^[^\W_][\w.\-]*$")
 
 DATASETS: dict[str, dict[str, str]] = {
     "dataset_a": {
-        "HOST_A": r"G:\同期\測定\000000\example",
+        "HOST_A": r"G:\測定\000000\example",
         "HOST_B": r"H:\同期\測定\000000\example",
     },
     "dataset_b": {
-        "HOST_A": r"G:\同期\測定\000000",
+        "HOST_A": r"G:\測定\000000",
         "HOST_B": r"H:\同期\測定\000000",
     },
     "dataset_c": {
-        "HOST_A": r"G:\同期\測定\dataset_l\dataset_c3",
+        "HOST_A": r"G:\測定\dataset_l\dataset_c3",
         "HOST_B": r"H:\同期\測定\dataset_l\dataset_c3",
     },
     "analysis_c": {
         "HOST_A": r"<repo>/data/analyses/dataset_c2",
     },
     "dataset_d": {
-        "HOST_A": r"G:/同期/測定/dataset_l/dataset_d",
+        "HOST_A": r"G:/測定/dataset_l/dataset_d",
         "HOST_B": r"H:\同期\測定\dataset_l\dataset_d",
     },
     "dataset_e": {
         "HOST_A": r"D:/measure/dataset_e",
     },
     "dataset_f": {
-        "HOST_A": r"//fileserver.example/Public/share/measure/dataset_f",
+        "HOST_A": r"G:\測定\dataset_f",
     },
 }
 
