@@ -392,6 +392,14 @@ class OpenDatasetDialog(QDialog):
             return
         add = self._form.addRow
 
+        def _lbl(text):
+            # Word-wrap every detail field so a long value (概要文・host path・解析名
+            # 列挙 etc.) wraps inside the detail pane instead of forcing the dialog's
+            # minimum width past resize(900, 500) and blowing the window wide.
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            return lbl
+
         def _txt(v, missing=None):
             return v if v else (missing or tr("picker.unknown"))
 
@@ -400,37 +408,37 @@ class OpenDatasetDialog(QDialog):
             open_lbl.setStyleSheet("color:#6ec1e4;font-weight:bold")
             add("", open_lbl)
         add(tr("picker.col.description"),
-            QLabel(m.description or tr("picker.unwritten")))
-        add(tr("picker.detail.format"), QLabel(_txt(m.format)))
+            _lbl(m.description or tr("picker.unwritten")))
+        add(tr("picker.detail.format"), _lbl(_txt(m.format)))
         add(tr("picker.detail.host_path"),
-            QLabel(m.host_path or _avail_text(m)))
+            _lbl(m.host_path or _avail_text(m)))
         add(tr("picker.detail.other_hosts"),
-            QLabel(", ".join(m.other_hosts) if m.other_hosts else "-"))
+            _lbl(", ".join(m.other_hosts) if m.other_hosts else "-"))
         add(tr("picker.detail.analyses"),
-            QLabel(", ".join(m.analysis_names) if m.analysis_names
-                   else tr("picker.unknown")))
+            _lbl(", ".join(m.analysis_names) if m.analysis_names
+                 else tr("picker.unknown")))
         if m.open_tab_count is not None:
             names = ", ".join(m.open_analysis_names) if m.open_analysis_names else "-"
-            add(tr("picker.detail.open_tabs"), QLabel(f"{m.open_tab_count} ({names})"))
+            add(tr("picker.detail.open_tabs"), _lbl(f"{m.open_tab_count} ({names})"))
         else:
-            add(tr("picker.detail.open_tabs"), QLabel(tr("picker.unknown")))
-        add(tr("picker.col.last_touched"), QLabel(_fmt_time(m.last_touched, precise=True)))
-        add(tr("picker.detail.last_opened"), QLabel(_fmt_time(m.last_opened, precise=True)))
+            add(tr("picker.detail.open_tabs"), _lbl(tr("picker.unknown")))
+        add(tr("picker.col.last_touched"), _lbl(_fmt_time(m.last_touched, precise=True)))
+        add(tr("picker.detail.last_opened"), _lbl(_fmt_time(m.last_opened, precise=True)))
         add(tr("picker.detail.annotations"),
-            QLabel(str(m.annotation_total) if m.annotation_total is not None
-                   else tr("picker.unknown")))
+            _lbl(str(m.annotation_total) if m.annotation_total is not None
+                 else tr("picker.unknown")))
         add(tr("picker.detail.exports"),
-            QLabel(str(m.export_png_count) if m.export_png_count is not None
-                   else tr("picker.unknown")))
+            _lbl(str(m.export_png_count) if m.export_png_count is not None
+                 else tr("picker.unknown")))
         add(tr("picker.detail.chats"),
-            QLabel(str(m.chat_session_count) if m.chat_session_count is not None
-                   else tr("picker.unknown")))
-        add(tr("picker.detail.disk_size"), QLabel(_fmt_size(m.disk_size_bytes)))
-        add(tr("picker.detail.last_meas"), QLabel(_fmt_time(m.last_measurement)))
+            _lbl(str(m.chat_session_count) if m.chat_session_count is not None
+                 else tr("picker.unknown")))
+        add(tr("picker.detail.disk_size"), _lbl(_fmt_size(m.disk_size_bytes)))
+        add(tr("picker.detail.last_meas"), _lbl(_fmt_time(m.last_measurement)))
         if m.uncomputed:
-            add(tr("picker.detail.updated_at"), QLabel(tr("picker.uncomputed")))
+            add(tr("picker.detail.updated_at"), _lbl(tr("picker.uncomputed")))
         else:
-            add(tr("picker.detail.updated_at"), QLabel(_fmt_time(m.updated_at, precise=True)))
+            add(tr("picker.detail.updated_at"), _lbl(_fmt_time(m.updated_at, precise=True)))
 
         # thumbnail: a live re-grab (更新 on an open dataset) takes precedence over
         # the persisted snapshot so the pane shows the current on-screen view;

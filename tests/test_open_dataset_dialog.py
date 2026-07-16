@@ -242,6 +242,24 @@ def test_refresh_no_regrab_when_window_lacks_hook(qapp, patch_picker, monkeypatc
     dlg._workers[-1].wait(5000)
 
 
+def test_description_label_wraps(qapp, patch_picker):
+    # A long 概要 must render with word-wrap so it wraps inside the detail pane
+    # instead of forcing the dialog's minimum width wider than resize(900, 500)
+    # and blowing the window out horizontally.
+    from PySide6.QtWidgets import QLabel
+    long_desc = "あ" * 500
+    # Complete meta (all HEAVY fields present) so no background worker spawns.
+    patch_picker([_meta("a", description=long_desc, uncomputed=False,
+                        disk_size_bytes=1, last_measurement=1,
+                        annotation_total=1, export_png_count=1)])
+    dlg, _m, _h = _make_dialog(qapp)
+    # The description text lives only in the detail pane's QLabel (the table cell
+    # is model data, not a widget), so match on text to locate it robustly.
+    matches = [w for w in dlg.findChildren(QLabel) if w.text() == long_desc]
+    assert matches, "description label not found in detail pane"
+    assert all(w.wordWrap() for w in matches)
+
+
 def test_edit_desc_failure_warns(qapp, patch_picker, monkeypatch):
     from gui import open_dataset_dialog as mod
     patch_picker([_meta("a")])
