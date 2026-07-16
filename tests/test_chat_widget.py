@@ -566,6 +566,7 @@ def test_live_hidden_suppresses_tool_lines(widget):
     widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
     widget._on_chunk(sid, "   ↳ ok\n")
     widget._on_chunk(sid, "done")
+    widget._flush_live_markdown()           # タイマーを待たず決定的に flush
     text = widget._log.toPlainText()
     assert "🔧" not in text and "↳" not in text
     assert "thinking" in text and "done" in text
@@ -577,18 +578,20 @@ def test_live_full_keeps_tool_lines(widget):
     sess, _ = _start_inflight(widget, mode_default="full")
     sid = sess.id
     widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
+    widget._flush_live_markdown()           # タイマーを待たず決定的に flush
     assert "🔧 read_file" in widget._log.toPlainText()
     widget._turns.pop(sid)
 
 
 def test_live_hidden_prose_appended_once(widget):
-    """prefix-append must not duplicate trailing prose as more chunks arrive."""
+    """全置換再描画は末尾プロサを重複させない（チャンク追加で二重描画しない）。"""
     sess, _ = _start_inflight(widget, mode_default="hidden")
     sid = sess.id
     widget._on_chunk(sid, "🔧 read_file  path=a.py\n")
     widget._on_chunk(sid, "   ↳ ok\n")
     widget._on_chunk(sid, "Hello ")
     widget._on_chunk(sid, "world")
+    widget._flush_live_markdown()           # タイマーを待たず決定的に flush
     text = widget._log.toPlainText()
     assert text.count("Hello world") == 1
     assert "🔧" not in text
@@ -610,8 +613,61 @@ def test_render_session_inflight_hidden_filters(widget):
     assert "intro" in text and "tail" in text
     assert turn.anchor is not None
     widget._on_chunk(sess.id, "\n🔧 write_file  path=b.py\n")
+    widget._flush_live_markdown()           # 新方式では _on_chunk が描画しないため明示 flush
     assert "🔧" not in widget._log.toPlainText()
     widget._turns.pop(sess.id)
+
+
+def test_live_markdown_applied_during_streaming(widget):
+    """ストリーミング中（完了前）でも in-flight 本文が Markdown 整形される。"""
+    sess, _ = _start_inflight(widget, mode_default="full")
+    sid = sess.id
+    widget._on_chunk(sid, "**bold**")
+    widget._flush_live_markdown()           # タイマーを待たず決定的に flush
+    text = widget._log.toPlainText()
+    assert "bold" in text and "**" not in text   # 完了前に既に Markdown 整形済み
+    widget._turns.pop(sid)
+
+
+def test_live_markdown_matches_completion_across_flushes(widget):
+    """見出し/リスト/コードブロック/段落を跨いで段階的に伸びる本文を複数回 flush した
+    最終 HTML が、同一最終本文を完了時パス（1 発 Markdown 描画）で描いた HTML と一致する。"""
+    pieces = ("Title\n", "=====\n\n- a\n", "- b\n\n```\nx\n```\n", "\ntail")
+    final = "".join(pieces)
+
+    def render_staged():
+        widget._log.clear()
+        sess, turn = _start_inflight(widget, mode_default="full")  # clear 後の fresh ブロックへ
+        for piece in pieces:
+            turn.buffer += piece
+            widget._flush_live_markdown()
+        html = widget._log.toHtml()
+        widget._turns.pop(sess.id)
+        return html
+
+    def render_completion():
+        widget._log.clear()
+        widget._append_block("assistant", final, markdown=True)  # 完了時本文描画と同一パス（素ヘッダ）
+        return widget._log.toHtml()
+
+    assert render_staged() == render_completion()
+
+
+def test_live_flush_defers_while_user_selecting(widget):
+    """ログ内テキスト選択中は _flush_live_markdown が描画を保留し、選択を保持する。"""
+    from PySide6.QtGui import QTextCursor
+    sess, turn = _start_inflight(widget, mode_default="full")
+    sid = sess.id
+    turn.buffer = "hello world"
+    widget._flush_live_markdown()                 # 一旦描画
+    cur = widget._log.textCursor()
+    cur.select(QTextCursor.SelectionType.Document) # ユーザー選択を模す
+    widget._log.setTextCursor(cur)
+    assert widget._log.textCursor().hasSelection()
+    turn.buffer += " more"
+    widget._flush_live_markdown()                 # 選択中 → 保留（no-op 描画）
+    assert widget._log.textCursor().hasSelection()  # 選択は保持されている
+    widget._turns.pop(sid)
 
 
 def test_completed_tool_only_message_no_bare_header(widget):

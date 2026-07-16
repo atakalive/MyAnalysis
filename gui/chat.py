@@ -47,6 +47,9 @@ _MAX_TOOL_TURNS = 8
 # Braille spinner frames for the "waiting" indicator.
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+_LIVE_MD_INTERVAL_MS = 120        # ライブ Markdown 再描画のコアレッシング基準間隔（ms）
+_LIVE_MD_MAX_INTERVAL_MS = 600    # 長文時に適応的に伸ばす際の上限（ms）
+
 # Chat font zoom bounds (effective point size). _zoom is an integer pt delta on
 # top of each widget's base size; clamping happens on the effective size so the
 # user can immediately step back from a bound.
@@ -192,6 +195,14 @@ def _simplify_tool_text(content: str, mode: str) -> str:
     return "\n".join(out)
 
 
+def _close_unterminated_fence(text: str) -> str:
+    """未クローズの ``` code fence があれば描画用に閉じる（保存はしない）。行頭
+    (先頭空白許容) から始まる ``` を数え、奇数なら末尾に閉じフェンスを補う。ライブ
+    描画中に開いたフェンス以降が全部コード化して明滅する現象を抑える簡易ガード。"""
+    fences = sum(1 for ln in text.split("\n") if ln.lstrip(" ").startswith("```"))
+    return text + "\n```" if fences % 2 else text
+
+
 class _StreamWorker(QThread):
     chunk  = Signal(str, str)   # (session_id, text)
     done   = Signal(str)        # (session_id,)
@@ -267,9 +278,9 @@ class _Turn:
         self.kill_timer = kill_timer
         self.buffer = ""
         self.stopped = False
-        # compact/hidden のライブ描画用。anchor は in-flight assistant 本文の開始
-        # 文書位置（int。_log.clear() で無効化される QTextCursor は使わない）。
-        # rendered は直近描画済みの簡略本文（prefix-append の基準）。
+        # 全モード共通のライブ Markdown 描画用。anchor は in-flight assistant 本文の
+        # 開始文書位置（int。_log.clear() で QTextCursor が無効化されるため int を保持する）。
+        # rendered は直近描画済みの簡略本文で、無変化スキップの基準に使う。
         self.anchor: int | None = None
         self.rendered = ""
         # 安定した stream 相関 ID（_start_turn で採番）。ストリーミング中の partial
@@ -365,6 +376,12 @@ class ChatWidget(QWidget):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(80)
         self._spin_timer.timeout.connect(self._tick_spinner)
+
+        # ストリーミング中のライブ Markdown 再描画をコアレッシングする single-shot タイマー。
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(_LIVE_MD_INTERVAL_MS)
+        self._live_timer.timeout.connect(self._flush_live_markdown)
 
         self._rebuild_tab_bar()
         self._render_session(self._active)
@@ -658,12 +675,12 @@ class ChatWidget(QWidget):
             body = _simplify_tool_text(turn.buffer, mode)
             self._append_block("assistant", "")                       # ヘッダ + 空本文
             turn.anchor = self._log.document().characterCount() - 1   # 本文開始の文書位置
-            turn.rendered = body                                      # prefix-append の基準を再設定
+            turn.rendered = body                                      # 無変化スキップの基準を再設定
             if body:
                 cursor = QTextCursor(self._log.document())
                 cursor.setPosition(turn.anchor)
                 cursor.setCharFormat(QTextCharFormat())
-                cursor.insertText(body)
+                self._insert_markdown(cursor, body)
                 self._scroll_to_bottom()
         # Show stashed completion note from a background-finished turn.
         note = self._turn_notes.pop(sess.id, None)
@@ -1054,7 +1071,7 @@ class ChatWidget(QWidget):
         turn = _Turn(sess, backend, worker, kill_timer)
         turn.stream_id = uuid.uuid4().hex   # この応答の partial/最終を紐付ける安定 ID
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは
-        # _log を触らないので anchor=None（_rewrite_inflight_body がガード済み）。
+        # _log を触らないので anchor=None（_flush_live_markdown がガード済み）。
         turn.anchor = (self._log.document().characterCount() - 1) if is_active else None
         self._turns[sess.id] = turn
         worker.chunk.connect(self._on_chunk)
@@ -1130,14 +1147,13 @@ class ChatWidget(QWidget):
         self.messageStreaming.emit(sid, turn.buffer, "local", turn.stream_id)
         if sid != self._active.id:        # 非表示セッションは文書に触れない（再開時 _render_session が再描画）
             return
-        if self._effective_tool_display(turn.session) == "full":
-            cursor = QTextCursor(self._log.document())
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.setCharFormat(QTextCharFormat())
-            cursor.insertText(piece)
-            self._scroll_to_bottom()
-        else:
-            self._rewrite_inflight_body(turn)
+        if not self._live_timer.isActive():
+            # 適応間隔: 長文ほど再パース間隔を伸ばし O(n^2) 累積を抑える。
+            self._live_timer.setInterval(
+                min(_LIVE_MD_MAX_INTERVAL_MS,
+                    _LIVE_MD_INTERVAL_MS + len(turn.buffer) // 200)
+            )
+            self._live_timer.start()
 
     def _on_done(self, sid: str) -> None:
         turn = self._turns.pop(sid, None)
@@ -1161,6 +1177,7 @@ class ChatWidget(QWidget):
             self._mark_chat_dirty()
         if sid == self._active.id:
             self._update_turn_ui()
+            self._live_timer.stop()           # アクティブ完了 → 保留 flush は不要
             self._render_session(sess)        # 生テキストを完了 Markdown 表示へ置換
             if turn.stopped:
                 self._append_system_line("[stopped]")
@@ -1203,6 +1220,7 @@ class ChatWidget(QWidget):
         # with only a vanished busy indicator. reviewer code R1 P2-2.
         self.messageAdded.emit(sess.id, "assistant", (turn.buffer or "") + error_text, "local")
         if sid == self._active.id:
+            self._live_timer.stop()           # アクティブ完了 → 保留 flush は不要
             self._render_session(sess)        # partial 本文を Markdown 化（_on_done と対称）
             cursor = QTextCursor(self._log.document())
             cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -1320,39 +1338,45 @@ class ChatWidget(QWidget):
                     turn.worker.wait(1000)
 
     # ----- display helpers -----
-    # 追記専用の QTextCursor 操作。full モードのストリーミングは末尾への
-    # insertText のみで O(n)。compact/hidden は _rewrite_inflight_body が
-    # _simplify_tool_text を通すが、prefix-append（増分のみ末尾追記）で
-    # append-only / O(n) を維持し、既存ブロックの再描画は通常発生しない。
+    # ストリーミング中のライブ本文描画はタイマー駆動の全置換 Markdown 再描画に
+    # 統一（全モード共通）。_flush_live_markdown が anchor〜末尾を毎回全置換し、
+    # 簡略化バッファを _insert_markdown で描き直す（無変化スキップで Qt 操作を抑制）。
+    # 完了時 _render_session の描画関数と同一なので「ライブ==完了」の見た目を保つ。
 
     def _scroll_to_bottom(self) -> None:
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    def _rewrite_inflight_body(self, turn: "_Turn") -> None:
-        """ストリーミング中の assistant 本文を、表示モードで簡略化したバッファに
-        同期する（compact/hidden 用、プレーンテキスト）。anchor 未設定なら no-op。
-        in-flight ブロックが _log 末尾である前提（スピナーは _log に書かず、
-        in-flight セッションに _turn_notes は付かない）に依存。"""
-        if turn.anchor is None:
+    def _flush_live_markdown(self) -> None:
+        """ストリーミング中のアクティブ turn の assistant 本文を、簡略化バッファから
+        Markdown で全置換再描画する（全モード共通）。常に self._active の turn を見るので、
+        保留タイマーは発火時点のアクティブ turn を描く（タブ切替は _render_session が
+        再 anchor するため自己修復）。anchor 未設定 / turn 無しなら no-op。in-flight
+        ブロックが _log 末尾である前提（スピナーは _log に書かず、in-flight セッションに
+        _turn_notes は付かない）に依存。"""
+        turn = self._turns.get(self._active.id)
+        if turn is None or turn.anchor is None:
+            return
+        # ユーザーがログ内テキストを選択中は、全置換で選択が外れコピー不能になる。描画を
+        # 保留し（buffer は更新済み）、単発タイマーを張り直して選択解除後に追いつく。
+        if self._log.textCursor().hasSelection():
+            self._live_timer.start()
             return
         body = _simplify_tool_text(turn.buffer, self._effective_tool_display(turn.session))
-        if body == turn.rendered:                                  # ① 変化なし → Qt 操作ゼロ
+        if body == turn.rendered:          # 変化なし → Qt 操作ゼロ
             return
         cursor = QTextCursor(self._log.document())
-        if turn.rendered and body.startswith(turn.rendered):       # ② 末尾追記（append-only, O(n)）
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.setCharFormat(QTextCharFormat())
-            cursor.insertText(body[len(turn.rendered):])
-        else:                                                      # ③ 構造変化 → anchor〜末尾を全置換（稀）
-            cursor.setPosition(turn.anchor)
-            cursor.movePosition(QTextCursor.MoveOperation.End,
-                                QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.setCharFormat(QTextCharFormat())
-            if body:
-                cursor.insertText(body)
-        turn.rendered = body
+        cursor.setPosition(turn.anchor)
+        cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        # 完了時パスは _log.clear() 後の fresh な既定ブロックへ描く。ライブは anchor ブロックを
+        # flush 間で再利用するので、char だけでなく block 書式も既定へ戻し、前回 flush の
+        # 見出し/リスト/コードブロック書式の残留を断つ（「ライブ==完了」保証。reviewer/reviewer 指摘）。
+        cursor.setBlockFormat(QTextBlockFormat())
+        cursor.setCharFormat(QTextCharFormat())
+        if body.strip():
+            self._insert_markdown(cursor, _close_unterminated_fence(body))   # 完了時 _append_block(markdown=True) と同一の描画関数
+        turn.rendered = body      # 保存する基準は fence 未補正の生 body（無変化スキップ判定の基準）
         self._scroll_to_bottom()
 
     def _append_system_line(self, text: str) -> None:
