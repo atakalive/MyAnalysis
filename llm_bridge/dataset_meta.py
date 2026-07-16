@@ -12,7 +12,7 @@ Synchronous checkpoints call `rebuild_meta(heavy=False)` (LIGHT only, keeps the
 GUI/CLI responsive); the picker's background worker runs `heavy=True`.
 
 IMPORTANT: this module must NOT import PySide6/gui. It stays standard-library +
-config/dataset_config/common.filelock at top level; the llm_bridge readers
+config/dataset_config/common.filelock/common.paths at top level; the llm_bridge readers
 (annotations/state/snapshots/session) are imported inside compute_meta to break
 the session→dataset_meta→session import cycle.
 """
@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
-from common.paths import safe_resolve
+from common.paths import atomic_write_text, safe_resolve
 import dataset_config
 from common.filelock import exclusive_lock
 
@@ -383,9 +383,7 @@ def read_meta(dataset: str) -> dict | None:
 def write_meta(dataset: str, meta: dict) -> None:
     """Atomically write meta.json (tmp + replace)."""
     path = _meta_path(dataset)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, json.dumps(meta, ensure_ascii=False, indent=2))
 
 
 def rebuild_meta(

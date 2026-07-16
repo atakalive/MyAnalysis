@@ -9,7 +9,7 @@ restore.
 IMPORTANT: this module must NOT import PySide6/gui at top level. `llm_bridge/__init__`
 imports it, and that package is imported from the CLI too. Functions that touch a
 window use it via duck-typing on the passed-in window argument. Top-level imports
-stay standard-library + config/dataset_config so read_session/write_session/
+stay standard-library + config/dataset_config/common.paths so read_session/write_session/
 infer_dataset are testable without Qt.
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import config
 import dataset_config
-from common.paths import safe_resolve
+from common.paths import atomic_write_text, safe_resolve
 from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
@@ -119,11 +119,7 @@ def write_session(dataset: str, payload: dict) -> None:
     """Atomically write <work_dir>/session.json (side-effecting work_dir resolve)."""
     work_dir = dataset_config.get_work_dir(dataset)
     target = work_dir / "session.json"
-    tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    tmp.replace(target)
+    atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def save_all(window) -> tuple[list[str], list[str]]:

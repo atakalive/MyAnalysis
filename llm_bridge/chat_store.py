@@ -190,19 +190,15 @@ def write_session_file(work_dir: Path, sess: ChatSession) -> None:
     This is the only function that creates chat_sessions/ (write path).
     Best-effort: OSError is swallowed. The tmp file is always cleaned up.
     """
+    from common.paths import atomic_write_text
     try:
         target_dir = work_dir / "chat_sessions"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{sess.id}.json"
-        tmp = target.with_suffix(".json.tmp")
-        try:
-            tmp.write_text(
-                json.dumps(session_to_dict(sess), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            tmp.replace(target)
-        finally:
-            tmp.unlink(missing_ok=True)
+        atomic_write_text(
+            target,
+            json.dumps(session_to_dict(sess), ensure_ascii=False, indent=2),
+        )
     except OSError:
         _log.warning("write_session_file: failed to write %r", sess.id, exc_info=True)
 

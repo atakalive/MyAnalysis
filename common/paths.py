@@ -1,6 +1,8 @@
 """Filesystem path helpers. All paths are derived from __file__ so the module
 location determines repo root. Move this file → repo_root changes accordingly."""
+import contextlib
 import os
+import tempfile
 from pathlib import Path
 
 # Windows のファイル名に使えない文字。パス区切り (/ \) と制御文字は別途・汎用で拒否。
@@ -96,3 +98,46 @@ def safe_resolve(path) -> Path:
         return p.resolve()
     except OSError:
         return Path(os.path.abspath(p))
+
+
+def atomic_write_text(path, text: str, *, encoding: str = "utf-8") -> None:
+    """一意 tmp + os.replace による atomic 書込（固定名 tmp を使わない）。
+
+    固定名 `<target>.json.tmp` 等は rclone/WinFsp の VFS write-back キャッシュ上でゴースト化し、
+    次の open(fixed_tmp,'w') が FileExistsError を起こして以後の書込を恒久ブロックし得る。
+    tempfile.mkstemp は対象ディレクトリ内に O_CREAT|O_EXCL で毎回新しい一意名の tmp を作るので、
+    残留 tmp が次の書込をブロックすることは原理的に起きない。
+
+    改行変換は Path.write_text と同じ既定（newline=None: 書込時 '\\n' → os.linesep）に合わせ、
+    正常 FS では書き出しバイトは従来の固定名パターンと byte-identical。親ディレクトリはここでは
+    作らない（呼び出し側が従来どおり保証する。mkstemp は既存ディレクトリを要求＝旧 tmp.write_text と
+    同条件）。生成ファイルの POSIX mode は mkstemp 既定の 0600 になる（旧パターンは umask 依存で
+    通常 0644）が、単一ユーザの state/JSON/TOML ファイルでは無害・Windows/rclone マウントでは
+    mode bit は無視されるため差異なし（前提の詳細は Issue #69「前提と破綻時の影響」節）。
+
+    例外安全: mkstemp を try 内に置き、fd の所有権を追跡する。os.fdopen が fd 所有権を取る前に
+    失敗した場合は fd を best-effort で close、成功後は with が close するので二重 close しない
+    （閉じた fd 番号の再利用による誤 close を避けるため sentinel `fd = None` で判定）。tmp の削除も
+    OSError を握って best-effort とし、掃除失敗が元の write/replace 例外をマスクしないようにする。
+    """
+    path = Path(path)
+    fd = None   # None = fd を所有していない（未取得 or fdopen が所有権を取得済み）
+    tmp = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        f = os.fdopen(fd, "w", encoding=encoding)   # 成功で f が fd を所有
+        fd = None                                   # 所有権が f に移った
+        with f:                                     # write の成否に関わらず f が fd を閉じる
+            f.write(text)                           # newline 既定=None（write_text と同じ）
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:                          # fdopen 前に失敗 → fd は未クローズ
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp is not None:                         # 自分の tmp は残さない（掃除失敗で元例外を隠さない）
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        raise

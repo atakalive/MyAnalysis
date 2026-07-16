@@ -45,6 +45,9 @@ def test_write_read_roundtrip(ds_env):
     session.write_session("ds_a", payload)
     got = session.read_session("ds_a")
     assert got == payload
+    # helper の no-leftover: 書込後に固定名/一意名の tmp が残らない。
+    work_dir = dataset_config.get_work_dir("ds_a")
+    assert list(work_dir.glob("*.tmp")) == []
 
 
 def test_read_missing_returns_none(ds_env):

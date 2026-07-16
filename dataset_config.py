@@ -16,7 +16,7 @@ import tomllib
 from pathlib import Path, PureWindowsPath
 
 from common.i18n import tr
-from common.paths import safe_resolve, validate_identifier_name
+from common.paths import atomic_write_text, safe_resolve, validate_identifier_name
 
 CONFIG_FILENAME = "myanalysis.toml"
 
@@ -101,9 +101,7 @@ def set_format(name: str, fmt: str) -> None:
         if not text.endswith("\n"):
             text += "\n"
         text += new_line + "\n"
-    tmp = config_path.with_suffix(".toml.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(config_path)
+    atomic_write_text(config_path, text)
 
 
 def ensure_config(name: str) -> Path:

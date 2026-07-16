@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from common.paths import safe_resolve
+from common.paths import atomic_write_text, safe_resolve
 
 
 def _winfsp_realpath_stub(*_args, **_kwargs):
@@ -58,3 +58,80 @@ def test_safe_resolve_containment_holds_under_failure(monkeypatch, tmp_path):
     # A '..' escape is still caught after lexical normalization.
     escape = base / ".." / "other"
     assert not safe_resolve(escape).is_relative_to(safe_resolve(base))
+
+
+def test_atomic_write_text_writes_and_overwrites(tmp_path):
+    target = tmp_path / "a.json"
+    atomic_write_text(target, "one")
+    assert target.read_text(encoding="utf-8") == "one"
+    atomic_write_text(target, "two")
+    assert target.read_text(encoding="utf-8") == "two"
+
+
+def test_atomic_write_text_leaves_no_tmp(tmp_path):
+    atomic_write_text(tmp_path / "a.json", "payload")
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_text_ignores_stale_fixed_tmp(tmp_path):
+    target = tmp_path / "data.json"
+    fixed = target.with_suffix(".json.tmp")     # 旧パターンが使う固定名 data.json.tmp
+    fixed.write_text("STALE", encoding="utf-8")
+    atomic_write_text(target, "payload")
+    assert target.read_text(encoding="utf-8") == "payload"
+    assert fixed.read_text(encoding="utf-8") == "STALE"   # helper は固定名を触らない＝一意名を使う証明
+
+
+def test_atomic_write_text_replace_failure_keeps_old_and_cleans_tmp(monkeypatch, tmp_path):
+    target = tmp_path / "data.json"
+    target.write_text("OLD", encoding="utf-8")
+    real_replace = os.replace
+
+    def scoped_boom(src, dst):
+        if os.fspath(dst) == os.fspath(target):
+            raise OSError("replace failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", scoped_boom)
+    with pytest.raises(OSError):
+        atomic_write_text(target, "NEW")
+    assert target.read_text(encoding="utf-8") == "OLD"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_text_survives_ghost_eexist(monkeypatch, tmp_path):
+    calls = {"n": 0}
+    real_os_open = os.open
+
+    def flaky(path, flags, mode=0o777):
+        name = os.fspath(path)
+        if name.startswith(str(tmp_path)) and name.endswith(".tmp") and calls["n"] == 0:
+            calls["n"] += 1
+            raise FileExistsError(17, "ghost tmp")   # 最初の .tmp 作成がゴースト衝突
+        return real_os_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", flaky)   # tempfile.mkstemp は同一 os モジュールの os.open を呼ぶ
+    target = tmp_path / "data.json"
+    atomic_write_text(target, "payload")     # mkstemp が別名で取り直して成功
+    assert target.read_text(encoding="utf-8") == "payload"
+    assert calls["n"] == 1
+
+
+def test_atomic_write_text_cleanup_failure_preserves_original_error(monkeypatch, tmp_path):
+    target = tmp_path / "data.json"
+    target.write_text("OLD", encoding="utf-8")
+    real_replace = os.replace
+
+    def scoped_boom(src, dst):
+        if os.fspath(dst) == os.fspath(target):
+            raise RuntimeError("REPLACE_FAILED")   # 元例外（distinct な型で識別）
+        return real_replace(src, dst)
+
+    def boom_unlink(self, *a, **k):
+        raise OSError("UNLINK_FAILED")             # 後始末側の失敗
+
+    monkeypatch.setattr(os, "replace", scoped_boom)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+    with pytest.raises(RuntimeError, match="REPLACE_FAILED"):   # OSError にマスクされない
+        atomic_write_text(target, "NEW")
+    assert target.read_text(encoding="utf-8") == "OLD"

@@ -2,6 +2,7 @@
 import contextlib
 import json
 from common.filelock import exclusive_lock
+from common.paths import atomic_write_text
 import dataset_config
 
 
@@ -35,9 +36,7 @@ def read(dataset: str, name: str) -> dict:
 
 def _write(dataset: str, name: str, data: dict) -> None:
     p = _path(dataset, name, create=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def submit(dataset: str, name: str, kind: str, **fields) -> None:
