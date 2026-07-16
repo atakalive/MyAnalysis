@@ -195,14 +195,6 @@ def _simplify_tool_text(content: str, mode: str) -> str:
     return "\n".join(out)
 
 
-def _close_unterminated_fence(text: str) -> str:
-    """未クローズの ``` code fence があれば描画用に閉じる（保存はしない）。行頭
-    (先頭空白許容) から始まる ``` を数え、奇数なら末尾に閉じフェンスを補う。ライブ
-    描画中に開いたフェンス以降が全部コード化して明滅する現象を抑える簡易ガード。"""
-    fences = sum(1 for ln in text.split("\n") if ln.lstrip(" ").startswith("```"))
-    return text + "\n```" if fences % 2 else text
-
-
 class _StreamWorker(QThread):
     chunk  = Signal(str, str)   # (session_id, text)
     done   = Signal(str)        # (session_id,)
@@ -1375,8 +1367,8 @@ class ChatWidget(QWidget):
         cursor.setBlockFormat(QTextBlockFormat())
         cursor.setCharFormat(QTextCharFormat())
         if body.strip():
-            self._insert_markdown(cursor, _close_unterminated_fence(body))   # 完了時 _append_block(markdown=True) と同一の描画関数
-        turn.rendered = body      # 保存する基準は fence 未補正の生 body（無変化スキップ判定の基準）
+            self._insert_markdown(cursor, body)   # 完了時 _append_block(markdown=True) と同一の描画関数
+        turn.rendered = body      # 直近描画済みの簡略本文（無変化スキップ判定の基準）
         self._scroll_to_bottom()
 
     def _append_system_line(self, text: str) -> None:
