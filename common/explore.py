@@ -3,7 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from common.mount_compat import install as _install_mount_compat
 from common.paths import safe_resolve
+
+_install_mount_compat()  # PIL/matplotlib の realpath(→WinError 1005) をマウント上で救う
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure

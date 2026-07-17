@@ -14,7 +14,10 @@ import socket
 from pathlib import Path
 
 from common.filelock import exclusive_lock
+from common.mount_compat import install as _install_mount_compat
 from common.paths import validate_identifier_name
+
+_install_mount_compat()  # PIL/matplotlib の realpath(→WinError 1005) をマウント上で救う
 
 # ホスト名は照合前に .upper() 済み。先頭は英数字 (非ASCII の文字も可)、以降は
 # 英数字・'_'・'.'・'-'。パス区切り・空白・記号・制御文字は拒否する。

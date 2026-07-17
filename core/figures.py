@@ -1,4 +1,5 @@
 """matplotlib figure primitives. GUI-free; used for batch PNG output."""
+import io
 from pathlib import Path
 from typing import Sequence
 import matplotlib
@@ -7,6 +8,11 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import pandas as pd
 import numpy as np
+
+from common.mount_compat import install as _install_mount_compat
+from common.paths import atomic_write_bytes
+
+_install_mount_compat()  # PIL/matplotlib の realpath(→WinError 1005) をマウント上で救う
 
 
 def trajectory(
@@ -81,7 +87,9 @@ def image_grid(
     fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False)
     for i, (p, t) in enumerate(zip(image_paths, titles)):
         ax = axes[i // ncols][i % ncols]
-        with Image.open(p) as img:
+        # マウント上では PIL に path を渡すと realpath→WinError 1005。逐次読みした
+        # バイト列を BytesIO で渡して realpath を回避する（common.mount_compat 参照）。
+        with Image.open(io.BytesIO(Path(p).read_bytes())) as img:
             arr = np.array(img)
         ax.imshow(arr, cmap=cmap if arr.ndim == 2 else None)
         ax.set_title(t, fontsize=9)
@@ -165,8 +173,18 @@ def bar_sorted(
 
 
 def save(fig: Figure, path: Path | str) -> None:
-    """Save fig to path (parent dirs created) and close it."""
+    """Save fig to path (parent dirs created) and close it.
+
+    In-memory PNG バッファへ描画してから atomic_write_bytes で書く（`fig.savefig(path)`
+    を直接使わない）。matplotlib の PNG 書き出しは PIL.Image.save 経由で、path を渡すと
+    内部の os.path.realpath が rclone/WinFsp マウント上で OSError [WinError 1005] を投げる
+    （common.mount_compat 参照）。BytesIO は path を持たないので PIL は realpath に触れず、
+    得たバイト列は JSON/TOML サイドカーと同じマウント安全な書込経路（一意 tmp + os.replace）
+    を通る。
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=120, bbox_inches="tight")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    atomic_write_bytes(path, buf.getvalue())
     plt.close(fig)

@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import numpy as np
@@ -164,7 +165,9 @@ class ImagePanel(QWidget):
                 raise ImportError(
                     "Pillow is required to load images from a path. Run: pip install Pillow"
                 ) from e
-            arr = np.asarray(PILImage.open(image))
+            # マウント上では PIL に path を渡すと realpath→WinError 1005。逐次読みした
+            # バイト列を BytesIO で渡して realpath を回避する（common.mount_compat 参照）。
+            arr = np.asarray(PILImage.open(io.BytesIO(Path(image).read_bytes())))
             self._view.setImage(arr)
         else:
             raise TypeError(f"unsupported image type: {type(image)!r}")

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from common.paths import atomic_write_text, safe_resolve
+from common.paths import atomic_write_bytes, atomic_write_text, safe_resolve
 
 
 def _winfsp_realpath_stub(*_args, **_kwargs):
@@ -135,3 +135,44 @@ def test_atomic_write_text_cleanup_failure_preserves_original_error(monkeypatch,
     with pytest.raises(RuntimeError, match="REPLACE_FAILED"):   # OSError にマスクされない
         atomic_write_text(target, "NEW")
     assert target.read_text(encoding="utf-8") == "OLD"
+
+
+# ---- atomic_write_bytes（PNG 等バイナリ出力用・atomic_write_text のバイナリ版） ----
+
+def test_atomic_write_bytes_writes_and_overwrites(tmp_path):
+    target = tmp_path / "a.png"
+    atomic_write_bytes(target, b"\x89PNG-one")
+    assert target.read_bytes() == b"\x89PNG-one"
+    atomic_write_bytes(target, b"two")
+    assert target.read_bytes() == b"two"
+
+
+def test_atomic_write_bytes_leaves_no_tmp(tmp_path):
+    atomic_write_bytes(tmp_path / "a.png", b"payload")
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_bytes_ignores_stale_fixed_tmp(tmp_path):
+    target = tmp_path / "img.png"
+    fixed = target.with_suffix(".png.tmp")          # 旧パターンが使う固定名 img.png.tmp
+    fixed.write_bytes(b"STALE")
+    atomic_write_bytes(target, b"payload")
+    assert target.read_bytes() == b"payload"
+    assert fixed.read_bytes() == b"STALE"           # helper は固定名を触らない＝一意名を使う証明
+
+
+def test_atomic_write_bytes_replace_failure_keeps_old_and_cleans_tmp(monkeypatch, tmp_path):
+    target = tmp_path / "img.png"
+    target.write_bytes(b"OLD")
+    real_replace = os.replace
+
+    def scoped_boom(src, dst):
+        if os.fspath(dst) == os.fspath(target):
+            raise OSError("replace failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", scoped_boom)
+    with pytest.raises(OSError):
+        atomic_write_bytes(target, b"NEW")
+    assert target.read_bytes() == b"OLD"
+    assert list(tmp_path.glob("*.tmp")) == []

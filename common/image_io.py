@@ -18,11 +18,16 @@ Design notes:
 """
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from common.mount_compat import install as _install_mount_compat
+
+_install_mount_compat()  # PIL の realpath(→WinError 1005) をマウント上で救う
 
 
 @dataclass(frozen=True)
@@ -181,7 +186,9 @@ def _load_pil(p: Path) -> tuple[np.ndarray, ImageMeta]:
         raise ImportError(
             "Pillow is required to load images from a path. Run: pip install Pillow"
         ) from e
-    img = PILImage.open(p)
+    # マウント上では PIL に path を渡すと realpath→WinError 1005。逐次読みしたバイト列を
+    # BytesIO で渡して realpath を回避する（common.mount_compat 参照）。
+    img = PILImage.open(io.BytesIO(p.read_bytes()))
     mode = img.mode
     gray_modes = {"1", "L", "LA", "I", "F"}
     is_gray = mode in gray_modes or mode.startswith("I;16")

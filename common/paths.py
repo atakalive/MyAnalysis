@@ -141,3 +141,37 @@ def atomic_write_text(path, text: str, *, encoding: str = "utf-8") -> None:
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_bytes(path, data: bytes) -> None:
+    """atomic_write_text のバイナリ版（一意 tmp + os.replace）。
+
+    PNG 等のバイナリ出力を rclone/WinFsp マウント上へ安全に書くための chokepoint。
+    matplotlib/PIL に直接パスを渡すと Image.save → os.path.realpath で WinError 1005 に
+    なるため（common.mount_compat 参照）、呼び出し側は BytesIO へ描画してから生バイトを
+    ここへ渡す。tempfile.mkstemp の一意名 + os.replace はマウント上で動作実績があり
+    （Issue #69）、固定名 tmp のゴースト衝突も起きない。write は逐次バイト書き込みのみで
+    realpath を経由しない。例外安全（fd 所有権追跡・tmp の best-effort 掃除で元例外を
+    マスクしない）は atomic_write_text と同一。
+    """
+    path = Path(path)
+    fd = None
+    tmp = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        f = os.fdopen(fd, "wb")                      # 成功で f が fd を所有
+        fd = None                                   # 所有権が f に移った
+        with f:                                     # write の成否に関わらず f が fd を閉じる
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:                          # fdopen 前に失敗 → fd は未クローズ
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp is not None:                         # 自分の tmp は残さない（掃除失敗で元例外を隠さない）
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        raise
