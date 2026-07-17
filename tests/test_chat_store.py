@@ -287,6 +287,33 @@ def test_new_session():
     assert sess.messages[0].content == "SYSTEM"
 
 
+# ---- draft: per-tab 未送信下書き（in-memory のみ／非永続） ----
+
+
+def test_session_draft_defaults_empty():
+    assert _sample_session().draft == ""
+
+
+def test_session_draft_not_persisted():
+    """draft は composer の一時状態なのでディスクに出さない: to_dict に載らず、
+    reload しても復活しない（永続化するのは messages/order/tool_display まで）。"""
+    sess = _sample_session()
+    sess.draft = "unsent text"
+    d = session_to_dict(sess)
+    assert "draft" not in d
+    assert session_from_dict(d).draft == ""
+
+
+def test_session_draft_does_not_break_disk_roundtrip(tmp_path):
+    """非永続なので、下書きの有無に関わらずディスク往復は等値のまま。"""
+    sess = _sample_session()
+    sess.draft = "unsent text"
+    write_session_file(tmp_path, sess)
+    loaded = read_session_file(tmp_path / "chat_sessions" / f"{sess.id}.json")
+    assert loaded.draft == ""
+    assert loaded == _sample_session()
+
+
 # ---- tool_display (Issue #35) ----
 
 

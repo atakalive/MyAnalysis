@@ -42,6 +42,11 @@ class ChatSession:
     updated: float
     order: float = 0.0  # explicit tab position; persisted, lower = leftmost
     tool_display: str | None = None  # per-session display override; None = follow default
+    # Per-tab unsent composer text. Deliberately NOT persisted: session_to_dict
+    # omits it and session_from_dict never reads it, so a draft lives only as
+    # long as the process. Kept on the session (not a side dict) so deleting a
+    # session drops its draft with it.
+    draft: str = ""
 
 
 # ----- Message ⇄ dict -----

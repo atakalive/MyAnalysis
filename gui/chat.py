@@ -10,7 +10,9 @@ from typing import Callable
 
 from common.i18n import tr
 
-from PySide6.QtCore import Qt, QSignalBlocker, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    Qt, QByteArray, QSignalBlocker, QThread, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (
     QActionGroup, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
@@ -18,7 +20,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QTextBrowser, QToolButton,
+    QPlainTextEdit, QPushButton, QSplitter, QTextBrowser, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -69,6 +71,21 @@ def _save_chat_zoom(n: int) -> None:
     Goes through the shared ui_prefs update helper (atomic, best-effort)."""
     from llm_bridge.paths import update_ui_pref
     update_ui_pref("chat_zoom", n)
+
+
+def _load_chat_split() -> str:
+    """Read the persisted log/input splitter geometry (QSplitter.saveState hex).
+    Returns "" on any problem. Must never raise."""
+    from llm_bridge.paths import read_ui_pref
+    v = read_ui_pref("chat_io_split", "")
+    return v if isinstance(v, str) else ""
+
+
+def _save_chat_split(hexstate: str) -> None:
+    """Persist the log/input splitter geometry into ui_prefs.json, preserving
+    sibling keys (atomic, best-effort)."""
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_io_split", hexstate)
 
 
 _TOOL_DISPLAY_MODES = frozenset({"full", "compact", "hidden"})
@@ -345,13 +362,26 @@ class ChatWidget(QWidget):
         self._log.setOpenExternalLinks(True)
         self._log.setOpenLinks(False)
         self._log.anchorClicked.connect(self._on_anchor_clicked)
-        layout.addWidget(self._log, stretch=1)
 
         self._input = QPlainTextEdit()
         self._input.setPlaceholderText(tr("chat.input.placeholder"))
-        self._input.setFixedHeight(80)
+        self._input.setMinimumHeight(40)
         self._input.installEventFilter(self)
-        layout.addWidget(self._input)
+
+        # ----- 履歴/入力の境界をドラッグでリサイズ（送信ボタン行は splitter の外） -----
+        self._io_split = QSplitter(Qt.Orientation.Vertical)
+        self._io_split.setChildrenCollapsible(False)   # ドラッグで 0 高に潰さない
+        self._io_split.addWidget(self._log)
+        self._io_split.addWidget(self._input)
+        self._io_split.setStretchFactor(0, 1)          # 余白は履歴側へ
+        self._io_split.setStretchFactor(1, 0)          # 入力は既定サイズを維持
+        layout.addWidget(self._io_split, stretch=1)
+        # 復元は splitterMoved 接続より前に行う（プログラム的な設定で保存を誘発しない）。
+        # restoreState は不正データで False を返すだけ（例外は投げない）→ 初期比へフォールバック。
+        _st = _load_chat_split()
+        if not (_st and self._io_split.restoreState(QByteArray.fromHex(bytes(_st, "ascii")))):
+            self._io_split.setSizes([300, 80])
+        self._io_split.splitterMoved.connect(self._on_io_split_moved)
 
         row = QHBoxLayout()
         self._status = QLabel("")
@@ -428,6 +458,11 @@ class ChatWidget(QWidget):
 
     def _save_zoom(self) -> None:
         _save_chat_zoom(self._zoom)
+
+    def _on_io_split_moved(self, *_) -> None:
+        """ユーザーが履歴/入力の境界をドラッグしたら比率を永続化する。
+        saveState は相対比を持つのでドック寸法が変わっても復元できる。"""
+        _save_chat_split(bytes(self._io_split.saveState().toHex()).decode("ascii"))
 
     def _render_active_preserving_status(self) -> None:
         """ズーム・ツール表示モード切替の再描画用。usage/コスト行は status ラベルに
@@ -515,9 +550,12 @@ class ChatWidget(QWidget):
         sess = self._session_by_id(sid)
         if sess is None:
             return
+        prev_id = self._active.id
+        self._commit_draft()
         self._active = sess
         self._rebuild_tab_bar()
         self._render_session(sess)
+        self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
     # ----- persistence accessors -----
@@ -746,15 +784,38 @@ class ChatWidget(QWidget):
                 return s
         return None
 
+    # ----- per-tab draft (composer はアクティブセッションに紐づく) -----
+
+    def _commit_draft(self) -> None:
+        """切替前に、現 composer の内容を今のアクティブセッションへ退避する。
+        必ず `self._active` を直に見るので、呼び出し側が `_active` をどう再代入して
+        いても「退避先＝退避時点の active」で常に正しい。"""
+        if self._active is not None:
+            self._active.draft = self._input.toPlainText()
+
+    def _switch_active_composer(self, prev_id: str) -> None:
+        """`_active` 再代入後に、新アクティブの下書きを composer へ読込む。
+
+        id が実際に変わった時だけ読込む: 同一セッションへの no-op 切替（同じタブの
+        再選択、active を変えなかった dataset 切替 / merge）でライブ composer を
+        stale な draft で潰さないため。merge が同一 id を別インスタンスへ差し替えた
+        場合も id は不変 → 読込スキップ → composer 保持（次の退避で新インスタンス
+        へ載る）。getattr は hot-reload patch 後の draft 無し旧インスタンス対策。"""
+        if self._active.id != prev_id:
+            self.set_input_draft(getattr(self._active, "draft", "") or "")
+
     def _on_switch_session(self, index: int) -> None:
         if index < 0:
             return
         sess = self._session_by_id(self._tab_bar.tabData(index))
         if sess is None:
             return
+        prev_id = self._active.id
+        self._commit_draft()
         self._active = sess
         self._last_active_by_ds[self._current_dataset] = sess.id
         self._render_session(sess)
+        self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
     def _on_tab_moved(self, *_) -> None:
@@ -781,6 +842,8 @@ class ChatWidget(QWidget):
         self._mark_chat_dirty()
 
     def _on_new_session(self) -> None:
+        prev_id = self._active.id
+        self._commit_draft()
         sess = chat_store.new_session(
             self._backend.name, _SYSTEM_PROMPT, dataset=self._current_dataset
         )
@@ -788,6 +851,7 @@ class ChatWidget(QWidget):
         self._active = sess
         self._rebuild_tab_bar()
         self._render_session(sess)
+        self._switch_active_composer(prev_id)   # 新規タブは draft="" → composer クリア
         self._update_turn_ui()
 
     # ----- fork / edit (Issue #63) -----
@@ -822,14 +886,9 @@ class ChatWidget(QWidget):
                 return
         else:
             return
-        # 共有ドラフト保護: 未送信の下書きがあれば破棄を確認（edit=prefill 上書き /
-        # fork=空化 のどちらも composer を置換するため両方に適用）。
-        if self.input_draft().strip():
-            reply = QMessageBox.question(
-                self, tr("dlg.branch.title"), tr("chat.edit.overwrite_draft")
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        # 下書きは per-tab（_fork_from 冒頭の _commit_draft で分岐元へ退避される）ため、
+        # 分岐で composer を置換しても分岐元の未送信テキストは失われない。かつて共有
+        # composer を守っていた破棄確認は不要になったので置かない。
         if action == "edit":
             self._fork_from(self._active, cut=index, prefill=msg.content)
         else:
@@ -837,6 +896,10 @@ class ChatWidget(QWidget):
 
     def _fork_from(self, src: ChatSession, *, cut: int, prefill: str | None) -> None:
         """src.messages[:cut] をコピーした新タブへ分岐し、切替＋composer 設定する。"""
+        # 分岐元(=現 active=src)の未送信下書きを退避してから composer を prefill で
+        # 置き換える。末尾の set_input_draft が新タブ側の composer 読込を兼ねるので
+        # _switch_active_composer は呼ばない。
+        self._commit_draft()
         suffix = tr("chat.fork.title_suffix")
         if src.title == chat_store._DEFAULT_TITLE:
             title = chat_store._DEFAULT_TITLE          # 未命名は据え置き → 次送信で auto-title
@@ -942,6 +1005,9 @@ class ChatWidget(QWidget):
             if hasattr(turn.backend, "cancel"):
                 turn.backend.cancel()
             turn.kill_timer.start(2000)
+        # 削除される側の下書きは道連れで良いので _commit_draft は呼ばない。id ガードで
+        # 「アクティブ削除→残タブの下書きを読込」「非アクティブ削除→composer 保持」。
+        prev_id = self._active.id
         self._sessions.remove(sess)
         if sess.dataset is not None:
             # Defer physical delete to save_all via a tombstone.
@@ -972,6 +1038,7 @@ class ChatWidget(QWidget):
         self._pending_remote.pop(sess.id, None)
         self._rebuild_tab_bar()
         self._render_session(self._active)
+        self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
     # ----- dataset binding -----
@@ -979,6 +1046,8 @@ class ChatWidget(QWidget):
     def set_current_dataset(self, ds: str | None) -> None:
         """Called from the window when the active analysis tab's dataset changes.
         Adopts a history-bearing scratch session and re-selects a visible one."""
+        prev_id = self._active.id
+        self._commit_draft()
         # Record what the outgoing dataset had open before leaving it. This single
         # choke-point catches every way `_active` can change (tab switch, new,
         # fork, remote select), so coming back re-selects that same session.
@@ -998,10 +1067,13 @@ class ChatWidget(QWidget):
         self._sync_active_to_visible()
         self._rebuild_tab_bar()
         self._render_session(self._active)
+        self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
     def merge_dataset_sessions(self, dataset: str, incoming: list) -> None:
         """Merge sessions loaded from `dataset`'s work_dir into the pool."""
+        prev_id = self._active.id
+        self._commit_draft()
         # Stamp each with the owning dataset (file location is the truth).
         for s in incoming:
             s.dataset = dataset
@@ -1020,6 +1092,7 @@ class ChatWidget(QWidget):
             # Newly merged-in chats should hide a stray blank and take focus.
             self._sync_active_to_visible()
             self._rebuild_tab_bar()
+            self._switch_active_composer(prev_id)
 
     # ----- send / receive -----
 
@@ -1030,6 +1103,7 @@ class ChatWidget(QWidget):
         if not text.strip():
             return
         self._input.clear()
+        self._active.draft = ""   # 送信済みテキストが後の退避/読込で復活しないように
         # Live-reference the current dataset from the window so a late
         # session_spec assignment (currentChanged fired before spec was set)
         # can't leave us with a stale cached _current_dataset.

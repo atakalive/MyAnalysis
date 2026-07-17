@@ -800,30 +800,26 @@ def test_fork_title_suffix_not_doubled(widget):
     assert widget._active.title == "my chat" + suffix
 
 
-def test_draft_protection_no_discards(widget, monkeypatch):
+def test_edit_preserves_source_draft(widget, monkeypatch):
+    """下書きが per-tab になったので、分岐は分岐元の未送信テキストを破棄しない
+    → かつての破棄確認ダイアログは廃止。確認なしで分岐し、src.draft は保持される。"""
     from gui.chat import QMessageBox
 
-    _make_active_with_messages(widget, dataset="ds")
-    widget.set_input_draft("unsent")
-    before = len(widget._sessions)
+    # 確認ダイアログが復活したら（No で分岐が阻止され）このテストが落ちるように、
+    # question は常に No を返すようにしておく。
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
     )
-    widget._handle_chat_action("edit", 3)
-    assert len(widget._sessions) == before
-
-
-def test_draft_protection_yes_proceeds(widget, monkeypatch):
-    from gui.chat import QMessageBox
-
-    _make_active_with_messages(widget, dataset="ds")
+    src = _make_active_with_messages(widget, dataset="ds")
     widget.set_input_draft("unsent")
     before = len(widget._sessions)
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
-    )
-    widget._handle_chat_action("edit", 3)
+
+    widget._handle_chat_action("edit", 3)  # user u2
+
     assert len(widget._sessions) == before + 1
+    assert widget._active is not src
+    assert widget.input_draft() == "u2"     # 新タブは prefill
+    assert src.draft == "unsent"            # 分岐元の下書きは保持される
 
 
 def test_edit_scratch_first_message_visible(widget):
@@ -875,6 +871,189 @@ def test_action_in_flight_guard(widget):
     widget._handle_chat_action("edit", 3)
     assert len(widget._sessions) == before
     del widget._turns[src.id]
+
+
+# ---- per-tab draft: composer はタブに紐づく ----
+
+
+def _add_scratch(widget, title):
+    from llm_bridge import chat_store
+
+    sess = chat_store.new_session("mock", "sys", dataset=None, title=title)
+    widget._sessions.append(sess)
+    widget._rebuild_tab_bar()
+    return sess
+
+
+def test_draft_is_per_tab(widget):
+    """A に書きかけのままタブ切替 → B は空。戻ると A の下書きが復元し、B も自分の
+    下書きを保持する（タブ間で別々の内容を自在なタイミングで送れる）。"""
+    a = widget._active
+    b = _add_scratch(widget, "B")
+
+    widget.set_input_draft("draft A")
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, b))  # → _on_switch_session
+    assert widget._active is b
+    assert widget.input_draft() == ""
+
+    widget.set_input_draft("draft B")
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, a))
+    assert widget._active is a
+    assert widget.input_draft() == "draft A"
+
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, b))
+    assert widget.input_draft() == "draft B"
+
+
+def test_switch_to_same_tab_keeps_live_composer(widget):
+    """同一タブの再選択で、まだ退避していないライブ composer を潰さない。"""
+    a = widget._active
+    widget.set_input_draft("typing...")
+    widget._on_switch_session(_tab_index_for(widget, a))
+    assert widget.input_draft() == "typing..."
+
+
+def test_new_session_clears_composer_and_keeps_old_draft(widget):
+    a = widget._active
+    widget.set_input_draft("draft A")
+    widget._on_new_session()
+    assert widget._active is not a
+    assert widget.input_draft() == ""     # 新規タブは空
+    assert a.draft == "draft A"           # 旧タブの下書きは退避済み
+
+
+def test_send_clears_active_draft(widget, monkeypatch):
+    """送信したテキストが後の退避/読込で復活しないこと。"""
+    monkeypatch.setattr(widget, "_start_turn", lambda *a, **k: None)
+    widget.set_input_draft("hello")
+    widget._on_send()
+    assert widget.input_draft() == ""
+    assert widget._active.draft == ""
+
+
+def test_delete_nonactive_tab_keeps_live_composer(widget, monkeypatch):
+    from gui.chat import QMessageBox
+
+    a = widget._active
+    b = _add_scratch(widget, "B")
+    widget.set_input_draft("typing in A")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    widget._on_delete_session(_tab_index_for(widget, b))
+    assert widget._active is a
+    assert widget.input_draft() == "typing in A"
+
+
+def test_delete_active_tab_loads_remaining_draft(widget, monkeypatch):
+    from gui.chat import QMessageBox
+
+    a = widget._active
+    b = _add_scratch(widget, "B")
+    # A に下書きを残してから B へ移り、B をアクティブのまま削除する。
+    widget.set_input_draft("draft A")
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, b))
+    widget.set_input_draft("draft B (doomed)")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    widget._on_delete_session(_tab_index_for(widget, b))
+    assert widget._active is a
+    assert widget.input_draft() == "draft A"   # 残ったタブの下書きが読込まれる
+
+
+def test_dataset_switch_preserves_per_tab_drafts(widget):
+    """DS 切替でも下書きはタブに残る（#51 の DS 別セッション群と両立）。"""
+    from llm_bridge import chat_store
+    from llm_backend.base import Message
+
+    a = chat_store.new_session("mock", "sys", dataset="A", title="chatA")
+    a.messages.append(Message(role="user", content="hi"))
+    b = chat_store.new_session("mock", "sys", dataset="B", title="chatB")
+    b.messages.append(Message(role="user", content="yo"))
+    widget._sessions = [a, b]
+    widget._active = a
+    widget._current_dataset = "A"
+    widget._rebuild_tab_bar()
+
+    widget.set_input_draft("draft for A")
+    widget.set_current_dataset("B")
+    assert widget._active is b
+    assert widget.input_draft() == ""
+    widget.set_input_draft("draft for B")
+
+    widget.set_current_dataset("A")
+    assert widget._active is a
+    assert widget.input_draft() == "draft for A"
+    assert b.draft == "draft for B"
+
+
+# ---- 履歴/入力のリサイズ（縦 QSplitter） ----
+
+
+def test_log_and_input_share_a_vertical_splitter(widget):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QSplitter
+
+    assert isinstance(widget._io_split, QSplitter)
+    assert widget._io_split.orientation() == Qt.Orientation.Vertical
+    assert widget._io_split.count() == 2
+    assert widget._log.parent() is widget._io_split
+    assert widget._input.parent() is widget._io_split
+    # 潰れ防止: どちらのペインもドラッグで 0 高にできない
+    assert widget._io_split.childrenCollapsible() is False
+
+
+def test_input_height_is_resizable_not_fixed(widget):
+    """setFixedHeight(80) 廃止の担保: 入力欄の高さは splitter で可変。"""
+    assert widget._input.minimumHeight() < widget._input.maximumHeight()
+
+
+def test_splitter_move_persists_state(widget, monkeypatch):
+    import llm_bridge.paths as paths
+
+    saved = {}
+    monkeypatch.setattr(paths, "update_ui_pref",
+                        lambda k, v: saved.__setitem__(k, v))
+    widget._on_io_split_moved()
+    assert "chat_io_split" in saved
+    assert isinstance(saved["chat_io_split"], str) and saved["chat_io_split"]
+
+
+def test_splitter_state_hex_roundtrip(widget):
+    """保存(_on_io_split_moved)↔復元(__init__)で使う hex エンコードの往復が成立する
+    ＝保存した比率を restoreState が受理する。"""
+    from PySide6.QtCore import QByteArray
+
+    widget._io_split.setSizes([500, 100])
+    hexstate = bytes(widget._io_split.saveState().toHex()).decode("ascii")
+    ok = widget._io_split.restoreState(QByteArray.fromHex(bytes(hexstate, "ascii")))
+    assert ok is True
+
+
+def test_load_chat_split_invalid_types_never_raise(monkeypatch):
+    """手編集/破損した ui_prefs の chat_io_split がどんな型でも "" に正規化される。"""
+    import llm_bridge.paths as paths
+    from gui.chat import _load_chat_split
+
+    for bad in ([], {}, ["x"], {"x": 1}, 0, 1.5, True, None):
+        monkeypatch.setattr(paths, "read_ui_pref", lambda *a, _b=bad, **k: _b)
+        assert _load_chat_split() == ""
+    monkeypatch.setattr(paths, "read_ui_pref", lambda *a, **k: "abc")
+    assert _load_chat_split() == "abc"
+
+
+def test_bad_saved_split_state_falls_back_to_defaults(qapp, monkeypatch):
+    """非 hex / 途中で切れた state でも例外を投げず、2 ペイン構成で立ち上がる。"""
+    import llm_bridge.paths as paths
+    from gui.chat import ChatWidget
+
+    for bad in ("zzzz", "6e6f74616", "deadbeef"):
+        monkeypatch.setattr(paths, "read_ui_pref",
+                            lambda k, d=None, _b=bad: _b if k == "chat_io_split" else d)
+        w = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)   # must not raise
+        assert w._io_split.count() == 2
+        assert all(s > 0 for s in w._io_split.sizes())
 
 
 def test_anchor_clicked_routes_chataction(widget, monkeypatch):
