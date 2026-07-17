@@ -289,7 +289,60 @@ def test_nonactive_history_scratch_visible_with_bound_chats(widget):
     assert c1.id in vis_ids
 
 
-# ---- _simplify_tool_text (Issue #35, pure function — Qt not required) ----
+# ---- per-dataset last-active chat session (Issue #74) ----
+
+
+def test_dataset_switch_restores_last_active_session(widget):
+    """Switching datasets returns to the session last open in each, not the first.
+
+    Bound sessions are always visible (no history needed), so A shows [A1, A2].
+    """
+    from llm_bridge import chat_store
+
+    a1 = chat_store.new_session("mock", "sys", dataset="A", title="A1")
+    a2 = chat_store.new_session("mock", "sys", dataset="A", title="A2")
+    b1 = chat_store.new_session("mock", "sys", dataset="B", title="B1")
+    widget._sessions = [a1, a2, b1]
+    widget._active = a1
+    widget._current_dataset = "A"
+    widget._rebuild_tab_bar()
+
+    # User selects A2 (drives the real currentChanged -> _on_switch_session path).
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, a2))
+    assert widget._active is a2
+
+    # B has no memory yet -> its only/first session.
+    widget.set_current_dataset("B")
+    assert widget._active is b1
+
+    # Back to A: restores A2, NOT the first session A1.
+    widget.set_current_dataset("A")
+    assert widget._active is a2
+
+    # B remembers b1 as its last-active too.
+    widget.set_current_dataset("B")
+    assert widget._active is b1
+
+
+def test_dataset_switch_falls_back_when_remembered_session_gone(widget):
+    """A remembered session that is no longer visible must not be resurrected —
+    the switch falls back to the first visible session."""
+    from llm_bridge import chat_store
+
+    a1 = chat_store.new_session("mock", "sys", dataset="A", title="A1")
+    a2 = chat_store.new_session("mock", "sys", dataset="A", title="A2")
+    b1 = chat_store.new_session("mock", "sys", dataset="B", title="B1")
+    widget._sessions = [a1, a2, b1]
+    widget._active = a1
+    widget._current_dataset = "A"
+    widget._rebuild_tab_bar()
+
+    widget._tab_bar.setCurrentIndex(_tab_index_for(widget, a2))
+    widget.set_current_dataset("B")          # remembers A -> a2
+
+    widget._sessions = [a1, b1]              # a2 disappears (e.g. deleted/synced away)
+    widget.set_current_dataset("A")
+    assert widget._active is a1
 
 CALL_A = "🔧 read_file  path=a.py"
 RES_A = "   ↳ ok"

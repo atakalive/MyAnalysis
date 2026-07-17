@@ -305,6 +305,11 @@ class ChatWidget(QWidget):
         ]
         self._active: ChatSession = self._sessions[0]
         self._current_dataset: str | None = None
+        # Per-dataset memory of the last-active session id. Analysis tabs get this
+        # for free (one _DatasetGroup per dataset holds its own currentIndex); the
+        # chat is a single shared widget, so switching datasets would otherwise
+        # always land on the first session instead of the one left open there.
+        self._last_active_by_ds: dict[str | None, str] = {}
         self._deleted: set[tuple[str, str]] = set()
         self._turns: dict[str, _Turn] = {}
         self._session_backends: dict[str, LLMBackend] = {}
@@ -592,15 +597,27 @@ class ChatWidget(QWidget):
         return [s for s in matched if s.dataset == ds or self._has_history(s)]
 
     def _sync_active_to_visible(self) -> None:
-        """Make `self._active` a visible session for the current dataset. Pick the
-        first visible one if the active is hidden; create a single blank only when
-        nothing at all is visible (the zero-tabs case). Must NOT be called from
-        delete, where `self._active` may still point at a just-removed session."""
+        """Make `self._active` a visible session for the current dataset. When the
+        active is hidden (a dataset switch), restore this dataset's last-active
+        session, else fall back to the first visible one; create a single blank
+        only when nothing at all is visible (the zero-tabs case). Must NOT be
+        called from delete, where `self._active` may still point at a just-removed
+        session."""
         vis = self._visible_sessions()
         if not vis:
             self._active = self._acquire_blank_session()
-        elif all(s.id != self._active.id for s in vis):
-            self._active = vis[0]
+            return
+        if any(s.id == self._active.id for s in vis):
+            return
+        # The remembered id is honoured only while still visible here, so one that
+        # was deleted or adopted away falls through to the first visible session.
+        remembered = self._last_active_by_ds.get(self._current_dataset)
+        if remembered is not None:
+            for s in vis:
+                if s.id == remembered:
+                    self._active = s
+                    return
+        self._active = vis[0]
 
     # ----- tool-call display mode -----
 
@@ -736,6 +753,7 @@ class ChatWidget(QWidget):
         if sess is None:
             return
         self._active = sess
+        self._last_active_by_ds[self._current_dataset] = sess.id
         self._render_session(sess)
         self._update_turn_ui()
 
@@ -961,6 +979,10 @@ class ChatWidget(QWidget):
     def set_current_dataset(self, ds: str | None) -> None:
         """Called from the window when the active analysis tab's dataset changes.
         Adopts a history-bearing scratch session and re-selects a visible one."""
+        # Record what the outgoing dataset had open before leaving it. This single
+        # choke-point catches every way `_active` can change (tab switch, new,
+        # fork, remote select), so coming back re-selects that same session.
+        self._last_active_by_ds[self._current_dataset] = self._active.id
         self._current_dataset = ds
         # Adoption: a history-bearing scratch session takes on the current ds.
         # Skip if a turn is in-flight — don't bind a generating session to an
