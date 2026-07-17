@@ -410,7 +410,7 @@ def test_show_figure2_does_not_clobber_primary_spec(
 def _ds71_env(monkeypatch, tmp_path):
     import config
     import dataset_config
-    from llm_bridge import session
+    from llm_bridge import paths, session
     monkeypatch.setattr(config, "DATASETS", {"myds": {}})
     monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
     monkeypatch.setattr(config, "reload_datasets", lambda *a, **k: None)
@@ -418,6 +418,18 @@ def _ds71_env(monkeypatch, tmp_path):
         dataset_config, "get_work_dir", lambda name, create=True: tmp_path
     )
     monkeypatch.setattr(session, "_touched", set())
+    # Hermetic: redirect all PC-local app state (last_window/recent_datasets/
+    # ui_prefs …) under tmp_path so save_all / open_dataset / ToolWindow init do
+    # NOT write to the real repo data/llm_state. Every paths.*_path() derives from
+    # global_state_dir(), so patching this one function covers them all — same
+    # flavour as tests/test_hotreload_qt.py / test_i18n_gui.py (reviewer code P1).
+    llm_state = tmp_path / "llm_state"
+
+    def _fake_global_state_dir():
+        llm_state.mkdir(parents=True, exist_ok=True)
+        return llm_state
+
+    monkeypatch.setattr(paths, "global_state_dir", _fake_global_state_dir)
 
 
 def _fresh_window(qapp):
