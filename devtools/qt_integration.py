@@ -507,7 +507,15 @@ class HotReloadController(QObject):
         tool_path = str(repo_root() / "tool.py")
         kwargs: dict = {}
         if sys.platform == "win32":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            # windowless 起動（run.bat の pythonw）は再起動も窓なしに保つ。
+            # pythonw に CREATE_NEW_CONSOLE を渡すと使われない空コンソールが
+            # 残ってしまうため、pythonw 起動時は CREATE_NO_WINDOW を使う。
+            # debug 起動（python.exe）は従来どおり新コンソールを開く。
+            if sys.executable.lower().endswith("pythonw.exe"):
+                flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            else:
+                flag = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+            kwargs["creationflags"] = flag
         subprocess.Popen([sys.executable, tool_path, "--resume-session"], **kwargs)
         window._close_all_floats()  # re-dock floats (#56); after Popen, before clear_dirty
         window.clear_session_dirty()  # avoid the closeEvent save prompt

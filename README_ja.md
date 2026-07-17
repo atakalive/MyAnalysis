@@ -38,10 +38,11 @@ LLM チャットを使わない場合でも GUI 自体は起動します（`.env
 ## 起動方法
 
 ```bash
-# Windows: ダブルクリックでも可。.venv があれば自動で activate して tool.py を実行
+# Windows: ダブルクリックでも可。.venv を activate し、pythonw で windowless 起動
+# （コンソールを残さない）。エラーを見たいときは `python tool.py` を直接実行。
 run.bat
 
-# 直接起動
+# 直接起動（コンソール付き。起動エラー/トレースバックを見たいときはこちら）
 python tool.py
 python tool.py --demo            # 合成データで全パネル種別を表示する検証用タブ付き
 python tool.py --resume-session  # リロード manifest からウィンドウ/タブ/チャットを復元（主にホットリロード用）
@@ -56,7 +57,7 @@ GUI 本体は [tool.py](tool.py)（PySide6）。
 | パス | 役割 |
 |---|---|
 | [tool.py](tool.py) | GUI エントリポイント（`QApplication` + `ToolWindow` 起動） |
-| [run.bat](run.bat) | Windows 用ランチャ（`.venv` activate → `python tool.py`） |
+| [run.bat](run.bat) | Windows 用ランチャ（`.venv` activate → windowless `pythonw tool.py`） |
 | [config.py](config.py) | データセット登録簿。`DATASETS`（dataset 名 → {ホスト名: フルパス}） |
 | [dataset_config.py](dataset_config.py) | データセット個別設定（`myanalysis.toml`）の読み書き |
 | [common/](common/) | 共有ユーティリティ（`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`） |

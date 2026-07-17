@@ -38,10 +38,11 @@ The GUI itself starts even without these files — the chat simply has no config
 ## Launching
 
 ```bash
-# Windows: double-click also works. Activates .venv if present, then runs tool.py
+# Windows: double-click also works. Activates .venv if present, then launches the
+# GUI windowless via pythonw (no lingering console). Use `python tool.py` to see errors.
 run.bat
 
-# Direct
+# Direct (keeps a console — use this to see startup errors / tracebacks)
 python tool.py
 python tool.py --demo            # Adds a synthetic demo tab exercising every panel type
 python tool.py --resume-session  # Restore window/tabs/chat from the reload manifest (mainly for hot-reload)
@@ -56,7 +57,7 @@ The GUI entry point is [tool.py](tool.py) (PySide6).
 | Path | Role |
 |---|---|
 | [tool.py](tool.py) | GUI entry point (`QApplication` + `ToolWindow`) |
-| [run.bat](run.bat) | Windows launcher (activate `.venv` → `python tool.py`) |
+| [run.bat](run.bat) | Windows launcher (activate `.venv` → windowless `pythonw tool.py`) |
 | [config.py](config.py) | Dataset registry: `DATASETS` (dataset name → {hostname: full path}) |
 | [dataset_config.py](dataset_config.py) | Reads/writes per-dataset settings (`myanalysis.toml`) |
 | [common/](common/) | Shared utilities (`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`) |
