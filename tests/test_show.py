@@ -403,3 +403,196 @@ def test_show_figure2_does_not_clobber_primary_spec(
     win.dispatch_command("show", path=str(png_path2), name="viewer", slot="right")
     assert tab.session_spec["figure"] == str(png_path.resolve())
     assert tab.session_spec["dataset"] == "ds"
+
+
+# ---- Issue #71: split layout / figure2 session round-trip (GUI) ----
+
+def _ds71_env(monkeypatch, tmp_path):
+    import config
+    import dataset_config
+    from llm_bridge import session
+    monkeypatch.setattr(config, "DATASETS", {"myds": {}})
+    monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
+    monkeypatch.setattr(config, "reload_datasets", lambda *a, **k: None)
+    monkeypatch.setattr(
+        dataset_config, "get_work_dir", lambda name, create=True: tmp_path
+    )
+    monkeypatch.setattr(session, "_touched", set())
+
+
+def _fresh_window(qapp):
+    from gui.window import ToolWindow
+    from llm_bridge import _make_show_handler, _make_show_image_handler
+    w = ToolWindow()
+    w.register_command("show", _make_show_handler(w))
+    w.register_command("show-image", _make_show_image_handler(w))
+    return w
+
+
+def test_figure_split_roundtrip(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from gui.panels import FigurePanel
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    a = tmp_path / "a.png"; QPixmap(10, 10).save(str(a))
+    b = tmp_path / "b.png"; QPixmap(10, 10).save(str(b))
+
+    w1 = _fresh_window(qapp)
+    w1.dispatch_command("show", path=str(a), name="viewer", dataset="myds")
+    w1.dispatch_command("show", path=str(b), name="viewer", slot="right")
+    tab1 = w1.active_tab()
+    tab1._splitter.setSizes([700, 300])
+    saved, failed = session.save_all(w1)
+    assert "myds" in saved and not failed
+
+    data = session.read_session("myds")
+    entry = data["tabs"][0]
+    assert entry["figure2"] == "b.png"
+    assert entry["layout"]["orientation"] == "horizontal"
+
+    w2 = _fresh_window(qapp)
+    assert session.open_dataset(w2, "myds").startswith("restored:")
+    t = next(t for t in w2.tabs() if t.name == "viewer")
+    assert isinstance(t.panel("figure-2"), FigurePanel)
+    assert not t.panel("figure-2")._pixmap.isNull()
+    assert t.capture_layout()["orientation"] == "horizontal"
+    assert not t._right_container.isHidden()
+    sizes = t._splitter.sizes()
+    assert sizes[0] > sizes[1]   # 700/300 ratio preserved (best-effort)
+
+
+def test_image_new_restore_on_recorded_side(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    im = tmp_path / "im.png"; QPixmap(10, 10).save(str(im))
+
+    w1 = _fresh_window(qapp)
+    w1.dispatch_command(
+        "show-image", path=str(im), name="v", panel="right", dataset="myds"
+    )
+    assert session.save_all(w1)[0]
+
+    w2 = _fresh_window(qapp)
+    assert session.open_dataset(w2, "myds").startswith("restored:")
+    t = next(t for t in w2.tabs() if t.name == "v")
+    assert not t._right_container.isHidden()
+    assert t._left_container.isHidden()
+    assert t._right_container.isAncestorOf(t.panel("viewer"))
+
+
+def test_existing_image_tab_converges_to_session_side(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    im = tmp_path / "im.png"; QPixmap(10, 10).save(str(im))
+
+    # existing viewer created on the default LEFT side.
+    w = _fresh_window(qapp)
+    w.dispatch_command("show-image", path=str(im), name="v", dataset="myds")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert t._left_container.isAncestorOf(t.panel("viewer"))
+
+    # session says RIGHT (left_hidden=True) → open_dataset must move it right.
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": None,
+        "tabs": [{
+            "name": "v", "kind": "image", "image": "im.png",
+            "layout": {"orientation": "horizontal", "sizes": [0, 1],
+                       "left_hidden": True, "right_hidden": False},
+        }],
+    })
+    session.open_dataset(w, "myds")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert t._right_container.isAncestorOf(t.panel("viewer"))
+    assert not t._right_container.isHidden()
+    assert t._left_container.isHidden()
+
+    # symmetric: session says LEFT → move back.
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": None,
+        "tabs": [{
+            "name": "v", "kind": "image", "image": "im.png",
+            "layout": {"orientation": "horizontal", "sizes": [1, 0],
+                       "left_hidden": False, "right_hidden": True},
+        }],
+    })
+    session.open_dataset(w, "myds")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert t._left_container.isAncestorOf(t.panel("viewer"))
+    assert not t._left_container.isHidden()
+    assert t._right_container.isHidden()
+
+
+def test_legacy_image_entry_does_not_move_viewer(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    im = tmp_path / "im.png"; QPixmap(10, 10).save(str(im))
+
+    w = _fresh_window(qapp)
+    w.dispatch_command("show-image", path=str(im), name="v", panel="right", dataset="myds")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert t._right_container.isAncestorOf(t.panel("viewer"))
+
+    # legacy entry (no layout) → existing viewer side unchanged (no regression).
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": None,
+        "tabs": [{"name": "v", "kind": "image", "image": "im.png"}],
+    })
+    session.open_dataset(w, "myds")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert t._right_container.isAncestorOf(t.panel("viewer"))
+
+
+def test_move_panel_idempotent(qapp):
+    from gui.tab import AnalysisTab
+    from gui.panels import FigurePanel
+    t = AnalysisTab("t")
+    p = FigurePanel()
+    t.add_panel("viewer", p, "left", stretch=1)
+    t.move_panel("viewer", "left")   # already left → no-op
+    assert t.panel("viewer") is p
+    assert t._left_container.isAncestorOf(p)
+
+
+def test_figure2_missing_suppresses_ghost_pane(qapp, tmp_path, monkeypatch):
+    from PySide6.QtGui import QPixmap
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    a = tmp_path / "a.png"; QPixmap(10, 10).save(str(a))
+
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": None,
+        "tabs": [{
+            "name": "viewer", "kind": "figure", "figure": "a.png",
+            "figure2": "gone.png",
+            "layout": {"orientation": "horizontal", "sizes": [1, 1],
+                       "left_hidden": False, "right_hidden": False},
+        }],
+    })
+    w = _fresh_window(qapp)
+    session.open_dataset(w, "myds")
+    t = next(t for t in w.tabs() if t.name == "viewer")
+    assert not t.panel("figure")._pixmap.isNull()
+    assert t._right_container.isHidden()   # empty ghost pane suppressed
+
+
+def test_apply_layout_zero_sizes_guard(qapp):
+    from gui.tab import AnalysisTab
+    t = AnalysisTab("t")
+    t._splitter.setSizes([500, 500])
+    before = t._splitter.sizes()
+    t.apply_layout({"orientation": "horizontal", "sizes": [0, 0],
+                    "left_hidden": False, "right_hidden": False})
+    assert t._splitter.sizes() == before   # degenerate [0,0] skipped
+
+
+def test_apply_layout_size_count_mismatch_guard(qapp):
+    from gui.tab import AnalysisTab
+    t = AnalysisTab("t")
+    t._splitter.setSizes([500, 500])
+    before = t._splitter.sizes()
+    t.apply_layout({"orientation": "horizontal", "sizes": [300, 300, 300],
+                    "left_hidden": False, "right_hidden": False})
+    assert t._splitter.sizes() == before   # wrong element count skipped

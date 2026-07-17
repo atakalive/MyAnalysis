@@ -203,6 +203,7 @@ class FigurePanel(QGraphicsView):
         self._pixmap: QPixmap | None = None
         self._user_zoomed = False
         self._text_item: QGraphicsTextItem | None = None
+        self._path: Path | None = None
 
         self._scene = QGraphicsScene(self)
         self._item = QGraphicsPixmapItem()
@@ -230,6 +231,14 @@ class FigurePanel(QGraphicsView):
         return QSize(0, 0)
 
     def set_path(self, path: str | Path) -> None:
+        """図をこのパネルへ読み込む。
+
+        副作用: 読込成否に関わらず self._path にソースパスを記録する。この _path は
+        session.json への figure2 永続で _spec_to_tab（llm_bridge/session.py）が
+        分割 2 枚目の図の元パスとして参照する（読込失敗でもパスは残るので次回保存で
+        欠落しない）。
+        """
+        self._path = Path(path)
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
             self._pixmap = None

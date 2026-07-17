@@ -60,6 +60,28 @@ class AnalysisTab(QWidget):
         widget.setParent(None)
         widget.deleteLater()
 
+    def move_panel(self, key: str, position: str) -> None:
+        """既存パネルを破棄せず左右コンテナ間へ移す（冪等）。
+
+        add_panel は同キー再登録で KeyError、remove_panel は deleteLater で破棄する
+        ため、どちらも「移設」には使えない。ここでは widget を現コンテナの layout から
+        外し目的コンテナの layout へ addWidget し直す（widget と内部状態は保持）。
+        image viewer の配置を session 復元で記録側へ収束させるために使う。
+        """
+        widget = self._panels[key]  # 不在なら KeyError（呼び出し側が存在保証）
+        if position == "left":
+            target_layout, target_container = self._left_layout, self._left_container
+        elif position == "right":
+            target_layout, target_container = self._right_layout, self._right_container
+        else:
+            raise ValueError(f"unknown position: {position!r}")
+        if target_container.isAncestorOf(widget):
+            return  # 既に目的コンテナ → no-op（冪等）
+        old = widget.parentWidget()
+        if old is not None and old.layout() is not None:
+            old.layout().removeWidget(widget)
+        target_layout.addWidget(widget, stretch=1)
+
     def panel(self, key: str) -> QWidget:
         return self._panels[key]
 
@@ -88,6 +110,44 @@ class AnalysisTab(QWidget):
         total = 1000
         l = int(total * left / (left + right))
         self._splitter.setSizes([l, total - l])
+
+    def capture_layout(self) -> dict:
+        """splitter の geometry のみを取り出す（figure2 の内容は含めない・汎用器を保つ）。
+
+        isHidden()（明示 hide フラグ）を使うのでトップレベルウィンドウの表示状態に
+        非依存（offscreen テスト・最小化でも安定）。既存 _compose_full の可視判定と同じ流儀。
+        """
+        horiz = self._splitter.orientation() == Qt.Orientation.Horizontal
+        return {
+            "orientation": "horizontal" if horiz else "vertical",
+            "sizes": list(self._splitter.sizes()),
+            "left_hidden": self._left_container.isHidden(),
+            "right_hidden": self._right_container.isHidden(),
+        }
+
+    def apply_layout(self, layout: dict) -> None:
+        """capture_layout の逆。best-effort（失敗しても復元ループを止めない）。
+
+        適用順は 向き → ペイン表示/非表示 → sizes。可視性を先に確定してから
+        sizes を配分する。sizes は要素数が splitter の子数と一致し合計 > 0 の時のみ
+        setSizes する（未表示のまま保存された背景タブの [0, 0] で split を潰さない／
+        手編集で要素数が壊れた session.json で意図しない 0 配分を避けるためのガード）。
+        """
+        try:
+            orient = layout.get("orientation")
+            if orient in ("horizontal", "vertical"):
+                self.set_split_orientation(orient)
+            self.set_pane_visible("left", not layout.get("left_hidden", False))
+            self.set_pane_visible("right", not layout.get("right_hidden", False))
+            sizes = layout.get("sizes")
+            if (
+                sizes
+                and len(sizes) == self._splitter.count()
+                and sum(sizes) > 0
+            ):
+                self._splitter.setSizes([int(s) for s in sizes])
+        except Exception:
+            _log.warning("apply_layout failed: %r", layout, exc_info=True)
 
     def connect_state(self, provider: Callable[[], dict] | None) -> None:
         self._state_provider = provider

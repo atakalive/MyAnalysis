@@ -54,33 +54,59 @@ def forget_dataset(name: str) -> None:
     _touched.discard(name)
 
 
-def _spec_to_tab(spec: dict, work_dir: Path) -> dict | None:
+def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
     """Reduce a live tab's session_spec to its persisted form.
 
     Handles kind in {"figure", "image", "analysis"}; figure/image relativise
     their path against work_dir. Returns None for any other/unknown kind.
+
+    `tab` (optional, default None) is the live tab widget. When present and it
+    exposes the relevant duck-typed members, two OPTIONAL fields are added — both
+    back-compat, since the Qt-free _FakeTab (name/session_spec only) exposes
+    neither, so existing save tests see an unchanged entry:
+      - ``layout`` (all kinds): tab.capture_layout() if callable.
+      - ``figure2`` (kind=="figure" only): work_dir-relative path of the split
+        second figure, from tab._panels["figure-2"]._path if present.
     """
-    if spec.get("kind") == "figure":
+    kind = spec.get("kind")
+    if kind == "figure":
         fig = spec.get("figure")
         try:
             rel = str(Path(fig).relative_to(work_dir))
         except (ValueError, TypeError):
             rel = fig
-        return {"name": spec.get("name"), "kind": "figure", "figure": rel}
-    if spec.get("kind") == "image":
+        entry: dict = {"name": spec.get("name"), "kind": "figure", "figure": rel}
+    elif kind == "image":
         img = spec.get("image")
         try:
             rel = str(Path(img).relative_to(work_dir))
         except (ValueError, TypeError):
             rel = img
-        return {"name": spec.get("name"), "kind": "image", "image": rel}
-    if spec.get("kind") == "analysis":
-        return {
+        entry = {"name": spec.get("name"), "kind": "image", "image": rel}
+    elif kind == "analysis":
+        entry = {
             "name": spec.get("name"),
             "kind": "analysis",
             "module": spec.get("module"),
         }
-    return None
+    else:
+        return None
+
+    if tab is not None:
+        capture = getattr(tab, "capture_layout", None)
+        if callable(capture):
+            entry["layout"] = capture()
+        if kind == "figure":
+            fig2 = getattr(
+                getattr(tab, "_panels", {}).get("figure-2", None), "_path", None
+            )
+            if fig2 is not None:
+                try:
+                    rel2 = str(Path(fig2).relative_to(work_dir))
+                except (ValueError, TypeError):
+                    rel2 = str(fig2)
+                entry["figure2"] = rel2
+    return entry
 
 
 def _resolve_work_dir_readonly(dataset: str) -> Path:
@@ -133,7 +159,7 @@ def save_all(window) -> tuple[list[str], list[str]]:
     or the dirty-clear gate.
     """
     # 1. Group session-tracked tabs by dataset, preserving tab order.
-    grouped: dict[str, list[dict]] = {}
+    grouped: dict[str, list[tuple]] = {}
     for tab in window.tabs():
         spec = getattr(tab, "session_spec", None)
         if not spec:
@@ -141,7 +167,7 @@ def save_all(window) -> tuple[list[str], list[str]]:
         ds = spec.get("dataset")
         if ds is None:
             continue
-        grouped.setdefault(ds, []).append(spec)
+        grouped.setdefault(ds, []).append((spec, tab))
 
     active = window.active_tab()
     active_name = active.name if active is not None else None
@@ -158,8 +184,8 @@ def save_all(window) -> tuple[list[str], list[str]]:
             work_dir = dataset_config.get_work_dir(ds)
             tabs: list[dict] = []
             ds_tab_names: set[str] = set()
-            for spec in specs:
-                entry = _spec_to_tab(spec, work_dir)
+            for spec, tab in specs:
+                entry = _spec_to_tab(spec, work_dir, tab)
                 if entry is not None:
                     tabs.append(entry)
                 ds_tab_names.add(spec.get("name"))
@@ -225,20 +251,20 @@ def save_dataset(window, dataset: str) -> bool:
     failure, so close_dataset can abort rather than lose unsaved edits.
     """
     try:
-        specs = [
-            spec for tab in window.tabs()
+        pairs = [
+            (spec, tab) for tab in window.tabs()
             if (spec := getattr(tab, "session_spec", None))
             and spec.get("dataset") == dataset
         ]
-        if not specs:
+        if not pairs:
             return True   # zero tabs → do not persist an empty layout
         active = window.active_tab()
         active_name = active.name if active is not None else None
         work_dir = dataset_config.get_work_dir(dataset)
         tabs: list[dict] = []
         ds_tab_names: set[str] = set()
-        for spec in specs:
-            entry = _spec_to_tab(spec, work_dir)
+        for spec, tab in pairs:
+            entry = _spec_to_tab(spec, work_dir, tab)
             if entry is not None:
                 tabs.append(entry)
             ds_tab_names.add(spec.get("name"))
@@ -380,6 +406,7 @@ def open_dataset(window, dataset: str) -> str:
             restored = 0
             for entry in sess.get("tabs", []):
                 try:
+                    fig2_shown = False
                     kind = entry.get("kind")
                     if kind == "figure":
                         fig = entry.get("figure")
@@ -399,6 +426,27 @@ def open_dataset(window, dataset: str) -> str:
                             dataset=dataset,
                         )
                         restored += 1
+                        fig2 = entry.get("figure2")
+                        if fig2:
+                            f2 = Path(fig2)
+                            abs2 = f2 if f2.is_absolute() else work_dir / f2
+                            if abs2.is_file():
+                                orient = (entry.get("layout") or {}).get("orientation")
+                                slot = {"horizontal": "right",
+                                        "vertical": "bottom"}.get(orient, "right")
+                                window.dispatch_command(
+                                    "show",
+                                    path=str(abs2),
+                                    name=entry.get("name"),
+                                    slot=slot,
+                                    dataset=dataset,
+                                )
+                                fig2_shown = True
+                            else:
+                                _log.warning(
+                                    "open_dataset: missing figure2 %s (tab %r)",
+                                    abs2, entry.get("name"),
+                                )
                     elif kind == "image":
                         img = entry.get("image")
                         ip = Path(img)
@@ -410,10 +458,14 @@ def open_dataset(window, dataset: str) -> str:
                                 entry.get("name"),
                             )
                             continue
+                        panel = "right" if (entry.get("layout") or {}).get(
+                            "left_hidden"
+                        ) else "left"
                         window.dispatch_command(
                             "show-image",
                             path=str(abs_path),
                             name=entry.get("name"),
+                            panel=panel,
                             dataset=dataset,
                         )
                         restored += 1
@@ -422,6 +474,39 @@ def open_dataset(window, dataset: str) -> str:
                             "add-tab", name=entry.get("module"), dataset=dataset
                         )
                         restored += 1
+
+                    layout = entry.get("layout")
+                    t = next(
+                        (t for t in window.tabs()
+                         if t.name == entry.get("name")
+                         and (getattr(t, "session_spec", None) or {}).get(
+                             "dataset") == dataset),
+                        None,
+                    )
+                    if kind in ("figure", "analysis"):
+                        if layout and t is not None and hasattr(t, "apply_layout"):
+                            if (
+                                kind == "figure"
+                                and entry.get("figure2")
+                                and not fig2_shown
+                            ):
+                                # figure2 ファイル欠損: 空の第2ペイン（=右コンテナ、
+                                # _SLOT_MAP は向きに依らず figure-2→right）を可視化しない。
+                                # primary 欠損が continue でエントリ全体を捨てるのと対称に、
+                                # 単一図の見た目へ落とす（reviewer 3.2 / reviewer P2-1）。
+                                layout = {**layout, "right_hidden": True}
+                            t.apply_layout(layout)
+                    elif kind == "image":
+                        # 既存タブ更新経路の show-image は panel= を無視するので、
+                        # ここで記録側へ viewer を移設して配置を収束させる（reviewer round3
+                        # P1）。layout がある時だけ動く（旧 session=layout 無しは既存側の
+                        # まま＝回帰なし。panel 既定 left で右 viewer を引き寄せない）。
+                        if layout and t is not None and hasattr(t, "move_panel"):
+                            side = "right" if layout.get("left_hidden") else "left"
+                            other = "left" if side == "right" else "right"
+                            t.move_panel("viewer", side)
+                            t.set_pane_visible(side, True)
+                            t.set_pane_visible(other, False)
                 except Exception:
                     _log.warning(
                         "open_dataset: failed to restore tab %r", entry,

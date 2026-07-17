@@ -538,3 +538,173 @@ def test_read_last_window_missing_returns_empty(monkeypatch, tmp_path):
     from llm_bridge import paths as lb_paths
     monkeypatch.setattr(lb_paths, "last_window_path", lambda: tmp_path / "absent.json")
     assert session.read_last_window() == {}
+
+
+# ---- Issue #71: split layout / figure2 persistence (Qt-free) ----
+
+class _LayoutTab:
+    """Stub tab exposing capture_layout + _panels for save-side layout/figure2."""
+    def __init__(self, name, spec, layout=None, figure2_path=None):
+        self.name = name
+        self.session_spec = spec
+        self._layout = layout
+        self._panels = {}
+        if figure2_path is not None:
+            self._panels["figure-2"] = type("P", (), {"_path": figure2_path})()
+
+    def capture_layout(self):
+        return self._layout
+
+
+class _RecordingDispatchWindow(_DispatchWindow):
+    def __init__(self):
+        super().__init__()
+        self.calls: list[tuple[str, dict]] = []
+
+    def dispatch_command(self, verb, **kwargs):
+        self.calls.append((verb, dict(kwargs)))
+
+
+def test_save_all_persists_layout_and_figure2(ds_env):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    fig1 = wd / "figures" / "a.png"
+    fig2 = wd / "figures" / "b.png"
+    layout = {"orientation": "horizontal", "sizes": [620, 380],
+              "left_hidden": False, "right_hidden": False}
+    spec = {"kind": "figure", "name": "viewer", "dataset": "ds_a",
+            "figure": str(fig1)}
+    tab = _LayoutTab("viewer", spec, layout=layout, figure2_path=fig2)
+    win = _FakeWindow([tab], active=None)
+    session.save_all(win)
+    data = session.read_session("ds_a")
+    entry = data["tabs"][0]
+    assert entry["figure"] == "figures/a.png"
+    assert entry["figure2"] == "figures/b.png"
+    assert entry["layout"] == layout
+
+
+def test_save_dataset_persists_layout_and_figure2(ds_env):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    fig1 = wd / "figures" / "a.png"
+    fig2 = wd / "figures" / "b.png"
+    layout = {"orientation": "vertical", "sizes": [300, 300],
+              "left_hidden": False, "right_hidden": False}
+    spec = {"kind": "figure", "name": "viewer", "dataset": "ds_a",
+            "figure": str(fig1)}
+    tab = _LayoutTab("viewer", spec, layout=layout, figure2_path=fig2)
+    win = _FakeWindow([tab], active=None)
+    assert session.save_dataset(win, "ds_a") is True
+    entry = session.read_session("ds_a")["tabs"][0]
+    assert entry["figure2"] == "figures/b.png"
+    assert entry["layout"] == layout
+
+
+def test_save_fake_tab_omits_layout_and_figure2(ds_env):
+    """A _FakeTab (no capture_layout / _panels) yields an unchanged entry."""
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    spec = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+            "figure": str(wd / "fa.png")}
+    win = _FakeWindow([_FakeTab("fa", spec)], active=None)
+    session.save_all(win)
+    entry = session.read_session("ds_a")["tabs"][0]
+    assert "layout" not in entry
+    assert "figure2" not in entry
+
+
+def _write_bytes(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+
+
+def test_open_dataset_figure2_second_show(ds_env):
+    """(a) figure2 present + file exists → 2nd show with slot=right issued."""
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "figures" / "a.png")
+    _write_bytes(wd / "figures" / "b.png")
+    session.write_session("ds_a", {
+        "version": 1, "dataset": "ds_a", "active_tab": None,
+        "tabs": [{
+            "name": "viewer", "kind": "figure", "figure": "figures/a.png",
+            "figure2": "figures/b.png",
+            "layout": {"orientation": "horizontal", "sizes": [1, 1],
+                       "left_hidden": False, "right_hidden": False},
+        }],
+    })
+    win = _RecordingDispatchWindow()
+    session.open_dataset(win, "ds_a")
+    shows = [c for c in win.calls if c[0] == "show"]
+    assert len(shows) == 2
+    with_slot = [c for c in shows if "slot" in c[1]]
+    assert len(with_slot) == 1
+    assert with_slot[0][1]["slot"] == "right"
+
+
+def test_open_dataset_figure2_missing_no_second_show(ds_env):
+    """(b) figure2 present but file missing → no 2nd show, no slot kwarg."""
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "figures" / "a.png")
+    session.write_session("ds_a", {
+        "version": 1, "dataset": "ds_a", "active_tab": None,
+        "tabs": [{
+            "name": "viewer", "kind": "figure", "figure": "figures/a.png",
+            "figure2": "figures/gone.png",
+            "layout": {"orientation": "horizontal", "sizes": [1, 1],
+                       "left_hidden": False, "right_hidden": False},
+        }],
+    })
+    win = _RecordingDispatchWindow()
+    session.open_dataset(win, "ds_a")
+    shows = [c for c in win.calls if c[0] == "show"]
+    assert len(shows) == 1
+    assert "slot" not in shows[0][1]
+
+
+def test_open_dataset_image_panel_from_layout(ds_env):
+    """(c) image entry with left_hidden=True → show-image panel='right'."""
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "images" / "im.png")
+    session.write_session("ds_a", {
+        "version": 1, "dataset": "ds_a", "active_tab": None,
+        "tabs": [{
+            "name": "viewer", "kind": "image", "image": "images/im.png",
+            "layout": {"orientation": "horizontal", "sizes": [0, 1],
+                       "left_hidden": True, "right_hidden": False},
+        }],
+    })
+    win = _RecordingDispatchWindow()
+    session.open_dataset(win, "ds_a")
+    imgs = [c for c in win.calls if c[0] == "show-image"]
+    assert len(imgs) == 1
+    assert imgs[0][1]["panel"] == "right"
+
+
+def test_open_dataset_legacy_entries_no_layout(ds_env):
+    """(d) old entries without layout/figure2 restore without error."""
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "figures" / "a.png")
+    _write_bytes(wd / "images" / "im.png")
+    session.write_session("ds_a", {
+        "version": 1, "dataset": "ds_a", "active_tab": None,
+        "tabs": [
+            {"name": "fig", "kind": "figure", "figure": "figures/a.png"},
+            {"name": "img", "kind": "image", "image": "images/im.png"},
+            {"name": "an", "kind": "analysis", "module": "an"},
+        ],
+    })
+    win = _RecordingDispatchWindow()
+    result = session.open_dataset(win, "ds_a")
+    assert result == "restored:3"
+    shows = [c for c in win.calls if c[0] == "show"]
+    assert len(shows) == 1
+    assert "slot" not in shows[0][1]
+    imgs = [c for c in win.calls if c[0] == "show-image"]
+    assert imgs[0][1]["panel"] == "left"
+    adds = [c for c in win.calls if c[0] == "add-tab"]
+    assert len(adds) == 1
