@@ -144,6 +144,39 @@ def test_manifest_write_consume_roundtrip(window, monkeypatch, tmp_path):
     assert not mpath.exists()  # consumed → deleted
 
 
+def test_manifest_restore_when_active_differs(window, monkeypatch, tmp_path):
+    """scope=app 再構築では「復元先セッション ≠ 現アクティブ」が普通のケース
+    (_last_active_by_ds は作り直され _sync_active_to_visible が vis[0] を選ぶ)。
+
+    下書きは per-tab なので set_active_session_by_id が composer を載せ替える →
+    復元は「セッション選択 → 下書き」の順である必要がある。逆順だと復元した下書きが
+    無関係なセッションへ退避され、空 draft(非永続) で composer が上書きされて消える。
+    上の round-trip テストは同一 widget/同一 id を使うため id ガードで載せ替えが
+    起きず、この退行を検出できない。"""
+    from devtools import qt_integration
+    from llm_bridge import chat_store, paths
+
+    mpath = tmp_path / "reload_manifest.json"
+    monkeypatch.setattr(paths, "reload_manifest_path", lambda: mpath)
+
+    cw = window.chat_widget()
+    target = cw._active
+    cw.set_input_draft("half-written question I did not want to lose")
+    qt_integration.write_manifest(window)
+
+    # 再構築後を模す: アクティブが別セッション（新しい blank）を指している。
+    other = chat_store.new_session("mock", "sys", dataset=None, title="blank")
+    cw._sessions.append(other)
+    cw._active = other
+    cw._rebuild_tab_bar()
+    cw.set_input_draft("")
+
+    assert qt_integration.consume_manifest(window) is True
+    assert cw._active.id == target.id
+    assert cw.input_draft() == "half-written question I did not want to lose"
+    assert other.draft == ""   # 無関係セッションへ流出していない
+
+
 def test_manifest_view_state_by_dataset_shape(window, probe_analysis, monkeypatch, tmp_path):
     """Issue #51 B4: write_manifest nests view_state under dataset in a
     distinctly-keyed field, and records active_dataset."""

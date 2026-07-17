@@ -50,6 +50,7 @@ _MAX_TOOL_TURNS = 8
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _LIVE_MD_INTERVAL_MS = 120        # ライブ Markdown 再描画のコアレッシング基準間隔（ms）
+_SPLIT_SAVE_DEBOUNCE_MS = 400     # 履歴/入力 splitter 比率の保存 debounce（ms）
 _LIVE_MD_MAX_INTERVAL_MS = 600    # 長文時に適応的に伸ばす際の上限（ms）
 
 # Chat font zoom bounds (effective point size). _zoom is an integer pt delta on
@@ -73,12 +74,22 @@ def _save_chat_zoom(n: int) -> None:
     update_ui_pref("chat_zoom", n)
 
 
+_HEXDIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 def _load_chat_split() -> str:
     """Read the persisted log/input splitter geometry (QSplitter.saveState hex).
-    Returns "" on any problem. Must never raise."""
+    Returns "" on any problem. Must never raise.
+
+    Validates ASCII-hex, not just str: the caller feeds this to
+    `bytes(v, "ascii")` for QByteArray.fromHex, and a hand-edited non-ASCII value
+    would raise UnicodeEncodeError inside ChatWidget.__init__ — taking the whole
+    chat dock down instead of falling back to the default ratio."""
     from llm_bridge.paths import read_ui_pref
     v = read_ui_pref("chat_io_split", "")
-    return v if isinstance(v, str) else ""
+    if not isinstance(v, str):
+        return ""
+    return v if v and all(c in _HEXDIGITS for c in v) else ""
 
 
 def _save_chat_split(hexstate: str) -> None:
@@ -381,6 +392,14 @@ class ChatWidget(QWidget):
         _st = _load_chat_split()
         if not (_st and self._io_split.restoreState(QByteArray.fromHex(bytes(_st, "ascii")))):
             self._io_split.setSizes([300, 80])
+        # splitterMoved はドラッグ中マウス移動ごとに連続発火するため、実書き込みは
+        # single-shot タイマーで coalesce する（_live_timer と同手法）。毎回 atomic
+        # write すると 1 ドラッグで数十回の tmp+replace が走る。connect より前に
+        # タイマーを作ること（ハンドラが参照するため）。
+        self._split_save_timer = QTimer(self)
+        self._split_save_timer.setSingleShot(True)
+        self._split_save_timer.setInterval(_SPLIT_SAVE_DEBOUNCE_MS)
+        self._split_save_timer.timeout.connect(self._flush_split_state)
         self._io_split.splitterMoved.connect(self._on_io_split_moved)
 
         row = QHBoxLayout()
@@ -460,8 +479,12 @@ class ChatWidget(QWidget):
         _save_chat_zoom(self._zoom)
 
     def _on_io_split_moved(self, *_) -> None:
-        """ユーザーが履歴/入力の境界をドラッグしたら比率を永続化する。
-        saveState は相対比を持つのでドック寸法が変わっても復元できる。"""
+        """境界ドラッグ中は連続発火するので、保存はタイマーへ集約する（ここでは書かない）。"""
+        self._split_save_timer.start()
+
+    def _flush_split_state(self) -> None:
+        """履歴/入力の比率を永続化する。saveState は相対比を持つのでドック寸法が
+        変わっても復元できる。"""
         _save_chat_split(bytes(self._io_split.saveState().toHex()).decode("ascii"))
 
     def _render_active_preserving_status(self) -> None:
@@ -1081,7 +1104,15 @@ class ChatWidget(QWidget):
         incoming = [s for s in incoming if (dataset, s.id) not in self._deleted]
         # Protect all in-flight sessions' reference identity from being swapped.
         incoming = [s for s in incoming if s.id not in self._turns]
+        # Drafts are in-memory only, so a same-id session swapped in from disk
+        # arrives with draft="" and would silently drop an unsent draft. Carry
+        # them across by id (the commit above put the active composer in here
+        # too). Must be read from the OLD pool, before self._sessions is rebound.
+        drafts = {s.id: d for s in self._sessions if (d := getattr(s, "draft", ""))}
         new_pool = chat_store.merge_sessions(self._sessions, incoming)
+        for s in new_pool:
+            if not getattr(s, "draft", "") and s.id in drafts:
+                s.draft = drafts[s.id]
         # Re-point _active at its (possibly replaced) instance in the new pool.
         for s in new_pool:
             if s.id == self._active.id:

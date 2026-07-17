@@ -230,16 +230,21 @@ def _restore_from_manifest(window, data: dict) -> None:
             _restore_view(tab, v)
     cw = window.chat_widget()
     if cw is not None:
-        draft = data.get("chat_draft") or ""
-        if draft and hasattr(cw, "set_input_draft"):
-            try:
-                cw.set_input_draft(draft)
-            except Exception:
-                pass
+        # 順序が重要: セッション選択 → 下書き復元。下書きは per-tab になり
+        # set_active_session_by_id が composer を載せ替える（切替前の内容を旧
+        # セッションへ退避し、新セッションの draft を読込む）ので、先に
+        # set_input_draft すると復元した下書きが無関係なセッションへ退避され、
+        # 空 draft（下書きは非永続）で composer が上書きされて消える。
         cid = data.get("chat_active_id")
         if cid and hasattr(cw, "set_active_session_by_id"):
             try:
                 cw.set_active_session_by_id(cid)
+            except Exception:
+                pass
+        draft = data.get("chat_draft") or ""
+        if draft and hasattr(cw, "set_input_draft"):
+            try:
+                cw.set_input_draft(draft)
             except Exception:
                 pass
     window.clear_session_dirty()

@@ -962,6 +962,42 @@ def test_delete_active_tab_loads_remaining_draft(widget, monkeypatch):
     assert widget.input_draft() == "draft A"   # 残ったタブの下書きが読込まれる
 
 
+def test_merge_preserves_drafts_across_instance_replacement(widget):
+    """merge は同一 id セッションを disk の新しいコピー（draft は非永続なので空）へ
+    差し替え得る。アクティブ/非アクティブどちらの未送信下書きも消えないこと。"""
+    import copy
+
+    from llm_backend.base import Message
+    from llm_bridge import chat_store
+
+    a = chat_store.new_session("mock", "sys", dataset="ds", title="A")
+    a.messages.append(Message(role="user", content="hi"))
+    b = chat_store.new_session("mock", "sys", dataset="ds", title="B")
+    b.messages.append(Message(role="user", content="yo"))
+    widget._sessions = [a, b]
+    widget._active = a
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+
+    b.draft = "important unsent text in B"      # 非アクティブタブの下書き
+    widget.set_input_draft("live text in A")    # アクティブはまだ未退避
+
+    # 別 PC が同期した strictly-newer な同一 id コピー（draft="" で来る）
+    a2 = copy.deepcopy(a)
+    a2.draft = ""
+    a2.updated = a.updated + 10
+    b2 = copy.deepcopy(b)
+    b2.draft = ""
+    b2.updated = b.updated + 10
+
+    widget.merge_dataset_sessions("ds", [a2, b2])
+
+    assert widget._active.id == a.id
+    assert widget.input_draft() == "live text in A"          # アクティブの composer は無傷
+    assert widget._session_by_id(a.id).draft == "live text in A"
+    assert widget._session_by_id(b.id).draft == "important unsent text in B"
+
+
 def test_dataset_switch_preserves_per_tab_drafts(widget):
     """DS 切替でも下書きはタブに残る（#51 の DS 別セッション群と両立）。"""
     from llm_bridge import chat_store
@@ -1009,15 +1045,21 @@ def test_input_height_is_resizable_not_fixed(widget):
     assert widget._input.minimumHeight() < widget._input.maximumHeight()
 
 
-def test_splitter_move_persists_state(widget, monkeypatch):
+def test_splitter_move_debounces_then_persists_state(widget, monkeypatch):
+    """ドラッグ中の連続発火では書かず（タイマーへ集約）、発火後に 1 回だけ保存する。"""
     import llm_bridge.paths as paths
 
     saved = {}
     monkeypatch.setattr(paths, "update_ui_pref",
                         lambda k, v: saved.__setitem__(k, v))
-    widget._on_io_split_moved()
-    assert "chat_io_split" in saved
-    assert isinstance(saved["chat_io_split"], str) and saved["chat_io_split"]
+
+    for _ in range(20):                      # ドラッグ中の連続 splitterMoved を模す
+        widget._on_io_split_moved()
+    assert saved == {}                       # まだ 1 回も書いていない
+    assert widget._split_save_timer.isActive()
+
+    widget._flush_split_state()              # タイマー発火を模す
+    assert isinstance(saved.get("chat_io_split"), str) and saved["chat_io_split"]
 
 
 def test_splitter_state_hex_roundtrip(widget):
@@ -1036,11 +1078,25 @@ def test_load_chat_split_invalid_types_never_raise(monkeypatch):
     import llm_bridge.paths as paths
     from gui.chat import _load_chat_split
 
-    for bad in ([], {}, ["x"], {"x": 1}, 0, 1.5, True, None):
+    # 型違い / 非 hex / 非 ASCII はすべて "" へ正規化。とくに非 ASCII は
+    # bytes(v,"ascii") が UnicodeEncodeError を投げるので loader で止める。
+    for bad in ([], {}, ["x"], {"x": 1}, 0, 1.5, True, None, "zzzz", "あいうえお", "de ad"):
         monkeypatch.setattr(paths, "read_ui_pref", lambda *a, _b=bad, **k: _b)
         assert _load_chat_split() == ""
     monkeypatch.setattr(paths, "read_ui_pref", lambda *a, **k: "abc")
-    assert _load_chat_split() == "abc"
+    assert _load_chat_split() == "abc"   # 有効 hex はそのまま通す
+
+
+def test_non_ascii_saved_split_state_does_not_crash_construction(qapp, monkeypatch):
+    """手編集で非 ASCII が入っても ChatWidget.__init__ が落ちない（dock 全滅を防ぐ）。"""
+    import llm_bridge.paths as paths
+    from gui.chat import ChatWidget
+
+    monkeypatch.setattr(paths, "read_ui_pref",
+                        lambda k, d=None: "あいうえお" if k == "chat_io_split" else d)
+    w = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)   # must not raise
+    assert w._io_split.count() == 2
+    assert all(s > 0 for s in w._io_split.sizes())
 
 
 def test_bad_saved_split_state_falls_back_to_defaults(qapp, monkeypatch):
