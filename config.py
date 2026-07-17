@@ -47,6 +47,9 @@ DATASETS: dict[str, dict[str, str]] = {
     "dataset_f": {
         "HOST_A": r"G:\測定\dataset_f",
     },
+    "dataset_g": {
+        "HOST_A": r"G:\測定\dataset_g",
+    },
 }
 
 
