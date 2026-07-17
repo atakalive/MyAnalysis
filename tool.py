@@ -5,6 +5,7 @@ from collections.abc import Callable
 from PySide6.QtWidgets import QApplication, QLabel
 
 import llm_bridge
+from common import crashlog
 from common.env import load_env
 from common.i18n import init_language
 from gui import apply_dark_theme
@@ -173,6 +174,7 @@ def create_main_window(
 
 
 def main() -> None:
+    crashlog.install()
     load_env()
     # 言語初期化は create_main_window() 側に一本化（Tier 3 再構築でも復元されるよう）。
 

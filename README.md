@@ -50,6 +50,8 @@ python tool.py --resume-session  # Restore window/tabs/chat from the reload mani
 
 The GUI entry point is [tool.py](tool.py) (PySide6).
 
+When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are written as tracebacks to `data/logs/gui-crash-*.log` (a crash at the same site is recorded only on its first occurrence even if the message changes; at most 200 files per process; intentional exits are not recorded). Startup import errors etc. are visible only with the console-attached `python tool.py`.
+
 ---
 
 ## Directory layout

@@ -50,6 +50,8 @@ python tool.py --resume-session  # リロード manifest からウィンドウ/�
 
 GUI 本体は [tool.py](tool.py)（PySide6）。
 
+windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui-crash-*.log` に traceback が残る（同一箇所のクラッシュはメッセージが変わっても初回のみ・1 プロセス最大 200 件・意図的終了は記録しない）。起動時 import エラー等はコンソール付きの `python tool.py` で確認する。
+
 ---
 
 ## ディレクトリ構成
