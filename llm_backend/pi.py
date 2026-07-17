@@ -21,6 +21,7 @@ import threading
 from collections.abc import Iterator
 
 from common.paths import repo_root
+from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
     build_prompt_with_history,
@@ -112,6 +113,7 @@ class PiCodingAgentBackend:
             cwd=config.get("cwd") or str(repo_root()),
             env=child_env,
             start_new_session=(sys.platform != "win32"),
+            **no_window_kwargs(),
         )
         proc.stdin.write(prompt.encode("utf-8"))
         proc.stdin.close()
@@ -200,6 +202,7 @@ class PiCodingAgentBackend:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     capture_output=True,
+                    **no_window_kwargs(),
                 )
             else:
                 # start_new_session=True が前提 → proc.pid が PGID

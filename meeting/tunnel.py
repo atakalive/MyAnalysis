@@ -37,6 +37,8 @@ import subprocess
 import threading
 import time
 
+from common.proc import no_window_kwargs
+
 
 # --------------------------------------------------------------------------- #
 # Facade
@@ -124,6 +126,7 @@ class _CloudflaredNamed:
                     # name, e.g. Japanese); decode as UTF-8 with replacement so the
                     # reader can't die on the platform default codec (cp932 on Windows).
                     encoding="utf-8", errors="replace",
+                    **no_window_kwargs(),
                 )
             except FileNotFoundError as e:
                 raise RuntimeError(
@@ -231,6 +234,7 @@ class _PinggyTunnel:
                     # decode as UTF-8 with replacement so the reader can't die on the
                     # platform default codec (cp932 on Windows) if ssh prints non-ASCII.
                     encoding="utf-8", errors="replace",
+                    **no_window_kwargs(),
                 )
             except FileNotFoundError as e:
                 raise RuntimeError(
@@ -339,7 +343,10 @@ class _TailscaleFunnel:
         self._on = False
 
     def _run(self, args: "list[str]", timeout: float) -> "subprocess.CompletedProcess[str]":
-        return subprocess.run([self._bin, *args], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(
+            [self._bin, *args], capture_output=True, text=True, timeout=timeout,
+            **no_window_kwargs(),
+        )
 
     def start(self, port: int, *, timeout: float = 20.0) -> str:
         with self._lock:

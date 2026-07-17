@@ -36,6 +36,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from common.paths import repo_root
+from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
@@ -211,6 +212,7 @@ class ClaudeCodeBackend:
             cwd=cwd,
             env=child_env,
             start_new_session=(sys.platform != "win32"),
+            **no_window_kwargs(),
         )
         user_msg = {
             "type": "user",
@@ -538,6 +540,7 @@ class ClaudeCodeBackend:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     capture_output=True,
+                    **no_window_kwargs(),
                 )
             else:
                 os.killpg(proc.pid, signal.SIGTERM)

@@ -158,6 +158,11 @@ class TestCommandAssembly:
         monkeypatch.setattr("subprocess.Popen", fake_popen)
         list(backend.stream([Message(role="user", content="hi")]))
         assert captured["kwargs"]["start_new_session"] is False
+        # windowless GUI から spawn しても cmd 窓を出さないよう creationflags を配線
+        # している（no_window_kwargs 経由）。POSIX CI では両辺 0 となり通る。
+        assert captured["kwargs"].get("creationflags") == getattr(
+            subprocess, "CREATE_NO_WINDOW", 0
+        )
 
     def test_model_and_provider(self, monkeypatch):
         cmd, _ = self._capture_cmd(
