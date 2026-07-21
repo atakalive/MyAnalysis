@@ -206,23 +206,29 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         # down as a unit on failure. build_tab side-effects state.json (via its
         # internal refresh-state), so capture the prior state to restore on any
         # failure / no-op path — the real UI read-back is the source of truth.
-        captured_state = state.read(dataset, name)
+        # Classified capture: if current.json is transiently unreadable on the
+        # mount (0-byte/未同期), do NOT restore-write the {} we'd otherwise get —
+        # persisting it would erase real tab state. Guarded at each restore site.
+        captured_status, captured_state = state.read_status(dataset, name)
         sandbox = QWidget()
         try:
             new_tab, mod = _build_analysis(sandbox, dataset, name)
         except Exception:
             sandbox.deleteLater()
-            state.writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                state.writer(dataset, name)(captured_state)
             raise
         if new_tab.name != name:
             sandbox.deleteLater()
-            state.writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                state.writer(dataset, name)(captured_state)
             raise ValueError(
                 f"tab name mismatch: expected {name!r}, got {new_tab.name!r}"
             )
         if not _sync_new_tab_state(new_tab, mod, dataset, name, captured_state):
             sandbox.deleteLater()
-            state.writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                state.writer(dataset, name)(captured_state)
             raise RuntimeError(
                 f"could not establish state for {name!r} (apply_state / "
                 f"refresh-state failed); tab not inserted"

@@ -222,6 +222,53 @@ def test_delete_session_file_absent_returns_true(tmp_path):
     assert delete_session_file(tmp_path, "nonexistent") is True
 
 
+# ---- durability: chat history survives a lost primary (mount) ----
+
+
+def test_write_session_file_creates_bak(tmp_path):
+    sess = _sample_session()
+    write_session_file(tmp_path, sess)
+    bak = tmp_path / "chat_sessions" / f"{sess.id}.json.bak"
+    assert bak.is_file()
+    assert read_session_file(bak) == sess
+
+
+def test_read_session_file_recovers_from_bak(tmp_path):
+    sess = _sample_session()
+    write_session_file(tmp_path, sess)
+    primary = tmp_path / "chat_sessions" / f"{sess.id}.json"
+    primary.write_bytes(b"")   # primary evicted → 0-byte
+    assert read_session_file(primary) == sess
+
+
+def test_load_recovers_deleted_primary_from_bak(tmp_path):
+    sess = _sample_session()
+    sess.id = "s1"
+    write_session_file(tmp_path, sess)
+    (tmp_path / "chat_sessions" / "s1.json").unlink()   # primary 消失、.bak 残存
+    got = load_dataset_sessions(tmp_path)
+    assert [s.id for s in got] == ["s1"]
+
+
+def test_load_bak_not_double_counted(tmp_path):
+    a = _sample_session(); a.id = "a"
+    b = _sample_session(); b.id = "b"
+    write_session_file(tmp_path, a)
+    write_session_file(tmp_path, b)
+    got = load_dataset_sessions(tmp_path)
+    assert sorted(s.id for s in got) == ["a", "b"]   # .bak が余分な重複を生まない
+
+
+def test_delete_removes_bak_and_no_resurrect(tmp_path):
+    sess = _sample_session()
+    sess.id = "d1"
+    write_session_file(tmp_path, sess)
+    assert delete_session_file(tmp_path, "d1") is True
+    assert not (tmp_path / "chat_sessions" / "d1.json").exists()
+    assert not (tmp_path / "chat_sessions" / "d1.json.bak").exists()
+    assert load_dataset_sessions(tmp_path) == []   # .bak から復活しない
+
+
 # ---- merge_sessions ----
 
 

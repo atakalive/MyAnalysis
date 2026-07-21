@@ -46,15 +46,17 @@ def read_ui_pref(key: str, default=None):
 
 
 def update_ui_pref(key: str, value) -> None:
-    """ui_prefs.json の key を value に更新。兄弟キー保持・atomic(temp+replace)・never raise。"""
+    """ui_prefs.json の key を value に更新。兄弟キー保持・atomic(temp+replace)・never raise。
+
+    破損/transient で読めない（unreadable）ときは書込を skip する: 兄弟キーを巻き添えで
+    失わないため（absent なら新規 {} から書いてよい）。"""
+    from common.paths import read_json_classified
     try:
         path = ui_prefs_path()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                data = {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-            data = {}                              # ValueError=UnicodeDecodeError（非 UTF-8）等も吸収
+        status, data = read_json_classified(path)
+        if status == "unreadable":
+            return                                 # 破損/transient → 兄弟キーを潰さない
+        data = data if status == "ok" else {}      # absent → 新規
         data[key] = value
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -98,10 +100,19 @@ def note_recent_dataset(name: str) -> None:
     window.note_current_dataset (pushes the current dataset to chat) — this only
     stamps the PC-local recent_datasets.json used for the picker's default sort.
     """
+    from common.paths import read_json_classified
     try:
-        data = read_recent_datasets()
-        data[name] = time.time()
         path = recent_datasets_path()
+        status, raw = read_json_classified(path)
+        if status == "unreadable":
+            return                                 # 破損/transient → MRU を巻き添えで潰さない
+        raw = raw if status == "ok" else {}
+        data = {                                   # read_recent_datasets と同じ型正規化
+            k: v for k, v in raw.items()
+            if isinstance(k, str) and isinstance(v, (int, float))
+            and not isinstance(v, bool)
+        }
+        data[name] = time.time()
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)

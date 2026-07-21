@@ -12,12 +12,20 @@ POSIX CI too.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from common.paths import atomic_write_bytes, atomic_write_text, safe_resolve
+from common.paths import (
+    atomic_write_bytes,
+    atomic_write_text,
+    durable_read_json,
+    durable_write_json,
+    read_json_classified,
+    safe_resolve,
+)
 
 
 def _winfsp_realpath_stub(*_args, **_kwargs):
@@ -176,3 +184,110 @@ def test_atomic_write_bytes_replace_failure_keeps_old_and_cleans_tmp(monkeypatch
         atomic_write_bytes(target, b"NEW")
     assert target.read_bytes() == b"OLD"
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_text_survives_fsync_oserror(monkeypatch, tmp_path):
+    # fsync 非対応マウント（OSError）でも write は成功し内容は正しい。
+    def boom_fsync(_fd):
+        raise OSError("fsync unsupported on this mount")
+    monkeypatch.setattr(os, "fsync", boom_fsync)
+    target = tmp_path / "a.json"
+    atomic_write_text(target, "payload")
+    assert target.read_text(encoding="utf-8") == "payload"
+
+
+# ---- read_json_classified: absent ≠ unreadable, with retry ----
+
+def test_read_json_classified_ok(tmp_path):
+    p = tmp_path / "m.json"
+    p.write_text('{"a": 1}', encoding="utf-8")
+    assert read_json_classified(p) == ("ok", {"a": 1})
+
+
+def test_read_json_classified_absent(tmp_path):
+    assert read_json_classified(tmp_path / "nope.json") == ("absent", None)
+
+
+def test_read_json_classified_zero_byte_is_unreadable(tmp_path):
+    p = tmp_path / "z.json"
+    p.write_bytes(b"")
+    assert read_json_classified(p, retries=2, delay=0) == ("unreadable", None)
+
+
+def test_read_json_classified_corrupt_is_unreadable(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text("{bad", encoding="utf-8")
+    assert read_json_classified(p, retries=2, delay=0) == ("unreadable", None)
+
+
+def test_read_json_classified_non_dict_is_unreadable(tmp_path):
+    p = tmp_path / "l.json"
+    p.write_text("[1, 2]", encoding="utf-8")
+    assert read_json_classified(p, retries=2, delay=0) == ("unreadable", None)
+
+
+def test_read_json_classified_retries_then_ok(monkeypatch, tmp_path):
+    p = tmp_path / "m.json"
+    p.write_text('{"a": 1}', encoding="utf-8")
+    calls = {"n": 0}
+    real_read_text = Path.read_text
+
+    def flaky(self, *a, **k):
+        if os.fspath(self) == os.fspath(p) and calls["n"] < 2:
+            calls["n"] += 1
+            raise OSError("transient mount hiccup")   # 同期ラグを模擬
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert read_json_classified(p, retries=3, delay=0) == ("ok", {"a": 1})
+    assert calls["n"] == 2
+
+
+# ---- durable_write_json / durable_read_json: .bak redundancy + recovery ----
+
+def test_durable_write_creates_primary_and_bak(tmp_path):
+    p = tmp_path / "m.json"
+    durable_write_json(p, {"a": 1})
+    assert json.loads(p.read_text(encoding="utf-8")) == {"a": 1}
+    assert json.loads((tmp_path / "m.json.bak").read_text(encoding="utf-8")) == {"a": 1}
+
+
+def test_durable_read_ok(tmp_path):
+    p = tmp_path / "m.json"
+    durable_write_json(p, {"a": 1})
+    assert durable_read_json(p) == ("ok", {"a": 1})
+
+
+def test_durable_read_absent(tmp_path):
+    assert durable_read_json(tmp_path / "nope.json", retries=2, delay=0) == ("absent", None)
+
+
+def test_durable_read_recovers_from_bak_when_primary_zeroed(tmp_path):
+    p = tmp_path / "m.json"
+    durable_write_json(p, {"a": 1})
+    p.write_bytes(b"")   # primary evicted → 0-byte
+    assert durable_read_json(p, retries=2, delay=0) == ("recovered", {"a": 1})
+    # 純読取: primary は 0byte のまま（自己修復は次の書込に委ねる）
+    assert p.read_bytes() == b""
+
+
+def test_durable_read_recovers_when_primary_deleted(tmp_path):
+    p = tmp_path / "m.json"
+    durable_write_json(p, {"a": 1})
+    p.unlink()
+    assert durable_read_json(p, retries=2, delay=0) == ("recovered", {"a": 1})
+
+
+def test_durable_read_unreadable_when_both_gone(tmp_path):
+    p = tmp_path / "m.json"
+    durable_write_json(p, {"a": 1})
+    p.write_bytes(b"")
+    (tmp_path / "m.json.bak").write_bytes(b"")
+    assert durable_read_json(p, retries=2, delay=0) == ("unreadable", None)
+
+
+def test_bak_is_not_matched_by_json_glob(tmp_path):
+    # '<name>.json.bak' は '*.json' グロブに一致しない（件数カウント/列挙で二重計上しない）。
+    durable_write_json(tmp_path / "s.json", {"x": 1})
+    assert [q.name for q in tmp_path.glob("*.json")] == ["s.json"]
+    assert (tmp_path / "s.json.bak").exists()

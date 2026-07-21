@@ -20,7 +20,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from common.paths import validate_identifier_name
+from common.paths import atomic_write_text, validate_identifier_name
 import dataset_config
 from dataset_config import KNOWN_FORMATS
 
@@ -219,8 +219,8 @@ def create_analysis(
     try:
         analysis_path = target_dir / "analysis.py"
         readme_path = target_dir / "README.md"
-        analysis_path.write_text(_render_analysis(name, dataset, fmt), encoding="utf-8")
-        readme_path.write_text(_render_readme(name), encoding="utf-8")
+        atomic_write_text(analysis_path, _render_analysis(name, dataset, fmt))
+        atomic_write_text(readme_path, _render_readme(name))
     except BaseException:
         # 不完全な生成物が残ると次回の「already exists」チェックを妨げる。
         # ignore_errors=True はロールバック自体の失敗 (ファイルロック等) で

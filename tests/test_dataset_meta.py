@@ -8,6 +8,8 @@ patch_description, load_one overlay, and MRU type normalization.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -266,6 +268,63 @@ def test_read_meta_binary_returns_none(ds_env):
 def test_read_meta_non_dict_none(ds_env):
     (ds_env / "meta.json").write_text("[1,2]", encoding="utf-8")
     assert dataset_meta.read_meta("ds") is None
+
+
+# ---- durability: description survives transient/lost meta.json (mount) ----
+
+def test_write_meta_creates_bak(ds_env):
+    dataset_meta.patch_description("ds", "hi")
+    bak = ds_env / "meta.json.bak"
+    assert bak.is_file()
+    assert json.loads(bak.read_text(encoding="utf-8"))["description"] == "hi"
+
+
+def test_rebuild_bails_on_unreadable_meta_preserving_description(ds_env, monkeypatch):
+    dataset_meta.patch_description("ds", "IMPORTANT-KEEP")
+    saved = (ds_env / "meta.json").read_bytes()   # read_bytes は patch されない
+    real_read_text = Path.read_text
+    metas = {str(ds_env / "meta.json"), str(ds_env / "meta.json.bak")}
+
+    def blind(self, *a, **k):
+        if str(self) in metas:
+            raise OSError("mount 1005")   # primary も .bak も読めない
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", blind)
+    dataset_meta.rebuild_meta("ds", heavy=False)   # unreadable → bail（上書きしない）
+    # read_bytes は patch されないので、undo せずに（ds_env の patch を壊さずに）検証する。
+    after = (ds_env / "meta.json").read_bytes()
+    assert after == saved
+    assert json.loads(after.decode("utf-8"))["description"] == "IMPORTANT-KEEP"
+
+
+def test_rebuild_recovers_description_from_bak_when_primary_zeroed(ds_env):
+    dataset_meta.patch_description("ds", "keepme")
+    (ds_env / "meta.json").write_bytes(b"")        # primary evicted → 0byte, .bak 健全
+    dataset_meta.rebuild_meta("ds", heavy=False)   # durable_read が .bak から回復して保持
+    assert dataset_meta.read_meta("ds")["description"] == "keepme"
+    assert (ds_env / "meta.json").stat().st_size > 0   # rebuild の書込で primary が healed
+
+
+def test_rebuild_writes_fresh_when_absent(ds_env):
+    _make_analysis(ds_env, "a1")
+    assert not (ds_env / "meta.json").exists()
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    m = dataset_meta.read_meta("ds")
+    assert m["description"] == ""
+    assert m["analysis_count"] == 1
+
+
+def test_last_measurement_ignores_meta_bak(ds_env):
+    # meta.json.bak は測定ファイルではない → last_measurement を汚さないこと。
+    _make_analysis(ds_env, "a1")
+    meas = ds_env / "raw.csv"
+    meas.write_text("x\n", encoding="utf-8")
+    old = 1_000_000.0
+    os.utime(meas, (old, old))
+    dataset_meta.patch_description("ds", "d")       # meta.json(.bak) を now で書く
+    m = dataset_meta.compute_meta("ds", heavy=True)
+    assert m["last_measurement"] == pytest.approx(old)   # now(meta.bak) ではなく raw.csv
 
 
 # ---- from_dict ----

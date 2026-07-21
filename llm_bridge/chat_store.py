@@ -174,36 +174,40 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
 
 
 def read_session_file(path: Path) -> ChatSession | None:
-    """Read one chat session file. Returns None on ANY problem.
+    """Read one chat session file, falling back to its `.bak` sidecar. None on
+    total failure.
 
     Pure (security-free) deserialization boundary: a single corrupt file must
     localize to a single missing session, never abort startup. Catches every
     exception (FileNotFoundError/OSError/JSONDecodeError/ValueError plus the
     KeyError/TypeError/AttributeError that key-missing valid JSON or unknown
-    versions can induce).
+    versions can induce). If the primary is missing/corrupt on the synced mount,
+    the durable `.bak` copy (written by write_session_file) is tried next.
     """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return session_from_dict(data)
-    except Exception:
-        return None
+    for p in (path, path.with_name(path.name + ".bak")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return session_from_dict(data)
+        except Exception:
+            continue   # primary が 0byte/破損/欠落なら .bak（durable コピー）へフォールバック
+    return None
 
 
 def write_session_file(work_dir: Path, sess: ChatSession) -> None:
-    """Atomically write <work_dir>/chat_sessions/<id>.json (tmp + replace).
+    """Durably write <work_dir>/chat_sessions/<id>.json (+ .bak, tmp + replace).
 
-    This is the only function that creates chat_sessions/ (write path).
-    Best-effort: OSError is swallowed. The tmp file is always cleaned up.
+    This is the only function that creates chat_sessions/ (write path). Chat
+    history is irreplaceable and lives on the synced mount, so it is written with
+    a `.bak` sidecar (durable_write_json) — if the primary is evicted with a
+    failed upload, read_session_file/load_dataset_sessions recover from `.bak`.
+    Best-effort: OSError is swallowed.
     """
-    from common.paths import atomic_write_text
+    from common.paths import durable_write_json
     try:
         target_dir = work_dir / "chat_sessions"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{sess.id}.json"
-        atomic_write_text(
-            target,
-            json.dumps(session_to_dict(sess), ensure_ascii=False, indent=2),
-        )
+        durable_write_json(target, session_to_dict(sess))
     except OSError:
         _log.warning("write_session_file: failed to write %r", sess.id, exc_info=True)
 
@@ -218,28 +222,44 @@ def load_dataset_sessions(work_dir: Path) -> list[ChatSession]:
     retain the historical most-recent-first ordering.
     """
     target_dir = work_dir / "chat_sessions"
-    sessions: list[ChatSession] = []
-    for path in target_dir.glob("*.json"):
-        sess = read_session_file(path)
-        if sess is not None:
-            sessions.append(sess)
+    by_id: dict[str, ChatSession] = {}
+    order: list[str] = []
+
+    def _take(sess: ChatSession | None) -> None:
+        if sess is not None and sess.id not in by_id:
+            by_id[sess.id] = sess
+            order.append(sess.id)
+
+    for path in target_dir.glob("*.json"):        # '*.json' は '<id>.json.bak' に一致しない
+        _take(read_session_file(path))
+    # primary が evict/欠落した分を .bak から回収（primary が読めた分は read_session_file
+    # 内で既に .bak も見るので、ここは primary が glob に現れないケースの保険）。
+    for bak in target_dir.glob("*.json.bak"):
+        primary = bak.with_name(bak.name[:-4])    # 末尾 ".bak" を除去 → '<id>.json'
+        if not primary.exists():
+            _take(read_session_file(primary))     # primary absent → .bak にフォールバック
+    sessions = [by_id[i] for i in order]
     sessions.sort(key=lambda s: (s.order, -(s.updated or 0.0)))
     return sessions
 
 
 def delete_session_file(work_dir: Path, id: str) -> bool:
-    """Best-effort delete of <work_dir>/chat_sessions/<id>.json.
+    """Best-effort delete of <work_dir>/chat_sessions/<id>.json AND its .bak.
 
-    Returns whether the file is absent after the call: True if it was already
-    gone or unlink succeeded, False if an OSError prevented deletion.
+    Both copies must go — otherwise load_dataset_sessions would resurrect the
+    deleted session from the durable .bak. Returns whether both are absent after
+    the call: True if already gone / unlink succeeded, False if an OSError
+    prevented deletion of either.
     """
     target = work_dir / "chat_sessions" / f"{id}.json"
-    try:
-        target.unlink(missing_ok=True)
-        return True
-    except OSError:
-        _log.warning("delete_session_file: failed to delete %r", id, exc_info=True)
-        return False
+    ok = True
+    for p in (target, target.with_name(target.name + ".bak")):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("delete_session_file: failed to delete %r", p.name, exc_info=True)
+            ok = False
+    return ok
 
 
 # ----- merge -----

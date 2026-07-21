@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
-from common.paths import atomic_write_text, safe_resolve
+from common.paths import durable_read_json, durable_write_json, safe_resolve
 import dataset_config
 from common.filelock import exclusive_lock
 
@@ -346,8 +346,8 @@ def compute_meta(
                     if excluded:
                         continue
                     if fn in {"myanalysis.toml", "meta.json"} \
-                            or fn.endswith((".tmp", ".lock")):
-                        continue
+                            or fn.endswith((".tmp", ".lock", ".bak")):
+                        continue   # .bak = durable_write の冗長コピー（測定ファイルではない）
                     latest = st.st_mtime if latest is None else max(latest, st.st_mtime)
             if not cancelled:
                 meta["disk_size_bytes"] = total
@@ -362,28 +362,26 @@ def compute_meta(
 
 
 def read_meta(dataset: str) -> dict | None:
-    """Read <dataset_dir>/meta.json. Returns None on any failure. Never raises.
+    """Read <dataset_dir>/meta.json (falling back to its .bak). None on failure.
 
-    Guarantees only that the return value is a dict; it does NOT validate the
-    types of known keys (they are passed through). Type normalization is
-    DatasetMeta.from_dict's job. `UnicodeDecodeError` (a ValueError subclass, from
-    a binary/non-UTF-8 meta.json) is caught like in read_ui_pref.
+    Read-only path (picker load / list-datasets): returns the parsed dict when
+    the primary is readable, or its `.bak` when the primary is missing/corrupt on
+    the synced mount (`durable_read_json` → 'recovered'); None on genuine absence
+    or when both copies are unusable. Never raises. Type normalization is
+    DatasetMeta.from_dict's job. Does NOT write (no self-heal here) — healing is
+    left to the locked writers, so an unlocked read never races them.
     """
     try:
-        text = _meta_path(dataset).read_text(encoding="utf-8")
-        data = json.loads(text)
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError,
-            ValueError, OSError, KeyError, RuntimeError):
+        path = _meta_path(dataset)
+    except (KeyError, RuntimeError):
         return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    status, data = durable_read_json(path)
+    return data if status in ("ok", "recovered") else None
 
 
 def write_meta(dataset: str, meta: dict) -> None:
-    """Atomically write meta.json (tmp + replace)."""
-    path = _meta_path(dataset)
-    atomic_write_text(path, json.dumps(meta, ensure_ascii=False, indent=2))
+    """Durably write meta.json + .bak (tmp + replace, fsync)."""
+    durable_write_json(_meta_path(dataset), meta)
 
 
 def rebuild_meta(
@@ -404,8 +402,10 @@ def rebuild_meta(
     computed = compute_meta(dataset, heavy=heavy, should_stop=should_stop)
     try:
         with exclusive_lock(_meta_lock_path(dataset)):
-            existing = read_meta(dataset) or {}
-            write_meta(dataset, _merge_meta(existing, computed, heavy=heavy))
+            status, existing = durable_read_json(_meta_path(dataset))
+            if status == "unreadable":
+                return   # primary も .bak も読めない → 上書きしない（description を守る）
+            write_meta(dataset, _merge_meta(existing or {}, computed, heavy=heavy))
     except (KeyError, RuntimeError, OSError):
         return
 
@@ -415,8 +415,9 @@ def patch_description(dataset: str, text: str) -> None:
     updated_at. A meta created from scratch here lacks analysis_count, so it is
     _is_stale → picked up by the background heavy rebuild."""
     with exclusive_lock(_meta_lock_path(dataset)):
-        meta = read_meta(dataset) or {}
-        meta["description"] = text
+        _status, meta = durable_read_json(_meta_path(dataset))
+        meta = meta or {}                      # 意図的な description 書込。unreadable でも書く
+        meta["description"] = text             # （durable_write が primary＋.bak を再確立する）
         meta.setdefault("version", META_VERSION)
         write_meta(dataset, meta)
 

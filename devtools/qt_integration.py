@@ -329,18 +329,24 @@ class HotReloadController(QObject):
         except SyntaxError as e:
             return f"reload-tab-error:syntax {e.filename}:{e.lineno}: {e.msg}"
 
-        captured_state = _m("llm_bridge.state").read(dataset, name)
+        # Classified capture (mirror llm_bridge._add_tab): if current.json is
+        # transiently unreadable on the mount (0-byte/未同期), do NOT restore-write
+        # the {} we'd otherwise get on the build-failure paths below — that would
+        # erase the retained tab's real on-disk state. current.json has no .bak.
+        captured_status, captured_state = _m("llm_bridge.state").read_status(dataset, name)
         view = _capture_view(old_tab)
         sandbox = QWidget()
         try:
             new_tab, mod = _m("llm_bridge")._build_analysis(sandbox, dataset, name)
         except Exception as e:  # noqa: BLE001 — keep old tab on any build failure
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return f"reload-tab-error:build failed: {e!r} (old tab retained)"
         if new_tab.name != name:
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return (
                 f"reload-tab-error:tab name mismatch: expected {name!r}, "
                 f"got {new_tab.name!r} (old tab retained)"
@@ -349,7 +355,8 @@ class HotReloadController(QObject):
             new_tab, mod, dataset, name, captured_state
         ):
             sandbox.deleteLater()
-            _m("llm_bridge.state").writer(dataset, name)(captured_state)
+            if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
+                _m("llm_bridge.state").writer(dataset, name)(captured_state)
             return (
                 "reload-tab-error:apply_state / refresh-state failed (old tab retained)"
             )

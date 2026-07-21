@@ -343,6 +343,27 @@ def test_tier2_build_failure_retains_old_tab(window, probe_analysis):
     assert state.read(HR_DS, name) == {"v": 1}  # captured state restored
 
 
+def test_tier2_build_failure_preserves_unreadable_current_json(window, probe_analysis):
+    # Regression (mount durability): a transiently-unreadable current.json must NOT
+    # be overwritten with {} on the build-failure restore path — mirror of _add_tab.
+    import dataset_config
+
+    name, af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    old_tab = next(t for t in window.tabs() if t.name == name)
+    cj = dataset_config.state_dir(HR_DS, name, create=False) / "current.json"
+    cj.write_bytes(b"")   # transient 0-byte / 未同期 view on the rclone/WinFsp mount
+
+    af.write_text(
+        "def build_tab(parent, data):\n    raise RuntimeError('boom')\n",
+        encoding="utf-8",
+    )
+    result = window.dispatch_command("reload", scope="tab", target=name)
+    assert result.startswith("reload-tab-error:")
+    assert next(t for t in window.tabs() if t.name == name) is old_tab   # retained
+    assert cj.read_bytes() == b""   # unreadable → restore-write skipped (not b"{}")
+
+
 def test_tier2_reload_rejects_non_analysis_tab(window, qapp, tmp_path):
     """同名の figure/viewer タブを解析として reload しない (kind ガード)。
 

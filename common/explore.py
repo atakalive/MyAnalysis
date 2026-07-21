@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from common.mount_compat import install as _install_mount_compat
-from common.paths import safe_resolve
+from common.paths import atomic_write_text, safe_resolve
 
 _install_mount_compat()  # PIL/matplotlib の realpath(→WinError 1005) をマウント上で救う
 
@@ -150,7 +150,7 @@ def save_code(name: str, label: str, content: str) -> Path:
     validate_name(label)
     path = get_work_dir(name) / "code" / f"{label}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)   # マウント上の truncate-in-place（0byte 化）を避ける
     return path
 
 

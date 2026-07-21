@@ -2,7 +2,7 @@
 import contextlib
 import json
 from common.filelock import exclusive_lock
-from common.paths import atomic_write_text
+from common.paths import durable_read_json, durable_write_json
 import dataset_config
 
 
@@ -28,15 +28,18 @@ def _lock(dataset: str, name: str):
 
 
 def read(dataset: str, name: str) -> dict:
-    p = _path(dataset, name, create=False)
-    if not p.exists():
-        return _empty()
-    return json.loads(p.read_text(encoding="utf-8"))
+    """Read annotations (primary→.bak). Display-only default: 'absent'/'unreadable'
+    → _empty() (NOT written back). 'ok'/'recovered' → the stored dict. Never raises.
+
+    Unlocked callers use this; it never writes, so it cannot race the locked
+    submit/clear writers (self-heal is left to the next locked write)."""
+    status, data = durable_read_json(_path(dataset, name, create=False))
+    return data if status in ("ok", "recovered") else _empty()
 
 
 def _write(dataset: str, name: str, data: dict) -> None:
-    p = _path(dataset, name, create=True)
-    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
+    """Durably write annotations.json (+ .bak). Caller must hold _lock."""
+    durable_write_json(_path(dataset, name, create=True), data)
 
 
 def submit(dataset: str, name: str, kind: str, **fields) -> None:
@@ -45,7 +48,12 @@ def submit(dataset: str, name: str, kind: str, **fields) -> None:
         raise ValueError(f"unknown annotation kind: {kind!r}")
     bucket = "markers" if kind == "marker" else "notes"
     with _lock(dataset, name):
-        data = read(dataset, name)
+        status, data = durable_read_json(_path(dataset, name, create=True))
+        if status == "unreadable":
+            return   # primary も .bak も読めない → 全 marker/notes 消失を避け mutation 中止
+        data = data if status in ("ok", "recovered") else _empty()
+        data.setdefault("markers", [])
+        data.setdefault("notes", [])
         data[bucket].append(fields)
         _write(dataset, name, data)
 
@@ -60,7 +68,12 @@ def clear(dataset: str, name: str, kind: str | None = None) -> None:
         raise ValueError(f"unknown annotation kind: {kind!r}")
     bucket = "markers" if kind == "marker" else "notes"
     with _lock(dataset, name):
-        data = read(dataset, name)
+        status, data = durable_read_json(_path(dataset, name, create=True))
+        if status == "unreadable":
+            return   # 読めない → 反対バケツを巻き添えで消さないため中止
+        data = data if status in ("ok", "recovered") else _empty()
+        data.setdefault("markers", [])
+        data.setdefault("notes", [])
         data[bucket] = []
         _write(dataset, name, data)
 
@@ -81,8 +94,12 @@ def start_watcher(tab, dataset: str) -> object:
     """
     from PySide6.QtCore import QFileSystemWatcher
     p = _path(dataset, tab.name, create=True)
-    if not p.exists():
-        _write(dataset, tab.name, _empty())
+    # 一瞬の同期ラグで既存 annotations.json を空に潰さない: 本当に absent の時だけ、
+    # ロック下で空を作る（unreadable/recovered/ok では触らない）。
+    with _lock(dataset, tab.name):
+        status, _data = durable_read_json(p)
+        if status == "absent":
+            _write(dataset, tab.name, _empty())
     parent_dir = str(p.parent)
     # Parent the watcher to `tab` so it is destroyed when the tab is (Tier 2/3
     # teardown + close_tab). Unparented, the closure keeps `tab` alive and a

@@ -1,8 +1,10 @@
 """Filesystem path helpers. All paths are derived from __file__ so the module
 location determines repo root. Move this file → repo_root changes accordingly."""
 import contextlib
+import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 # Windows のファイル名に使えない文字。パス区切り (/ \) と制御文字は別途・汎用で拒否。
@@ -132,6 +134,9 @@ def atomic_write_text(path, text: str, *, encoding: str = "utf-8") -> None:
         fd = None                                   # 所有権が f に移った
         with f:                                     # write の成否に関わらず f が fd を閉じる
             f.write(text)                           # newline 既定=None（write_text と同じ）
+            f.flush()
+            with contextlib.suppress(OSError):      # fsync 非対応マウントでも write を壊さない
+                os.fsync(f.fileno())                # cache→バックエンド upload の durability を促す
         os.replace(tmp, path)
     except BaseException:
         if fd is not None:                          # fdopen 前に失敗 → fd は未クローズ
@@ -166,6 +171,9 @@ def atomic_write_bytes(path, data: bytes) -> None:
         fd = None                                   # 所有権が f に移った
         with f:                                     # write の成否に関わらず f が fd を閉じる
             f.write(data)
+            f.flush()
+            with contextlib.suppress(OSError):      # fsync 非対応マウントでも write を壊さない
+                os.fsync(f.fileno())                # cache→バックエンド upload の durability を促す
         os.replace(tmp, path)
     except BaseException:
         if fd is not None:                          # fdopen 前に失敗 → fd は未クローズ
@@ -175,3 +183,87 @@ def atomic_write_bytes(path, data: bytes) -> None:
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
         raise
+
+
+def read_json_classified(path, *, retries: int = 3, delay: float = 0.05):
+    """JSON ファイルを三値で読む: ('ok', dict) / ('absent', None) / ('unreadable', None)。
+
+    同期ドライブ（rclone/WinFsp）では「一瞬の空/未同期/再DL 失敗」が起きうる。それを
+    「本当に無い（=既定値で作り直してよい）」と混同すると、transient なグリッチが恒久
+    データ損失に化ける（config_share._read_file_state と同じ規律をここで汎用化する）。
+
+    'absent'     = FileNotFoundError。primary が本当に無い＝新規作成/上書き安全。
+    'unreadable' = ファイルは在る(or 判定不能)が retries 回試しても UTF-8+JSON+dict に
+                   parse できない（0byte/破損/OSError/同期途中）。呼び出し側はこれを
+                   既定値で上書きしてはならない。
+    retries/delay は同期ラグ・replace 直後の一瞬の空を吸収する。read が最初から成功する
+    正常パスでは sleep しない（遅延を足さない）。never raise。
+    """
+    path = Path(path)
+    for attempt in range(retries):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:          # OSError のサブクラス — 先に捕捉
+            return ("absent", None)
+        except (OSError, ValueError):      # ValueError=UnicodeDecodeError も含む → 在るが読めず
+            text = ""
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                data = None
+            if isinstance(data, dict):
+                return ("ok", data)
+        if attempt < retries - 1:
+            time.sleep(delay)
+    return ("unreadable", None)
+
+
+def bak_path(path) -> Path:
+    """path のサイドカー・バックアップ名（例: meta.json → meta.json.bak）。
+
+    末尾へ '.bak' を付けるだけ（拡張子置換ではない）ので、'*.json' グロブには一致しない
+    ＝件数カウント/列挙で二重計上・誤ロードされない。
+    """
+    p = Path(path)
+    return p.with_name(p.name + ".bak")
+
+
+def durable_write_json(path, data) -> None:
+    """非再計算 JSON を primary＋サイドカー '.bak' の 2 コピーで atomic(＋fsync) 書込。
+
+    primary → .bak の順に書く: 途中クラッシュでも primary は健全で、.bak が primary より
+    新しくなることはない（durable_read_json が古い .bak で新しい primary を巻き戻さない
+    ための不変条件）。同期ドライブで primary が evict＋upload 失敗で失われても .bak から
+    回復できる。小さな JSON 前提（2× 書込のコストは無視できる）。
+    """
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    p = Path(path)
+    atomic_write_text(p, text)
+    atomic_write_text(bak_path(p), text)
+
+
+def durable_read_json(path, *, retries: int = 3, delay: float = 0.05):
+    """primary→.bak の順で読む純読取（**書込しない**）。never raise。
+
+    返り値: ('ok', dict) / ('absent', None) / ('recovered', dict) / ('unreadable', None)。
+    primary が読めれば 'ok'。primary が読めない（absent/unreadable）ときは .bak を見る:
+    .bak が読めれば 'recovered'（primary が evict/削除/破損でも .bak が生きていれば回復）。
+    .bak も駄目なら、primary が本当に無ければ 'absent'（新規作成/上書き安全）、primary が
+    在るが読めなければ 'unreadable'（呼び出し側は上書き禁止）。
+
+    read 中に primary を書き換えないので、(a) 非ロックな read でのレース、(b) 新しい
+    primary を古い .bak で巻き戻す事故、を両方回避する。自己修復は呼び出し側の次回
+    durable_write_json（その exclusive_lock 内）が担う。
+    """
+    p = Path(path)
+    status, data = read_json_classified(p, retries=retries, delay=delay)
+    if status == "ok":
+        return ("ok", data)
+    # primary が absent/unreadable → durable な .bak を試す。
+    bstatus, bdata = read_json_classified(bak_path(p), retries=retries, delay=delay)
+    if bstatus == "ok":
+        return ("recovered", bdata)   # primary が失われても .bak が生存
+    if status == "absent":
+        return ("absent", None)       # primary が本当に無く .bak も使えない → 新規
+    return ("unreadable", None)       # primary は在るが読めず .bak も駄目 → 上書き禁止
