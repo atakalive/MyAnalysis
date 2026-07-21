@@ -189,19 +189,22 @@ class FigurePanel(QGraphicsView):
     """汎用画像ビューア。任意の PNG 等を忠実フィット表示する（QGraphicsView）。
 
     軸付きの ImagePanel と違い、チャート PNG を転置・反転せず原寸比で表示。
-    ホイール=カーソル中心に拡縮、左ドラッグ=パン。縮小はフィットで止まる。
+    ホイール=カーソル中心に拡縮、左ドラッグ=パン。縮小はフィットで止まる
+    （右クリック『50% に縮小』で 50% 表示、その状態から拡大ホイールで 100% 復帰）。
     Pillow/pyqtgraph/numpy 不要 — 依存は PySide6 のみ。
     """
 
     MAX_ABS_SCALE = 40.0
     ZOOM_IN = 1.25
     ZOOM_OUT = 0.8
+    SHRINK_FRACTION = 0.5  # 右クリック「50% に縮小」の倍率（フィット比）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         # 状態属性を scene/view 設定より前に初期化（resize/show 配送順に非依存）。
         self._pixmap: QPixmap | None = None
         self._user_zoomed = False
+        self._half = False  # 右クリックメニューでの 50% 縮小状態か
         self._text_item: QGraphicsTextItem | None = None
         self._path: Path | None = None
 
@@ -239,6 +242,7 @@ class FigurePanel(QGraphicsView):
         欠落しない）。
         """
         self._path = Path(path)
+        self._half = False  # 新規読込・再読込は通常（フィット）状態から
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
             self._pixmap = None
@@ -274,6 +278,7 @@ class FigurePanel(QGraphicsView):
             return
         self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
         self._user_zoomed = False
+        self._half = False
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -291,8 +296,14 @@ class FigurePanel(QGraphicsView):
         dy = event.angleDelta().y()
         if dy == 0:
             return
-        factor = self.ZOOM_IN if dy > 0 else self.ZOOM_OUT
+        self._zoom_step(dy > 0)
+        event.accept()
 
+    def _zoom_step(self, zoom_in: bool) -> None:
+        """ホイール 1 ノッチ分の拡縮。通常領域の下限=フィット（100% 未満へは縮まない）。
+        50% 縮小状態（self._half）では拡大でフィットへ復帰・縮小で 50% を維持する。"""
+        if self._pixmap is None:
+            return
         # 縮小下限 fit はその場で解析計算（手動ズーム中のリサイズでも陳腐化しない）。
         br = self._item.boundingRect()
         if br.width() == 0 or br.height() == 0:
@@ -305,17 +316,43 @@ class FigurePanel(QGraphicsView):
         # m11() をスケールとして使えるのは回転/反転/せん断を一切かけない前提
         # （本パネルは scale と平行移動のみ）。将来 回転/反転を足すとこの前提は崩れる。
         current = self.transform().m11()
-        hi = max(fit, self.MAX_ABS_SCALE)
-        target = min(max(current * factor, fit), hi)
+        if self._half:
+            # 50% 縮小状態: 拡大方向で 100%(フィット) へ復帰、縮小方向は 50% 維持。
+            if zoom_in:
+                target = fit
+                self._half = False
+            else:
+                target = current
+        else:
+            # 通常: 下限=フィット（既存仕様どおり 100% 未満へは縮まない）。
+            factor = self.ZOOM_IN if zoom_in else self.ZOOM_OUT
+            hi = max(fit, self.MAX_ABS_SCALE)
+            target = min(max(current * factor, fit), hi)
         applied = target / current
         if abs(applied - 1) >= 1e-9:
             self.scale(applied, applied)
 
-        if self.transform().m11() <= fit * (1 + 1e-6):
-            self._user_zoomed = False
-        else:
-            self._user_zoomed = True
-        event.accept()
+        # 自動フィット追従（resize/show 時の _fit）は「50% でなく、かつフィット倍率」の時のみ。
+        self._user_zoomed = self._half or (self.transform().m11() > fit * (1 + 1e-6))
+
+    def _set_half_scale(self) -> None:
+        """右クリックメニュー『50% に縮小』。フィット倍率の SHRINK_FRACTION 倍へ縮小。"""
+        if self._pixmap is None:
+            return
+        br = self._item.boundingRect()
+        if br.width() == 0 or br.height() == 0:
+            return
+        vp = self.viewport().size()
+        if vp.width() < 2 or vp.height() < 2:
+            return
+        fit = min(vp.width() / br.width(), vp.height() / br.height())
+        current = self.transform().m11()
+        applied = (fit * self.SHRINK_FRACTION) / current
+        if abs(applied - 1) >= 1e-9:
+            self.scale(applied, applied)
+        self.centerOn(self._item)  # 小さくなった画像をパネル中央へ
+        self._half = True
+        self._user_zoomed = True  # リサイズで倍率保持（自動再フィットさせない）
 
     def full_pixmap(self) -> QPixmap | None:
         """ズーム/パンに依存しない原寸の全図。未ロード/読込失敗時は None。
@@ -344,5 +381,7 @@ class FigurePanel(QGraphicsView):
         menu = QMenu(self)
         copy_action = menu.addAction(tr("figure.menu.copy_image"))
         copy_action.triggered.connect(self.copy_image_to_clipboard)
+        shrink_action = menu.addAction(tr("figure.menu.shrink_half"))
+        shrink_action.triggered.connect(self._set_half_scale)
         menu.exec(event.globalPos())
         event.accept()

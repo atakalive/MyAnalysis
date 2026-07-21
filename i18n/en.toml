@@ -34,6 +34,7 @@
 
 # --- figure panel ---
 "figure.menu.copy_image"      = "Copy Image"
+"figure.menu.shrink_half"     = "Shrink to 50%"
 
 # --- dock ---
 "dock.chat"                   = "Chat"

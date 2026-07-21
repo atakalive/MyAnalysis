@@ -34,6 +34,7 @@
 
 # --- figure panel ---
 "figure.menu.copy_image"      = "画像をコピー"
+"figure.menu.shrink_half"     = "50% に縮小"
 
 # --- dock ---
 "dock.chat"                   = "Chat"

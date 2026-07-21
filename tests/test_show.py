@@ -238,6 +238,52 @@ def test_show_collapse_then_restore_via_slot(
     assert all(s > 0 for s in tab._splitter.sizes())
 
 
+def test_figure_panel_half_scale(qapp, tmp_path):
+    """右クリック『50% に縮小』と、そこからのホイール挙動（拡大→100%復帰 / 縮小→50%維持）。
+    通常ホイールの最小がフィット（100%）で止まる既存仕様も併せて確認する。"""
+    from PySide6.QtGui import QPixmap
+    from gui.panels import FigurePanel
+
+    png = tmp_path / "big.png"
+    QPixmap(800, 600).save(str(png))
+    panel = FigurePanel()
+    panel.resize(400, 400)
+    panel.show()
+    qapp.processEvents()
+    panel.set_path(png)
+
+    vp = panel.viewport().size()
+    br = panel._item.boundingRect()
+    if vp.width() < 2 or vp.height() < 2:
+        import pytest as _pytest
+
+        _pytest.skip("offscreen viewport not sized")
+    fit = min(vp.width() / br.width(), vp.height() / br.height())
+
+    # 通常ホイール縮小はフィット（100%）で止まる（既存仕様）。
+    for _ in range(30):
+        panel._zoom_step(zoom_in=False)
+    assert panel.transform().m11() >= fit * (1 - 1e-6)
+    assert panel._half is False
+
+    # メニュー「50% に縮小」。
+    panel._set_half_scale()
+    assert abs(panel.transform().m11() - fit * 0.5) <= fit * 1e-6
+    assert panel._half is True
+    assert panel._user_zoomed is True
+
+    # 50% から縮小方向ホイール → 50% を維持。
+    panel._zoom_step(zoom_in=False)
+    assert abs(panel.transform().m11() - fit * 0.5) <= fit * 1e-6
+    assert panel._half is True
+
+    # 50% から拡大方向ホイール → 100%（フィット）へ復帰。
+    panel._zoom_step(zoom_in=True)
+    assert abs(panel.transform().m11() - fit) <= fit * 1e-6
+    assert panel._half is False
+    assert panel._user_zoomed is False
+
+
 def test_show_collapse_then_restore_vertical(
     win, png_path, png_path2, png_path3, png_path4
 ):
