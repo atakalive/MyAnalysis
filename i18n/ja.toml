@@ -96,7 +96,6 @@
 "chat.action.edit"            = "✎ 編集"
 "chat.action.fork"            = "⑂ 分岐"
 "chat.fork.title_suffix"      = " (分岐)"
-"chat.action.busy"            = "生成中は編集/分岐できません"
 
 # --- validate (common/paths.py) ---
 "validate.empty"              = "名前を入力してください。"

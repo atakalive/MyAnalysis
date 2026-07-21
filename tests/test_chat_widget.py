@@ -864,12 +864,15 @@ def test_action_content_none_user_guard(widget):
     assert len(widget._sessions) == before
 
 
-def test_action_in_flight_guard(widget):
+def test_action_in_flight_allows_fork(widget):
+    """生成中でも編集/分岐は許可され、元セッションの生成は背景で継続する（#76）。"""
     src = _make_active_with_messages(widget, dataset="ds")
-    widget._turns[src.id] = MagicMock()
+    widget._turns[src.id] = MagicMock()          # src を生成中に見せる
     before = len(widget._sessions)
-    widget._handle_chat_action("edit", 3)
-    assert len(widget._sessions) == before
+    widget._handle_chat_action("edit", 3)        # user u2 を編集
+    assert len(widget._sessions) == before + 1   # 分岐が実行される
+    assert widget._active is not src
+    assert src.id in widget._turns               # 元の生成は背景に残る（Stop しない）
     del widget._turns[src.id]
 
 

@@ -894,10 +894,12 @@ class ChatWidget(QWidget):
             QDesktopServices.openUrl(url)
 
     def _handle_chat_action(self, action: str, index: int) -> None:
-        """ヘッダ行の ✎編集 / ⑂分岐 リンクのクリックを処理する。"""
-        if self._active.id in self._turns:
-            self._status.setText(tr("chat.action.busy"))
-            return
+        """ヘッダ行の ✎編集 / ⑂分岐 リンクのクリックを処理する。
+
+        生成中でも実行できる（#76）。edit/fork は `_fork_from` で新タブへ分岐し
+        active を切り替えるだけで、元セッションの in-flight ターンは `_turns` に
+        残ったまま背景で継続する（remote 注入 / 並行送信 / delete-orphan と同一経路）。
+        """
         if not (0 <= index < len(self._active.messages)):
             return
         msg = self._active.messages[index]

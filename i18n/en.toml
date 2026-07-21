@@ -96,7 +96,6 @@
 "chat.action.edit"            = "✎ edit"
 "chat.action.fork"            = "⑂ fork"
 "chat.fork.title_suffix"      = " (fork)"
-"chat.action.busy"            = "Can't edit/branch while generating"
 
 # --- validate (common/paths.py) ---
 "validate.empty"              = "Please enter a name."
