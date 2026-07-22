@@ -115,7 +115,7 @@
 <div id="app">
   <div id="cols">
     <div id="left">
-      <div class="bar" id="dsBar" style="display:none"><span id="dsChip" class="dschip"></span></div>
+      <div class="bar" id="dsBar" style="display:none"></div>
       <div class="bar" id="tabBar"></div>
       <div id="canvaswrap">
         <img id="view" alt="">
@@ -166,7 +166,7 @@ const T = {
         copyTabName: "Copy tab name", commentOnTab: "Comment on this tab",
         tabCommentPrefix: "[Comment on tab: {name}] ",
         noDataset: "(no dataset)", switchingDs: "Dataset switched — loading view…",
-        noTabs: "(no shared tabs)",
+        noTabs: "(no shared tabs)", noSessionsInDataset: "No shared chats in this dataset.",
         viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
@@ -179,7 +179,7 @@ const T = {
         copyTabName: "タブ名をコピー", commentOnTab: "このタブにコメント",
         tabCommentPrefix: "[タブ「{name}」へのコメント] ",
         noDataset: "（データセットなし）", switchingDs: "データセット切替中 — ビューを読込中…",
-        noTabs: "（共有中のタブなし）",
+        noTabs: "（共有中のタブなし）", noSessionsInDataset: "このデータセットに共有中のチャットはありません。",
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
@@ -737,8 +737,12 @@ async function poll(reanchor = false) {
     const since = (reanchor || bootstrap)
       ? "?since=RESET"
       : "?since=" + encodeURIComponent(sinceParam());
+    // `since` already opened the query with `?`, so ds is joined with `&`. Omit
+    // ds entirely while bootstrapping (curDs === undefined) — an empty `ds=` would
+    // route to the null group. New guests always send ds (empty for the null group).
+    const dsQ = (curDs !== undefined) ? "&ds=" + encodeURIComponent(curDs ?? "") : "";
     const r = await api("/poll/" + encodeURIComponent(cfg.channel) + "/" +
-                        encodeURIComponent(sidPath) + since);
+                        encodeURIComponent(sidPath) + since + dsQ);
     // Permanent expiry is idempotent → handle before the generation check so even
     // an overtaken poll reliably detects channel death and stops.
     if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
@@ -751,40 +755,47 @@ async function poll(reanchor = false) {
       showGapIfNeeded(serverNow);
       cur.latestSeenTs = serverNow;
     }
-    // ---- DS layer: mirror the host's dataset switch (Issue #51 follow-up) ----
-    // Absent field = pre-DS host → curDs stays undefined, no switch logic runs.
-    // First poll with the field: curDs undefined skips the switch branch (join
-    // is not a "switch"). active_dataset and tabs travel in one server-side
-    // store write, so this snapshot is internally consistent.
-    let dsFollowSid = null;
+    // ---- DS layer (Issue #78): independent per-guest navigation ----
+    // curDs is the local source of truth and NEVER follows the host. The host's
+    // active_dataset seeds only the first poll's default and legacy routing.
     if ("active_dataset" in data) {
-      const ds = data.active_dataset == null ? null : String(data.active_dataset);
-      if (curDs !== undefined && ds !== curDs) {
-        if (curTab) selTabByDs[curDs ?? ""] = curTab;
-        if (curSid) selSidByDs[curDs ?? ""] = curSid;
-        onDatasetSwitch();
-        // Auto-follow: the session set swaps with the dataset — without this
-        // the guest would be stranded on the opt-out notice, send disabled.
-        const sids2 = (data.sessions || []).map((s) => s.id);
-        if (curSid && !sids2.includes(curSid) && sids2.length) {
-          const remembered = selSidByDs[ds ?? ""];
-          dsFollowSid = sids2.includes(remembered) ? remembered : sids2[0];
-        }
+      if (curDs === undefined) {
+        // First poll: default to the host's active DS (join is not a "switch").
+        curDs = (data.active_dataset == null) ? null : String(data.active_dataset);
       }
-      curDs = ds;
-      renderDatasetBar(ds);
+      renderDatasetBar(data.datasets || []);
+      // Snap if the current DS closed / was renamed away (no longer in the list).
+      const dslist = data.datasets || [];
+      if (curDs !== undefined && dslist.length && !dslist.includes(curDs ?? "")) {
+        switchToDataset(dslist[0]);
+        return;   // switchToDataset issued a fresh poll(true); this one is stale
+      }
     }
     renderSessions(data.sessions || []);
+    // renderSessions may call selectSession() (re-select / auto-select), which
+    // issues its own poll(false) and bumps pollGen. If so, abandon the rest of
+    // this poll: the response's messages belong to the OLD sid and must not be
+    // applied to the swapped `cur` (reviewer R2 P1). finally won't reschedule
+    // (myGen !== pollGen), and the newer poll owns render/reschedule.
+    if (myGen !== pollGen) return;
     renderTabs(data.tabs || []);
     applyViewVersions(data.view_versions || {});
     // session opt-out detection — debounced to 2 consecutive polls so a dataset
-    // switch (incl. the ms window where the sessions PUT landed before the tabs
-    // PUT) never flashes the notice / disables send for one cycle. A genuine
+    // switch never flashes the notice / disables send for one cycle. A genuine
     // opt-out shows one poll (~3s) later than before, which was already racy.
-    const sids = (data.sessions || []).map((s) => s.id);
+    // Scope `sids` to the CURRENT dataset so a lingering old-DS sid can't keep
+    // send enabled after a switch (reviewer P1).
+    const sids = (data.sessions || [])
+      .filter((s) => (s.dataset ?? "") === (curDs ?? ""))
+      .map((s) => s.id);
     const notice = document.getElementById("sessNotice");
     optOutStrikes = (curSid && !sids.includes(curSid)) ? optOutStrikes + 1 : 0;
-    if (optOutStrikes >= 2 && !dsFollowSid) {
+    if (!curSid) {
+      // 0-session dataset (no send target): disable send, show a neutral notice.
+      notice.style.display = "block";
+      notice.textContent = T.noSessionsInDataset;
+      document.getElementById("sendBtn").disabled = true;
+    } else if (optOutStrikes >= 2) {
       notice.style.display = "block";
       notice.textContent = T.optedOut;
       document.getElementById("sendBtn").disabled = true;
@@ -811,11 +822,6 @@ async function poll(reanchor = false) {
     }
     document.getElementById("status").textContent = T.connected;
     maybePresence();
-    // Deferred DS auto-follow: MUST run after the message loop — this response's
-    // messages belong to the old sid, and selectSession swaps `cur` (the store).
-    // Its internal poll(false) bumps pollGen, so our finally won't reschedule
-    // (same re-entrancy pattern as the renderSessions bootstrap).
-    if (dsFollowSid) selectSession(dsFollowSid);
   } catch (e) {
     if (myGen === pollGen) document.getElementById("status").textContent = T.retrying;
   } finally {
@@ -836,10 +842,11 @@ function schedulePoll() {
 }
 
 // ---- presence (every ~20s, or immediately on sid/tab switch) ----
-// The reported tab is the bare name (no dataset): guests only ever view the
-// active dataset, so it is unambiguous for the host's participant list — except
-// for ≤1 presence interval right after a host dataset switch, where the previous
-// dataset's tab name may linger (accepted v1 imprecision).
+// Issue #78: the reported `tab` is a bare name qualified by the `ds` sent
+// alongside it — the host's watched-DS view rendering keys on this ds, so a guest
+// viewing a background DS gets that DS's views rendered on demand. ds is omitted
+// while bootstrapping (curDs === undefined) so the host doesn't register the null
+// group before the guest has chosen a DS (symmetric to poll's ds omission).
 async function maybePresence(force = false) {
   const now = Date.now();
   if (!force && now - lastPresenceMs < PRESENCE_INTERVAL_MS) return;
@@ -847,7 +854,10 @@ async function maybePresence(force = false) {
   try {
     await api("/presence/" + encodeURIComponent(cfg.channel), {
       method: "POST", expect: "none",
-      body: { pid, name: myName || "Guest", sid: curSid || "", tab: curTab || "" },
+      body: {
+        pid, name: myName || "Guest", sid: curSid || "", tab: curTab || "",
+        ...(curDs !== undefined ? { ds: curDs ?? "" } : {}),
+      },
     });
   } catch (e) { /* transient */ }
 }
@@ -855,10 +865,14 @@ async function maybePresence(force = false) {
 // ---- sessions / tabs UI ----
 function renderSessions(sessions) {
   const bar = document.getElementById("sessionBar");
-  const have = new Set(sessions.map((s) => s.id));
-  if (curSid && !have.has(curSid)) { /* opted out — keep selection, poll shows notice */ }
+  // Issue #78: the flat all-DS session list is filtered to the current dataset.
+  const filtered = sessions.filter((s) => (s.dataset ?? "") === (curDs ?? ""));
+  const have = new Set(filtered.map((s) => s.id));
+  // Invalidate a curSid that no longer belongs to this dataset (switched DS, or
+  // opted out) so it isn't a stale send target and auto-select can pick a fresh one.
+  if (curSid && !have.has(curSid)) { curSid = null; cur = null; }
   bar.innerHTML = "";
-  for (const s of sessions) {
+  for (const s of filtered) {
     const b = document.createElement("button");
     b.className = "tabbtn" + (s.id === curSid ? " active" : "");
     b.textContent = (s.busy ? "● " : "") + (s.title || "chat") + (s.busy ? " (" + T.generating + ")" : "");
@@ -867,9 +881,20 @@ function renderSessions(sessions) {
   }
   // 生成中はポーリングを速め（≈1s）、逐次表示をライブに感じさせる。非生成時は既定3s。
   // schedulePoll が直後（poll の finally）に clamp して再武装する。
-  const activeBusy = sessions.some((s) => s.id === curSid && s.busy);
+  const activeBusy = filtered.some((s) => s.id === curSid && s.busy);
   pollInterval = activeBusy ? POLL_MIN : 3000;
-  if (!curSid && sessions.length) selectSession(sessions[0].id);
+  if (!curSid && filtered.length) {
+    // Prefer this dataset's remembered selection; else the first session.
+    const remembered = selSidByDs[curDs ?? ""];
+    selectSession(filtered.some((s) => s.id === remembered) ? remembered : filtered[0].id);
+  }
+  if (!curSid) {
+    // 0-session dataset: clear the old DS's conversation from the log so it isn't
+    // mistaken for the current DS's history, and hide the history button.
+    document.getElementById("chatlog").innerHTML = "";
+    cur = null;
+    updateHistBtn();
+  }
 }
 
 function selectSession(sid) {
@@ -909,8 +934,9 @@ async function loadHistory() {
   updateHistBtn();
   try {
     const before = state.oldestMid ? "&before=" + encodeURIComponent(state.oldestMid) : "";
+    const dsQ = (curDs !== undefined) ? "&ds=" + encodeURIComponent(curDs ?? "") : "";
     const r = await api("/history/" + encodeURIComponent(cfg.channel) + "/" +
-                        encodeURIComponent(curSid) + "?turns=5" + before);
+                        encodeURIComponent(curSid) + "?turns=5" + before + dsQ);
     if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
     if (r.ok && r.data) {
       prependMsgs(state, r.data.messages || []);
@@ -923,11 +949,38 @@ async function loadHistory() {
   }
 }
 
-// ---- DS layer bar (mirrors the host's DatasetSwitcher above the tab layer;
-// host-driven in v1 — the chip is a label, not a switcher) ----
-function renderDatasetBar(ds) {
-  document.getElementById("dsBar").style.display = "";
-  document.getElementById("dsChip").textContent = ds === null ? T.noDataset : ds;
+// ---- DS layer bar (mirrors the host's DatasetSwitcher above the tab layer).
+// Issue #78: every open DS is a clickable chip; curDs is the local source of
+// truth and never follows the host — each guest navigates independently. ----
+function renderDatasetBar(datasets) {
+  const bar = document.getElementById("dsBar");
+  bar.style.display = "";
+  bar.innerHTML = "";
+  for (const ds of datasets) {
+    const b = document.createElement("button");
+    b.className = "tabbtn" + (ds === (curDs ?? "") ? " active" : "");
+    b.textContent = "◆ " + (ds === "" ? T.noDataset : ds);
+    b.onclick = () => switchToDataset(ds);
+    bar.appendChild(b);
+  }
+}
+
+// Switch to a dataset (wire key; "" = null group). Independent per guest — no
+// host follow. Remembers the current DS's tab/session selection, resets the
+// per-DS view caches (onDatasetSwitch), and nulls curSid/cur so the immediate
+// poll(true) bootstraps with sid "_" (never pulls the old DS's messages into the
+// new DS's store). The new DS's session is chosen by renderSessions auto-select.
+function switchToDataset(dsKey) {
+  const target = dsKey === "" ? null : dsKey;
+  if ((curDs ?? "") === dsKey) return;
+  if (curTab) selTabByDs[curDs ?? ""] = curTab;
+  if (curSid) selSidByDs[curDs ?? ""] = curSid;
+  curSid = null;
+  cur = null;
+  curDs = target;
+  onDatasetSwitch();
+  maybePresence(true);
+  poll(true);
 }
 
 // Dataset-scoped state swap: same-named tabs in the new dataset are DIFFERENT
@@ -1010,7 +1063,8 @@ async function fetchView(targetVer) {
   if (viewInflight.has(key)) return;                  // de-dupe concurrent fetches per tab
   viewInflight.add(key);
   try {
-    const r = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(tab),
+    const r = await api("/view/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(tab) +
+                        "?ds=" + encodeURIComponent(curDs ?? ""),
                         { expect: "blob" });
     if (r.status === 401 || r.status === 410) { selfDestruct(); return; }
     if (r.status === 204 || !r.ok || !r.data) return; // transient: don't advance appliedVv → next poll retries
@@ -1236,7 +1290,8 @@ async function send() {
   const m = { mid: null, text, name: myName || "Guest", role: "user", mine: true, status: "sending" };
   appendMsg(state, m);
   try {
-    const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+    const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid) +
+      (curDs !== undefined ? "?ds=" + encodeURIComponent(curDs ?? "") : ""),
       { method: "POST", body: { text, name: myName || "Guest" } });
     if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(state, m, false); return; }
     if (r.ok && r.data && r.data.mid) {
@@ -1262,7 +1317,8 @@ function markFailed(state, m, retryable) {
     btn.remove();
     setMsgStatus(m, "sending", T.sending);
     try {
-      const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid),
+      const r = await api("/msg/" + encodeURIComponent(cfg.channel) + "/" + encodeURIComponent(curSid) +
+        (curDs !== undefined ? "?ds=" + encodeURIComponent(curDs ?? "") : ""),
         { method: "POST", body: { text: m.text, name: myName || "Guest" } });
       if (r.status === 401 || r.status === 410) { selfDestruct(); markFailed(state, m, false); return; }
       if (r.ok && r.data && r.data.mid) {
@@ -1394,6 +1450,55 @@ function runSelfTest() {
   check("st-toolline-literal",
         r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
         r.indexOf("read_file · write_file") !== -1);
+  // 9. Issue #78: 独立DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
+  //    リセット・switchToDataset の sid/cur null 化。poll/presence の副作用は stopped で無効化。
+  {
+    const _save = { curDs, curSid, cur, curTab, stopped };
+    stopped = true;    // poll()/schedulePoll() を no-op 化（fetch を発火させない）
+    // 9a. renderDatasetBar: 全DSをクリック可能ボタン化し curDs（?? ""）をハイライト。
+    curDs = "dsB";
+    renderDatasetBar(["dsA", "dsB", ""]);
+    const dsbtns = document.getElementById("dsBar").querySelectorAll("button");
+    check("ds-bar-clickable",
+          dsbtns.length === 3 && dsbtns[1].classList.contains("active") &&
+          !dsbtns[0].classList.contains("active") &&
+          dsbtns[2].textContent.indexOf(T.noDataset) !== -1 &&
+          typeof dsbtns[0].onclick === "function");
+    // null グループのハイライトは curDs ?? "" 経由。
+    curDs = null;
+    renderDatasetBar(["dsA", ""]);
+    const dsbtns2 = document.getElementById("dsBar").querySelectorAll("button");
+    check("ds-bar-null-highlight",
+          dsbtns2[1].classList.contains("active") && !dsbtns2[0].classList.contains("active"));
+    // 9b. renderSessions: (s.dataset ?? "") で現DSにフィルタし、現DSの先頭を auto-select。
+    store.clear();
+    curDs = "dsA"; curSid = null; cur = null;
+    renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                    { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
+    const sessbtns = document.getElementById("sessionBar").querySelectorAll("button");
+    check("sess-ds-filter", sessbtns.length === 1 && curSid === "a1");
+    // 9c. 0セッションDSへ切替: curSid/cur を null 化・chatlog を空リセット。
+    curDs = "dsB"; curSid = "a1"; cur = getState("a1");
+    document.getElementById("chatlog").innerHTML = "<div>stale</div>";
+    renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+    check("sess-empty-ds-reset",
+          curSid === null && cur === null &&
+          document.getElementById("chatlog").innerHTML === "");
+    // 9d. switchToDataset: 選択記憶の直後に curSid/cur を null 化（DS切替 poll が sid "_"）。
+    store.clear();
+    curDs = "dsA"; curSid = "a1"; cur = getState("a1"); curTab = "t1";
+    switchToDataset("dsB");
+    check("switch-nulls-sid",
+          curSid === null && cur === null && curDs === "dsB" &&
+          selSidByDs["dsA"] === "a1" && selTabByDs["dsA"] === "t1");
+    // 同一DSへの switch は no-op（poll を発火しない）。
+    curSid = "keep";
+    switchToDataset("dsB");
+    check("switch-noop-same", curSid === "keep");
+    stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
+    cur = _save.cur; curTab = _save.curTab;
+  }
+
   const failed = cases.filter((c) => !c.pass);
   const ok = failed.length === 0;
   for (const c of cases) console.log((c.pass ? "PASS" : "FAIL") + " " + c.name);

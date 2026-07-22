@@ -70,6 +70,14 @@ _VIEW_MAX_PNG_BYTES = 6 * 1024 * 1024
 # The guest polls at ~1s when busy, so finer-grained posts are wasted; the final
 # full text is unthrottled (messageAdded), so a throttled-away partial is loss-free.
 _STREAM_MIN_INTERVAL = 0.7
+# Watched-DS view rendering (Issue #78): a background DS is view-rendered only
+# while a guest is actively watching it (presence-derived). _WATCH_WARM_GRACE_SEC
+# keeps a DS "warm" for several presence polls (_PRESENCE_POLL_SEC) after the last
+# sighting so a transient presence gap doesn't drop its view. _MAX_WATCHED_RENDER
+# caps the simultaneously-rendered background DSs (active is always rendered) so a
+# crowd each opening a different DS can't fan the host out to every open DS per tick.
+_WATCH_WARM_GRACE_SEC = 45.0
+_MAX_WATCHED_RENDER = 8
 
 
 def _q(s: str) -> str:
@@ -96,7 +104,7 @@ class _RelayWorker(QThread):
     sig_inbound = Signal(str, str, str)   # (sid, name, text)  — from in: only
     sig_presence = Signal(object)         # list[{pid,name,sid,tab,last}]
     sig_state = Signal(str)               # "expired" | "disconnected" | "ok"
-    sig_sendfail = Signal(str, str)       # (kind, tab-or-"") of a dropped outbox item (no retry)
+    sig_sendfail = Signal(str, str, str)  # (kind, ds, tab) of a dropped outbox item (no retry)
 
     def __init__(self, base_url: str, admin_key: str, channel: str,
                  poll_ms: int = 3000, parent=None):
@@ -200,7 +208,8 @@ class _RelayWorker(QThread):
             elif kind == "tabs":
                 resp = self._req("PUT", f"/tabs/{_q(self._ch)}", data=item["data"])
             elif kind == "view":
-                resp = self._req("PUT", f"/view/{_q(self._ch)}/{_q(item['tab'])}",
+                resp = self._req("PUT", f"/view/{_q(self._ch)}/{_q(item['tab'])}"
+                                 f"?ds={_q(item.get('ds') or '')}",
                                  data=item["png"], is_png=True)
             else:
                 return
@@ -214,10 +223,12 @@ class _RelayWorker(QThread):
                 self._emit_expired()
             else:
                 self._note_fail()
-                self.sig_sendfail.emit(str(kind or ""), str(item.get("tab") or ""))
+                self.sig_sendfail.emit(str(kind or ""), str(item.get("ds") or ""),
+                                       str(item.get("tab") or ""))
         except Exception:
             self._note_fail()
-            self.sig_sendfail.emit(str(kind or ""), str(item.get("tab") or ""))
+            self.sig_sendfail.emit(str(kind or ""), str(item.get("ds") or ""),
+                                   str(item.get("tab") or ""))
 
     def _do_inbound(self) -> None:
         try:
@@ -346,8 +357,10 @@ class MeetingRelay(QObject):
         self._published_session_ids: set[str] = set()
         self._backfilled_ids: set[str] = set()   # sids whose pre-meeting transcript was staged
         self._meeting_start_ids: set[str] = set()
-        self._published_tabs: set[str] = set()
-        self._tab_known: set[str] = set()
+        # (dataset, tab-name) pairs — all open DSs are default-shared (Issue #78),
+        # so a bare name would collide across datasets (dsA/dsB "overview").
+        self._published_tabs: set[tuple[str, str]] = set()
+        self._tab_known: set[tuple[str, str]] = set()
         # Auto-share new chat sessions (Issue #48): default on, persisted in ui_prefs.json.
         from llm_bridge.paths import read_ui_pref
         pref = read_ui_pref("auto_share_new_sessions", True)
@@ -356,13 +369,17 @@ class MeetingRelay(QObject):
         self._participants: list = []
         self._last_sessions_json: str | None = None
         self._last_tabs_json: str | None = None
-        self._last_pub_dataset: str | None = None   # dataset of the last published tick
-        self._view_hashes: dict[str, bytes] = {}
-        # cacheKey() of the last captured pixmap per tab. full_pixmap() returns the
-        # same shared QPixmap until the figure is swapped, so an unchanged cacheKey
+        # Per-DS view render demand (Issue #78): ds-key ("" = null group) → monotonic
+        # expiry. A DS is view-rendered while active or while a guest watches it
+        # (presence-derived, warm-graced). Keyed by (ds, tab) so same-named tabs in
+        # different datasets don't share a dedupe entry.
+        self._watched_ds_until: dict[str, float] = {}
+        self._view_hashes: dict[tuple[str, str], bytes] = {}
+        # cacheKey() of the last captured pixmap per (ds, tab). full_pixmap() returns
+        # the same shared QPixmap until the figure is swapped, so an unchanged cacheKey
         # lets us skip the expensive toImage()+SHA1 entirely (grab() fallback always
         # mints a fresh cacheKey, so it harmlessly falls through to the hash gate).
-        self._view_cachekeys: dict[str, int] = {}
+        self._view_cachekeys: dict[tuple[str, str], int] = {}
         self._admin_key = os.environ.get("RELAY_ADMIN_KEY", "") or ""
         # Legacy remote-relay override: when set, no local server / tunnel is
         # started and this URL is the shared host+guest base_url.
@@ -486,55 +503,32 @@ class MeetingRelay(QObject):
     def _tab_dataset(self, tab):
         return (getattr(tab, "session_spec", None) or {}).get("dataset")
 
-    def _active_ds_tab_names(self) -> set[str]:
-        """Tab names belonging to the active dataset (None-safe filter, B5)."""
-        cur = self._active_dataset()
-        out: set[str] = set()
+    def _all_ds_tab_pairs(self) -> set[tuple[str, str]]:
+        """(ds-key, tab-name) pairs for EVERY open dataset (Issue #78). ds None is
+        coerced to "" (null group). Names are None-safe (a non-name tab is skipped).
+        This is the all-DS successor to the pre-#78 active-dataset-only helper."""
+        out: set[tuple[str, str]] = set()
         for tab in self._window.tabs():
-            if self._tab_dataset(tab) == cur:
-                n = getattr(tab, "name", None)
-                if n is not None:
-                    out.add(n)
+            n = getattr(tab, "name", None)
+            if n is None:
+                continue
+            ds = self._tab_dataset(tab)
+            out.add(("" if ds is None else ds, n))
         return out
 
-    def _session_in_active_scope(self, sid: str) -> bool:
-        """True iff session ``sid`` is in the host's selection AND bound to the
-        ACTIVE dataset — the live out/in gate for messages (Issue #51 B5 / reviewer
-        code P1 R2). The session list/history are already scoped via ``eff_sids``
-        in the capture tick; the live message paths (out send, in receive) need
-        the same gate so a prior dataset's in-flight replies and remote guest
-        injections do not cross a dataset switch and leak a hidden dataset's chat.
-        A session absent from the current summaries reads as dataset None (matches
-        the active scope only when no dataset is selected)."""
-        if sid not in self._published_session_ids:
-            return False
-        cw = self._window.chat_widget()
-        if cw is None:
-            return False
-        ds = next(
-            (s.get("dataset") for s in cw.session_summaries() if s.get("id") == sid),
-            None,
-        )
-        return ds == self._active_dataset()
+    def absorb_new_tabs(self) -> list[tuple[str, str]]:
+        """Auto-share tabs that appeared after the meeting started, across ALL open
+        datasets (Issue #78).
 
-    def absorb_new_tabs(self) -> list[str]:
-        """Auto-share tabs that appeared after the meeting started, limited to the
-        ACTIVE dataset (Issue #51 B5).
-
-        Tabs default to shared: a tab opened mid-meeting in the active dataset
-        joins the published set without the host having to click. A same-named
-        tab in a hidden dataset is NOT absorbed (its view PNG would otherwise
-        overwrite the active one under the shared bare-name relay id).
-        Explicitly deselected tabs stay in `_tab_known` and are not re-added.
-        Returns the names newly absorbed (for logging/UI), [] if idle.
+        Tabs default to shared: a tab opened mid-meeting in any open dataset joins
+        the published set without the host having to click. Keyed by (ds, name) so
+        same-named tabs in different datasets are distinct. Explicitly deselected
+        tabs stay in `_tab_known` and are not re-added. Returns the (ds, name)
+        pairs newly absorbed (for logging/UI), [] if idle.
         """
         if not self._sharing:
             return []
-        active_names = self._active_ds_tab_names()
-        new = [
-            t for t in self._window.tab_names()
-            if t not in self._tab_known and t in active_names
-        ]
+        new = [p for p in self._all_ds_tab_pairs() if p not in self._tab_known]
         if new:
             self._published_tabs.update(new)
             self._tab_known.update(new)
@@ -598,21 +592,15 @@ class MeetingRelay(QObject):
             if cw is None:
                 return []
             summaries = cw.session_summaries()
-        # Decide (mark observed / auto-publish) only sessions in the ACTIVE
-        # dataset, mirroring absorb_new_tabs (Issue #51 B5 / reviewer code P1). A
-        # hidden dataset's sessions stay "undecided" (not marked known) so that
-        # switching to that dataset later default-shares them; publishing a
-        # hidden dataset's chat would also leak it to guests.
-        cur = self._active_dataset()
-        new = [
-            s for s in summaries
-            if s["id"] not in self._session_known and s.get("dataset") == cur
-        ]
+        # Decide (mark observed / auto-publish) sessions across ALL open datasets
+        # (Issue #78): every open DS is default-shared, so a new session in any DS
+        # auto-joins. Explicit deselection persists via _session_known.
+        new = [s for s in summaries if s["id"] not in self._session_known]
         if not new:
             return []
         # always mark observed (privacy invariant, Issue #48): a session created
         # while the auto-share toggle was OFF stays known → not retroactively
-        # published on OFF→ON. Scoped to the active dataset per the filter above.
+        # published on OFF→ON.
         self._session_known.update(s["id"] for s in new)
         if not self._auto_share_new_sessions:
             return []                            # toggle off: known but NOT published
@@ -682,19 +670,20 @@ class MeetingRelay(QObject):
         # dataset — absorb_new_tabs/absorb_new_sessions both only decide the
         # active dataset, mirroring each other.
         cur = self._active_dataset()
-        active_ids = {s["id"] for s in summaries if s.get("dataset") == cur}
-        self._published_session_ids = set(active_ids)
+        all_ids = {s["id"] for s in summaries}
+        self._published_session_ids = set(all_ids)
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         self._meeting_start_ids = set(self._published_session_ids)
-        self._session_known = set(active_ids)
-        self._published_tabs = self._active_ds_tab_names()
-        self._tab_known = self._active_ds_tab_names()
+        self._session_known = set(all_ids)
+        all_pairs = self._all_ds_tab_pairs()
+        self._published_tabs = set(all_pairs)
+        self._tab_known = set(all_pairs)
         self._channel = ch
         self._secret = secret
         self._sharing = True
         self._last_sessions_json = None
         self._last_tabs_json = None
-        self._last_pub_dataset = cur
+        self._watched_ds_until = {}
         self._view_hashes = {}
         self._view_cachekeys = {}
 
@@ -798,15 +787,28 @@ class MeetingRelay(QObject):
 
     def _on_participants(self, data) -> None:
         self._participants = data if isinstance(data, list) else []
+        # Derive watched-DS demand from presence (Issue #78): a guest actively
+        # viewing a DS re-stamps its expiry every presence poll (~5s); a DS left
+        # unwatched naturally expires after _WATCH_WARM_GRACE_SEC. Only count
+        # entries that actually carry "ds" (bootstrap/legacy guests omit it — an
+        # absent key must not register as the null group). hasattr guard: a
+        # mid-meeting hot-reload can patch this onto an instance predating the field.
+        if not hasattr(self, "_watched_ds_until"):
+            self._watched_ds_until = {}
+        now = time.monotonic()
+        for p in self._participants:
+            if isinstance(p, dict) and "ds" in p:
+                self._watched_ds_until[str(p.get("ds") or "")] = now + _WATCH_WARM_GRACE_SEC
         self.participantsUpdated.emit(self._participants)
 
     def _on_remote_message(self, sid: str, name: str, text: str) -> None:
         # in: receive gate — symmetric to the out: send gate. KV is eventually
         # consistent, so a guest may POST to a just-opted-out sid within the
         # propagation window; drop it here so a private session never drives the
-        # agent (tool-operation rights). Active-DS scoped so a guest can't inject
-        # into a hidden dataset's session after a switch (Issue #51 B5 / reviewer P1).
-        if not self._session_in_active_scope(sid):
+        # agent (tool-operation rights). Gated on _published_session_ids only:
+        # all open DSs are shared now (Issue #78), so a guest may legitimately
+        # inject into a background-DS session.
+        if sid not in self._published_session_ids:
             return
         cw = self._window.chat_widget()
         if cw is not None:
@@ -826,19 +828,11 @@ class MeetingRelay(QObject):
         last_pub = getattr(self, "_stream_last_pub", None)
         if last_pub is not None:
             last_pub.pop(sid, None)
-        # out: send only host-local messages of a published session IN THE ACTIVE
-        # dataset — a hidden dataset's in-flight reply must not leak after a switch
-        # (Issue #51 B5 / reviewer P1). stream_id pop above runs regardless of the gate.
-        # Exception: the FINAL of a streamed turn whose partials already reached
-        # guests (sid_stream) passes even after a dataset switch hid its session —
-        # withholding it would leave the guest bubble a truncated partial forever
-        # (chatdock finalizes only on partial=false). This completes an already-
-        # public message; it does not newly expose a hidden dataset's session, and
-        # an explicit unshare (sid dropped from _published_session_ids) still wins.
-        stream_final = (role == "assistant" and sid_stream is not None
-                        and sid in self._published_session_ids)
+        # out: send only host-local messages of a published session. All open DSs
+        # are shared now (Issue #78), so the gate is _published_session_ids only;
+        # stream_id pop above runs regardless of the gate.
         if not (self._sharing and origin == "local"
-                and (self._session_in_active_scope(sid) or stream_final)):
+                and sid in self._published_session_ids):
             return
         if not content or not content.strip():
             return
@@ -858,12 +852,12 @@ class MeetingRelay(QObject):
     def _on_message_streaming(self, sid: str, content: str, origin: str,
                               stream_id: str) -> None:
         # Live partial of an in-flight assistant turn — same out: gate as
-        # _on_message_added (published ∩ active dataset), throttled to
+        # _on_message_added (published only, Issue #78), throttled to
         # _STREAM_MIN_INTERVAL per session so a fast token stream doesn't flood the
         # relay. The final full text still arrives via _on_message_added, so a
         # throttled-away partial is loss-free.
         if not (self._sharing and origin == "local"
-                and self._session_in_active_scope(sid)):
+                and sid in self._published_session_ids):
             return
         if not content or not content.strip() or not stream_id:
             return
@@ -885,28 +879,26 @@ class MeetingRelay(QObject):
             self._worker.enqueue({"kind": "out", "sid": sid, "body": body,
                                   "stream_id": stream_id, "partial": True})
 
-    def _on_sendfail(self, kind: str, detail: str = "") -> None:
+    def _on_sendfail(self, kind: str, ds: str = "", detail: str = "") -> None:
         # _send drops a failed item without retry, but the change-detect latch was
         # already advanced at enqueue time — a lost tabs PUT would leave the server
-        # on the old dataset (with its view store un-cleared) while new-DS view
-        # PUTs land under same-named tabs. Reset the latch so the next capture
-        # tick re-enqueues at the correct FIFO position. (Re-enqueueing inside
-        # _send instead would reorder the PUT after same-tick view items.)
+        # on the old published set. Reset the latch so the next capture tick
+        # re-enqueues at the correct FIFO position. (Re-enqueueing inside _send
+        # instead would reorder the PUT after same-tick view items.)
         #
-        # The view dedupe caches must also roll back: _capture_tab latches them at
-        # CAPTURE time, decoupled from send success, and a static figure never
-        # mints a new hash — so a dropped view PUT (or the server-side views wipe
-        # triggered by the re-sent dataset-switch tabs PUT) would otherwise leave
-        # guests on 204 + placeholder forever.
+        # A dropped view PUT must roll back just that (ds, tab)'s dedupe entry:
+        # _capture_tab latches them at CAPTURE time, decoupled from send success,
+        # and a static figure never mints a new hash — so a dropped view PUT would
+        # otherwise leave guests on 204 + placeholder forever. The old wholesale
+        # cache wipe on a tabs failure is gone (Issue #78 removed the server's
+        # dataset-switch view wipe, so there is nothing to recover from there).
         if kind == "tabs":
             self._last_tabs_json = None
-            self._view_hashes = {}
-            self._view_cachekeys = {}
         elif kind == "sessions":
             self._last_sessions_json = None
         elif kind == "view":
-            self._view_hashes.pop(detail, None)
-            self._view_cachekeys.pop(detail, None)
+            self._view_hashes.pop((ds, detail), None)
+            self._view_cachekeys.pop((ds, detail), None)
 
     def _backfill_session(self, sid: str, cw) -> None:
         """Stage a published session's existing transcript into the relay so guests
@@ -952,92 +944,108 @@ class MeetingRelay(QObject):
             win = self._window
             cw = win.chat_widget()
 
-            # Active-dataset scope (Issue #51 B5): the effective publish set is the
-            # host's selection ∩ the ACTIVE dataset. absorb_new_* only decide the
-            # active dataset, so switching to another dataset auto-absorbs (default-
-            # shares) its tabs/sessions on the next tick, while previously-active
-            # ones drop out of the ∩ (still selected, just not the active scope).
             cur = self._active_dataset()
+            active_key = "" if cur is None else cur
 
-            # Dataset switch: the relay server clears its view store when the
-            # published dataset changes, so every active tab must re-PUT even if
-            # its pixels are unchanged — otherwise guests sit on 204 forever.
-            # getattr: hot-reload compatibility (mirrors _backfilled_ids below).
-            if getattr(self, "_last_pub_dataset", object()) != cur:
-                self._last_pub_dataset = cur
-                self._view_hashes = {}
-                self._view_cachekeys = {}
-
-            # Sessions: publish only ids in (_published_session_ids ∩ existing ∩
-            # active-ds) so a deleted session drops out and a hidden dataset's
-            # chat never leaks.
+            # Sessions: publish _published_session_ids ∩ existing across ALL open
+            # datasets (Issue #78) — a deleted session drops out via ∩ existing.
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
-            active_sids = {s["id"] for s in summaries if s.get("dataset") == cur}
             self.absorb_new_sessions(summaries)
             self._published_session_ids &= existing
-            eff_sids = self._published_session_ids & active_sids
             # Stage each newly-published session's pre-meeting transcript once so
             # guests can fetch history older than meeting start (GET /history).
             # getattr guard: a mid-meeting hot-reload patches new code onto the
-            # existing MeetingRelay instance, which lacks the new _backfilled_ids
-            # field — recreate it so backfill still runs (next tick) without a
-            # fresh meeting.
+            # existing MeetingRelay instance, which lacks _backfilled_ids —
+            # recreate it so backfill still runs (next tick) without a fresh meeting.
             if not hasattr(self, "_backfilled_ids"):
                 self._backfilled_ids = set()
             if cw is not None:
-                for sid in list(eff_sids - self._backfilled_ids):
+                for sid in list(self._published_session_ids - self._backfilled_ids):
                     self._backfill_session(sid, cw)
                     self._backfilled_ids.add(sid)
+            # Each session carries its dataset (str or None) so guests can bucket
+            # the flat all-DS session list by DS (invariant: every session has the
+            # key; session_summaries() always provides `dataset`).
             pub = [
-                {"id": s["id"], "title": s["title"], "busy": s["busy"]}
-                for s in summaries if s["id"] in eff_sids
+                {"id": s["id"], "title": s["title"], "busy": s["busy"],
+                 "dataset": s.get("dataset")}
+                for s in summaries if s["id"] in self._published_session_ids
             ]
             sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
             if sj != self._last_sessions_json:
                 self._last_sessions_json = sj
                 self._worker.enqueue({"kind": "sessions", "data": pub})
 
-            # Tabs: new tabs auto-join the published set (default-share, active DS
-            # only); publish the selection ∩ active-ds tabs. Build the guest list
-            # from the active dataset's own tab objects (dataset-checked, deduped,
-            # in window order) — NOT the flat bare-name tab_names(), which can hold
-            # a hidden dataset's same-named tab and duplicate it (reviewer code P2).
+            # Tabs: new tabs auto-join across ALL open datasets. Names live per-DS
+            # in tabs_by_dataset (same-named tabs in different datasets stay
+            # distinct); only (ds, name) in _published_tabs are shared.
             self.absorb_new_tabs()
-            seen_tab: set[str] = set()
-            pub_tabs: list[str] = []
+            tabs_by_dataset: dict[str, list[str]] = {}
             for tab in win.tabs():
-                n = getattr(tab, "name", None)
-                if n is None or n in seen_tab:
+                name = getattr(tab, "name", None)
+                if name is None:
                     continue
-                if n in self._published_tabs and self._tab_dataset(tab) == cur:
-                    seen_tab.add(n)
-                    pub_tabs.append(n)
-            # active_dataset rides in the same payload (atomic with the tab list)
-            # AND in the change-detect JSON, so switching between two datasets
-            # with identical published tab names still re-publishes.
-            tabs_payload = {"active_dataset": cur, "tabs": pub_tabs}
+                tds = self._tab_dataset(tab)
+                ds_key = "" if tds is None else tds
+                if (ds_key, name) not in self._published_tabs:
+                    continue
+                lst = tabs_by_dataset.setdefault(ds_key, [])
+                if name not in lst:                     # DS-internal dedupe, window order
+                    lst.append(name)
+
+            # datasets = open DS keys ∪ published-item DS keys, in open-DS order
+            # then appended extras. Union so a dataset=None published chat session
+            # (not a tab group in _groups) is still reachable from the guest UI —
+            # otherwise it would be an unreachable-but-/msg-able published sid.
+            datasets = list(win.open_dataset_keys())
+            for s in pub:
+                k = "" if s.get("dataset") is None else s.get("dataset")
+                if k not in datasets:
+                    datasets.append(k)
+            for (ds_key, _name) in self._published_tabs:
+                if ds_key not in datasets:
+                    datasets.append(ds_key)
+
+            tabs_payload = {"active_dataset": cur, "datasets": datasets,
+                            "tabs_by_dataset": tabs_by_dataset}
             tj = json.dumps(tabs_payload, sort_keys=True, ensure_ascii=False)
             if tj != self._last_tabs_json:
                 self._last_tabs_json = tj
                 self._worker.enqueue({"kind": "tabs", "data": tabs_payload})
 
-            # Views: grab published tabs in the ACTIVE dataset only (GUI thread),
-            # hash-gate, enqueue PNG bytes. Restricting to the active DS keeps a
-            # same-named tab in a hidden dataset from overwriting the shared view.
+            # Views (demand-driven, Issue #78): render the active DS always, plus
+            # DSs a guest is currently watching (presence-derived, warm-graced),
+            # capped at _MAX_WATCHED_RENDER (freshest-expiry first) so a crowd on
+            # many DSs can't fan the host out to every open DS per tick. Cold DSs
+            # get tab NAMES only — their view is skipped (guest sees a placeholder).
+            if not hasattr(self, "_watched_ds_until"):
+                self._watched_ds_until = {}
+            now = time.monotonic()
+            live = {ds for ds, until in self._watched_ds_until.items() if until > now}
+            watched = sorted(
+                live & set(datasets),
+                key=lambda d: self._watched_ds_until[d], reverse=True,
+            )[:_MAX_WATCHED_RENDER]
+            render_ds = {active_key} | set(watched)
             for tab in win.tabs():
                 name = getattr(tab, "name", None)
-                if name is None or name not in self._published_tabs:
+                if name is None:
                     continue
-                if self._tab_dataset(tab) != cur:
+                tds = self._tab_dataset(tab)
+                ds_key = "" if tds is None else tds
+                if (ds_key, name) not in self._published_tabs:
                     continue
-                png = self._capture_tab(tab, name)
+                if ds_key not in render_ds:
+                    continue
+                png = self._capture_tab(tab, (ds_key, name))
                 if png is not None:
-                    self._worker.enqueue({"kind": "view", "tab": name, "png": png})
+                    self._worker.enqueue({"kind": "view", "tab": name,
+                                          "ds": ds_key, "png": png})
         except Exception as exc:
             _log.warning("capture tick skipped: %s", exc)
 
-    def _capture_tab(self, tab, name: str) -> bytes | None:
+    def _capture_tab(self, tab, key) -> bytes | None:
         try:
             # Full content extent (decoupled from host zoom/pan/scroll) when the
             # tab supports it; else the on-screen viewport. getattr guard tolerates
@@ -1051,7 +1059,7 @@ class MeetingRelay(QObject):
         # Fast path: a full_pixmap-backed view returns the same shared QPixmap until
         # the figure changes, so an unchanged cacheKey skips toImage()+SHA1 entirely.
         cache_key = pixmap.cacheKey()
-        if cache_key and self._view_cachekeys.get(name) == cache_key:
+        if cache_key and self._view_cachekeys.get(key) == cache_key:
             return None
         digest = None
         try:
@@ -1059,8 +1067,8 @@ class MeetingRelay(QObject):
             digest = _qimage_digest(img)
         except Exception:
             digest = None
-        if digest is not None and self._view_hashes.get(name) == digest:
-            self._view_cachekeys[name] = cache_key   # remember so we short-circuit next tick
+        if digest is not None and self._view_hashes.get(key) == digest:
+            self._view_cachekeys[key] = cache_key   # remember so we short-circuit next tick
             return None    # unchanged (fast path, no PNG encode)
         pixmap = self._fit_for_wire(pixmap)
         png = self._pixmap_png(pixmap)
@@ -1080,17 +1088,17 @@ class MeetingRelay(QObject):
                 # Record cacheKey so an identical oversized pixmap short-circuits
                 # next tick (no re-encode loop); a changed figure mints a new key.
                 if cache_key:
-                    self._view_cachekeys[name] = cache_key
+                    self._view_cachekeys[key] = cache_key
                 return None
         if digest is None:
             # constBits failed — fall back to hashing the PNG bytes (correctness
             # kept; only the no-encode fast path is lost).
             digest = hashlib.sha1(png).digest()
-            if self._view_hashes.get(name) == digest:
-                self._view_cachekeys[name] = cache_key
+            if self._view_hashes.get(key) == digest:
+                self._view_cachekeys[key] = cache_key
                 return None
-        self._view_hashes[name] = digest
-        self._view_cachekeys[name] = cache_key
+        self._view_hashes[key] = digest
+        self._view_cachekeys[key] = cache_key
         return png
 
     @staticmethod

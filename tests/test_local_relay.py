@@ -91,7 +91,7 @@ def test_sessions_tabs_put(clock):
     assert status == 200 and _json(p) == {"ok": True}
     assert st._ch["ch1"]["sessions"] == [{"id": "s1"}]
     _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody(["t1"]))
-    assert st._ch["ch1"]["tabs"] == ["t1"]
+    assert st._ch["ch1"]["tabs_by_ds"][""] == ["t1"]   # bare list → null-group slice
 
 
 # 4. out → poll, not inbound (echo gate)
@@ -197,7 +197,7 @@ def test_msg_sid_whitelist(clock):
     _new_channel(st)
     # not published → 403
     status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
-    assert status == 403 and _json(p) == {"error": "session not published"}
+    assert status == 403 and _json(p) == {"error": "session not in scope"}
     _publish_session(st)
     status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
     assert status == 200
@@ -218,7 +218,7 @@ def test_poll_shape(clock):
     _, _, p = _call(st, "GET", "/poll/ch1/s1", _guest_h())
     obj = _json(p)
     assert set(obj) == {"messages", "sessions", "tabs", "active_dataset",
-                        "view_versions", "alive", "server_now_ms"}
+                        "datasets", "view_versions", "alive", "server_now_ms"}
     assert obj["alive"] is True
     assert obj["active_dataset"] is None   # legacy bare-list publish → null dataset
 
@@ -266,7 +266,7 @@ def test_view_put_get(clock):
     _publish_tab(st)
     status, _, _ = _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNGDATA")
     assert status == 200
-    assert st._ch["ch1"]["vv"]["t1"] > 0
+    assert st._ch["ch1"]["vv_by_ds"][""]["t1"] > 0
     status, hdrs, payload = _call(st, "GET", "/view/ch1/t1", _guest_h())
     assert status == 200 and hdrs["content-type"] == "image/png"
     assert payload == b"\x89PNGDATA"
@@ -283,9 +283,11 @@ def test_tabs_put_dataset_shape(clock):
     status, _, p = _call(st, "PUT", "/tabs/ch1", _admin_h(),
                          _jbody({"active_dataset": "ds1", "tabs": ["t1", "t2"]}))
     assert status == 200 and _json(p) == {"ok": True}
-    assert st._ch["ch1"]["tabs"] == ["t1", "t2"]
+    assert st._ch["ch1"]["tabs_by_ds"]["ds1"] == ["t1", "t2"]
     assert st._ch["ch1"]["dataset"] == "ds1"
-    _publish_session(st)
+    # a session in ds1 so ds-less poll (active-DS filter) returns it
+    _call(st, "PUT", "/sessions/ch1", _admin_h(),
+          _jbody([{"id": "s1", "title": "T", "busy": False, "dataset": "ds1"}]))
     _, _, pp = _call(st, "GET", "/poll/ch1/s1", _guest_h())
     obj = _json(pp)
     assert obj["active_dataset"] == "ds1" and obj["tabs"] == ["t1", "t2"]
@@ -296,35 +298,77 @@ def test_tabs_put_legacy_list_null_dataset(clock):
     st = RelayState(ADMIN)
     _new_channel(st)
     _publish_tab(st)                        # bare ["t1"]
-    assert st._ch["ch1"]["tabs"] == ["t1"]
+    assert st._ch["ch1"]["tabs_by_ds"][""] == ["t1"]
     assert st._ch["ch1"]["dataset"] is None
     _publish_session(st)
     _, _, pp = _call(st, "GET", "/poll/ch1/s1", _guest_h())
     assert _json(pp)["active_dataset"] is None
 
 
-# 9d. dataset switch clears the view store: a same-named tab in the new dataset
-#     must never serve the old dataset's PNG (204 until the host re-uploads)
-def test_dataset_switch_clears_views(clock):
+# 9d. per-DS view isolation: same-named tabs in two datasets keep separate PNGs
+#     and a guest reading with a given ds never sees the other dataset's bytes.
+def test_same_named_tabs_per_ds_isolation(clock):
     st = RelayState(ADMIN)
     _new_channel(st)
-    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({"active_dataset": "ds1", "tabs": ["t1"]}))
-    _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNG_DS1")
-    assert st._ch["ch1"]["vv"]["t1"] > 0
-    clock["t"] += 1
-    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({"active_dataset": "ds2", "tabs": ["t1"]}))
-    assert st._ch["ch1"]["views"] == {} and st._ch["ch1"]["vv"] == {}
-    # t1 is still published (by ds2) → 204, not 403, and never ds1's bytes
-    status, _, payload = _call(st, "GET", "/view/ch1/t1", _guest_h())
-    assert status == 204 and payload == b""
-    _, _, pp = _call(st, "GET", "/poll/ch1/_", _guest_h())
+    # publish "t1" in BOTH datasets via the new multi-DS shape
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "ds1", "datasets": ["ds1", "ds2"],
+        "tabs_by_dataset": {"ds1": ["t1"], "ds2": ["t1"]}}))
+    _call(st, "PUT", "/view/ch1/t1?ds=ds1", _admin_h(), b"\x89PNG_DS1")
+    _call(st, "PUT", "/view/ch1/t1?ds=ds2", _admin_h(), b"\x89PNG_DS2")
+    assert st._ch["ch1"]["vv_by_ds"]["ds1"]["t1"] > 0
+    assert st._ch["ch1"]["vv_by_ds"]["ds2"]["t1"] > 0
+    # each ds reads its own PNG
+    status, _, p1 = _call(st, "GET", "/view/ch1/t1?ds=ds1", _guest_h())
+    assert status == 200 and p1 == b"\x89PNG_DS1"
+    status, _, p2 = _call(st, "GET", "/view/ch1/t1?ds=ds2", _guest_h())
+    assert status == 200 and p2 == b"\x89PNG_DS2"
+    # ds absent → active (ds1) slice
+    status, _, p0 = _call(st, "GET", "/view/ch1/t1", _guest_h())
+    assert status == 200 and p0 == b"\x89PNG_DS1"
+    # poll per DS returns that DS's view_versions + tabs; datasets list is global
+    _publish_session(st)
+    _, _, pp = _call(st, "GET", "/poll/ch1/_?ds=ds2", _guest_h())
     obj = _json(pp)
-    assert obj["active_dataset"] == "ds2" and obj["view_versions"] == {}
-    # a fresh upload repopulates
-    status, _, _ = _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNG_DS2")
-    assert status == 200
-    status, _, payload = _call(st, "GET", "/view/ch1/t1", _guest_h())
-    assert status == 200 and payload == b"\x89PNG_DS2"
+    assert obj["active_dataset"] == "ds1" and obj["tabs"] == ["t1"]
+    assert set(obj["datasets"]) == {"ds1", "ds2"}
+    assert "t1" in obj["view_versions"]
+
+
+# 9d-2. empty ds= (null group) reads a slice distinct from the active dataset —
+#       the keep_blank_values regression guard.
+def test_null_group_ds_addressable(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "ds1", "datasets": ["ds1", ""],
+        "tabs_by_dataset": {"ds1": ["t1"], "": ["t1"]}}))
+    _call(st, "PUT", "/view/ch1/t1?ds=ds1", _admin_h(), b"\x89PNG_ACTIVE")
+    _call(st, "PUT", "/view/ch1/t1?ds=", _admin_h(), b"\x89PNG_NULL")
+    # empty ds= must reach the null group, NOT the active slice
+    status, _, pn = _call(st, "GET", "/view/ch1/t1?ds=", _guest_h())
+    assert status == 200 and pn == b"\x89PNG_NULL"
+    status, _, pa = _call(st, "GET", "/view/ch1/t1?ds=ds1", _guest_h())
+    assert status == 200 and pa == b"\x89PNG_ACTIVE"
+
+
+# 9d-3. a dataset dropped from `datasets` has its slices pruned (3-dict union)
+def test_dropped_dataset_pruned(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "ds1", "datasets": ["ds1", "ds2"],
+        "tabs_by_dataset": {"ds1": ["t1"], "ds2": ["t1"]}}))
+    _call(st, "PUT", "/view/ch1/t1?ds=ds2", _admin_h(), b"\x89PNG_DS2")
+    # host closes ds2 (drops it from datasets); even the view/vv slice is pruned
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "ds1", "datasets": ["ds1"],
+        "tabs_by_dataset": {"ds1": ["t1"]}}))
+    assert "ds2" not in st._ch["ch1"]["tabs_by_ds"]
+    assert "ds2" not in st._ch["ch1"]["views_by_ds"]
+    assert "ds2" not in st._ch["ch1"]["vv_by_ds"]
+    # ds1 (still open) survives
+    assert st._ch["ch1"]["tabs_by_ds"]["ds1"] == ["t1"]
 
 
 # 9e. tab-list-only changes within one dataset keep the view store
@@ -334,8 +378,8 @@ def test_same_dataset_tabs_change_keeps_views(clock):
     _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({"active_dataset": "ds1", "tabs": ["t1"]}))
     _call(st, "PUT", "/view/ch1/t1", _admin_h(), b"\x89PNG")
     _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({"active_dataset": "ds1", "tabs": ["t1", "t2"]}))
-    assert st._ch["ch1"]["views"].get("t1") == b"\x89PNG"
-    assert st._ch["ch1"]["vv"]["t1"] > 0
+    assert st._ch["ch1"]["views_by_ds"]["ds1"].get("t1") == b"\x89PNG"
+    assert st._ch["ch1"]["vv_by_ds"]["ds1"]["t1"] > 0
 
 
 # 9f. field-type coercion on the new shape (admin-only surface, never 500)
@@ -345,9 +389,9 @@ def test_tabs_put_bad_field_types(clock):
     status, _, _ = _call(st, "PUT", "/tabs/ch1", _admin_h(),
                          _jbody({"active_dataset": 5, "tabs": "x"}))
     assert status == 200
-    assert st._ch["ch1"]["dataset"] is None and st._ch["ch1"]["tabs"] == []
+    assert st._ch["ch1"]["dataset"] is None and st._ch["ch1"]["tabs_by_ds"][""] == []
     _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({"tabs": ["t1", 5]}))
-    assert st._ch["ch1"]["tabs"] == ["t1", "5"]     # entries str-coerced (guest renders raw)
+    assert st._ch["ch1"]["tabs_by_ds"][""] == ["t1", "5"]  # entries str-coerced (guest renders raw)
     status, _, p = _call(st, "PUT", "/tabs/ch1", _admin_h(), b"{not json")
     assert status == 400 and _json(p) == {"error": "bad json"}
 
@@ -373,6 +417,83 @@ def test_history_unpublished_sid_has_more(clock):
     _, _, pe = _call(st, "GET", "/history/ch1/nosuch?turns=5", _guest_h())
     obj = _json(pe)
     assert obj["messages"] == [] and obj["has_more"] is True
+
+
+# 9i. ds-scoped sessions in poll: ds absent → active-DS sessions only (legacy
+#     presenter-mirror); ds present → flat all-DS session list (client filters).
+def test_poll_sessions_ds_scope(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "dsA", "datasets": ["dsA", "dsB"],
+        "tabs_by_dataset": {"dsA": [], "dsB": []}}))
+    _call(st, "PUT", "/sessions/ch1", _admin_h(), _jbody([
+        {"id": "a", "title": "A", "busy": False, "dataset": "dsA"},
+        {"id": "b", "title": "B", "busy": False, "dataset": "dsB"},
+    ]))
+    # ds absent → only active dsA's sessions
+    _, _, p0 = _call(st, "GET", "/poll/ch1/_", _guest_h())
+    assert {s["id"] for s in _json(p0)["sessions"]} == {"a"}
+    # ds present → all sessions (flat), client-side filtered by curDs
+    _, _, pb = _call(st, "GET", "/poll/ch1/_?ds=dsB", _guest_h())
+    assert {s["id"] for s in _json(pb)["sessions"]} == {"a", "b"}
+
+
+# 9j. session scope gate across poll messages / /msg / /history (Issue #78):
+#     ds absent → active-DS sid only; ds present → sid.dataset == ds only.
+def test_session_scope_gate(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody({
+        "active_dataset": "dsA", "datasets": ["dsA", "dsB"],
+        "tabs_by_dataset": {"dsA": [], "dsB": []}}))
+    _call(st, "PUT", "/sessions/ch1", _admin_h(), _jbody([
+        {"id": "a", "title": "A", "busy": False, "dataset": "dsA"},
+        {"id": "b", "title": "B", "busy": False, "dataset": "dsB"},
+    ]))
+    # background dsB message present
+    _call(st, "POST", "/out/ch1/b", _admin_h(), _jbody({"text": "b_reply", "role": "assistant"}))
+
+    # ds absent (legacy guest): background dsB sid `b` is out of scope everywhere
+    _, _, pm = _call(st, "GET", "/poll/ch1/b", _guest_h())
+    assert _json(pm)["messages"] == []                       # poll messages gated
+    status, _, _ = _call(st, "POST", "/msg/ch1/b", _guest_h(), _jbody({"text": "hi"}))
+    assert status == 403                                     # /msg gated
+    _, _, ph = _call(st, "GET", "/history/ch1/b", _guest_h())
+    assert _json(ph)["has_more"] is True and _json(ph)["messages"] == []
+
+    # ds=dsB (new guest): sid `b` is in scope; the dsA sid `a` is NOT
+    _, _, pm2 = _call(st, "GET", "/poll/ch1/b?ds=dsB", _guest_h())
+    assert [m["text"] for m in _json(pm2)["messages"]] == ["b_reply"]
+    status, _, _ = _call(st, "POST", "/msg/ch1/b?ds=dsB", _guest_h(), _jbody({"text": "hi"}))
+    assert status == 200
+    status, _, _ = _call(st, "POST", "/msg/ch1/a?ds=dsB", _guest_h(), _jbody({"text": "x"}))
+    assert status == 403                                     # a is dsA, not dsB
+
+
+# 9k. hot-reload migration: a pre-#78 channel (flat tabs/views/vv, no per-DS keys)
+#     is upgraded in place and its stored view survives (guest still sees it).
+def test_hot_reload_migration_keeps_view(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st, sid="s1")
+    # simulate a channel dict produced by pre-#78 code: flat stores, no per-DS keys
+    cs = st._ch["ch1"]
+    cs["dataset"] = "dsX"
+    cs["tabs"] = ["t1"]
+    cs["views"] = {"t1": b"\x89PNG_OLD"}
+    cs["vv"] = {"t1": 1234}
+    for k in ("datasets", "tabs_by_ds", "views_by_ds", "vv_by_ds"):
+        cs.pop(k, None)
+    # a read path (poll) must upgrade-in-place and preserve the flat view
+    _, _, pp = _call(st, "GET", "/poll/ch1/s1", _guest_h())
+    obj = _json(pp)
+    assert obj["active_dataset"] == "dsX" and obj["datasets"] == ["dsX"]
+    assert obj["tabs"] == ["t1"] and "t1" in obj["view_versions"]
+    status, _, payload = _call(st, "GET", "/view/ch1/t1", _guest_h())
+    assert status == 200 and payload == b"\x89PNG_OLD"
+    # flat store is blanked post-migration (never re-migrated)
+    assert cs["tabs"] == [] and cs["views"] == {} and cs["vv"] == {}
 
 
 # 10. expiry + hb grace

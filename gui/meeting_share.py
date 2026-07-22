@@ -42,7 +42,9 @@ class MeetingShareWindow(QWidget):
         self._sess_sig = None       # signature of the rendered session rows
         self._tab_sig = None
         self._sess_boxes: dict[str, QCheckBox] = {}
-        self._tab_boxes: dict[str, QCheckBox] = {}
+        # Keyed by (dataset-key, tab-name) — all open DSs are shareable (Issue #78),
+        # so bare names would collide across datasets.
+        self._tab_boxes: dict[tuple[str, str], QCheckBox] = {}
         self.setWindowTitle(tr("meeting.share.title"))
         self.resize(520, 720)
 
@@ -395,21 +397,22 @@ class MeetingShareWindow(QWidget):
             self._new_session_note.setVisible(False)
 
         # Mid-meeting tabs auto-join the published set before we read it, so a
-        # newly-opened tab renders checked immediately (no one-tick flicker).
-        # Scope the list to the ACTIVE dataset (Issue #51 B5) so the UI matches
-        # the real relay publish scope (a hidden DS's same-named tab is not shown
-        # as a shareable item).
+        # newly-opened tab renders checked immediately (no one-tick flicker). All
+        # open DSs are shareable now (Issue #78), so enumerate every DS's tabs as
+        # (ds-key, name) pairs (ds None → "").
         self._relay.absorb_new_tabs()
-        tabs = [
-            t.name for t in self._window.tabs()
-            if (getattr(t, "session_spec", None) or {}).get("dataset") == cur_ds
-            and getattr(t, "name", None) is not None
-        ]
+        tab_pairs = []
+        for t in self._window.tabs():
+            name = getattr(t, "name", None)
+            if name is None:
+                continue
+            tds = (getattr(t, "session_spec", None) or {}).get("dataset")
+            tab_pairs.append(("" if tds is None else tds, name))
         pub_tabs = self._relay.published_tabs()
-        tsig = tuple(tabs) + (sharing,)
+        tsig = tuple(tab_pairs) + (sharing,)
         if tsig != self._tab_sig:
             self._tab_sig = tsig
-            self._rebuild_tab_rows(tabs, sharing, pub_tabs)
+            self._rebuild_tab_rows(tab_pairs, sharing, pub_tabs)
 
     def _rebuild_session_rows(self, summaries, cur_ds, sharing, published) -> None:
         while self._sess_layout.count():
@@ -440,19 +443,27 @@ class MeetingShareWindow(QWidget):
         self._sess_layout.addStretch(1)
         self._sync_select_all(self._sess_boxes, self._sess_select_all)
 
-    def _rebuild_tab_rows(self, tabs, sharing, pub_tabs) -> None:
+    def _rebuild_tab_rows(self, pairs, sharing, pub_tabs) -> None:
         while self._tab_layout.count():
             item = self._tab_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
         self._tab_boxes = {}
-        for name in tabs:
-            box = QCheckBox(name)
-            box.setChecked(name in pub_tabs if sharing else True)
-            box.toggled.connect(self._on_tab_toggle)
-            self._tab_layout.addWidget(box)
-            self._tab_boxes[name] = box
+        # group by dataset ("" = null group, sorted last) — mirrors _rebuild_session_rows
+        by_ds: dict = {}
+        for (ds, name) in pairs:
+            by_ds.setdefault(ds, []).append(name)
+        for ds in sorted(by_ds, key=lambda d: (d == "", d)):
+            header = QLabel(ds if ds else "—")
+            header.setStyleSheet("font-weight:bold;color:#6ec1e4")
+            self._tab_layout.addWidget(header)
+            for name in by_ds[ds]:
+                box = QCheckBox(name)
+                box.setChecked((ds, name) in pub_tabs if sharing else True)
+                box.toggled.connect(self._on_tab_toggle)
+                self._tab_layout.addWidget(box)
+                self._tab_boxes[(ds, name)] = box
         self._tab_layout.addStretch(1)
         self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
@@ -469,8 +480,8 @@ class MeetingShareWindow(QWidget):
 
     def _on_tab_toggle(self, _checked=False) -> None:
         if self._relay.is_sharing():
-            names = [name for name, box in self._tab_boxes.items() if box.isChecked()]
-            self._relay.set_published_tabs(names)
+            keys = [key for key, box in self._tab_boxes.items() if box.isChecked()]
+            self._relay.set_published_tabs(keys)
         self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
     def _on_select_all_sessions(self, _checked=False) -> None:
@@ -497,8 +508,8 @@ class MeetingShareWindow(QWidget):
             b.setChecked(target)
             b.blockSignals(False)
         if self._relay.is_sharing():
-            names = [name for name, b in boxes.items() if b.isChecked()]
-            self._relay.set_published_tabs(names)
+            keys = [key for key, b in boxes.items() if b.isChecked()]
+            self._relay.set_published_tabs(keys)
         self._sync_select_all(boxes, self._tab_select_all)
 
     def _sync_select_all(self, boxes, master) -> None:

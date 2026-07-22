@@ -132,19 +132,73 @@ class RelayState:
     # ---- channel state ----
 
     def _ensure_channel(self, ch: str, now_sec_val: int) -> dict:
-        return self._ch.setdefault(ch, {
+        cs = self._ch.setdefault(ch, {
             "meta": {},
             "hb": now_sec_val,
             "sessions": [],
-            "tabs": [],
+            "tabs": [],        # legacy flat store (migrated to per-DS on upgrade)
             "dataset": None,   # active dataset the published tabs belong to (DS layer)
+            "datasets": [],    # ordered DS keys ("" = null/dataset-less group) (Issue #78)
+            "tabs_by_ds": {},  # ds-key -> [tab, ...]      (Issue #78)
+            "views_by_ds": {}, # ds-key -> {tab: png}      (Issue #78)
+            "vv_by_ds": {},    # ds-key -> {tab: version}  (Issue #78)
             "in_msgs": [],
             "out_msgs": [],
             "backlog": {},     # sid -> [msg, ...] pre-meeting transcript (no TTL compaction)
-            "views": {},
-            "vv": {},
+            "views": {},       # legacy flat store (migrated to per-DS on upgrade)
+            "vv": {},          # legacy flat store (migrated to per-DS on upgrade)
             "presence": {},
         })
+        self._upgrade_channel(cs)
+        return cs
+
+    @staticmethod
+    def _upgrade_channel(cs: dict) -> None:
+        """Idempotently ensure a channel carries the per-DS namespace keys and,
+        once, migrate any legacy flat ``tabs``/``views``/``vv`` into the active
+        DS's slice (Issue #78). A mid-meeting host hot-reload leaves existing
+        channel dicts (created by pre-#78 code) without the per-DS keys, so both
+        write and read paths call this after fetching ``cs``.
+        """
+        cs.setdefault("datasets", [])
+        cs.setdefault("tabs_by_ds", {})
+        cs.setdefault("views_by_ds", {})
+        cs.setdefault("vv_by_ds", {})
+        # One-time flat→per-DS migration: only when legacy flat state exists AND
+        # the per-DS store is still empty. After migrating we blank the flat store
+        # so this guard can never fire twice (post-#78 nothing writes flat).
+        legacy = cs.get("tabs") or cs.get("views") or cs.get("vv")
+        if legacy and not cs["tabs_by_ds"] and not cs["views_by_ds"] and not cs["vv_by_ds"]:
+            key = cs.get("dataset") or ""
+            cs["tabs_by_ds"][key] = list(cs.get("tabs") or [])
+            cs["views_by_ds"][key] = dict(cs.get("views") or {})
+            cs["vv_by_ds"][key] = dict(cs.get("vv") or {})
+            if key not in cs["datasets"]:
+                cs["datasets"].append(key)
+            cs["tabs"] = []
+            cs["views"] = {}
+            cs["vv"] = {}
+
+    @staticmethod
+    def _ds_key(cs: dict, ds_raw: "str | None") -> str:
+        """Canonicalise a `ds` query value to a per-DS store key (Issue #78).
+
+        ``ds_raw`` is ``None`` (absent → host-active slice), ``""`` (explicit null
+        group), or a dataset name. Absent resolves to the active dataset's key
+        (``""`` when the active dataset is the null group)."""
+        return (cs.get("dataset") or "") if ds_raw is None else ds_raw
+
+    def _session_scope_ok(self, cs: dict, sid: str, ds_raw: "str | None") -> bool:
+        """True iff ``sid`` is published AND bound to the caller's DS scope
+        (Issue #78). ``ds`` absent (legacy guest) → the active dataset only;
+        ``ds`` present (new guest) → the sessions whose ``dataset`` equals ``ds``.
+        This keeps a legacy guest a true presenter-mirror (no background-DS chat
+        exposure) across messages, /msg, and /history."""
+        scope = self._ds_key(cs, ds_raw)
+        sess = next((s for s in cs["sessions"] if s.get("id") == sid), None)
+        if sess is None:
+            return False
+        return ("" if sess.get("dataset") is None else sess.get("dataset")) == scope
 
     def _evict_expired_channels(self, now_sec_val: int) -> None:
         # Reap (a) meta'd channels past expires_at and (b) metadata-less channels
@@ -212,7 +266,12 @@ class RelayState:
             return (204, dict(_CORS), b"")
 
         split = urllib.parse.urlsplit(path)
-        query = urllib.parse.parse_qs(split.query)
+        # keep_blank_values: an empty `?ds=` must survive as "" (the null/dataset-
+        # less group key), distinct from an absent `ds` (None → host-active). The
+        # default drops blank values, collapsing "absent" and "empty" to the same
+        # None and making the null group un-addressable. Only `ds` distinguishes
+        # the two; every other query consumer coerces "" to its default anyway.
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
         seg = [urllib.parse.unquote(s) for s in split.path.split("/") if s]
 
         # GET / -> serve the guest HTML (file I/O outside the lock).
@@ -274,26 +333,42 @@ class RelayState:
             obj = self._parse_json(body)
             if obj is _BAD:
                 return self._json({"error": "bad json"}, 400)
-            if isinstance(obj, dict):
-                ds = obj.get("active_dataset")
-                ds = ds if isinstance(ds, str) else None
-                tabs = obj.get("tabs")
-                tabs = [str(t) for t in tabs] if isinstance(tabs, list) else []
-            else:
-                ds = None
-                tabs = [str(t) for t in obj] if isinstance(obj, list) else []
             cs = self._ensure_channel(seg[1], now_s)
-            # Dataset switch: drop every stored view. Tab names are unique only
-            # WITHIN a dataset, so a same-named tab in the new dataset must never
-            # serve the old dataset's PNG. Tab-list-only changes within one
-            # dataset keep the store (stale vv entries are unreachable: /view
-            # 403s unpublished tabs). .get(): a channel created before this field
-            # existed (mid-meeting hot-reload) lacks the key.
-            if ds != cs.get("dataset"):
-                cs["views"] = {}
-                cs["vv"] = {}
-            cs["dataset"] = ds
-            cs["tabs"] = tabs
+            if isinstance(obj, dict) and isinstance(obj.get("tabs_by_dataset"), dict):
+                # New multi-DS shape: full per-DS namespace in one PUT (Issue #78).
+                tbd = obj["tabs_by_dataset"]
+                cs["tabs_by_ds"] = {
+                    str(k): [str(t) for t in v]
+                    for k, v in tbd.items() if isinstance(v, list)
+                }
+                raw_ds = obj.get("datasets")
+                cs["datasets"] = (
+                    [str(d) for d in raw_ds] if isinstance(raw_ds, list)
+                    else list(cs["tabs_by_ds"])
+                )
+                active = obj.get("active_dataset")
+                cs["dataset"] = active if isinstance(active, str) else None
+            else:
+                # Legacy dict{active_dataset, tabs} OR bare-list (pre-DS host):
+                # a single-DS publish keyed by the active dataset (None → "").
+                active = obj.get("active_dataset") if isinstance(obj, dict) else None
+                active = active if isinstance(active, str) else None
+                raw = obj.get("tabs") if isinstance(obj, dict) else obj
+                tabs = [str(t) for t in raw] if isinstance(raw, list) else []
+                key = active if isinstance(active, str) else ""
+                cs["tabs_by_ds"][key] = tabs
+                cs["datasets"] = [key]
+                cs["dataset"] = active
+            # Prune slices for datasets no longer published (replaces the old
+            # dataset-switch view wipe). Walk the UNION of all three per-DS dicts
+            # so a DS that opted every tab out but still has a lingering view/vv
+            # slice is cleaned too. Open-but-unpublished DSs (empty slice present
+            # in `datasets`) are kept.
+            for k in (set(cs["tabs_by_ds"]) | set(cs["views_by_ds"]) | set(cs["vv_by_ds"])):
+                if k not in cs["datasets"]:
+                    cs["tabs_by_ds"].pop(k, None)
+                    cs["views_by_ds"].pop(k, None)
+                    cs["vv_by_ds"].pop(k, None)
             return self._json({"ok": True})
 
         if seg[:1] == ["heartbeat"] and len(seg) == 2 and method == "PUT":
@@ -411,8 +486,8 @@ class RelayState:
             if not ok:
                 return self._json({"error": "not live"}, status)
             cs = self._ch[ch]
-            if not any(s.get("id") == sid for s in cs["sessions"]):
-                return self._json({"error": "session not published"}, 403)
+            if not self._session_scope_ok(cs, sid, self._q1(query, "ds")):
+                return self._json({"error": "session not in scope"}, 403)
             obj, err = self._json_obj(body)
             if err:
                 return err
@@ -440,35 +515,44 @@ class RelayState:
             pid = str(obj.get("pid") or "")
             if not pid:
                 return self._json({"error": "missing pid"}, 400)
-            cs["presence"][pid] = {
+            entry = {
                 "pid": pid,
                 "name": str(obj.get("name") or "").strip() or "Guest",
                 "sid": str(obj.get("sid") or ""),
                 "tab": str(obj.get("tab") or ""),
                 "last": now_s,
             }
+            # Only record `ds` when the guest actually sent it: a bootstrap/legacy
+            # guest omits it, and the host's watched-DS derivation keys on "ds" in
+            # p — an absent key must not be mistaken for the null group ("") (Issue #78).
+            if "ds" in obj:
+                entry["ds"] = str(obj.get("ds") or "")
+            cs["presence"][pid] = entry
             return self._json({"ok": True})
 
-        # PUT/GET /view/{ch}/{tab}
+        # PUT/GET /view/{ch}/{tab}?ds=
         if seg[:1] == ["view"] and len(seg) == 3:
             ch, tab = seg[1], seg[2]
             if method == "PUT":
                 if not self._is_admin(headers):
                     return self._json({"error": "unauthorized"}, 401)
                 cs = self._ensure_channel(ch, now_s)
-                if tab not in cs["tabs"]:
+                ds = self._ds_key(cs, self._q1(query, "ds"))
+                if tab not in cs["tabs_by_ds"].get(ds, []):
                     return self._json({"error": "tab not published"}, 403)
-                cs["views"][tab] = body
-                cs["vv"][tab] = now_m
+                cs["views_by_ds"].setdefault(ds, {})[tab] = body
+                cs["vv_by_ds"].setdefault(ds, {})[tab] = now_m
                 return self._json({"ok": True})
             if method == "GET":
                 ok, status = self._check_guest(headers, ch, now_s)
                 if not ok:
                     return self._json({"error": "not live"}, status)
                 cs = self._ch[ch]
-                if tab not in cs["tabs"]:
+                self._upgrade_channel(cs)
+                ds = self._ds_key(cs, self._q1(query, "ds"))
+                if tab not in cs["tabs_by_ds"].get(ds, []):
                     return self._json({"error": "tab not published"}, 403)
-                png = cs["views"].get(tab)
+                png = cs["views_by_ds"].get(ds, {}).get(tab)
                 if not png:
                     return (204, dict(_CORS), b"")
                 return (200, {"content-type": "image/png", **_CORS}, png)
@@ -480,19 +564,31 @@ class RelayState:
             if not ok:
                 return self._json({"error": "not live"}, status)
             cs = self._ch[ch]
-            sessions = cs["sessions"]
+            self._upgrade_channel(cs)
+            ds_raw = self._q1(query, "ds")
+            ds = self._ds_key(cs, ds_raw)
             messages = []
-            if any(s.get("id") == sid for s in sessions):
+            if self._session_scope_ok(cs, sid, ds_raw):
                 sc = self.compute_since(self._q1(query, "since"), now_m)
                 messages = sorted(
                     self._scan(cs["in_msgs"], sc, now_m, sid)
                     + self._scan(cs["out_msgs"], sc, now_m, sid),
                     key=lambda m: m["mid"],
                 )
+            # ds absent (legacy guest, no client-side DS filter) → only the active
+            # dataset's sessions (true presenter-mirror). ds present (new guest) →
+            # the flat all-DS session list, filtered client-side by curDs.
+            sessions_out = (
+                cs["sessions"] if ds_raw is not None
+                else [s for s in cs["sessions"] if s.get("dataset") == cs.get("dataset")]
+            )
             return self._json({
-                "messages": messages, "sessions": sessions, "tabs": cs["tabs"],
+                "messages": messages, "sessions": sessions_out,
+                "tabs": cs["tabs_by_ds"].get(ds, []),
                 "active_dataset": cs.get("dataset"),
-                "view_versions": dict(cs["vv"]), "alive": True, "server_now_ms": now_m,
+                "datasets": list(cs["datasets"]),
+                "view_versions": dict(cs["vv_by_ds"].get(ds, {})),
+                "alive": True, "server_now_ms": now_m,
             })
 
         # GET /history/{ch}/{sid}?before=&turns= (guest) — backward pagination.
@@ -505,11 +601,12 @@ class RelayState:
             if not ok:
                 return self._json({"error": "not live"}, status)
             cs = self._ch[ch]
-            if not any(s.get("id") == sid for s in cs["sessions"]):
+            if not self._session_scope_ok(cs, sid, self._q1(query, "ds")):
                 # has_more=True, not False: a dataset switch swaps the published
-                # session set, and an in-flight history fetch landing here would
-                # otherwise make the guest latch histExhausted permanently (the
-                # backlog is still staged — a retry after switch-back succeeds).
+                # session set (or the sid is out of the caller's DS scope), and an
+                # in-flight history fetch landing here would otherwise make the
+                # guest latch histExhausted permanently (the backlog is still
+                # staged — a retry after switch-back succeeds).
                 return self._json({"messages": [], "has_more": True, "server_now_ms": now_m})
             try:
                 turns = int(self._q1(query, "turns") or 5)
