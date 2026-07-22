@@ -37,12 +37,11 @@
   .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
-  /* DS layer above the tab bar — mirrors the host's DatasetSwitcher (host-driven,
-     not clickable in v1). The ◆ prefix mirrors the host's DS tab label (#57). */
+  /* DS layer above the tab bar — clickable chips mirroring the host's
+     DatasetSwitcher. Independent per guest (no host follow, Issue #78). Chips are
+     .tabbtn buttons; the ◆ prefix (added via textContent) mirrors the host's DS
+     tab label (#57). */
   #dsBar { border-bottom: 1px solid #333; }
-  .dschip { background: #3a3d41; color: #ddd; padding: 3px 10px; font-size: 12px;
-            border-radius: 4px; }
-  .dschip::before { content: "◆ "; color: #6ec1e4; }
   .viewempty { position: absolute; inset: 0; display: flex; align-items: center;
                justify-content: center; color: #888; font-size: 13px;
                font-style: italic; pointer-events: none; }
@@ -1380,7 +1379,7 @@ function join(tok, name) {
 
 // ---- self-test (#selftest): renderMarkdown の安全性/正当性をブラウザで決定論的に検証。
 // join せず・リレー接続せず、フィクスチャへ適用して assert する。通常運用には影響しない。 ----
-function runSelfTest() {
+async function runSelfTest() {
   const cases = [];
   const check = (name, cond) => cases.push({ name, pass: !!cond });
   let r;
@@ -1495,6 +1494,55 @@ function runSelfTest() {
     curSid = "keep";
     switchToDataset("dsB");
     check("switch-noop-same", curSid === "keep");
+
+    // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査（reviewer P2）:
+    // bootstrap での ds 省略・0セッションDSでの送信無効化・現DSスコープの opt-out。
+    const _api = api, _sched = schedulePoll;
+    let capUrl = null, capBody = null;
+    let pollResp = { status: 503, ok: false, data: {} };
+    api = (u, opts) => { capUrl = u; capBody = opts && opts.body; return Promise.resolve(pollResp); };
+    schedulePoll = () => {};
+    try {
+      // 9e. maybePresence: bootstrap(curDs===undefined)は body に ds を載せない、
+      //     確定時は ds（null群は "")。body は await 前に組まれるので同期捕捉できる。
+      lastPresenceMs = 0; curDs = undefined; curSid = "s1"; curTab = null;
+      maybePresence(true);
+      check("presence-bootstrap-omits-ds", !!capBody && !("ds" in capBody));
+      lastPresenceMs = 0; curDs = "dsA"; maybePresence(true);
+      check("presence-includes-ds", !!capBody && capBody.ds === "dsA");
+      lastPresenceMs = 0; curDs = null; maybePresence(true);
+      check("presence-null-group-ds", !!capBody && capBody.ds === "");
+      // 9f. poll URL: bootstrap は ds を付けない・確定時は &ds=<enc>（503 で副作用前に return）。
+      stopped = false;
+      curDs = undefined; curSid = null; cur = null;
+      await poll(false);
+      check("poll-bootstrap-omits-ds", !!capUrl && capUrl.indexOf("ds=") === -1);
+      curDs = "dsA"; curSid = "s1"; cur = getState("s1");
+      await poll(false);
+      check("poll-includes-ds", !!capUrl && capUrl.indexOf("&ds=dsA") !== -1);
+      // 9g. poll 本処理: 0セッションDSは curSid を null 化し送信無効＋noSessionsInDataset、
+      //     現DSに sid が有れば（他DS sid は現DSフィルタで除外され）送信有効。
+      const mkResp = (sessions) => ({ status: 200, ok: true, data: {
+        sessions, tabs: [], view_versions: {}, datasets: ["dsA", "dsB"],
+        active_dataset: "dsA", messages: [], server_now_ms: 1 } });
+      store.clear();
+      curDs = "dsB"; curSid = "x"; cur = getState("x"); curTab = null; optOutStrikes = 0;
+      pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+      await poll(false);
+      check("poll-empty-ds-disables-send",
+            curSid === null &&
+            document.getElementById("sendBtn").disabled === true &&
+            document.getElementById("sessNotice").textContent === T.noSessionsInDataset);
+      curDs = "dsA"; curSid = "a1"; cur = getState("a1"); optOutStrikes = 0;
+      pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                         { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
+      await poll(false);
+      check("poll-current-ds-sid-keeps-send",
+            document.getElementById("sendBtn").disabled === false);
+    } finally {
+      api = _api; schedulePoll = _sched;
+    }
+
     stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
     cur = _save.cur; curTab = _save.curTab;
   }

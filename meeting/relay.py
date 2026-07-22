@@ -449,7 +449,7 @@ class MeetingRelay(QObject):
     def published_session_ids(self) -> set[str]:
         return set(self._published_session_ids)
 
-    def published_tabs(self) -> set[str]:
+    def published_tabs(self) -> set[tuple[str, str]]:
         return set(self._published_tabs)
 
     def meeting_start_ids(self) -> set[str]:
@@ -483,13 +483,13 @@ class MeetingRelay(QObject):
                 for sid in removed:
                     pend.pop(sid, None)
 
-    def set_published_tabs(self, names) -> None:
+    def set_published_tabs(self, pairs: "set[tuple[str, str]] | list[tuple[str, str]]") -> None:
         # Symmetric to set_published_sessions (Issue #51 / reviewer code P2 R3):
-        # record every explicitly-decided tab (published OR deselected) as known
-        # so a deselected tab is not re-absorbed (default-shared) on a dataset
-        # switch. Active-dataset tabs are already in _tab_known from meeting_start,
-        # so this only matters if the share UI ever exposes a hidden dataset's tab.
-        new = set(names)
+        # record every explicitly-decided (dataset, name) tab (published OR
+        # deselected) as known so a deselected tab is not re-absorbed
+        # (default-shared) on a later capture tick. Since Issue #78 all open
+        # datasets' tabs are shareable, so `pairs` spans every open dataset.
+        new = set(pairs)
         removed = self._published_tabs - new
         if not hasattr(self, "_tab_known"):
             self._tab_known = set(self._published_tabs)
@@ -621,13 +621,13 @@ class MeetingRelay(QObject):
         """Create the channel, start the worker + capture timer; deliver the token
         asynchronously via ``tokenReady`` (the tunnel URL resolves off-thread).
 
-        The default published set is the ACTIVE dataset's sessions/tabs at start
-        time. ``_session_known``/``_tab_known`` are scoped to the active dataset
-        too, so a hidden dataset's items stay "undecided" and are auto-absorbed
-        (default-shared) when the host switches to that dataset (Issue #51 B5:
-        the shared set swaps to the newly-active dataset). Explicit per-item
-        deselection persists across switches (deselected items stay in ``_known``
-        and are not re-absorbed).
+        The default published set is EVERY open dataset's sessions/tabs at start
+        time (Issue #78: guests independently browse and drive any dataset, so the
+        host default-shares all of them). ``_session_known``/``_tab_known`` seed
+        from all open datasets too. Explicit per-item deselection makes an item
+        private and persists across dataset switches (deselected items stay in
+        ``_known`` and are not re-absorbed). Sessions/tabs opened mid-meeting in
+        any dataset auto-absorb (default-shared) on the next capture tick.
 
         No ``self`` state is mutated until the ``admin/channel`` POST succeeds, so
         a POST failure propagates cleanly with ``_sharing`` still False.
@@ -663,13 +663,11 @@ class MeetingRelay(QObject):
         self._expires_at = int(data.get("expires_at", 0) or 0)
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
-        # Publish AND "know" only the ACTIVE dataset's sessions/tabs (Issue #51
-        # B5 / reviewer code P1). Scoping _known to the active dataset (not ALL
-        # ids/names) is what lets a hidden dataset's items be treated as "new"
-        # and auto-absorbed (default-shared) when the host switches to that
-        # dataset — absorb_new_tabs/absorb_new_sessions both only decide the
-        # active dataset, mirroring each other.
-        cur = self._active_dataset()
+        # Publish AND "know" EVERY open dataset's sessions/tabs (Issue #78:
+        # default-share all open datasets so guests can browse/drive any of them;
+        # explicit opt-out is the only thing that makes an item private).
+        # absorb_new_tabs/absorb_new_sessions decide all open datasets too, so an
+        # item opened mid-meeting in any dataset auto-absorbs on the next tick.
         all_ids = {s["id"] for s in summaries}
         self._published_session_ids = set(all_ids)
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
@@ -879,7 +877,7 @@ class MeetingRelay(QObject):
             self._worker.enqueue({"kind": "out", "sid": sid, "body": body,
                                   "stream_id": stream_id, "partial": True})
 
-    def _on_sendfail(self, kind: str, ds: str = "", detail: str = "") -> None:
+    def _on_sendfail(self, kind: str, ds: str = "", tab: str = "") -> None:
         # _send drops a failed item without retry, but the change-detect latch was
         # already advanced at enqueue time — a lost tabs PUT would leave the server
         # on the old published set. Reset the latch so the next capture tick
@@ -897,8 +895,8 @@ class MeetingRelay(QObject):
         elif kind == "sessions":
             self._last_sessions_json = None
         elif kind == "view":
-            self._view_hashes.pop((ds, detail), None)
-            self._view_cachekeys.pop((ds, detail), None)
+            self._view_hashes.pop((ds, tab), None)
+            self._view_cachekeys.pop((ds, tab), None)
 
     def _backfill_session(self, sid: str, cw) -> None:
         """Stage a published session's existing transcript into the relay so guests
@@ -1045,7 +1043,7 @@ class MeetingRelay(QObject):
         except Exception as exc:
             _log.warning("capture tick skipped: %s", exc)
 
-    def _capture_tab(self, tab, key) -> bytes | None:
+    def _capture_tab(self, tab, key: tuple[str, str]) -> bytes | None:
         try:
             # Full content extent (decoupled from host zoom/pan/scroll) when the
             # tab supports it; else the on-screen viewport. getattr guard tolerates
