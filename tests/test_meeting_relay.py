@@ -549,6 +549,44 @@ def test_backlog_history_end_to_end(qapp):
         srv.shutdown()
 
 
+def test_newsession_worker_end_to_end(qapp):
+    """Full path over a real socket: guest POST /newsession → relay → worker GET
+    /newsessions → sig_new_session. Guards the worker<->relay integration the
+    fake-_req tests skip (Issue #81).
+
+    The response key "requests", the item fields ds/name/mid and the route path
+    live as three independent literal sets (local_relay.py, relay.py, and the
+    stubbed payloads in the fake-_req tests), so a one-sided rename would leave
+    every other test green while the guest's "+" silently stops working."""
+    import hashlib
+    import urllib.request
+    import meeting.local_relay as lr
+    import meeting.relay as mr
+    srv = lr.start_server("ADMIN")
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        secret = "sek"
+        sh = hashlib.sha256(secret.encode()).hexdigest()
+        srv.state.handle("POST", "/admin/channel", {"Authorization": "Bearer ADMIN"},
+                         json.dumps({"ch": "ch", "ttl_sec": 3600, "secret_hash": sh}).encode())
+        req = urllib.request.Request(
+            base + "/newsession/ch?ds=dsA",
+            data=json.dumps({"name": "Bob"}).encode(), method="POST",
+            headers={"Authorization": "Bearer " + secret,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert json.loads(r.read().decode())["ok"] is True
+        w = mr._RelayWorker(base, "ADMIN", "ch")
+        got = []
+        w.sig_new_session.connect(lambda ds, n: got.append((ds, n)))
+        w._do_new_sessions()
+        assert got == [("dsA", "Bob")]   # 応答キー・フィールド名・パスの三者一致
+        w._do_new_sessions()
+        assert got == [("dsA", "Bob")]   # 実サーバ相手でも mid dedup が効く
+    finally:
+        srv.shutdown()
+
+
 def test_backfill_runs_after_hot_reload_without_field(qapp, monkeypatch):
     # Simulate a mid-meeting scope=patch hot-reload: the running instance predates
     # the _backfilled_ids field. The capture tick must recreate it and still backfill.
