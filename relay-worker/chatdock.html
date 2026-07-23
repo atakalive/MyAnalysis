@@ -166,6 +166,10 @@ const T = {
         tabCommentPrefix: "[Comment on tab: {name}] ",
         noDataset: "(no dataset)", switchingDs: "Dataset switched — loading view…",
         noTabs: "(no shared tabs)", noSessionsInDataset: "No shared chats in this dataset.",
+        newChat: "New chat",
+        newChatNullDs: "Pick a dataset first — chats here are not saved",
+        newChatPending: "Creating a new chat…",
+        newChatTimeout: "The new chat did not appear.",
         viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
@@ -179,6 +183,10 @@ const T = {
         tabCommentPrefix: "[タブ「{name}」へのコメント] ",
         noDataset: "（データセットなし）", switchingDs: "データセット切替中 — ビューを読込中…",
         noTabs: "（共有中のタブなし）", noSessionsInDataset: "このデータセットに共有中のチャットはありません。",
+        newChat: "新規チャット",
+        newChatNullDs: "先にデータセットを選んでください（ここのチャットは保存されません）",
+        newChatPending: "新規チャットを作成中…",
+        newChatTimeout: "新規チャットが作成されませんでした。",
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
@@ -187,6 +195,8 @@ const LOOKBACK_MS = 15000;
 const POLL_MIN = 1000, POLL_MAX = 30000;
 const FETCH_TIMEOUT_MS = 10000;
 const PRESENCE_INTERVAL_MS = 20000;
+const PENDING_NEW_MS = 30000;   // "+" 自動選択予約の寿命（Issue #81）
+const STATUS_MSG_MS = 5000;     // status 行の一時メッセージ寿命（Issue #81）
 
 // ---- tool-call display (本体 gui/chat.py の3段階表示をミラー。受信した生テキストは
 // 常に保持し、描画時にモードで簡略化する＝表示のみ・可逆。各ゲストのローカル設定で、
@@ -467,6 +477,15 @@ const appliedVv = {};           // tab → version successfully decoded+painted
 const viewInflight = new Set(); // "gen:tab" keys with an in-flight /view fetch (de-dupe)
 let lastPresenceMs = 0;
 let histInflight = false;       // one /history fetch in flight at a time
+// Issue #81: guest-minted chat. The host mints the id, so the guest reserves an
+// auto-select by snapshotting THIS dataset's known session ids at press time and
+// selecting whichever id shows up that wasn't in the snapshot.
+let pendingNewSelect = null;     // {ds, before:Set<string>, select:boolean, deadline:number} | null
+let newSessionInflight = false;  // POST 多重発行の抑止（押下抑止は pendingNewSelect が担う）
+let lastFilteredSids = new Set();// 直近 renderSessions の現DSセッションid集合
+let lastFilteredDs = undefined;  // そのスナップショットを取った時の curDs（?? "" 前の生値）
+// status 行の一時占有。poll は毎回 T.connected を書くので、期限内はこちらを優先する。
+let statusOverride = null;       // {text:string, until:number} | null
 
 // ---- per-session chat store (in-memory; survives session-tab switches, cleared
 // on page reload). The msgs array is the render source of truth, so switching
@@ -819,7 +838,13 @@ async function poll(reanchor = false) {
       }
       if (serverNow > cur.latestSeenTs) cur.latestSeenTs = serverNow;
     }
-    document.getElementById("status").textContent = T.connected;
+    // Issue #81: 「+」由来の一時メッセージは期限内だけ status 行を占有する
+    // （この行が毎ポーリング T.connected で潰してしまうため）。この行は成功パス
+    // にしかないので、503 / !ok の間はホストオフライン・再試行表示が優先され、
+    // newChatPending / newChatTimeout は表示されない（接続障害の告知が優先で妥当）。
+    if (statusOverride && Date.now() >= statusOverride.until) statusOverride = null;
+    document.getElementById("status").textContent =
+      statusOverride ? statusOverride.text : T.connected;
     maybePresence();
   } catch (e) {
     if (myGen === pollGen) document.getElementById("status").textContent = T.retrying;
@@ -867,9 +892,35 @@ function renderSessions(sessions) {
   // Issue #78: the flat all-DS session list is filtered to the current dataset.
   const filtered = sessions.filter((s) => (s.dataset ?? "") === (curDs ?? ""));
   const have = new Set(filtered.map((s) => s.id));
+  lastFilteredSids = have;       // Issue #81: newSession() が差分の基準に使う
+  lastFilteredDs = curDs;        // そのスナップショットがどの DS のものかを併記
   // Invalidate a curSid that no longer belongs to this dataset (switched DS, or
   // opted out) so it isn't a stale send target and auto-select can pick a fresh one.
   if (curSid && !have.has(curSid)) { curSid = null; cur = null; }
+  // Issue #81: 「+」の予約は、before に無い id がこの dataset に現れた時点で解決する。
+  // ボタン生成より前に解決するので、選ばれたタブはこの描画で .active が付く。
+  if (pendingNewSelect) {
+    if (pendingNewSelect.ds !== (curDs ?? "")) {
+      // DS 切替 → 予約は無効。「作成中…」も畳む（実態と矛盾する表示を残さない）。
+      pendingNewSelect = null;
+      statusOverride = null;
+    } else if (Date.now() > pendingNewSelect.deadline) {
+      pendingNewSelect = null;                        // 期限切れ → ゲストに知らせる
+      statusOverride = { text: T.newChatTimeout, until: Date.now() + STATUS_MSG_MS };
+    } else {
+      const fresh = filtered.find((s) => !pendingNewSelect.before.has(s.id));
+      if (fresh) {
+        const doSelect = pendingNewSelect.select;
+        pendingNewSelect = null;
+        if (doSelect) {
+          statusOverride = null;      // 本物の新セッションを掴んだので「作成中…」を畳む
+          selectSession(fresh.id);
+        }
+        // select:false（スナップショットが旧DS）のときの fresh は既存セッション
+        // でありうるので「作成中…」は畳まず、statusOverride 自身の期限に委ねる。
+      }
+    }
+  }
   bar.innerHTML = "";
   for (const s of filtered) {
     const b = document.createElement("button");
@@ -878,6 +929,21 @@ function renderSessions(sessions) {
     b.onclick = () => selectSession(s.id);
     bar.appendChild(b);
   }
+  // Issue #81: 「+」は毎ポーリングの innerHTML="" で消えるので毎回 append する。
+  // 0セッションDSでも「最初の1件」を作れるよう、下の `if (!curSid)` 分岐に依存
+  // しない位置（for ループ直後）に置く。null グループ（curDs が null/undefined）は
+  // 作成対象外なので無効化し、理由をツールチップで示す。
+  const nullDs = (curDs === null || curDs === undefined);
+  const addBtn = document.createElement("button");
+  addBtn.className = "tabbtn";
+  addBtn.textContent = "+";
+  addBtn.title = nullDs ? T.newChatNullDs : T.newChat;
+  // 予約が生きている間は押せない（押下から出現までの数秒に二重作成させない）。
+  addBtn.disabled = stopped || nullDs || newSessionInflight || !!pendingNewSelect;
+  // 押下と同時に自分を disabled にする: 次の再描画は最短でも約1秒後なので、
+  // renderSessions の式だけでは押下直後の見た目が変わらない。
+  addBtn.onclick = () => { addBtn.disabled = true; newSession(); };
+  bar.appendChild(addBtn);
   // 生成中はポーリングを速め（≈1s）、逐次表示をライブに感じさせる。非生成時は既定3s。
   // schedulePoll が直後（poll の finally）に clamp して再武装する。
   const activeBusy = filtered.some((s) => s.id === curSid && s.busy);
@@ -893,6 +959,45 @@ function renderSessions(sessions) {
     document.getElementById("chatlog").innerHTML = "";
     cur = null;
     updateHistBtn();
+  }
+}
+
+// Issue #81: 「+」押下。ホストにセッション採番を依頼し、自動選択の予約を張る。
+// `send()` と同じ ds クエリ規約・同じ 401/410 → selfDestruct 規約に従う。
+async function newSession() {
+  if (stopped || newSessionInflight || pendingNewSelect) return;
+  if (curDs === null || curDs === undefined) return;   // null グループは作成対象外
+  newSessionInflight = true;
+  // before スナップショットが「今の DS のもの」でない場合（switchToDataset が
+  // curDs を書き換えてから poll 応答が返るまでの窓）は、作成だけ行い自動選択は
+  // しない。旧 DS の id 集合で差分を取ると新 DS の既存セッションを誤選択する。
+  pendingNewSelect = {
+    ds: (curDs ?? ""),
+    before: new Set(lastFilteredSids),
+    select: (lastFilteredDs === curDs),
+    deadline: Date.now() + PENDING_NEW_MS,
+  };
+  try {
+    const r = await api("/newsession/" + encodeURIComponent(cfg.channel) +
+                        "?ds=" + encodeURIComponent(curDs),
+                        { method: "POST", body: { name: myName || "Guest" } });
+    if (r.status === 401 || r.status === 410) { pendingNewSelect = null; selfDestruct(); return; }
+    if (!r.ok) {
+      pendingNewSelect = null;   // 失敗 → 予約を残さない（他ゲスト作成分を誤選択しない）
+      statusOverride = { text: T.sendFail, until: Date.now() + STATUS_MSG_MS };
+      return;
+    }
+    statusOverride = { text: T.newChatPending, until: Date.now() + PENDING_NEW_MS };
+    // 即座に1回 poll して出現を早く拾う。ポーリング間隔そのものは renderSessions が
+    // 通常値（非生成時 3s）へ戻すので、以降は通常ポーリングのまま。検出遅延の上限は
+    // ホストの capture 1s + poll 3s ≈ 4s。
+    if (pollTimer) clearTimeout(pollTimer);
+    poll(false);
+  } catch (e) {
+    pendingNewSelect = null;
+    statusOverride = { text: T.sendFail, until: Date.now() + STATUS_MSG_MS };
+  } finally {
+    newSessionInflight = false;
   }
 }
 
@@ -1383,168 +1488,299 @@ async function runSelfTest() {
   const cases = [];
   const check = (name, cond) => cases.push({ name, pass: !!cond });
   let r;
-  // 1. XSS 無害化: onerror 付き実 <img> を生成しない（エスケープ済みテキストとして現れる）。
-  r = renderMarkdown("<img src=x onerror=alert(1)>");
-  check("xss-img", !/<img[^>]*onerror/i.test(r) && r.indexOf("&lt;img") !== -1);
-  // 2. URL allowlist: javascript: は弾く（大文字混在も）、https: は許可リンク化。
-  r = renderMarkdown("[x](javascript:alert(1))");
-  check("xss-js-link", !/href=["']?javascript/i.test(r));
-  r = renderMarkdown("[x](jaVasCript:alert(1))");
-  check("xss-js-link-mixed", !/href=["']?javascript/i.test(r));
-  r = renderMarkdown("[ok](https://example.com)");
-  check("ok-https-link", /<a href="https:\/\/example\.com">ok<\/a>/.test(r));
-  // 3. コードフェンス特殊文字: $1/$$ は置換変数として誤消費されず literal 保持、& は正しく
-  //    エスケープ（$&amp;）、< は &lt; 化（実 <b> タグにならない）。
-  r = renderMarkdown("```\n$1 $& $$ <b>\n```");
-  check("code-dollar", r.indexOf("$1") !== -1 && r.indexOf("$$") !== -1 && r.indexOf("$&amp;") !== -1);
-  check("code-lt", r.indexOf("&lt;b&gt;") !== -1 && r.indexOf("<b>") === -1);
-  // 4. プレースホルダ/センチネル衝突: 入力にセンチネル相当が含まれても誤マッチしない。
-  r = renderMarkdown("plain \u0000 0 \u0000 text **bold**");
-  check("sentinel-no-collide", /<strong>bold<\/strong>/.test(r));
-  // 5. 構造パース回帰防止: 見出し/リストが実タグへ、スペースが保持されること
-  //    （sentinel は NUL のためスペースは無傷。過去に「全スペース削除」と誤読された箇所の回帰網）。
-  r = renderMarkdown("# Heading\n- Item 1\n- Item 2");
-  check("header-parsed", /<h1>Heading<\/h1>/.test(r));
-  check("list-parsed", /<ul><li>Item 1<\/li><li>Item 2<\/li><\/ul>/.test(r));
-  check("space-preserved", renderMarkdown("a b c").indexOf("a b c") !== -1);
-  // 6. never-throw: 未閉じフェンス/未閉じ強調/null でも例外を投げず文字列を返す。
-  let threw = false;
+  // #selftest は join() を通らないので cfg が null のまま。URL 組立
+  // ("/poll/" + encodeURIComponent(cfg.channel) 等) は api stub に入る前の
+  // 引数式で評価されるため、スタブを張らないと TypeError が catch に飲まれて
+  // ブロック9 の 7 件が必ず FAIL する（Issue #81 で修復）。
+  // api も同じ位置で stub する: maybePresence() には stopped ガードが無く、
+  // 9b/9d が force 呼びするので、cfg だけ張ると実 fetch が飛んで見出しの
+  // 「join せず・リレー接続せず」が偽になる。9e-9g とブロック10 の自前退避とは
+  // そのまま合成できる。
+  const _cfgSave = cfg, _apiSave = api;
+  cfg = { base_url: "", channel: "ch1", secret: "s" };
+  api = () => Promise.resolve({ status: 503, ok: false, data: {} });
   try {
-    [renderMarkdown("```\nunclosed **bold _italic"), renderMarkdown("**"), renderMarkdown(null)]
-      .forEach((x) => { if (typeof x !== "string") threw = true; });
-  } catch (e) { threw = true; }
-  check("never-throw", !threw);
-  // 7. DS切替の状態リセット: 世代++・per-tab キャッシュ全消去・選択解除・画像クリア
-  //    （dataset.url が消え Copy/Download ガードが効く）・プレースホルダ表示。
-  //    viewInflight は世代キーのため onDatasetSwitch では消さない（自滅する）。
-  appliedVv["t1"] = 5;
-  lastViewVersions = { t1: 5 };
-  curTab = "t1";
-  const g0 = viewGen;
-  const vimg = document.getElementById("view");
-  vimg.dataset.url = "blob:fake";
-  onDatasetSwitch();
-  check("ds-switch-reset",
-        viewGen === g0 + 1 && Object.keys(appliedVv).length === 0 &&
-        Object.keys(lastViewVersions).length === 0 && curTab === null &&
-        !vimg.dataset.url &&
-        document.getElementById("viewEmpty").style.display !== "none");
-
-  // 8. ツール集約(simplifyToolText)の host パリティ + 表示経路の literal 化(語中 _ 誤強調防止)。
-  r = simplifyToolText("🔧 Read  a.py\n   ↳ x\n🔧 Grep  q\n   ↳ y\n🔧 Read  b.py", "compact");
-  check("st-compact-aggregate", r === "🔧 Read · Grep · Read");                  // 行A: 順序・重複保持
-  r = simplifyToolText("🔧 A  x\n\n   ↳ r\n\n🔧 B  y", "compact");
-  check("st-compact-blank-absorb", r === "🔧 A · B");                            // 行B: run 内空行吸収→1 run
-  {
-    const rc = simplifyToolText("pre\n🔧 A  x\n   ↳ r\nmid\n🔧 B  y\n   ↳ s\npost", "compact")
-               .split("\n").filter((l) => l.startsWith(TOOL_CALL_MARKER + " "));
-    check("st-compact-prose-split", rc.length === 2 && rc[0] === "🔧 A" && rc[1] === "🔧 B");  // 行C: run 境界
-  }
-  r = simplifyToolText("🔧 write_file  path=b.py", "compact");
-  check("st-compact-single", r === "🔧 write_file");                            // 行D: 単一呼び出し・区切り無し
-  r = simplifyToolText("intro\n   ↳ r1\n   ↳ r2\nend", "compact");
-  check("st-compact-resultonly-drop",                                           // 行E: 結果のみ run は guest では出さない
-        r.indexOf("↳") === -1 && r.indexOf("intro") !== -1 && r.indexOf("end") !== -1);
-  r = renderMarkdown("🔧 read_file · write_file");                              // 表示経路: 語中 _ を強調化しない
-  check("st-toolline-literal",
-        r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
-        r.indexOf("read_file · write_file") !== -1);
-  // 9. Issue #78: 独立DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
-  //    リセット・switchToDataset の sid/cur null 化。poll/presence の副作用は stopped で無効化。
-  {
-    const _save = { curDs, curSid, cur, curTab, stopped };
-    stopped = true;    // poll()/schedulePoll() を no-op 化（fetch を発火させない）
-    // 9a. renderDatasetBar: 全DSをクリック可能ボタン化し curDs（?? ""）をハイライト。
-    curDs = "dsB";
-    renderDatasetBar(["dsA", "dsB", ""]);
-    const dsbtns = document.getElementById("dsBar").querySelectorAll("button");
-    check("ds-bar-clickable",
-          dsbtns.length === 3 && dsbtns[1].classList.contains("active") &&
-          !dsbtns[0].classList.contains("active") &&
-          dsbtns[2].textContent.indexOf(T.noDataset) !== -1 &&
-          typeof dsbtns[0].onclick === "function");
-    // null グループのハイライトは curDs ?? "" 経由。
-    curDs = null;
-    renderDatasetBar(["dsA", ""]);
-    const dsbtns2 = document.getElementById("dsBar").querySelectorAll("button");
-    check("ds-bar-null-highlight",
-          dsbtns2[1].classList.contains("active") && !dsbtns2[0].classList.contains("active"));
-    // 9b. renderSessions: (s.dataset ?? "") で現DSにフィルタし、現DSの先頭を auto-select。
-    store.clear();
-    curDs = "dsA"; curSid = null; cur = null;
-    renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
-                    { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
-    const sessbtns = document.getElementById("sessionBar").querySelectorAll("button");
-    check("sess-ds-filter", sessbtns.length === 1 && curSid === "a1");
-    // 9c. 0セッションDSへ切替: curSid/cur を null 化・chatlog を空リセット。
-    curDs = "dsB"; curSid = "a1"; cur = getState("a1");
-    document.getElementById("chatlog").innerHTML = "<div>stale</div>";
-    renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
-    check("sess-empty-ds-reset",
-          curSid === null && cur === null &&
-          document.getElementById("chatlog").innerHTML === "");
-    // 9d. switchToDataset: 選択記憶の直後に curSid/cur を null 化（DS切替 poll が sid "_"）。
-    store.clear();
-    curDs = "dsA"; curSid = "a1"; cur = getState("a1"); curTab = "t1";
-    switchToDataset("dsB");
-    check("switch-nulls-sid",
-          curSid === null && cur === null && curDs === "dsB" &&
-          selSidByDs["dsA"] === "a1" && selTabByDs["dsA"] === "t1");
-    // 同一DSへの switch は no-op（poll を発火しない）。
-    curSid = "keep";
-    switchToDataset("dsB");
-    check("switch-noop-same", curSid === "keep");
-
-    // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査（reviewer P2）:
-    // bootstrap での ds 省略・0セッションDSでの送信無効化・現DSスコープの opt-out。
-    const _api = api, _sched = schedulePoll;
-    let capUrl = null, capBody = null;
-    let pollResp = { status: 503, ok: false, data: {} };
-    api = (u, opts) => { capUrl = u; capBody = opts && opts.body; return Promise.resolve(pollResp); };
-    schedulePoll = () => {};
+    // 1. XSS 無害化: onerror 付き実 <img> を生成しない（エスケープ済みテキストとして現れる）。
+    r = renderMarkdown("<img src=x onerror=alert(1)>");
+    check("xss-img", !/<img[^>]*onerror/i.test(r) && r.indexOf("&lt;img") !== -1);
+    // 2. URL allowlist: javascript: は弾く（大文字混在も）、https: は許可リンク化。
+    r = renderMarkdown("[x](javascript:alert(1))");
+    check("xss-js-link", !/href=["']?javascript/i.test(r));
+    r = renderMarkdown("[x](jaVasCript:alert(1))");
+    check("xss-js-link-mixed", !/href=["']?javascript/i.test(r));
+    r = renderMarkdown("[ok](https://example.com)");
+    check("ok-https-link", /<a href="https:\/\/example\.com">ok<\/a>/.test(r));
+    // 3. コードフェンス特殊文字: $1/$$ は置換変数として誤消費されず literal 保持、& は正しく
+    //    エスケープ（$&amp;）、< は &lt; 化（実 <b> タグにならない）。
+    r = renderMarkdown("```\n$1 $& $$ <b>\n```");
+    check("code-dollar", r.indexOf("$1") !== -1 && r.indexOf("$$") !== -1 && r.indexOf("$&amp;") !== -1);
+    check("code-lt", r.indexOf("&lt;b&gt;") !== -1 && r.indexOf("<b>") === -1);
+    // 4. プレースホルダ/センチネル衝突: 入力にセンチネル相当が含まれても誤マッチしない。
+    r = renderMarkdown("plain \u0000 0 \u0000 text **bold**");
+    check("sentinel-no-collide", /<strong>bold<\/strong>/.test(r));
+    // 5. 構造パース回帰防止: 見出し/リストが実タグへ、スペースが保持されること
+    //    （sentinel は NUL のためスペースは無傷。過去に「全スペース削除」と誤読された箇所の回帰網）。
+    r = renderMarkdown("# Heading\n- Item 1\n- Item 2");
+    check("header-parsed", /<h1>Heading<\/h1>/.test(r));
+    check("list-parsed", /<ul><li>Item 1<\/li><li>Item 2<\/li><\/ul>/.test(r));
+    check("space-preserved", renderMarkdown("a b c").indexOf("a b c") !== -1);
+    // 6. never-throw: 未閉じフェンス/未閉じ強調/null でも例外を投げず文字列を返す。
+    let threw = false;
     try {
-      // 9e. maybePresence: bootstrap(curDs===undefined)は body に ds を載せない、
-      //     確定時は ds（null群は "")。body は await 前に組まれるので同期捕捉できる。
-      lastPresenceMs = 0; curDs = undefined; curSid = "s1"; curTab = null;
-      maybePresence(true);
-      check("presence-bootstrap-omits-ds", !!capBody && !("ds" in capBody));
-      lastPresenceMs = 0; curDs = "dsA"; maybePresence(true);
-      check("presence-includes-ds", !!capBody && capBody.ds === "dsA");
-      lastPresenceMs = 0; curDs = null; maybePresence(true);
-      check("presence-null-group-ds", !!capBody && capBody.ds === "");
-      // 9f. poll URL: bootstrap は ds を付けない・確定時は &ds=<enc>（503 で副作用前に return）。
-      stopped = false;
-      curDs = undefined; curSid = null; cur = null;
-      await poll(false);
-      check("poll-bootstrap-omits-ds", !!capUrl && capUrl.indexOf("ds=") === -1);
-      curDs = "dsA"; curSid = "s1"; cur = getState("s1");
-      await poll(false);
-      check("poll-includes-ds", !!capUrl && capUrl.indexOf("&ds=dsA") !== -1);
-      // 9g. poll 本処理: 0セッションDSは curSid を null 化し送信無効＋noSessionsInDataset、
-      //     現DSに sid が有れば（他DS sid は現DSフィルタで除外され）送信有効。
-      const mkResp = (sessions) => ({ status: 200, ok: true, data: {
-        sessions, tabs: [], view_versions: {}, datasets: ["dsA", "dsB"],
-        active_dataset: "dsA", messages: [], server_now_ms: 1 } });
+      [renderMarkdown("```\nunclosed **bold _italic"), renderMarkdown("**"), renderMarkdown(null)]
+        .forEach((x) => { if (typeof x !== "string") threw = true; });
+    } catch (e) { threw = true; }
+    check("never-throw", !threw);
+    // 7. DS切替の状態リセット: 世代++・per-tab キャッシュ全消去・選択解除・画像クリア
+    //    （dataset.url が消え Copy/Download ガードが効く）・プレースホルダ表示。
+    //    viewInflight は世代キーのため onDatasetSwitch では消さない（自滅する）。
+    appliedVv["t1"] = 5;
+    lastViewVersions = { t1: 5 };
+    curTab = "t1";
+    const g0 = viewGen;
+    const vimg = document.getElementById("view");
+    vimg.dataset.url = "blob:fake";
+    onDatasetSwitch();
+    check("ds-switch-reset",
+          viewGen === g0 + 1 && Object.keys(appliedVv).length === 0 &&
+          Object.keys(lastViewVersions).length === 0 && curTab === null &&
+          !vimg.dataset.url &&
+          document.getElementById("viewEmpty").style.display !== "none");
+
+    // 8. ツール集約(simplifyToolText)の host パリティ + 表示経路の literal 化(語中 _ 誤強調防止)。
+    r = simplifyToolText("🔧 Read  a.py\n   ↳ x\n🔧 Grep  q\n   ↳ y\n🔧 Read  b.py", "compact");
+    check("st-compact-aggregate", r === "🔧 Read · Grep · Read");                  // 行A: 順序・重複保持
+    r = simplifyToolText("🔧 A  x\n\n   ↳ r\n\n🔧 B  y", "compact");
+    check("st-compact-blank-absorb", r === "🔧 A · B");                            // 行B: run 内空行吸収→1 run
+    {
+      const rc = simplifyToolText("pre\n🔧 A  x\n   ↳ r\nmid\n🔧 B  y\n   ↳ s\npost", "compact")
+                 .split("\n").filter((l) => l.startsWith(TOOL_CALL_MARKER + " "));
+      check("st-compact-prose-split", rc.length === 2 && rc[0] === "🔧 A" && rc[1] === "🔧 B");  // 行C: run 境界
+    }
+    r = simplifyToolText("🔧 write_file  path=b.py", "compact");
+    check("st-compact-single", r === "🔧 write_file");                            // 行D: 単一呼び出し・区切り無し
+    r = simplifyToolText("intro\n   ↳ r1\n   ↳ r2\nend", "compact");
+    check("st-compact-resultonly-drop",                                           // 行E: 結果のみ run は guest では出さない
+          r.indexOf("↳") === -1 && r.indexOf("intro") !== -1 && r.indexOf("end") !== -1);
+    r = renderMarkdown("🔧 read_file · write_file");                              // 表示経路: 語中 _ を強調化しない
+    check("st-toolline-literal",
+          r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
+          r.indexOf("read_file · write_file") !== -1);
+    // 9. Issue #78: 独立DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
+    //    リセット・switchToDataset の sid/cur null 化。poll/presence の副作用は stopped で無効化。
+    {
+      const _save = { curDs, curSid, cur, curTab, stopped };
+      stopped = true;    // poll()/schedulePoll() を no-op 化（fetch を発火させない）
+      // 9a. renderDatasetBar: 全DSをクリック可能ボタン化し curDs（?? ""）をハイライト。
+      curDs = "dsB";
+      renderDatasetBar(["dsA", "dsB", ""]);
+      const dsbtns = document.getElementById("dsBar").querySelectorAll("button");
+      check("ds-bar-clickable",
+            dsbtns.length === 3 && dsbtns[1].classList.contains("active") &&
+            !dsbtns[0].classList.contains("active") &&
+            dsbtns[2].textContent.indexOf(T.noDataset) !== -1 &&
+            typeof dsbtns[0].onclick === "function");
+      // null グループのハイライトは curDs ?? "" 経由。
+      curDs = null;
+      renderDatasetBar(["dsA", ""]);
+      const dsbtns2 = document.getElementById("dsBar").querySelectorAll("button");
+      check("ds-bar-null-highlight",
+            dsbtns2[1].classList.contains("active") && !dsbtns2[0].classList.contains("active"));
+      // 9b. renderSessions: (s.dataset ?? "") で現DSにフィルタし、現DSの先頭を auto-select。
       store.clear();
-      curDs = "dsB"; curSid = "x"; cur = getState("x"); curTab = null; optOutStrikes = 0;
-      pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
-      await poll(false);
-      check("poll-empty-ds-disables-send",
-            curSid === null &&
-            document.getElementById("sendBtn").disabled === true &&
-            document.getElementById("sessNotice").textContent === T.noSessionsInDataset);
-      curDs = "dsA"; curSid = "a1"; cur = getState("a1"); optOutStrikes = 0;
-      pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
-                         { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
-      await poll(false);
-      check("poll-current-ds-sid-keeps-send",
-            document.getElementById("sendBtn").disabled === false);
-    } finally {
-      api = _api; schedulePoll = _sched;
+      curDs = "dsA"; curSid = null; cur = null;
+      renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                      { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
+      const sessbtns = document.getElementById("sessionBar").querySelectorAll("button");
+      // Issue #81: 末尾に「+」（新規チャット）が常に付くので、セッションタブは length-1 個。
+      // 件数だけでなく末尾が "+" であることも見る（"+" の位置を動かしたら気づけるように）。
+      check("sess-ds-filter", sessbtns.length === 2 &&
+            sessbtns[sessbtns.length - 1].textContent === "+" && curSid === "a1");
+      // 9c. 0セッションDSへ切替: curSid/cur を null 化・chatlog を空リセット。
+      curDs = "dsB"; curSid = "a1"; cur = getState("a1");
+      document.getElementById("chatlog").innerHTML = "<div>stale</div>";
+      renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+      check("sess-empty-ds-reset",
+            curSid === null && cur === null &&
+            document.getElementById("chatlog").innerHTML === "");
+      // 9d. switchToDataset: 選択記憶の直後に curSid/cur を null 化（DS切替 poll が sid "_"）。
+      store.clear();
+      curDs = "dsA"; curSid = "a1"; cur = getState("a1"); curTab = "t1";
+      switchToDataset("dsB");
+      check("switch-nulls-sid",
+            curSid === null && cur === null && curDs === "dsB" &&
+            selSidByDs["dsA"] === "a1" && selTabByDs["dsA"] === "t1");
+      // 同一DSへの switch は no-op（poll を発火しない）。
+      curSid = "keep";
+      switchToDataset("dsB");
+      check("switch-noop-same", curSid === "keep");
+
+      // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査（reviewer P2）:
+      // bootstrap での ds 省略・0セッションDSでの送信無効化・現DSスコープの opt-out。
+      const _api = api, _sched = schedulePoll;
+      let capUrl = null, capBody = null;
+      let pollResp = { status: 503, ok: false, data: {} };
+      api = (u, opts) => { capUrl = u; capBody = opts && opts.body; return Promise.resolve(pollResp); };
+      schedulePoll = () => {};
+      try {
+        // 9e. maybePresence: bootstrap(curDs===undefined)は body に ds を載せない、
+        //     確定時は ds（null群は "")。body は await 前に組まれるので同期捕捉できる。
+        lastPresenceMs = 0; curDs = undefined; curSid = "s1"; curTab = null;
+        maybePresence(true);
+        check("presence-bootstrap-omits-ds", !!capBody && !("ds" in capBody));
+        lastPresenceMs = 0; curDs = "dsA"; maybePresence(true);
+        check("presence-includes-ds", !!capBody && capBody.ds === "dsA");
+        lastPresenceMs = 0; curDs = null; maybePresence(true);
+        check("presence-null-group-ds", !!capBody && capBody.ds === "");
+        // 9f. poll URL: bootstrap は ds を付けない・確定時は &ds=<enc>（503 で副作用前に return）。
+        stopped = false;
+        curDs = undefined; curSid = null; cur = null;
+        await poll(false);
+        check("poll-bootstrap-omits-ds", !!capUrl && capUrl.indexOf("ds=") === -1);
+        curDs = "dsA"; curSid = "s1"; cur = getState("s1");
+        await poll(false);
+        check("poll-includes-ds", !!capUrl && capUrl.indexOf("&ds=dsA") !== -1);
+        // 9g. poll 本処理: 0セッションDSは curSid を null 化し送信無効＋noSessionsInDataset、
+        //     現DSに sid が有れば（他DS sid は現DSフィルタで除外され）送信有効。
+        const mkResp = (sessions) => ({ status: 200, ok: true, data: {
+          sessions, tabs: [], view_versions: {}, datasets: ["dsA", "dsB"],
+          active_dataset: "dsA", messages: [], server_now_ms: 1 } });
+        store.clear();
+        curDs = "dsB"; curSid = "x"; cur = getState("x"); curTab = null; optOutStrikes = 0;
+        pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+        await poll(false);
+        check("poll-empty-ds-disables-send",
+              curSid === null &&
+              document.getElementById("sendBtn").disabled === true &&
+              document.getElementById("sessNotice").textContent === T.noSessionsInDataset);
+        curDs = "dsA"; curSid = "a1"; cur = getState("a1"); optOutStrikes = 0;
+        pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                           { id: "b1", title: "B1", busy: false, dataset: "dsB" }]);
+        await poll(false);
+        check("poll-current-ds-sid-keeps-send",
+              document.getElementById("sendBtn").disabled === false);
+      } finally {
+        api = _api; schedulePoll = _sched;
+      }
+
+      stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
+      cur = _save.cur; curTab = _save.curTab;
     }
 
-    stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
-    cur = _save.cur; curTab = _save.curTab;
+    // 10. Issue #81: ゲスト発の「新規チャット」。セッションバー末尾の "+"・0セッション
+    //     DSでも出ること・null グループでの無効化・POST の URL/body・二重押下抑止・
+    //     pendingNewSelect の差分検出による自動選択・DS不一致/期限切れ/スナップショット
+    //     古さの扱い。api/schedulePoll は stub 化して副作用を止める。
+    {
+      const _save = { curDs, curSid, cur, curTab, stopped, myName,
+                      pendingNewSelect, newSessionInflight, statusOverride,
+                      lastFilteredSids, lastFilteredDs };
+      const _api = api, _sched = schedulePoll;
+      const calls = [];
+      stopped = false;
+      myName = "Zoe";
+      schedulePoll = () => {};
+      // /newsession だけ 200、他（poll/presence）は 503 にして本処理前に return させる。
+      api = (u, opts) => {
+        calls.push({ u, body: opts && opts.body });
+        return Promise.resolve(u.indexOf("/newsession/") !== -1
+          ? { status: 200, ok: true, data: { ok: true, mid: "m1" } }
+          : { status: 503, ok: false, data: {} });
+      };
+      const nposts = () => calls.filter((c) => c.u.indexOf("/newsession/") !== -1).length;
+      try {
+        // 10a. セッションが有る DS: 末尾に "+" が1つだけ付く。
+        store.clear();
+        curDs = "dsA"; curSid = null; cur = null;
+        pendingNewSelect = null; newSessionInflight = false; statusOverride = null;
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+        let btns = document.getElementById("sessionBar").querySelectorAll("button");
+        check("newchat-btn-present",
+              btns.length === 2 && btns[1].textContent === "+" &&
+              btns[1].title === T.newChat && T.newChat.length > 0 &&
+              btns[1].disabled === false);
+        // 10b. 0セッションDSでも "+" は残る（最初の1件を作れる）。
+        curDs = "dsZ"; curSid = null; cur = null;
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+        btns = document.getElementById("sessionBar").querySelectorAll("button");
+        check("newchat-btn-zero-sessions", btns.length === 1 && btns[0].textContent === "+");
+        // 10c. null グループでは無効化され、理由がツールチップに出る。押しても POST しない。
+        curDs = null; curSid = null; cur = null;
+        renderSessions([{ id: "z1", title: "Z1", busy: false, dataset: null }]);
+        btns = document.getElementById("sessionBar").querySelectorAll("button");
+        const addNull = btns[btns.length - 1];
+        calls.length = 0;
+        await newSession();
+        check("newchat-btn-null-ds-disabled",
+              addNull.textContent === "+" && addNull.disabled === true &&
+              addNull.title === T.newChatNullDs && T.newChatNullDs.length > 0 &&
+              nposts() === 0 && pendingNewSelect === null);
+        // 10d. newSession(): POST /newsession/{ch}?ds= + body.name、現DSの既知id集合で予約。
+        store.clear();
+        curDs = "dsA"; curSid = "a1"; cur = getState("a1"); statusOverride = null;
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
+        calls.length = 0;
+        await newSession();
+        const post = calls.find((c) => c.u.indexOf("/newsession/") !== -1);
+        check("newchat-post",
+              !!post && post.u.indexOf("/newsession/ch1") !== -1 &&
+              post.u.indexOf("ds=dsA") !== -1 &&
+              !!post.body && post.body.name === "Zoe" &&
+              newSessionInflight === false &&
+              !!statusOverride && statusOverride.text === T.newChatPending &&
+              !!pendingNewSelect && pendingNewSelect.ds === "dsA" &&
+              pendingNewSelect.select === true && pendingNewSelect.before.has("a1"));
+        // 10e. 予約が生きている間の再押下は POST を増やさない（二重作成防止）。
+        await newSession();
+        check("newchat-double-press-one-post", nposts() === 1);
+        // 10f. before に無い id が現DSに現れたら自動選択し、予約と「作成中…」を解除する。
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                        { id: "n1", title: "N1", busy: false, dataset: "dsA" }]);
+        check("newchat-autoselect",
+              curSid === "n1" && pendingNewSelect === null && statusOverride === null);
+        // 10g. DS不一致の予約は破棄し、「作成中…」も畳む（自動選択もタイムアウト表示もしない）。
+        curSid = "a1"; cur = getState("a1");
+        statusOverride = { text: T.newChatPending, until: Date.now() + PENDING_NEW_MS };
+        pendingNewSelect = { ds: "dsB", before: new Set(), select: true,
+                             deadline: Date.now() + PENDING_NEW_MS };
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                        { id: "n1", title: "N1", busy: false, dataset: "dsA" }]);
+        check("newchat-pending-ds-mismatch",
+              pendingNewSelect === null && curSid === "a1" && statusOverride === null);
+        // 10h. 期限切れの予約は破棄し、ゲストに理由を出す。
+        pendingNewSelect = { ds: "dsA", before: new Set(["a1"]), select: true,
+                             deadline: Date.now() - 1 };
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                        { id: "n1", title: "N1", busy: false, dataset: "dsA" }]);
+        check("newchat-pending-expired",
+              pendingNewSelect === null && curSid === "a1" &&
+              !!statusOverride && statusOverride.text === T.newChatTimeout);
+        // 10i. スナップショットが旧DSのもの（DS切替の応答待ち窓）なら select=false に
+        //      落とし、既存セッションを誤選択しない。fresh が既存セッションでありうる
+        //      ので「作成中…」は畳まず期限に委ねる。
+        curSid = "a1"; cur = getState("a1");
+        pendingNewSelect = null; statusOverride = null;
+        lastFilteredSids = new Set(["old1"]); lastFilteredDs = "dsOld";
+        await newSession();
+        const staleSelect = pendingNewSelect && pendingNewSelect.select;
+        renderSessions([{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                        { id: "n1", title: "N1", busy: false, dataset: "dsA" }]);
+        check("newchat-stale-snapshot-no-select",
+              staleSelect === false && pendingNewSelect === null && curSid === "a1" &&
+              !!statusOverride && statusOverride.text === T.newChatPending);
+      } finally {
+        api = _api; schedulePoll = _sched;
+        stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
+        cur = _save.cur; curTab = _save.curTab; myName = _save.myName;
+        pendingNewSelect = _save.pendingNewSelect;
+        newSessionInflight = _save.newSessionInflight;
+        statusOverride = _save.statusOverride;
+        lastFilteredSids = _save.lastFilteredSids; lastFilteredDs = _save.lastFilteredDs;
+      }
+    }
+  } finally {
+    cfg = _cfgSave;
+    api = _apiSave;
   }
 
   const failed = cases.filter((c) => !c.pass);

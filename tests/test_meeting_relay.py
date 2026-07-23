@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import urllib.error
 
 import pytest
@@ -59,10 +60,17 @@ class FakeChat:
         self._summaries = summaries or []
         self._messages = messages or {}   # sid -> [FakeMsg, ...] (for backfill)
         self.injected = []
+        self.created = []
         self._pending_remote = {}
 
     def session_summaries(self):
         return list(self._summaries)
+
+    def create_remote_session(self, dataset):
+        self.created.append(dataset)
+        sid = "new%d" % len(self.created)
+        self._summaries.append({"id": sid, "title": sid, "busy": False, "dataset": dataset})
+        return sid
 
     def _session_by_id(self, sid):
         msgs = self._messages.get(sid)
@@ -1360,3 +1368,183 @@ def test_copy_buttons_flash_copied(qapp, monkeypatch):
     sw._copy_feedback.stop()
     sw._copy_link_feedback.stop()
     r.stop()   # relay 後始末（冪等。姉妹テスト末尾と同様）
+
+
+# ---- Issue #81: guest-requested new chat sessions ----
+
+def test_worker_new_sessions_emit_and_dedup(qapp):
+    import meeting.relay as mr
+    w = mr._RelayWorker("http://x", "k", "ch")
+    got = []
+    w.sig_new_session.connect(lambda ds, n: got.append((ds, n)))
+    payload = {"requests": [{"ds": "dsA", "name": "Bob", "mid": _mid(2000)}],
+               "server_now_ms": 2000}
+
+    def fake_req(method, path, data=None, is_png=False):
+        return FakeResp(json.dumps(payload).encode())
+
+    w._req = fake_req
+    w._do_new_sessions()
+    w._do_new_sessions()
+    assert got == [("dsA", "Bob")]
+    assert w._ns_reanchor is False
+
+
+def test_new_sessions_failure_does_not_advance_cursor(qapp):
+    import meeting.relay as mr
+    w = mr._RelayWorker("http://x", "k", "ch")
+    w._ns_reanchor = False
+    w._ns_latest_seen_ts = 500
+
+    def boom(method, path, data=None, is_png=False):
+        raise OSError("network down")
+
+    w._req = boom
+    w._do_new_sessions()
+    assert w._ns_latest_seen_ts == 500
+
+
+def test_new_sessions_expired_emits_state(qapp):
+    import meeting.relay as mr
+    w = mr._RelayWorker("http://x", "k", "ch")
+    states = []
+    w.sig_state.connect(states.append)
+
+    def gone(method, path, data=None, is_png=False):
+        raise urllib.error.HTTPError("http://x", 410, "gone", {}, io.BytesIO(b""))
+
+    w._req = gone
+    w._do_new_sessions()
+    assert "expired" in states
+
+
+def test_new_session_request_publishes_regardless_of_toggle(qapp, monkeypatch):
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win,
+                         ui_prefs={"auto_share_new_sessions": False})
+    r._sharing = True
+    r._published_session_ids = {"a"}
+    r._session_known = {"a"}
+    r._on_new_session_request("ds1", "Bob")
+    assert chat.created == ["ds1"]
+    sid = "new1"
+    assert sid in r.published_session_ids()
+    assert sid in r._session_known
+
+
+def test_new_session_request_rejects_null_group(qapp, monkeypatch, caplog):
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    r._published_session_ids = {"a"}
+    before = r.published_session_ids()
+    with caplog.at_level(logging.WARNING, logger="meeting.relay"):
+        r._on_new_session_request("", "Bob")
+    hits = [rec for rec in caplog.records
+            if "the null group is not a creatable target" in rec.getMessage()]
+    assert len(hits) == 1
+    assert chat.created == []
+    assert r.published_session_ids() == before
+
+
+def test_new_session_request_unknown_ds_falls_back(qapp, monkeypatch):
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    r._published_session_ids = {"a"}
+    r._on_new_session_request("bogus", "Bob")
+    assert chat.created == ["ds1"]
+
+
+def test_new_session_request_accepts_closed_dataset_with_sessions(qapp, monkeypatch):
+    chat = FakeChat([
+        _sess("a"),
+        {"id": "c", "title": "C", "busy": False, "dataset": "dsClosed"},
+    ])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    r._published_session_ids = {"a", "c"}
+    r._on_new_session_request("dsClosed", "Bob")
+    assert chat.created == ["dsClosed"]
+
+
+def test_new_session_request_accepts_published_tab_only_dataset(qapp, monkeypatch):
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    r._published_session_ids = {"a"}
+    r._published_tabs = {("dsTabOnly", "t1")}
+    r._on_new_session_request("dsTabOnly", "Bob")
+    assert chat.created == ["dsTabOnly"]
+
+
+def test_new_session_request_rejects_opted_out_dataset(qapp, monkeypatch):
+    chat = FakeChat([
+        _sess("a"),
+        {"id": "o", "title": "O", "busy": False, "dataset": "dsOut"},
+    ])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    r._published_session_ids = {"a"}       # "o" opted out → no dsOut chip
+    r._on_new_session_request("dsOut", "Bob")
+    assert chat.created == ["ds1"]
+
+
+def test_new_session_request_ignored_when_not_sharing(qapp, monkeypatch):
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = False
+    r._published_session_ids = {"a"}
+    before = r.published_session_ids()
+    r._on_new_session_request("ds1", "Bob")
+    assert chat.created == []
+    assert r.published_session_ids() == before
+
+
+def test_new_session_request_no_active_dataset_drops(qapp, monkeypatch, caplog):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset=None)
+    _mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
+    with caplog.at_level(logging.WARNING, logger="meeting.relay"):
+        r._on_new_session_request("bogus", "Bob")
+    hits = [rec for rec in caplog.records
+            if "the host has no current dataset to fall back to" in rec.getMessage()]
+    assert len(hits) == 1
+    assert chat.created == []
+
+
+def test_new_session_survives_capture_tick(qapp, monkeypatch):
+    import meeting.relay as mr
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win,
+                         ui_prefs={"auto_share_new_sessions": False})
+    r._sharing = True
+    r._published_session_ids = {"a"}
+    r._session_known = {"a"}
+    r._on_new_session_request("ds1", "Bob")
+    sid = "new1"
+    r._worker = mr._RelayWorker("http://x", "ADMIN", "ch")
+    r._on_capture_tick()
+    assert sid in r.published_session_ids()
+
+
+def test_shareable_ds_keys_order(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds1")
+    _mr, r = _make_relay(monkeypatch, win)
+    r._published_tabs = {("dsTabOnly", "t1")}
+    sessions = [
+        {"id": "a", "dataset": "ds1"},        # already open → no duplicate
+        {"id": "b", "dataset": "dsSess"},     # session-derived extra
+        {"id": "c", "dataset": None},         # null group
+    ]
+    assert r._shareable_ds_keys(sessions) == ["ds1", "dsSess", "", "dsTabOnly"]

@@ -740,3 +740,108 @@ def test_socket_smoke(tmp_path):
     finally:
         srv.shutdown()
         srv.shutdown()   # idempotent
+
+
+# ---- Issue #81: guest-requested new chat sessions ----
+
+def test_newsession_guest_auth(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, _ = _call(st, "POST", "/newsession/ch1", {}, _jbody({"name": "Bob"}))
+    assert status == 401
+    status, _, _ = _call(st, "POST", "/newsession/ghost", _guest_h(), _jbody({"name": "Bob"}))
+    assert status == 410
+
+
+def test_newsession_enqueue_and_drain(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, p = _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(),
+                         _jbody({"name": "Bob"}))
+    assert status == 200
+    obj = _json(p)
+    assert obj["ok"] is True and obj["mid"]
+
+    status, _, p2 = _call(st, "GET", "/newsessions/ch1", _admin_h())
+    assert status == 200
+    reqs = _json(p2)["requests"]
+    assert len(reqs) == 1
+    assert reqs[0]["ds"] == "dsA"
+    assert reqs[0]["name"] == "Bob"
+    assert reqs[0]["mid"] == obj["mid"]
+
+
+def test_newsessions_admin_only(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, _ = _call(st, "GET", "/newsessions/ch1", _guest_h())
+    assert status == 401
+
+
+def test_newsession_ds_canonicalisation(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/tabs/ch1", _admin_h(),
+          _jbody({"active_dataset": "dsH", "tabs": ["t1"]}))
+
+    def _post(path):
+        status, _, p = _call(st, "POST", path, _guest_h(), _jbody({"name": "Bob"}))
+        return status, _json(p)["mid"]
+
+    s_a, mid_a = _post("/newsession/ch1?ds=")          # explicit empty → null group
+    s_b, mid_b = _post("/newsession/ch1")              # absent → host active
+    s_c, mid_c = _post("/newsession/ch1?ds=dsA")       # unpublished name → verbatim
+    assert (s_a, s_b, s_c) == (200, 200, 200)
+
+    _, _, p = _call(st, "GET", "/newsessions/ch1", _admin_h())
+    by_mid = {r["mid"]: r["ds"] for r in _json(p)["requests"]}
+    assert by_mid[mid_a] == ""
+    assert by_mid[mid_b] == "dsH"
+    assert by_mid[mid_c] == "dsA"
+
+
+def test_newsession_since_cursor(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    clock["t"] += 1
+    _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(), _jbody({"name": "n1"}))
+    clock["t"] += 1
+    _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(), _jbody({"name": "n2"}))
+
+    _, _, p = _call(st, "GET", "/newsessions/ch1", _admin_h())
+    reqs = _json(p)["requests"]
+    mid1 = next(r["mid"] for r in reqs if r["name"] == "n1")
+    mid2 = next(r["mid"] for r in reqs if r["name"] == "n2")
+
+    _, _, r1 = _call(st, "GET", f"/newsessions/ch1?since={mid1}", _admin_h())
+    assert {r["name"] for r in _json(r1)["requests"]} == {"n1", "n2"}
+    _, _, r2 = _call(st, "GET", f"/newsessions/ch1?since={mid2}", _admin_h())
+    assert {r["name"] for r in _json(r2)["requests"]} == {"n2"}
+
+
+def test_newsession_queue_cap(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    total = lr.MAX_NEW_SESSIONS + 5
+    for i in range(total):
+        _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(),
+              _jbody({"name": "g%d" % i}))
+    _, _, p = _call(st, "GET", "/newsessions/ch1", _admin_h())
+    reqs = _json(p)["requests"]
+    assert len(reqs) == lr.MAX_NEW_SESSIONS
+    names = {r["name"] for r in reqs}
+    assert "g0" not in names                       # oldest dropped
+    assert "g%d" % (total - 1) in names            # newest kept
+
+
+def test_newsession_missing_key_channel(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    st._ch["ch1"].pop("new_sessions", None)        # pre-#81 channel (hot-reload)
+    status, _, p = _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(),
+                         _jbody({"name": "Bob"}))
+    assert status == 200
+    st._ch["ch1"].pop("new_sessions", None)
+    status, _, p2 = _call(st, "GET", "/newsessions/ch1", _admin_h())
+    assert status == 200
+    assert _json(p2)["requests"] == []

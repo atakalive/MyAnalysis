@@ -1157,3 +1157,57 @@ def test_render_session_emits_chataction_anchors(widget):
     assert "chataction:fork:1" not in html
     assert "chataction:edit:2" not in html
     assert "chataction:edit:0" not in html and "chataction:fork:0" not in html
+
+
+# ---- Issue #81: guest-requested new chat session (meeting relay) ----
+
+def test_create_remote_session_binds_dataset(widget):
+    sess = _make_session(widget, dataset="ds")
+    widget._active = sess
+    before = len(widget._sessions)
+
+    sid = widget.create_remote_session("ds")
+
+    assert len(widget._sessions) == before + 1
+    new = next(s for s in widget._sessions if s.id == sid)
+    assert new.dataset == "ds"
+    assert len(new.messages) == 1
+    assert new.messages[0].role == "system"
+
+
+def test_create_remote_session_keeps_active_and_composer(widget):
+    sess = _make_session(widget, dataset="ds")
+    widget._active = sess
+    widget._input.setPlainText("typing...")
+
+    widget.create_remote_session("ds")
+
+    assert widget._active.id == sess.id
+    assert widget.input_draft() == "typing..."
+
+
+def test_create_remote_session_adopts_hidden_blank_active(widget):
+    from llm_bridge import chat_store
+
+    blank = chat_store.new_session("mock", "sys", dataset=None)
+    widget._sessions = [blank]
+    widget._active = blank
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+    widget._input.setPlainText("typing...")
+
+    sid = widget.create_remote_session("ds")
+
+    assert widget._active.id == sid
+    assert widget._last_active_by_ds["ds"] == sid
+    assert widget.input_draft() == "typing..."
+
+
+def test_create_remote_session_does_not_mark_dirty(widget):
+    sess = _make_session(widget, dataset="ds")
+    widget._active = sess
+    widget._window.mark_chat_dirty.reset_mock()
+
+    widget.create_remote_session("ds")
+
+    assert widget._window.mark_chat_dirty.call_count == 0

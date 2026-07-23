@@ -1235,6 +1235,49 @@ class ChatWidget(QWidget):
             return
         self._start_turn(sess, inj_text, "remote")
 
+    def create_remote_session(self, dataset: str) -> str:
+        """Mint a chat session on a guest's behalf (meeting relay) and return its id.
+
+        The id is host-minted (uuid4 via chat_store.new_session) — a guest never
+        supplies one. Called on the GUI thread from
+        MeetingRelay._on_new_session_request (a queued-signal slot), the same
+        threading contract as inject_remote_message. `dataset` is always a real
+        dataset name: the null group is rejected upstream (Issue #81) because
+        _save_chat_sessions never writes a dataset=None session.
+
+        `_mark_chat_dirty()` is deliberately NOT called — symmetric with the host's
+        own `+` (`_on_new_session`). A brand-new session holds only its system
+        message, and _save_chat_sessions skips `len(sess.messages) <= 1`, so there
+        is nothing to write yet; the first message raises the flag via _start_turn.
+
+        The host's focus is NOT stolen: `_active` and the composer are left alone.
+        可視性の不変条件（唯一の例外）: `_visible_sessions()` は「現 dataset が
+        自前のチャットを持った時点で、履歴なしの未束縛 blank を隠す」。よって
+        append 直後に `_active` が不可視になり得るのは **履歴なし blank が active
+        だった場合だけ**（in-flight ターンを持つセッションは `_start_turn` が
+        user メッセージを先に append するので必ず履歴を持ち、隠れない）。この
+        1ケースだけは `_active` を新セッションへ移す — でないとタブバーの選択と
+        `_active` が乖離し、ホストの送信先が不可視セッションになる。このとき
+        `_last_active_by_ds` も更新する（`set_current_dataset` の docstring が
+        宣言する「`_active` の変わり方を全て捕まえる」規約に、adopt 経路も従う）。
+        `_commit_draft()` は意図的に呼ばない: composer はホストが打鍵中の文字列を
+        そのまま保持し（次のタブ切替で新 active の `draft` へ退避される）、隠れる
+        blank 側の古い `draft` は捨てる。
+        """
+        sess = chat_store.new_session(
+            self._backend.name, _SYSTEM_PROMPT, dataset=dataset
+        )
+        self._sessions.append(sess)
+        adopt = not any(s.id == self._active.id for s in self._visible_sessions())
+        if adopt:
+            self._active = sess
+            self._last_active_by_ds[self._current_dataset] = sess.id
+        self._rebuild_tab_bar()
+        if adopt:
+            self._render_session(sess)
+            self._update_turn_ui()
+        return sess.id
+
     def session_summaries(self) -> list[dict]:
         """All sessions across every dataset as plain dicts (relay / share UI).
 

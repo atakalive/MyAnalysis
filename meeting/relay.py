@@ -102,6 +102,7 @@ class _RelayWorker(QThread):
     """Continuous network I/O for one channel. All urllib has timeout=5.0."""
 
     sig_inbound = Signal(str, str, str)   # (sid, name, text)  — from in: only
+    sig_new_session = Signal(str, str)     # (ds, name) — guest-requested new chat (Issue #81)
     sig_presence = Signal(object)         # list[{pid,name,sid,tab,last}]
     sig_state = Signal(str)               # "expired" | "disconnected" | "ok"
     sig_sendfail = Signal(str, str, str)  # (kind, ds, tab) of a dropped outbox item (no retry)
@@ -118,6 +119,16 @@ class _RelayWorker(QThread):
         self._latest_seen_ts = 0       # worker-clock cursor (ms)
         self._reanchor = True          # first poll omits `since`
         self._seen: set[str] = set()
+        # Issue #81: /newsessions keeps its OWN cursor + dedup so it can never
+        # consume or skew the /inbound message cursor. No hot-reload getattr guard
+        # here on purpose — the new (ds, name) Signal added to this class changes
+        # the class's Signal set, which devtools/hotreload.py flags as
+        # "scope=app recommended", and a running pre-#81 run() frame has no
+        # _do_new_sessions() call site in its bytecode, so these fields can never be
+        # reached un-initialised.
+        self._ns_latest_seen_ts = 0
+        self._ns_reanchor = True
+        self._ns_seen: set[str] = set()
         self._fail_streak = 0
         self._disconnected = False
         self._last_hb = 0.0
@@ -146,6 +157,7 @@ class _RelayWorker(QThread):
         while not self.isInterruptionRequested():
             self._drain_outbox()
             self._do_inbound()
+            self._do_new_sessions()
             self._maybe_heartbeat()
             self._maybe_presence()
             self._sleep_interruptible(self._poll_ms)
@@ -269,6 +281,52 @@ class _RelayWorker(QThread):
             self._latest_seen_ts = server_now
         cutoff = self._latest_seen_ts - 2 * _LOOKBACK_MS
         self._seen = {x for x in self._seen if self._mid_ts(x) >= cutoff}
+
+    def _do_new_sessions(self) -> None:
+        """Poll guest new-chat requests (Issue #81) — the /inbound counterpart.
+
+        Independent cursor/dedup (_ns_*). Reanchor semantics mirror _do_inbound:
+        the first poll omits `since`, so the server's 15s lookback floor applies.
+        That cannot replay a stale request in practice — meeting_start always mints
+        a FRESH channel (secrets.token_hex) and a fresh worker, so the queue this
+        worker first reads is always empty.
+        """
+        try:
+            if self._ns_reanchor:
+                res = self._req("GET", f"/newsessions/{_q(self._ch)}")
+            else:
+                floor = max(0, self._ns_latest_seen_ts - _LOOKBACK_MS)
+                since = f"{floor:013d}-{'0' * 13}"
+                res = self._req("GET", f"/newsessions/{_q(self._ch)}?since={_q(since)}")
+            with res:
+                payload = json.loads(res.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 410):
+                self._emit_expired()
+            else:
+                self._note_fail()
+            return     # cursor not advanced on failure (re-fetched next poll)
+        except Exception:
+            self._note_fail()
+            return
+        self._note_ok()
+        server_now = int(payload.get("server_now_ms", 0) or 0)
+        if self._ns_reanchor:
+            self._ns_latest_seen_ts = server_now    # adopt the worker clock
+            self._ns_reanchor = False
+        for m in payload.get("requests", []):
+            mid = m.get("mid")
+            if not mid or mid in self._ns_seen:
+                continue
+            self._ns_seen.add(mid)
+            self.sig_new_session.emit(str(m.get("ds", "")), str(m.get("name", "")))
+            ts = self._mid_ts(mid)
+            if ts > self._ns_latest_seen_ts:
+                self._ns_latest_seen_ts = ts
+        if server_now > self._ns_latest_seen_ts:
+            self._ns_latest_seen_ts = server_now
+        cutoff = self._ns_latest_seen_ts - 2 * _LOOKBACK_MS
+        self._ns_seen = {x for x in self._ns_seen if self._mid_ts(x) >= cutoff}
 
     @staticmethod
     def _mid_ts(mid: str) -> int:
@@ -516,6 +574,44 @@ class MeetingRelay(QObject):
             out.add(("" if ds is None else ds, n))
         return out
 
+    def _shareable_ds_keys(self, sessions) -> list[str]:
+        """DS wire keys a guest can see, in guest DS-bar order ("" = null group).
+
+        SSOT for the two callers that MUST agree (Issue #81): _on_capture_tick
+        publishes this list as `datasets` (the guest's clickable DS chips), and
+        _on_new_session_request accepts a "+" only for a key in it. If they drift,
+        a guest can click a chip the host then silently redirects elsewhere.
+
+        Order: open datasets, then extras contributed by `sessions`, then by
+        published tabs. Only the TAB-DERIVED TAIL is unstable: `_published_tabs`
+        is a set, so its iteration order varies with PYTHONHASHSEED. The
+        open-dataset prefix (window._groups is an insertion-ordered dict = display
+        order) and the session-derived middle (`sessions` is a list) are both
+        deterministic. That tail instability is a pre-existing property of the
+        inline code this replaces — just don't write a test that compares that
+        tail verbatim with more than one key in it.
+        The last two sources matter because `close_dataset` is
+        "close != forget": a closed dataset's chats stay in ChatWidget._sessions
+        and its (ds, name) pairs stay in _published_tabs (only an explicit
+        set_published_tabs opt-out removes them), so its chip keeps showing.
+
+        `sessions` is the PUBLISHED session subset — an opted-out session's dataset
+        contributes no chip, so it must not widen the accepted set either.
+
+        getattr on open_dataset_keys tolerates a pre-#78 window double; the old
+        inline form raised there and _on_capture_tick swallowed the whole tick.
+        """
+        getter = getattr(self._window, "open_dataset_keys", None)
+        keys = list(getter()) if callable(getter) else []
+        for s in sessions:
+            k = "" if s.get("dataset") is None else s["dataset"]
+            if k not in keys:
+                keys.append(k)
+        for (ds_key, _name) in self._published_tabs:
+            if ds_key not in keys:
+                keys.append(ds_key)
+        return keys
+
     def absorb_new_tabs(self) -> list[tuple[str, str]]:
         """Auto-share tabs that appeared after the meeting started, across ALL open
         datasets (Issue #78).
@@ -688,6 +784,7 @@ class MeetingRelay(QObject):
         self._worker = _RelayWorker(self._host_base_url, self._admin_key, ch,
                                     poll_ms=self._poll_ms)
         self._worker.sig_inbound.connect(self._on_remote_message)
+        self._worker.sig_new_session.connect(self._on_new_session_request)
         self._worker.sig_presence.connect(self._on_participants)
         self._worker.sig_state.connect(self._on_state)
         self._worker.sig_sendfail.connect(self._on_sendfail)
@@ -812,6 +909,78 @@ class MeetingRelay(QObject):
         if cw is not None:
             cw.inject_remote_message(text, name, session_id=sid)
         self.remoteMessageReceived.emit(sid, name, text)
+
+    def _on_new_session_request(self, ds: str, name: str) -> None:
+        """Guest-requested new chat session (Issue #81). GUI thread (queued signal).
+
+        `ds` is the relay's DS wire key ("" = the null/dataset-less group), already
+        canonicalised by RelayState._ds_key (an absent `?ds=` resolved to the host's
+        active dataset).
+
+        Accepted DS set = exactly the chips a guest can see, i.e. what
+        _on_capture_tick publishes as `datasets` — both go through
+        _shareable_ds_keys() with the same (published) session subset, so the two
+        can never drift apart. A key outside that set falls back to the host's
+        current dataset and is logged at WARNING with BOTH the requested and the
+        actual ds (an INFO line carrying only the rewritten value would erase the
+        fact that a fallback happened).
+
+        The null group ("") is never a creation target (see the Issue's
+        "null グループを作成対象から外す"): such a session is skipped by
+        _save_chat_sessions and would be auto-adopted away by _start_turn.
+
+        The session is published EXPLICITLY (both _published_session_ids and
+        _session_known) regardless of the auto-share toggle: the guest asked for it.
+        Adding to _session_known first is what stops absorb_new_sessions from
+        re-deciding it on the next capture tick.
+        """
+        if not self._sharing:
+            return
+        cw = self._window.chat_widget() if hasattr(self._window, "chat_widget") else None
+        create = getattr(cw, "create_remote_session", None)
+        if not callable(create):
+            return    # hot-reload: a ChatWidget predating create_remote_session
+        if ds == "":
+            # Rejected BEFORE the fallback: falling back to the active dataset here
+            # would silently create the chat somewhere the guest did not ask for.
+            # テスト12 はこの WARNING を rec.getMessage() の部分一致
+            # ("the null group is not a creatable target") で拾う。隣接リテラルは
+            # コンパイル時に連結されるので折り返し位置は自由だが、境界の空白を
+            # 落とすと文言が変わってテストが落ちる。テスト18 が拾う
+            # "the host has no current dataset to fall back to" も同じ制約。
+            _log.warning(
+                "guest %r new-chat request dropped: "
+                "the null group is not a creatable target "
+                "(such a session is never persisted)", name,
+            )
+            return
+        summaries = cw.session_summaries()
+        pub = [s for s in summaries if s["id"] in self._published_session_ids]
+        allowed = {k for k in self._shareable_ds_keys(pub) if k}
+        if ds not in allowed:
+            cur = self._active_dataset()
+            if cur is None:
+                _log.warning(
+                    "guest %r new-chat request dropped: ds=%r is not shareable and "
+                    "the host has no current dataset to fall back to", name, ds,
+                )
+                return
+            _log.warning(
+                "guest %r new-chat request: ds=%r is not shareable, creating in %r "
+                "instead", name, ds, cur,
+            )
+            ds = cur
+        sid = create(dataset=ds)
+        if not sid:
+            return
+        if not hasattr(self, "_session_known"):
+            self._session_known = set(self._published_session_ids)
+        self._published_session_ids.add(sid)
+        self._session_known.add(sid)
+        # Audit trail: the host can tell WHICH guest minted the chat. The session
+        # title stays the _DEFAULT_TITLE sentinel so _start_turn's auto-title still
+        # fires on the first message — that is why `name` is logged, not titled.
+        _log.info("guest %r created chat session %s (ds=%r)", name, sid, ds)
 
     def _on_message_added(self, sid: str, role: str, content: str, origin: str) -> None:
         # out: send gate — publish ONLY host-local messages of a published
@@ -992,18 +1161,10 @@ class MeetingRelay(QObject):
                 if name not in lst:                     # DS-internal dedupe, window order
                     lst.append(name)
 
-            # datasets = open DS keys ∪ published-item DS keys, in open-DS order
-            # then appended extras. Union so a dataset=None published chat session
-            # (not a tab group in _groups) is still reachable from the guest UI —
-            # otherwise it would be an unreachable-but-/msg-able published sid.
-            datasets = list(win.open_dataset_keys())
-            for s in pub:
-                k = "" if s.get("dataset") is None else s.get("dataset")
-                if k not in datasets:
-                    datasets.append(k)
-            for (ds_key, _name) in self._published_tabs:
-                if ds_key not in datasets:
-                    datasets.append(ds_key)
+            # datasets = the guest's clickable DS chips. Computed by
+            # _shareable_ds_keys so _on_new_session_request accepts exactly those
+            # chips (Issue #81) — the two must never drift apart.
+            datasets = self._shareable_ds_keys(pub)
 
             tabs_payload = {"active_dataset": cur, "datasets": datasets,
                             "tabs_by_dataset": tabs_by_dataset}

@@ -48,6 +48,7 @@ HB_GRACE = 120         # heartbeat liveness grace (seconds)
 TTL_MIN = 3600         # channel ttl clamp min (1h)
 TTL_MAX = 86400        # channel ttl clamp max (24h)
 MSG_TTL = 86400        # message liveness (seconds) = 24h
+MAX_NEW_SESSIONS = 20  # guest new-chat request queue cap (abuse backstop, Issue #81)
 
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -144,6 +145,7 @@ class RelayState:
             "vv_by_ds": {},    # ds-key -> {tab: version}  (Issue #78)
             "in_msgs": [],
             "out_msgs": [],
+            "new_sessions": [],  # guest new-chat requests (Issue #81)
             "backlog": {},     # sid -> [msg, ...] pre-meeting transcript (no TTL compaction)
             "views": {},       # legacy flat store (migrated to per-DS on upgrade)
             "vv": {},          # legacy flat store (migrated to per-DS on upgrade)
@@ -467,6 +469,21 @@ class RelayState:
             messages = self._scan(cs["in_msgs"], since, now_m, None) if cs else []
             return self._json({"messages": messages, "server_now_ms": now_m})
 
+        # GET /newsessions/{ch}?since= (host) — drain guest new-chat requests
+        # (Issue #81). Symmetric to GET /inbound: _ch.get (never _ensure_channel) so
+        # a read can't resurrect an evicted channel. _scan is called with sid=None,
+        # which short-circuits before touching m["sid"] — queue items carry no sid.
+        if seg[:1] == ["newsessions"] and len(seg) == 2 and method == "GET":
+            if not self._is_admin(headers):
+                return self._json({"error": "unauthorized"}, 401)
+            cs = self._ch.get(seg[1])
+            since = self.compute_since(self._q1(query, "since"), now_m)
+            requests = (
+                self._scan(cs.setdefault("new_sessions", []), since, now_m, None)
+                if cs else []
+            )
+            return self._json({"requests": requests, "server_now_ms": now_m})
+
         # GET /presence/{ch} (host) — bare array.
         if seg[:1] == ["presence"] and len(seg) == 2 and method == "GET":
             if not self._is_admin(headers):
@@ -501,6 +518,37 @@ class RelayState:
                 "origin": "guest", "mid": mid, "sid": sid,
             })
             return self._json({"mid": mid})
+
+        # POST /newsession/{ch}?ds= (guest) — ask the HOST to mint a new chat
+        # session in `ds`. The guest never supplies a session id: write_session_file
+        # writes <work_dir>/chat_sessions/<id>.json, so a guest-chosen id would be a
+        # path-traversal vector — the host mints a uuid4, publishes it, and the guest
+        # discovers it by diffing the published session list (Issue #81).
+        # The singular/plural split is deliberate: POST /newsession enqueues one,
+        # GET /newsessions (admin) drains the queue. `ds` is canonicalised but NOT
+        # validated here — only the host knows which datasets are live.
+        if seg[:1] == ["newsession"] and len(seg) == 2 and method == "POST":
+            ch = seg[1]
+            ok, status = self._check_guest(headers, ch, now_s)
+            if not ok:
+                return self._json({"error": "not live"}, status)
+            cs = self._ch[ch]
+            obj, err = self._json_obj(body)
+            if err:
+                return err
+            name = str(obj.get("name") or "").strip() or "Guest"
+            # _ds_key canonicalises here (NOT host-side): absent `ds` → the host's
+            # active DS key, "" stays the null group. Keeping the wire value a plain
+            # str is what lets the worker's new signal be Signal(str, str).
+            ds = self._ds_key(cs, self._q1(query, "ds"))
+            mid = gen_mid(now_m)
+            # setdefault (not cs["new_sessions"]): a channel created by pre-#81 code
+            # before a mid-meeting hot-reload lacks the key (mirrors "backlog").
+            q = cs.setdefault("new_sessions", [])
+            q.append({"ds": ds, "name": name, "mid": mid})
+            if len(q) > MAX_NEW_SESSIONS:
+                del q[:len(q) - MAX_NEW_SESSIONS]   # drop oldest — abuse backstop
+            return self._json({"ok": True, "mid": mid})
 
         # POST /presence/{ch} (guest)
         if seg[:1] == ["presence"] and len(seg) == 2 and method == "POST":
