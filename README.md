@@ -245,13 +245,17 @@ pass `dataset=<ds>` to any tab-addressing verb (`add-tab` / `show` / `set-active
 open together (recorded in the gitignored `data/llm_state/last_window.json`); restore
 is additive (it never closes already-open datasets). No automatic restore at startup.
 
-**Meeting share** broadcasts only the ACTIVE dataset's tabs and chat sessions
-(switching datasets swaps the shared set; same-named cross-dataset tabs are not
-co-shared in v1). The guest page mirrors the host's DS-above-tabs structure: a DS
-bar shows the active dataset and follows host switches, auto-following the guest's
-chat to the new dataset's sessions. Known v1 limit: messages generated entirely
-while their dataset was hidden are not delivered to guests, even after switching
-back (an in-flight streamed reply still delivers its final).
+**Meeting share** broadcasts every open dataset's tabs and chat sessions by default;
+making an item private is an explicit opt-out (Issue #78). Same-named tabs in
+different datasets stay distinct — the wire carries a per-dataset tab namespace. The
+guest page mirrors the host's DS-above-tabs structure: the DS bar lists every shared
+dataset as a clickable chip and each guest navigates on their own (`curDs` is
+guest-local; the host's active dataset only seeds the default on first load). A
+**Follow host** toggle sits at the right end of that bar — default OFF and not
+persisted; switching it ON snaps the guest to the host's active dataset and keeps it
+in sync, and clicking any dataset chip turns it back OFF (Issue #80). Switching
+datasets stashes the unsent message draft per dataset, so a host-driven switch never
+re-targets half-typed text at another dataset's chat.
 
 **Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
 resident while open, so opening many large datasets at once can pressure memory

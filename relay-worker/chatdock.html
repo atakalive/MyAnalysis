@@ -37,10 +37,17 @@
   .bar { display: flex; gap: 4px; padding: 6px; background: #252526; flex-wrap: wrap; align-items: center; }
   .tabbtn { background: #333; padding: 4px 10px; font-size: 12px; }
   .tabbtn.active { background: #0e639c; }
+  .followtoggle { margin-left: auto; background: #3a3d41; border: 1px solid #5a5d61;
+                  padding: 4px 10px; font-size: 12px; font-weight: 600; }
+  .followtoggle:hover { background: #45494e; }
+  .followtoggle.on { background: #2d7d46; border-color: #3fa860; color: #fff; }
+  .followtoggle.on:hover { background: #348a4f; }
   /* DS layer above the tab bar — clickable chips mirroring the host's
-     DatasetSwitcher. Independent per guest (no host follow, Issue #78). Chips are
-     .tabbtn buttons; the ◆ prefix (added via textContent) mirrors the host's DS
-     tab label (#57). */
+     DatasetSwitcher. curDs is guest-local: each guest navigates on their own by
+     default (Issue #78) and only tracks the host's active dataset while the opt-in
+     "Follow host" toggle is on (Issue #80). Chips are .tabbtn buttons; the ◆ prefix
+     (added via textContent) mirrors the host's DS tab label (#57). #followToggle is
+     a permanent child of #dsBar, pushed to the right edge by margin-left:auto. */
   #dsBar { border-bottom: 1px solid #333; }
   .viewempty { position: absolute; inset: 0; display: flex; align-items: center;
                justify-content: center; color: #888; font-size: 13px;
@@ -114,7 +121,7 @@
 <div id="app">
   <div id="cols">
     <div id="left">
-      <div class="bar" id="dsBar" style="display:none"></div>
+      <div class="bar" id="dsBar" style="display:none"><button id="followToggle" class="followtoggle"></button></div>
       <div class="bar" id="tabBar"></div>
       <div id="canvaswrap">
         <img id="view" alt="">
@@ -165,6 +172,8 @@ const T = {
         copyTabName: "Copy tab name", commentOnTab: "Comment on this tab",
         tabCommentPrefix: "[Comment on tab: {name}] ",
         noDataset: "(no dataset)", switchingDs: "Dataset switched — loading view…",
+        followHost: "Follow host",
+        followHostHint: "Auto-switch your dataset to match the host. Clicking a dataset chip turns this off.",
         noTabs: "(no shared tabs)", noSessionsInDataset: "No shared chats in this dataset.",
         newChat: "New chat",
         newChatNullDs: "Pick a dataset first — chats here are not saved",
@@ -182,6 +191,8 @@ const T = {
         copyTabName: "タブ名をコピー", commentOnTab: "このタブにコメント",
         tabCommentPrefix: "[タブ「{name}」へのコメント] ",
         noDataset: "（データセットなし）", switchingDs: "データセット切替中 — ビューを読込中…",
+        followHost: "ホストに追従",
+        followHostHint: "表示データセットをホストへ自動追従します。データセットのチップをクリックすると解除されます。",
         noTabs: "（共有中のタブなし）", noSessionsInDataset: "このデータセットに共有中のチャットはありません。",
         newChat: "新規チャット",
         newChatNullDs: "先にデータセットを選んでください（ここのチャットは保存されません）",
@@ -468,6 +479,20 @@ let optOutStrikes = 0;          // consecutive polls with curSid unpublished (th
                                 // switch doesn't flash it for one cycle)
 const selTabByDs = {};          // dsKey ("" for null) → last selected tab (switch-back)
 const selSidByDs = {};          // dsKey → last selected session (switch-back)
+const draftByDs = {};           // dsKey → 未送信ドラフト（#msg の内容）。DS 切替で退避/復元する
+                                // （Issue #80。selTabByDs/selSidByDs と同じ per-DS 退避パターン）。
+                                // ページ寿命・プルーニングしない: DS がチップ一覧から一時的に
+                                // 消えるのは日常的で、同期して消すと打鍵内容を無言で破棄する。
+let followTarget = "none";      // "none" = 独立(既定) | "host" = ホストの active_dataset に
+                                // 追従。将来は参加者 pid も取りうるので文字列で持つ（衝突回避の
+                                // ため pid は "pid:" 接頭辞を予約）。DSチップの手動クリックで
+                                // "none" に戻る（Issue #80）。
+let hostActiveDs;               // 直近ポールで受け取ったホストの active_dataset（生値:
+                                // null = null グループ）。undefined = 一度も受信していない。
+                                // JSON.parse は値 undefined を生まないので、受信後にこの変数が
+                                // undefined になることはない（followHostIfNeeded のコメント参照）。
+let dsChips = [];               // 直近ポールの datasets（= DSバーのチップ集合。wire key で
+                                // "" = null グループ）。追従先の妥当性判定に使う。
 let pollInterval = 3000;
 let pollTimer = null;
 let pollGen = 0;                // generation token: only the latest poll() renders/reschedules
@@ -773,19 +798,26 @@ async function poll(reanchor = false) {
       showGapIfNeeded(serverNow);
       cur.latestSeenTs = serverNow;
     }
-    // ---- DS layer (Issue #78): independent per-guest navigation ----
-    // curDs is the local source of truth and NEVER follows the host. The host's
-    // active_dataset seeds only the first poll's default and legacy routing.
+    // ---- DS layer (Issue #78 / #80): per-guest DS navigation ----
+    // curDs is the guest-local source of truth. The host's active_dataset seeds
+    // the first poll's default, and afterwards is applied only while the opt-in
+    // "Follow host" toggle is on (followTarget === "host", Issue #80).
     if ("active_dataset" in data) {
+      dsChips = data.datasets || [];
+      // JSON.parse never yields the value `undefined`, so once this branch is taken
+      // active_dataset is null or a string. hostActiveDs === undefined therefore
+      // keeps meaning exactly "no poll has delivered it yet" (== null is safe here).
+      hostActiveDs = (data.active_dataset == null) ? null : String(data.active_dataset);
       if (curDs === undefined) {
         // First poll: default to the host's active DS (join is not a "switch").
-        curDs = (data.active_dataset == null) ? null : String(data.active_dataset);
+        curDs = hostActiveDs;
+      } else if (followHostIfNeeded()) {
+        return;   // switchToDataset issued a fresh poll(true); this one is stale
       }
-      renderDatasetBar(data.datasets || []);
+      renderDatasetBar(dsChips);
       // Snap if the current DS closed / was renamed away (no longer in the list).
-      const dslist = data.datasets || [];
-      if (curDs !== undefined && dslist.length && !dslist.includes(curDs ?? "")) {
-        switchToDataset(dslist[0]);
+      if (curDs !== undefined && dsChips.length && !dsChips.includes(curDs ?? "")) {
+        switchToDataset(dsChips[0]);
         return;   // switchToDataset issued a fresh poll(true); this one is stale
       }
     }
@@ -1054,31 +1086,82 @@ async function loadHistory() {
 }
 
 // ---- DS layer bar (mirrors the host's DatasetSwitcher above the tab layer).
-// Issue #78: every open DS is a clickable chip; curDs is the local source of
-// truth and never follows the host — each guest navigates independently. ----
+// Issue #78: every shared DS is a clickable chip; curDs is the guest-local source
+// of truth. Issue #80: #followToggle is a permanent child of #dsBar and chips are
+// inserted before it, so re-rendering the chips must never wipe the toggle. ----
 function renderDatasetBar(datasets) {
   const bar = document.getElementById("dsBar");
   bar.style.display = "";
-  bar.innerHTML = "";
+  bar.querySelectorAll("button.tabbtn").forEach((b) => b.remove()); // チップのみ除去（トグルは残す）
+  const toggle = document.getElementById("followToggle");
   for (const ds of datasets) {
     const b = document.createElement("button");
     b.className = "tabbtn" + (ds === (curDs ?? "") ? " active" : "");
     b.textContent = "◆ " + (ds === "" ? T.noDataset : ds);
-    b.onclick = () => switchToDataset(ds);
-    bar.appendChild(b);
+    b.onclick = () => chipClick(ds);
+    bar.insertBefore(b, toggle);                                    // チップはトグルの手前
   }
+  renderFollowToggle();
 }
 
-// Switch to a dataset (wire key; "" = null group). Independent per guest — no
-// host follow. Remembers the current DS's tab/session selection, resets the
-// per-DS view caches (onDatasetSwitch), and nulls curSid/cur so the immediate
-// poll(true) bootstraps with sid "_" (never pulls the old DS's messages into the
-// new DS's store). The new DS's session is chosen by renderSessions auto-select.
+// #followToggle は #dsBar の永続子（HTML に静的に置かれ、renderDatasetBar でも消さない）。
+// ラベル・色・ハンドラだけをここで貼り替える。表示は followTarget だけで決まる（設計判断4:
+// 「ON なのに追従していない」状態は不変条件 I1 の下では生じないので中間表示を持たない）。
+function renderFollowToggle() {
+  const ft = document.getElementById("followToggle");
+  const on = followTarget === "host";
+  ft.className = "followtoggle" + (on ? " on" : "");
+  ft.textContent = (on ? "🔗 " : "🔓 ") + T.followHost + ": " + (on ? "ON" : "OFF");
+  ft.title = T.followHostHint;
+  ft.onclick = toggleFollow;
+}
+
+function toggleFollow() {
+  followTarget = (followTarget === "host") ? "none" : "host";
+  renderFollowToggle();
+  followHostIfNeeded();          // ON にした瞬間ホストへスナップ（一致済み/追従不能なら no-op）
+}
+
+// チップの手動クリック = 明示的なナビゲーション。追従を解除してから切り替える。
+// switchToDataset は追従とも共有する原子操作なので、解除はここに閉じる。
+function chipClick(dsKey) {
+  followTarget = "none";
+  renderFollowToggle();
+  switchToDataset(dsKey);        // 同一DSクリックは switchToDataset 先頭のガードで no-op
+}
+
+// 追従の単一判定点。poll（毎周期）と toggleFollow（ON 直後のスナップ）の両方がここだけを通る。
+// 切替を発行したら true（poll は自分のポールを stale として捨てる）。
+// dsChips に無いキーへは飛ばない: ホストの active_dataset が共有チップ集合の外にある場合、
+// 追従 →「現DSが消えた」安全弁 → 追従 … と毎ポール往復して view キャッシュを焼き続けるため。
+// 現行の relay ではこの分岐は発火しない（active_dataset は必ず datasets に含まれる）。将来
+// relay 側に DS 単位のオプトアウトが入ったときの防御で、そのときは追従が無言で no-op になる。
+function followHostIfNeeded() {
+  if (followTarget !== "host" || hostActiveDs === undefined) return false;
+  const key = hostActiveDs ?? "";
+  if ((curDs ?? "") === key || !dsChips.includes(key)) return false;
+  switchToDataset(key);
+  return true;
+}
+
+// Switch to a dataset (wire key; "" = null group). The shared switch primitive:
+// chipClick (manual nav) and followHostIfNeeded (opt-in host tracking, Issue #80)
+// both funnel through it, so it must NOT touch followTarget — dropping the tracking
+// is chipClick's job alone. The leading same-DS guard is a contract chipClick relies
+// on. Remembers the current DS's tab/session selection AND the unsent #msg draft
+// (draftByDs, Issue #80: with the toggle on a host switch would otherwise re-target
+// the guest's half-typed message at another DS's session), resets the per-DS view
+// caches (onDatasetSwitch), and nulls curSid/cur so the immediate poll(true)
+// bootstraps with sid "_" (never pulls the old DS's messages into the new DS's
+// store). The new DS's session is chosen by renderSessions auto-select.
 function switchToDataset(dsKey) {
   const target = dsKey === "" ? null : dsKey;
   if ((curDs ?? "") === dsKey) return;
   if (curTab) selTabByDs[curDs ?? ""] = curTab;
   if (curSid) selSidByDs[curDs ?? ""] = curSid;
+  const ta = document.getElementById("msg");
+  draftByDs[curDs ?? ""] = ta.value;      // 未送信ドラフトを現DSに退避（Issue #80）
+  ta.value = draftByDs[dsKey] ?? "";      // 新DSの退避分を復元（無ければ空）
   curSid = null;
   cur = null;
   curDs = target;
@@ -1566,15 +1649,16 @@ async function runSelfTest() {
     check("st-toolline-literal",
           r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
           r.indexOf("read_file · write_file") !== -1);
-    // 9. Issue #78: 独立DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
-    //    リセット・switchToDataset の sid/cur null 化。poll/presence の副作用は stopped で無効化。
+    // 9. Issue #78/#80: DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
+    //    リセット・switchToDataset の sid/cur null 化とドラフト退避・「ホストに追従」トグルの
+    //    状態遷移・poll の追従判定と stale poll 中断。副作用は stopped と stub で無効化。
     {
-      const _save = { curDs, curSid, cur, curTab, stopped };
+      const _save = { curDs, curSid, cur, curTab, stopped, followTarget, hostActiveDs, dsChips };
       stopped = true;    // poll()/schedulePoll() を no-op 化（fetch を発火させない）
       // 9a. renderDatasetBar: 全DSをクリック可能ボタン化し curDs（?? ""）をハイライト。
       curDs = "dsB";
       renderDatasetBar(["dsA", "dsB", ""]);
-      const dsbtns = document.getElementById("dsBar").querySelectorAll("button");
+      const dsbtns = document.getElementById("dsBar").querySelectorAll("button.tabbtn");
       check("ds-bar-clickable",
             dsbtns.length === 3 && dsbtns[1].classList.contains("active") &&
             !dsbtns[0].classList.contains("active") &&
@@ -1583,7 +1667,7 @@ async function runSelfTest() {
       // null グループのハイライトは curDs ?? "" 経由。
       curDs = null;
       renderDatasetBar(["dsA", ""]);
-      const dsbtns2 = document.getElementById("dsBar").querySelectorAll("button");
+      const dsbtns2 = document.getElementById("dsBar").querySelectorAll("button.tabbtn");
       check("ds-bar-null-highlight",
             dsbtns2[1].classList.contains("active") && !dsbtns2[0].classList.contains("active"));
       // 9b. renderSessions: (s.dataset ?? "") で現DSにフィルタし、現DSの先頭を auto-select。
@@ -1614,6 +1698,48 @@ async function runSelfTest() {
       curSid = "keep";
       switchToDataset("dsB");
       check("switch-noop-same", curSid === "keep");
+      // 9h. Issue #80「ホストに追従」トグル: 宣言時の既定OFF・OFF時の見た目・再描画耐性・
+      //     ON 表示・チップクリックでの解除。
+      //     curDs === hostActiveDs にしてある間は switchToDataset は発火しない。
+      const ftEl = document.getElementById("followToggle");
+      followTarget = "none"; hostActiveDs = "dsA"; curDs = "dsA"; dsChips = ["dsA", "dsB"];
+      renderDatasetBar(dsChips);
+      check("follow-toggle-renders-off",
+            _save.followTarget === "none" &&          // 宣言時の既定（誰も永続復元していない）
+            !ftEl.classList.contains("on") &&
+            ftEl.textContent.indexOf(T.followHost) !== -1 &&
+            ftEl.textContent.indexOf(": OFF") !== -1 &&
+            ftEl.title === T.followHostHint && T.followHostHint.length > 0);
+      // チップ再描画でトグルが消えない・重複しない・常に最終子（右端）に残る。
+      renderDatasetBar(dsChips);
+      check("follow-toggle-survives-rerender",
+            document.getElementById("dsBar").querySelectorAll("#followToggle").length === 1 &&
+            document.getElementById("dsBar").lastElementChild === ftEl &&
+            document.getElementById("dsBar").querySelectorAll("button.tabbtn").length === 2);
+      toggleFollow();
+      check("follow-toggle-on",
+            followTarget === "host" && ftEl.classList.contains("on") &&
+            ftEl.textContent.indexOf(": ON") !== -1 && curDs === "dsA");
+      // チップの手動クリックで解除。この check は 9e-9g の前提（followTarget === "none"）が
+      // 成立していることの保証も兼ねる。
+      chipClick("dsA");                                  // 同一DS＝switchToDataset は no-op
+      check("follow-chip-click-drops",
+            followTarget === "none" && !ftEl.classList.contains("on") && curDs === "dsA");
+      // 9i. Issue #80: DS 切替で #msg の未送信ドラフトが DS ごとに退避/復元される
+      //     （追従・手動の両方が switchToDataset を通るので、そこで一括して守る）。
+      const taEl = document.getElementById("msg");
+      for (const k of Object.keys(draftByDs)) delete draftByDs[k];   // 9d の書き込みを消す
+      store.clear();
+      curDs = "dsA"; curSid = "a1"; cur = getState("a1"); curTab = null;
+      taEl.value = "draft-A";
+      switchToDataset("dsB");
+      check("draft-stashed-on-switch",
+            taEl.value === "" && draftByDs["dsA"] === "draft-A");
+      taEl.value = "draft-B";
+      switchToDataset("dsA");
+      check("draft-restored-on-switch-back",
+            taEl.value === "draft-A" && draftByDs["dsB"] === "draft-B");
+      taEl.value = "";
 
       // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査（reviewer P2）:
       // bootstrap での ds 省略・0セッションDSでの送信無効化・現DSスコープの opt-out。
@@ -1645,6 +1771,7 @@ async function runSelfTest() {
         const mkResp = (sessions) => ({ status: 200, ok: true, data: {
           sessions, tabs: [], view_versions: {}, datasets: ["dsA", "dsB"],
           active_dataset: "dsA", messages: [], server_now_ms: 1 } });
+        followTarget = "none";   // 9g は独立モード前提（9h が host にしたまま来ても壊れない）
         store.clear();
         curDs = "dsB"; curSid = "x"; cur = getState("x"); curTab = null; optOutStrikes = 0;
         pollResp = mkResp([{ id: "a1", title: "A1", busy: false, dataset: "dsA" }]);
@@ -1659,12 +1786,57 @@ async function runSelfTest() {
         await poll(false);
         check("poll-current-ds-sid-keeps-send",
               document.getElementById("sendBtn").disabled === false);
+        // 9j. Issue #80: poll の追従判定と、追従時に stale poll を中断すること。
+        //     switchToDataset は stub 化（実で回すと下記カスケードで暴走タイマを生む）。
+        //     番兵: 追従して return した周では renderSessions が走らない＝番兵が残る。
+        //     追従しない周では renderSessions の innerHTML="" で番兵が消える（空振り防止）。
+        const _switch = switchToDataset;
+        let switchArg;
+        switchToDataset = (k) => { switchArg = k; };   // function 宣言＝再代入可（api/schedulePoll と同じ）
+        try {
+          const SENT = "<i>sentinel</i>";
+          const sessBar = document.getElementById("sessionBar");
+          const mkRespDs = (active) => ({ status: 200, ok: true, data: {
+            sessions: [{ id: "a1", title: "A1", busy: false, dataset: "dsA" },
+                       { id: "b1", title: "B1", busy: false, dataset: "dsB" }],
+            tabs: [], view_versions: {}, datasets: ["dsA", "dsB"],
+            active_dataset: active, messages: [], server_now_ms: 1 } });
+          // OFF: ホストが dsB を見ていてもゲストは動かない（独立）。描画は通常どおり走る。
+          store.clear();
+          followTarget = "none"; curDs = "dsA"; curSid = "a1"; cur = getState("a1");
+          curTab = null; optOutStrikes = 0;
+          switchArg = undefined; pollResp = mkRespDs("dsB"); sessBar.innerHTML = SENT;
+          await poll(false);
+          check("follow-off-poll-independent",
+                switchArg === undefined && curDs === "dsA" && hostActiveDs === "dsB" &&
+                sessBar.innerHTML !== SENT);
+          // ON: ホストの dsB へ切替を決め、そのポールは描画せず return する。
+          followTarget = "host"; curDs = "dsA"; curSid = "a1"; cur = getState("a1");
+          optOutStrikes = 0;
+          switchArg = undefined; pollResp = mkRespDs("dsB"); sessBar.innerHTML = SENT;
+          await poll(false);
+          check("follow-on-poll-switches",
+                switchArg === "dsB" && sessBar.innerHTML === SENT);
+          // ON でもチップ一覧に無いDSへは飛ばない（安全弁との毎ポール往復を断つガード）。
+          // 現行 relay では active_dataset は必ず datasets に含まれるので実運用では起きない
+          // 状態を、ガードが将来も残ることを保証するために合成している（設計判断4）。
+          followTarget = "host"; curDs = "dsA"; curSid = "a1"; cur = getState("a1");
+          optOutStrikes = 0;
+          switchArg = undefined; pollResp = mkRespDs("dsZ"); sessBar.innerHTML = SENT;
+          await poll(false);
+          check("follow-on-poll-skips-unlisted",
+                switchArg === undefined && curDs === "dsA" && hostActiveDs === "dsZ" &&
+                sessBar.innerHTML !== SENT);
+        } finally {
+          switchToDataset = _switch;
+        }
       } finally {
         api = _api; schedulePoll = _sched;
       }
 
       stopped = _save.stopped; curDs = _save.curDs; curSid = _save.curSid;
-      cur = _save.cur; curTab = _save.curTab;
+      cur = _save.cur; curTab = _save.curTab; followTarget = _save.followTarget;
+      hostActiveDs = _save.hostActiveDs; dsChips = _save.dsChips;
     }
 
     // 10. Issue #81: ゲスト発の「新規チャット」。セッションバー末尾の "+"・0セッション
