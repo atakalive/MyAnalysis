@@ -106,6 +106,26 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
                 except (ValueError, TypeError):
                     rel2 = str(fig2)
                 entry["figure2"] = rel2
+            # desync を二度と書かない: figure2 が採れなかった（右ペインが空）のに
+            # layout が両可視だと、次回復元で空の分割ペインが出る（観測症状）。figure2
+            # が無ければ右ペイン（=図タブでは figure-2 専用、primary は常に左）を必ず
+            # 畳んで保存する。left_hidden は触らない。capture_layout 非対応の fake tab は
+            # layout キー自体が無いのでスキップ（既存 save テスト回帰なし）。
+            if "figure2" not in entry and "layout" in entry:
+                entry["layout"] = {**entry["layout"], "right_hidden": True}
+        elif kind == "image":
+            img2 = getattr(
+                getattr(tab, "_panels", {}).get("viewer-2", None), "_path", None
+            )
+            if img2 is not None:
+                try:
+                    rel2 = str(Path(img2).relative_to(work_dir))
+                except (ValueError, TypeError):
+                    rel2 = str(img2)
+                entry["image2"] = rel2
+            # 画像は復元が収束型（left_hidden から side を選び逆ペインを hide）なので
+            # 両可視+image2 なしは復元時に自動で単一へ畳まれる → 保存側正規化は不要
+            # （図と非対称。図は apply_layout が layout を忠実再現するため両側が必要）。
     return entry
 
 
@@ -407,6 +427,7 @@ def open_dataset(window, dataset: str) -> str:
             for entry in sess.get("tabs", []):
                 try:
                     fig2_shown = False
+                    img2_shown = False
                     kind = entry.get("kind")
                     if kind == "figure":
                         fig = entry.get("figure")
@@ -458,9 +479,18 @@ def open_dataset(window, dataset: str) -> str:
                                 entry.get("name"),
                             )
                             continue
-                        panel = "right" if (entry.get("layout") or {}).get(
-                            "left_hidden"
-                        ) else "left"
+                        # 2枚目(image2)を出せるなら split。その場合 primary は左固定、
+                        # 出せない（欠落/ファイル欠損）なら記録側(left_hidden)へ収束。
+                        img2 = entry.get("image2")
+                        abs2 = None
+                        if img2:
+                            i2 = Path(img2)
+                            abs2 = i2 if i2.is_absolute() else work_dir / i2
+                        will_split = abs2 is not None and abs2.is_file()
+                        panel = "left" if will_split else (
+                            "right" if (entry.get("layout") or {}).get("left_hidden")
+                            else "left"
+                        )
                         window.dispatch_command(
                             "show-image",
                             path=str(abs_path),
@@ -469,6 +499,23 @@ def open_dataset(window, dataset: str) -> str:
                             dataset=dataset,
                         )
                         restored += 1
+                        if will_split:
+                            orient = (entry.get("layout") or {}).get("orientation")
+                            slot = {"horizontal": "right",
+                                    "vertical": "bottom"}.get(orient, "right")
+                            window.dispatch_command(
+                                "show-image",
+                                path=str(abs2),
+                                name=entry.get("name"),
+                                slot=slot,
+                                dataset=dataset,
+                            )
+                            img2_shown = True
+                        elif img2:
+                            _log.warning(
+                                "open_dataset: missing image2 %s (tab %r)",
+                                abs2, entry.get("name"),
+                            )
                     elif kind == "analysis":
                         window.dispatch_command(
                             "add-tab", name=entry.get("module"), dataset=dataset
@@ -485,23 +532,26 @@ def open_dataset(window, dataset: str) -> str:
                     )
                     if kind in ("figure", "analysis"):
                         if layout and t is not None and hasattr(t, "apply_layout"):
-                            if (
-                                kind == "figure"
-                                and entry.get("figure2")
-                                and not fig2_shown
-                            ):
-                                # figure2 ファイル欠損: 空の第2ペイン（=右コンテナ、
-                                # _SLOT_MAP は向きに依らず figure-2→right）を可視化しない。
+                            if kind == "figure" and not fig2_shown:
+                                # 2枚目を出せなかった図タブ（figure2 欠落 null／ファイル
+                                # 欠損の双方）は右ペイン（=図タブでは figure-2 専用。
+                                # _SLOT_MAP は向きに依らず figure-2→right）を必ず畳む。
+                                # これが無いと「両可視 layout + figure2 なし」の desync
+                                # session がそのまま空の分割ペインで復元される（観測症状）。
                                 # primary 欠損が continue でエントリ全体を捨てるのと対称に、
-                                # 単一図の見た目へ落とす（reviewer 3.2 / reviewer P2-1）。
+                                # 単一図の見た目へ落とす。analysis kind は対象外。
                                 layout = {**layout, "right_hidden": True}
                             t.apply_layout(layout)
                     elif kind == "image":
-                        # 既存タブ更新経路の show-image は panel= を無視するので、
-                        # ここで記録側へ viewer を移設して配置を収束させる（reviewer round3
-                        # P1）。layout がある時だけ動く（旧 session=layout 無しは既存側の
-                        # まま＝回帰なし。panel 既定 left で右 viewer を引き寄せない）。
-                        if layout and t is not None and hasattr(t, "move_panel"):
+                        if img2_shown:
+                            # 2枚 split: 図と同じく layout を忠実復元（両可視・向き・sizes）。
+                            if layout and t is not None and hasattr(t, "apply_layout"):
+                                t.apply_layout(layout)
+                        elif layout and t is not None and hasattr(t, "move_panel"):
+                            # 単一 viewer: 記録側へ viewer を移設して配置を収束させる
+                            # （reviewer round3 P1）。両可視+image2 なしもここで side=left・
+                            # 逆ペイン hide で自動的に単一へ畳まれる（A-1 相当）。旧
+                            # session=layout 無しは既存側のまま＝回帰なし。
                             side = "right" if layout.get("left_hidden") else "left"
                             other = "left" if side == "right" else "right"
                             t.move_panel("viewer", side)

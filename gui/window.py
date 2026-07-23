@@ -611,6 +611,14 @@ class ToolWindow(QMainWindow):
             raise KeyError(f"tab name {tab.name!r} already exists")
         i = grp.tabs.addTab(tab, tab.name)
         grp.tabs.tabBar().setTabData(i, tab.name)   # tear-off identity（#56）
+        # 分割 splitter の手動ドラッグ（sizes 変更）を dirty 化＝分割ジオメトリ変更を
+        # 保存対象にする。add_tab は同名再追加で上の KeyError に当たり同一タブに 2 度
+        # 来ないので 1 接続（再ドックは _dock_tab が insertTab 直呼びで add_tab を通らない）。
+        # mark_session_dirty は引数なし・splitterMoved は (pos, index) を渡すため lambda で捨てる。
+        # setSizes() は splitterMoved を発火しない＋復元中は suppress_dirty=True で二重に安全。
+        sp = getattr(tab, "_splitter", None)
+        if sp is not None:
+            sp.splitterMoved.connect(lambda *a: self.mark_session_dirty())
         self.mark_session_dirty()
 
     def float_tab(

@@ -167,3 +167,104 @@ def test_show_image_session_roundtrip(qapp, tif_path, tmp_path, monkeypatch):
     assert panel._arr is not None
     assert panel.nC == 3           # matches the (3, 32, 40) CYX source tif
     assert (panel.nY, panel.nX) == (32, 40)
+
+
+# ---- 生画像 2枚分割（Part B: viewer-2 / slot / image2 round-trip）----
+
+def test_show_image_split_adds_viewer2(win, tif_path, tif_path2):
+    from gui.imageviewer import ImageViewerPanel
+    win.dispatch_command("show-image", path=str(tif_path), name="v")
+    win.dispatch_command("show-image", path=str(tif_path2), name="v", slot="right")
+    tab = win.active_tab()
+    assert isinstance(tab.panel("viewer"), ImageViewerPanel)
+    assert isinstance(tab.panel("viewer-2"), ImageViewerPanel)
+    assert tab.panel("viewer") is not tab.panel("viewer-2")
+    assert not tab._left_container.isHidden()
+    assert not tab._right_container.isHidden()
+    assert tab._right_container.isAncestorOf(tab.panel("viewer-2"))
+
+
+def test_show_image_split_preserves_primary_verbs(win, tif_path, tif_path2):
+    """clobber 回帰: 2枚目追加後も set-channel 等の verb は 1枚目に効く
+    （viewer-2 は _register_viewer_verbs を通さないので verb を上書きしない）。"""
+    win.dispatch_command("show-image", path=str(tif_path), name="v")     # nC=3
+    win.dispatch_command("show-image", path=str(tif_path2), name="v", slot="right")  # nC=2
+    tab = win.active_tab()
+    tab.dispatch_command("set-channel", index=2)
+    assert tab.panel("viewer").active_channel == 2     # 1枚目に効く
+    assert tab.panel("viewer-2").active_channel == 0   # 2枚目は不変
+
+
+def test_show_image_panel_slot_conflict(win, tif_path, tif_path2):
+    """panel=right + slot=right の矛盾は slot 優先・panel 無視（決定的）。"""
+    win.dispatch_command("show-image", path=str(tif_path), name="v")
+    win.dispatch_command(
+        "show-image", path=str(tif_path2), name="v", panel="right", slot="right"
+    )
+    tab = win.active_tab()
+    assert "viewer-2" in tab._panels
+    assert tab._right_container.isAncestorOf(tab.panel("viewer-2"))
+    assert tab._left_container.isAncestorOf(tab.panel("viewer"))
+
+
+def test_show_image_invalid_slot(win, tif_path):
+    with pytest.raises(ValueError, match="invalid slot"):
+        win.dispatch_command("show-image", path=str(tif_path), slot="left")
+
+
+def _img_split_env(monkeypatch, tmp_path):
+    import config
+    import dataset_config
+    from llm_bridge import session
+    monkeypatch.setattr(config, "DATASETS", {"myds": {}})
+    monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
+    monkeypatch.setattr(config, "reload_datasets", lambda *a, **k: None)
+    monkeypatch.setattr(dataset_config, "get_work_dir", lambda name, create=True: tmp_path)
+    monkeypatch.setattr(session, "_touched", set())
+
+
+def test_image_split_roundtrip(qapp, tif_path, tif_path2, tmp_path, monkeypatch):
+    from llm_bridge import session, _make_show_image_handler
+    from gui.window import ToolWindow
+    from gui.imageviewer import ImageViewerPanel
+    _img_split_env(monkeypatch, tmp_path)
+
+    w1 = ToolWindow()
+    w1.register_command("show-image", _make_show_image_handler(w1))
+    w1.dispatch_command("show-image", path=str(tif_path), name="v", dataset="myds")
+    w1.dispatch_command("show-image", path=str(tif_path2), name="v", slot="right")
+    saved, failed = session.save_all(w1)
+    assert "myds" in saved and not failed
+    entry = session.read_session("myds")["tabs"][0]
+    assert entry["image2"] == "img2.tif"
+
+    w2 = ToolWindow()
+    w2.register_command("show-image", _make_show_image_handler(w2))
+    assert session.open_dataset(w2, "myds").startswith("restored:")
+    t = next(t for t in w2.tabs() if t.name == "v")
+    assert isinstance(t.panel("viewer-2"), ImageViewerPanel)
+    assert not t._left_container.isHidden()
+    assert not t._right_container.isHidden()   # 右ペインが hide されていない
+
+
+def test_image_layout_without_image2_collapses_on_restore(
+    qapp, tif_path, tmp_path, monkeypatch
+):
+    """画像側の desync 対称: 両可視 layout + image2 なし → 収束型で単一へ畳む。"""
+    from llm_bridge import session, _make_show_image_handler
+    from gui.window import ToolWindow
+    _img_split_env(monkeypatch, tmp_path)
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": "v",
+        "tabs": [{
+            "name": "v", "kind": "image", "image": "img.tif",
+            "layout": {"orientation": "horizontal", "sizes": [600, 400],
+                       "left_hidden": False, "right_hidden": False},
+        }],
+    })
+    w = ToolWindow()
+    w.register_command("show-image", _make_show_image_handler(w))
+    assert session.open_dataset(w, "myds").startswith("restored:")
+    t = next(t for t in w.tabs() if t.name == "v")
+    assert not t._left_container.isHidden()
+    assert t._right_container.isHidden()

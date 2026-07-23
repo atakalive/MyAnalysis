@@ -197,6 +197,7 @@ class ImageViewerPanel(QWidget):
         # State attributes initialised before any signal wiring.
         self._arr: np.ndarray | None = None
         self._meta: ImageMeta | None = None
+        self._path: Path | None = None   # 元ファイルパス（session の image2 用。array 由来は None）
         self._axes = ""
         self.nY = self.nX = 1
         self.nC = self.nZ = self.nT = 1
@@ -281,6 +282,8 @@ class ImageViewerPanel(QWidget):
         image; otherwise reinitialise all channels and clamp position.
         """
         arr, meta = self._resolve_image(image)
+        # 元パスを保持（session の image2 に使う。ndarray/(arr,meta) 由来は None）。
+        self._path = Path(image) if isinstance(image, (str, Path)) else None
         # Same-identity reload keeps per-channel state only when shape, axes AND
         # colour kind match — a same-shape RGB <-> 3ch-fluorescence swap must
         # reinitialise (different default LUTs / level policy), not reuse.

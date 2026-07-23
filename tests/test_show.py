@@ -654,3 +654,110 @@ def test_apply_layout_size_count_mismatch_guard(qapp):
     t.apply_layout({"orientation": "horizontal", "sizes": [300, 300, 300],
                     "left_hidden": False, "right_hidden": False})
     assert t._splitter.sizes() == before   # wrong element count skipped
+
+
+# ---- Split dirty tracking + desync collapse (図の分割が復元されない修正) ----
+
+def _dirty_env(monkeypatch, tmp_path):
+    import config
+    monkeypatch.setattr(config, "DATASETS", {"ds": {}})
+    monkeypatch.setattr(config, "get_dataset_dir", lambda name: tmp_path)
+
+
+def test_split_add_after_clear_marks_dirty(win, png_path, png_path2, tmp_path, monkeypatch):
+    """クリア後（復元/明示保存後を模擬）に slot=right で 2枚目を足すと dirty になる。
+    修正前はこの分岐が dirty を立てず closeEvent が保存をスキップして分割が消えた。"""
+    _dirty_env(monkeypatch, tmp_path)
+    win.dispatch_command("show", path=str(png_path), name="viewer", dataset="ds")
+    win.clear_session_dirty()
+    assert not win.is_session_dirty()
+    win.dispatch_command("show", path=str(png_path2), name="viewer", slot="right")
+    assert win.is_session_dirty()
+
+
+def test_set_split_verb_marks_dirty(win, png_path, tmp_path, monkeypatch):
+    _dirty_env(monkeypatch, tmp_path)
+    win.dispatch_command("show", path=str(png_path), name="viewer", dataset="ds")
+    tab = win.active_tab()
+    win.clear_session_dirty()
+    tab.dispatch_command("set-split", left=3, right=1)
+    assert win.is_session_dirty()
+
+
+def test_splitter_drag_marks_dirty(win, png_path, tmp_path, monkeypatch):
+    """手動ドラッグ相当（splitterMoved）で dirty 化。setSizes は発火しないので
+    ここでは signal を直接 emit して配線を検証する。"""
+    _dirty_env(monkeypatch, tmp_path)
+    win.dispatch_command("show", path=str(png_path), name="viewer", dataset="ds")
+    tab = win.active_tab()
+    win.clear_session_dirty()
+    tab._splitter.splitterMoved.emit(100, 1)
+    assert win.is_session_dirty()
+
+
+def test_layout_split_without_figure2_collapses_on_restore(qapp, tmp_path, monkeypatch):
+    """観測された壊れ方（両可視 layout + figure2 欠落）を復元すると空の分割ペインで
+    なく単一表示に畳まれる（desync 自己増殖の停止・症状の直接原因の回帰ガード）。"""
+    from PySide6.QtGui import QPixmap
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    a = tmp_path / "a.png"; QPixmap(10, 10).save(str(a))
+    session.write_session("myds", {
+        "version": 1, "dataset": "myds", "active_tab": "viewer",
+        "tabs": [{
+            "name": "viewer", "kind": "figure", "figure": "a.png",
+            "layout": {"orientation": "horizontal", "sizes": [600, 400],
+                       "left_hidden": False, "right_hidden": False},
+        }],
+    })
+    w = _fresh_window(qapp)
+    assert session.open_dataset(w, "myds").startswith("restored:")
+    t = next(t for t in w.tabs() if t.name == "viewer")
+    assert t._right_container.isHidden()        # 空の第2ペインを出さない
+    assert not t._left_container.isHidden()
+
+
+def test_spec_to_tab_normalizes_layout_when_no_figure2(tmp_path):
+    """保存側: figure2 が採れないのに両可視 layout の時、右ペインを畳んで永続化
+    （desync を二度と書かない・Qt 非依存）。"""
+    from llm_bridge import session
+
+    class _T:
+        def __init__(self):
+            self._panels = {}          # figure-2 無し
+
+        def capture_layout(self):
+            return {"orientation": "horizontal", "sizes": [600, 400],
+                    "left_hidden": False, "right_hidden": False}
+
+    spec = {"kind": "figure", "name": "v", "dataset": "d",
+            "figure": str(tmp_path / "a.png")}
+    entry = session._spec_to_tab(spec, tmp_path, _T())
+    assert "figure2" not in entry
+    assert entry["layout"]["right_hidden"] is True
+    assert entry["layout"]["left_hidden"] is False
+
+
+def test_figure_split_roundtrip_after_restore(qapp, tmp_path, monkeypatch):
+    """復元直後（dirty クリア済）に 2枚目を足す→保存→再復元で healthy に 2枚戻る。"""
+    from PySide6.QtGui import QPixmap
+    from gui.panels import FigurePanel
+    from llm_bridge import session
+    _ds71_env(monkeypatch, tmp_path)
+    a = tmp_path / "a.png"; QPixmap(10, 10).save(str(a))
+    b = tmp_path / "b.png"; QPixmap(10, 10).save(str(b))
+
+    w1 = _fresh_window(qapp)
+    w1.dispatch_command("show", path=str(a), name="viewer", dataset="myds")
+    w1.clear_session_dirty()                       # 復元/保存後を模擬
+    w1.dispatch_command("show", path=str(b), name="viewer", slot="right")
+    assert w1.is_session_dirty()                   # 分割追加で dirty（修正点）
+    saved, failed = session.save_all(w1)
+    assert "myds" in saved and not failed
+    assert session.read_session("myds")["tabs"][0]["figure2"] == "b.png"
+
+    w2 = _fresh_window(qapp)
+    assert session.open_dataset(w2, "myds").startswith("restored:")
+    t = next(t for t in w2.tabs() if t.name == "viewer")
+    assert isinstance(t.panel("figure-2"), FigurePanel)
+    assert not t._right_container.isHidden()

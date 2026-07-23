@@ -170,7 +170,11 @@ TOOLS = [
             "multi-channel) for ImageJ-style INTERACTIVE viewing (dynamic range / "
             "LUT / composite). Use this ONLY when the user explicitly asks to view "
             "a raw image / TIFF, or says 'open in ImageJ'. Do NOT open one on your "
-            "own initiative. For a generated result figure (PNG) use `show`.",
+            "own initiative. For a generated result figure (PNG) use `show`. "
+            "Use slot=right|bottom to place a SECOND image alongside "
+            "(right=horizontal, bottom=vertical split); slot targets the 2nd pane "
+            "and panel is ignored when slot is set. The 2nd image is view-only for "
+            "LUT/range verbs (those address the 1st pane).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -179,7 +183,12 @@ TOOLS = [
                     "panel": {
                         "type": "string",
                         "enum": ["left", "right"],
-                        "description": "Pane position (default: left / main pane).",
+                        "description": "Primary pane side (default: left). Ignored when slot is set.",
+                    },
+                    "slot": {
+                        "type": "string",
+                        "enum": ["right", "bottom"],
+                        "description": "Place a 2nd image alongside: right=horizontal, bottom=vertical split.",
                     },
                     "dataset": _DATASET_PROP,
                 },
@@ -429,7 +438,7 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         return _via_bridge("window", None, "show", kwargs, cancelled=cancelled)
     if name == "show_image":
         kwargs = {"path": args["path"]}
-        for k in ("name", "panel", "dataset"):
+        for k in ("name", "panel", "slot", "dataset"):
             if k in args:
                 kwargs[k] = args[k]
         return _via_bridge("window", None, "show-image", kwargs, cancelled=cancelled)

@@ -290,6 +290,15 @@ _SLOT_MAP = {
     "bottom": ("figure-2", "right", "vertical"),
 }
 
+# show-image 版: slot=None は単一 primary（viewer, panel= で左右指定可）、
+# slot=right/bottom で 2枚目 viewer-2 を反対ペインへ並置し水平/垂直分割。
+# _SLOT_MAP（図）と違い left/top は無い（画像 primary の側は panel= で指定）。
+_IMG_SLOT_MAP = {
+    None: ("viewer", "left", None),
+    "right": ("viewer-2", "right", "horizontal"),
+    "bottom": ("viewer-2", "right", "vertical"),
+}
+
 
 def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     """Build the `show` window verb handler.
@@ -393,6 +402,12 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
                         tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
                         session.note_dataset(inferred)
                         window.mark_session_dirty()
+            elif (getattr(tab, "session_spec", None) or {}).get("dataset"):
+                # figure-2（slot=right/bottom）追加/更新は session_spec を触らないが、
+                # 分割の合成/幾何は保存時にライブタブから導出される（figure2 パス +
+                # capture_layout）。上の figure 分岐だけでは復元/保存後に足した分割が
+                # dirty にならず closeEvent で保存されない。永続化可能な viewer なら dirty。
+                window.mark_session_dirty()
             # Activate now — spec is final, so this focus surfaces the right
             # dataset group + chat. Pass the resolved dataset so a same-named tab
             # in another dataset is never focused instead.
@@ -415,10 +430,10 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         tab.set_pane_visible(container_position, True)
         if orientation is not None:
             tab.set_split_orientation(orientation)
-        tab.register_command(
-            "set-split",
-            lambda left, right: tab.set_split_ratio(float(left), float(right)),
-        )
+        def _set_split(left, right):
+            tab.set_split_ratio(float(left), float(right))
+            window.mark_session_dirty()   # 成功後のみ（set_split_ratio は ValueError を投げ得る）
+        tab.register_command("set-split", _set_split)
         tab.register_command("snapshot", lambda: None)
         # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
         # that add_tab/set_active_tab fires sees the final spec.
@@ -461,10 +476,16 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
         path: str,
         name: str = "viewer",
         panel: str = "left",
+        slot: str | None = None,
         dataset: str | None = None,
     ) -> str:
         if panel not in ("left", "right"):
             raise ValueError(f"panel must be 'left' or 'right', got {panel!r}")
+        if slot not in _IMG_SLOT_MAP:
+            raise ValueError(f"invalid slot: {slot!r} (use right/bottom to split)")
+        panel_key, _container_position, orientation = _IMG_SLOT_MAP[slot]
+        # slot 指定時は 2枚目(viewer-2)が対象・primary は左固定・panel は無視（決定的）。
+        primary_side = "left" if slot is not None else panel
         p = safe_resolve(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
@@ -480,18 +501,39 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
                 raise LookupError(
                     f"tab {name!r} is not an image-viewer tab"
                 )
-            tab.panel("viewer").set_image(p)
-            # session_spec / note_dataset / dirty only when a dataset resolves.
-            if dataset is not None:
-                ds = str(dataset)
-                tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
-                session.note_dataset(ds)
-                window.mark_session_dirty()
+            if panel_key == "viewer":
+                tab.panel("viewer").set_image(p)
+                # session_spec / note_dataset / dirty only when a dataset resolves.
+                if dataset is not None:
+                    ds = str(dataset)
+                    tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
+                    session.note_dataset(ds)
+                    window.mark_session_dirty()
+                else:
+                    inferred = session.infer_dataset(str(p))
+                    if inferred is not None:
+                        tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
+                        session.note_dataset(inferred)
+                        window.mark_session_dirty()
             else:
-                inferred = session.infer_dataset(str(p))
-                if inferred is not None:
-                    tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
-                    session.note_dataset(inferred)
+                # 2枚目(viewer-2)を並置。primary の session_spec は触らない（figure-2 と
+                # 対称）。attach_image_viewer は使わない: _register_viewer_verbs が
+                # set-lut 等をタブ単位で再登録し 1枚目の verb ルーティングを clobber する。
+                new_v2 = not isinstance(tab._panels.get("viewer-2"), ImageViewerPanel)
+                if new_v2:
+                    p2 = ImageViewerPanel()
+                    tab.add_panel("viewer-2", p2, "right", stretch=1)
+                    p2.set_image(p)
+                else:
+                    tab.panel("viewer-2").set_image(p)
+                tab.set_split_orientation(orientation)
+                tab.set_pane_visible("right", True)
+                if new_v2 and (
+                    not tab._left_container.isHidden()
+                    and not tab._right_container.isHidden()
+                ):
+                    tab.set_split_ratio(1, 1)
+                if (getattr(tab, "session_spec", None) or {}).get("dataset"):
                     window.mark_session_dirty()
             _set_active_tab(
                 window, name,
@@ -507,12 +549,14 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
         tab = AnalysisTab(name)
         tab.set_pane_visible("left", False)
         tab.set_pane_visible("right", False)
-        attach_image_viewer(tab, p, panel=panel)
-        tab.set_pane_visible(panel, True)
-        tab.register_command(
-            "set-split",
-            lambda left, right: tab.set_split_ratio(float(left), float(right)),
-        )
+        # 新規タブは primary のみ（primary 無しに 2枚目は作れない）。slot 指定時は
+        # primary_side=left。まず primary を show してから slot で 2枚目を並置する。
+        attach_image_viewer(tab, p, panel=primary_side)
+        tab.set_pane_visible(primary_side, True)
+        def _set_split(left, right):
+            tab.set_split_ratio(float(left), float(right))
+            window.mark_session_dirty()   # 成功後のみ（set_split_ratio は ValueError を投げ得る）
+        tab.register_command("set-split", _set_split)
         tab.register_command("snapshot", lambda: None)
         # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
         # that add_tab/set_active_tab fires sees the final spec. ds None → no
