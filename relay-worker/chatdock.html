@@ -141,7 +141,7 @@
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
-        <textarea id="msg" rows="5" placeholder="Message… (Enter to send)"></textarea>
+        <textarea id="msg" rows="5" placeholder="Message… (Ctrl+Enter to send, Enter for newline)"></textarea>
         <div id="inputbar">
           <span id="genIndicator" style="display:none"></span>
           <button id="sendBtn">Send</button>
@@ -179,6 +179,7 @@ const T = {
         newChatNullDs: "Pick a dataset first — chats here are not saved",
         newChatPending: "Creating a new chat…",
         newChatTimeout: "The new chat did not appear.",
+        msgPlaceholder: "Message… (Ctrl+Enter to send, Enter for newline)",
         viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
@@ -198,6 +199,7 @@ const T = {
         newChatNullDs: "先にデータセットを選んでください（ここのチャットは保存されません）",
         newChatPending: "新規チャットを作成中…",
         newChatTimeout: "新規チャットが作成されませんでした。",
+        msgPlaceholder: "メッセージ…（Ctrl+Enter で送信、Enter で改行）",
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
@@ -1520,6 +1522,15 @@ function markFailed(state, m, retryable) {
   m._el.appendChild(btn);
 }
 
+// ---- chat input keybinding (host parity: gui/chat.py eventFilter) ----
+// Ctrl+Enter（Mac は Cmd+Enter）だけを送信に取る。修飾なし Enter / Shift+Enter は
+// preventDefault せず textarea 既定の改行にフォールスルーする。Shift は判定しない
+// （ホストの ControlModifier ビット AND は Ctrl+Shift+Enter でも真になるため）。
+// join() の外に出してあるのは #selftest から直接呼べるようにするため。
+function onMsgKeydown(e) {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+}
+
 // ---- join ----
 function join(tok, name) {
   try {
@@ -1551,9 +1562,10 @@ function join(tok, name) {
   document.getElementById("histBtn").onclick = loadHistory;
   setupToolDisplaySel();
   updateHistBtn();
-  document.getElementById("msg").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  });
+  const msgEl = document.getElementById("msg");
+  // 未定義（将来の言語追加漏れ）なら HTML 側の英語フォールバック属性をそのまま残す。
+  msgEl.placeholder = T.msgPlaceholder || msgEl.placeholder;
+  msgEl.addEventListener("keydown", onMsgKeydown);
   // Page Visibility: on resume, reanchor (since omitted) to jump cleanly to
   // "now" using the worker clock — never local Date.now().
   document.addEventListener("visibilitychange", () => {
@@ -1948,6 +1960,47 @@ async function runSelfTest() {
         newSessionInflight = _save.newSessionInflight;
         statusOverride = _save.statusOverride;
         lastFilteredSids = _save.lastFilteredSids; lastFilteredDs = _save.lastFilteredDs;
+      }
+    }
+
+    // 11. Issue #82: チャット入力の送信キー。ホスト(gui/chat.py eventFilter)と同じく
+    //     Ctrl/Cmd を伴う Enter だけを送信に取り、修飾なし Enter / Shift+Enter は
+    //     preventDefault せず textarea 既定の改行へ落とす。ホストの ControlModifier は
+    //     ビット AND なので Ctrl+Shift+Enter も送信側であり、それも固定する。
+    //     send を stub 化して副作用を止める。
+    {
+      const _send = send;
+      let sends = 0;
+      send = () => { sends++; };
+      const fire = (key, mods) => {
+        let prevented = false;
+        sends = 0;
+        onMsgKeydown({
+          key: key,
+          ctrlKey: !!(mods && mods.ctrl),
+          metaKey: !!(mods && mods.meta),
+          shiftKey: !!(mods && mods.shift),
+          preventDefault: () => { prevented = true; },
+        });
+        return { prevented: prevented, sends: sends };
+      };
+      try {
+        let f = fire("Enter", null);
+        check("keydown-plain-enter-newline", f.prevented === false && f.sends === 0);
+        f = fire("Enter", { shift: true });
+        check("keydown-shift-enter-newline", f.prevented === false && f.sends === 0);
+        f = fire("Enter", { ctrl: true });
+        check("keydown-ctrl-enter-sends", f.prevented === true && f.sends === 1);
+        f = fire("Enter", { meta: true });
+        check("keydown-meta-enter-sends", f.prevented === true && f.sends === 1);
+        f = fire("Enter", { ctrl: true, shift: true });
+        check("keydown-ctrl-shift-enter-sends", f.prevented === true && f.sends === 1);
+        f = fire("Enter", { meta: true, shift: true });
+        check("keydown-meta-shift-enter-sends", f.prevented === true && f.sends === 1);
+        f = fire("k", { ctrl: true });
+        check("keydown-ctrl-nonenter-ignored", f.prevented === false && f.sends === 0);
+      } finally {
+        send = _send;
       }
     }
   } finally {
