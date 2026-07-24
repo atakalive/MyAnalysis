@@ -260,6 +260,7 @@ class HotReloadController(QObject):
         super().__init__(window)
         self._window = window
         self._reloader = hotreload.HotReloader()
+        self._last_report: hotreload.ReloadReport | None = None
 
     def note_analysis_opened(self, dataset: str, name: str) -> None:
         """解析タブを開いた時点の SHA を clean baseline として登録する。"""
@@ -278,10 +279,12 @@ class HotReloadController(QObject):
     # -- Tier 1 --
 
     def do_reload(self) -> str:
+        self._last_report = None
         busy = self._busy()
         if busy:
             return busy
         report = self._reloader.reload(ReloadContext(self._window))
+        self._last_report = report
         return report.summary()
 
     # -- Tier 2 --
@@ -642,5 +645,29 @@ def _menu_patch(window, controller: HotReloadController) -> None:
     msg = controller.do_reload()
     first = msg.splitlines()[0] if msg else "done"
     window.statusBar().showMessage(f"reload: {first}", 5000)
-    if "scope=app recommended" in msg or "SYNTAX ERROR" in msg or "FAILED" in msg:
-        QMessageBox.information(window, _m("common.i18n").tr("dev.reload.title"), msg)
+    tr = _m("common.i18n").tr
+    report = controller._last_report
+    if report is not None and report.requires_app:
+        box = QMessageBox(window)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(tr("dev.reload.requires_app.title"))
+        box.setText(
+            tr("dev.reload.requires_app.body", items="\n".join(report.requires_app))
+        )
+        box.setDetailedText(msg)   # 従来の全ダンプは「詳細」へ
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.button(QMessageBox.StandardButton.Yes).setText(
+            tr("dev.reload.requires_app.rebuild")
+        )
+        box.button(QMessageBox.StandardButton.No).setText(
+            tr("dev.reload.requires_app.ignore")
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)  # Enter 一発で再ビルド
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            r = controller.reload_app()
+            if r.startswith("reload-busy"):
+                window.statusBar().showMessage(f"reload: {r}", 5000)
+    elif "scope=app recommended" in msg or "SYNTAX ERROR" in msg or "FAILED" in msg:
+        QMessageBox.information(window, tr("dev.reload.title"), msg)

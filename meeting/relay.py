@@ -123,7 +123,7 @@ class _RelayWorker(QThread):
         # consume or skew the /inbound message cursor. No hot-reload getattr guard
         # here on purpose — the new (ds, name) Signal added to this class changes
         # the class's Signal set, which devtools/hotreload.py flags as
-        # "scope=app recommended", and a running pre-#81 run() frame has no
+        # "requires scope=app", and a running pre-#81 run() frame has no
         # _do_new_sessions() call site in its bytecode, so these fields can never be
         # reached un-initialised.
         self._ns_latest_seen_ts = 0

@@ -381,3 +381,81 @@ def test_tier2_reload_rejects_non_analysis_tab(window, qapp, tmp_path):
     assert result.startswith("reload-tab-error:")
     assert "not an analysis tab" in result
     assert "vw" in window.tab_names()  # viewer は破壊されない
+
+
+# ---------------------------------------------------------------------------
+# requires_app 確認ダイアログ (Issue #83)
+# ---------------------------------------------------------------------------
+
+
+def _mk_requires_app_report():
+    from devtools import hotreload
+
+    return hotreload.ReloadReport(
+        reloaded=["relay"],
+        requires_app=["_RelayWorker: Signal set changed ({'x'}) — requires scope=app"],
+    )
+
+
+def test_menu_patch_requires_app_accept_rebuilds(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from devtools import qt_integration
+
+    controller = window._hotreload
+    report = _mk_requires_app_report()
+    monkeypatch.setattr(controller, "do_reload", lambda: report.summary())
+    controller._last_report = report
+
+    calls = []
+    monkeypatch.setattr(
+        controller, "reload_app", lambda: (calls.append("app"), "reload-scheduled")[1]
+    )
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes
+    )
+
+    qt_integration._menu_patch(window, controller)
+    assert calls == ["app"]   # 既定「app で再ビルド」→ reload_app 実行
+
+
+def test_menu_patch_requires_app_ignore_does_not_rebuild(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from devtools import qt_integration
+
+    controller = window._hotreload
+    report = _mk_requires_app_report()
+    monkeypatch.setattr(controller, "do_reload", lambda: report.summary())
+    controller._last_report = report
+
+    calls = []
+    monkeypatch.setattr(controller, "reload_app", lambda: calls.append("app"))
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No
+    )
+
+    qt_integration._menu_patch(window, controller)
+    assert calls == []   # 「無視」→ reload_app は呼ばれない
+
+
+def test_menu_patch_soft_warning_uses_info_dialog(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from devtools import hotreload, qt_integration
+
+    controller = window._hotreload
+    report = hotreload.ReloadReport(
+        reloaded=["m"],
+        warnings=["C.__init__ changed — scope=app recommended"],
+    )
+    monkeypatch.setattr(controller, "do_reload", lambda: report.summary())
+    controller._last_report = report
+
+    info_calls = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *a, **k: info_calls.append(a)
+    )
+    rebuilt = []
+    monkeypatch.setattr(controller, "reload_app", lambda: rebuilt.append("x"))
+
+    qt_integration._menu_patch(window, controller)
+    assert rebuilt == []          # requires_app 空 → 再ビルドしない
+    assert len(info_calls) == 1   # 既存のソフト警告 info 経路のまま

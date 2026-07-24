@@ -74,6 +74,10 @@
 "dev.rebuild_failed.title"    = "App rebuild failed"
 "dev.restart_abort.title"     = "Restart aborted"
 "dev.save_failed.body"        = "Failed to save session: {datasets}"
+"dev.reload.requires_app.title"   = "App rebuild required"
+"dev.reload.requires_app.body"    = "Structural changes that cannot be patched were detected:\n{items}\n\nRebuild with scope=app."
+"dev.reload.requires_app.rebuild" = "Rebuild app"
+"dev.reload.requires_app.ignore"  = "Ignore"
 
 # --- status ---
 "status.active"               = "Active: {name}"

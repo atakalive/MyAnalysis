@@ -74,6 +74,10 @@
 "dev.rebuild_failed.title"    = "アプリ再構築に失敗"
 "dev.restart_abort.title"     = "再起動中止"
 "dev.save_failed.body"        = "セッション保存に失敗: {datasets}"
+"dev.reload.requires_app.title"   = "アプリ再構築が必要です"
+"dev.reload.requires_app.body"    = "patch では反映できない構造変更が検出されました:\n{items}\n\napp で再ビルドしてください。"
+"dev.reload.requires_app.rebuild" = "app で再ビルド"
+"dev.reload.requires_app.ignore"  = "無視"
 
 # --- status ---
 "status.active"               = "アクティブ: {name}"

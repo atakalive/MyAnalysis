@@ -357,3 +357,43 @@ def test_toposort_dependency_first(tmp_path):
     rep = ReloadReport()
     order = [r.name for r in _toposort(recs, rep)]
     assert order.index("b") < order.index("a")
+
+
+# ---------------------------------------------------------------------------
+# requires_app: Signal / __bases__ changes escalate to Tier 3 (Issue #83)
+# ---------------------------------------------------------------------------
+
+
+def test_signal_set_change_goes_to_requires_app(loader):
+    mod, path, rec = loader(
+        "hr_sig",
+        "from PySide6.QtCore import Signal\nclass C:\n  a = Signal()\n",
+    )
+    path.write_text(
+        "from PySide6.QtCore import Signal\nclass C:\n  a = Signal()\n  b = Signal()\n",
+        encoding="utf-8",
+    )
+    rep = ReloadReport()
+    superreload(rec, rep)
+    assert any("Signal set changed" in w for w in rep.requires_app)
+    assert not any("Signal set changed" in w for w in rep.warnings)
+
+
+def test_init_only_change_stays_in_warnings(loader):
+    mod, path, rec = loader(
+        "hr_init", "class C:\n  def __init__(self):\n    self.x = 1\n"
+    )
+    path.write_text(
+        "class C:\n  def __init__(self):\n    self.x = 1\n    self.y = 2\n",
+        encoding="utf-8",
+    )
+    rep = ReloadReport()
+    superreload(rec, rep)
+    assert any("__init__ changed" in w for w in rep.warnings)
+    assert rep.requires_app == []
+
+
+def test_needs_app_reload_true_for_requires_app_only():
+    rep = ReloadReport(requires_app=["C: Signal set changed — requires scope=app"])
+    assert rep.warnings == []
+    assert rep.needs_app_reload() is True

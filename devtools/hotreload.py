@@ -72,6 +72,7 @@ class ReloadReport:
     skipped_syntax: list[str] = field(default_factory=list)  # "path:line: msg"
     failed: list[str] = field(default_factory=list)          # "module: err" (rolled back)
     warnings: list[str] = field(default_factory=list)
+    requires_app: list[str] = field(default_factory=list)  # cannot-patch structural changes (Signal/__bases__)
     analyses_changed: list[tuple[str, str]] = field(default_factory=list)  # (dataset, name)
 
     @property
@@ -80,7 +81,7 @@ class ReloadReport:
 
     def needs_app_reload(self) -> bool:
         """True if any structural change suggests escalating to Tier 3 (app)."""
-        return bool(self.warnings)
+        return bool(self.warnings or self.requires_app)
 
     def summary(self) -> str:
         parts: list[str] = []
@@ -97,6 +98,11 @@ class ReloadReport:
             parts.append("SYNTAX ERROR — nothing reloaded:\n  " + "\n  ".join(self.skipped_syntax))
         if self.failed:
             parts.append("FAILED (rolled back): " + "; ".join(self.failed))
+        if self.requires_app:
+            parts.append(
+                "‼ requires scope=app (cannot patch):\n  "
+                + "\n  ".join(self.requires_app)
+            )
         if self.warnings:
             parts.append(
                 "⚠ structural changes — scope=app recommended:\n  "
@@ -337,14 +343,14 @@ def update_class(old: type, new: type, report: ReloadReport) -> None:
 
     # --- structural change detection (→ warnings / Tier 3 escalation) ---
     if old.__bases__ != new.__bases__:
-        report.warnings.append(f"{qn}: __bases__ changed — scope=app recommended")
+        report.requires_app.append(f"{qn}: __bases__ changed — requires scope=app")
     if getattr(old, "__slots__", None) != getattr(new, "__slots__", None):
         report.warnings.append(f"{qn}: __slots__ changed — scope=app recommended")
     old_sigs = {k for k, v in old.__dict__.items() if _is_signal(v)}
     new_sigs = {k for k, v in new.__dict__.items() if _is_signal(v)}
     if old_sigs != new_sigs:
-        report.warnings.append(
-            f"{qn}: Signal set changed ({old_sigs ^ new_sigs}) — scope=app recommended"
+        report.requires_app.append(
+            f"{qn}: Signal set changed ({old_sigs ^ new_sigs}) — requires scope=app"
         )
     oi, ni = old.__dict__.get("__init__"), new.__dict__.get("__init__")
     if isinstance(oi, FunctionType) and isinstance(ni, FunctionType):
