@@ -418,6 +418,7 @@ def test_init_constant_only_change_not_flagged(loader):
     superreload(rec, rep)
     assert not any("__init__ changed" in w for w in rep.warnings)
     assert rep.requires_app == []
+    assert mod.C().x == 2   # 定数は live __init__ にパッチ済み（新規インスタンスは新値）
 
 
 def test_needs_app_reload_true_for_requires_app_only():
