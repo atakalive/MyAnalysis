@@ -379,7 +379,13 @@ def test_signal_set_change_goes_to_requires_app(loader):
     assert not any("Signal set changed" in w for w in rep.warnings)
 
 
-def test_init_only_change_stays_in_warnings(loader):
+def test_init_body_change_stays_in_warnings(loader):
+    # An __init__ body change is a *soft* warning, never escalated to requires_app
+    # (only Signal-set / __bases__ changes escalate). A statement is added rather
+    # than editing a constant on purpose: __init__ detection compares co_code only,
+    # and a constant-only edit (self.x = 1 → 2) leaves co_code identical (LOAD_CONST
+    # carries a co_consts *index*), so no warning fires — see the blind-spot test
+    # below and issue #84.
     mod, path, rec = loader(
         "hr_init", "class C:\n  def __init__(self):\n    self.x = 1\n"
     )
@@ -390,6 +396,27 @@ def test_init_only_change_stays_in_warnings(loader):
     rep = ReloadReport()
     superreload(rec, rep)
     assert any("__init__ changed" in w for w in rep.warnings)
+    assert rep.requires_app == []
+
+
+def test_init_constant_only_change_not_flagged(loader):
+    # Documents the co_code-based detector's blind spot (issue #84): editing only a
+    # constant default in __init__ leaves co_code identical (co_consts differs), so
+    # the change is classified as neither a soft warning nor requires_app.
+    # update_function still patches the constant into the live __init__ (new
+    # instances see the new default; existing instances keep the old one). Left
+    # unflagged deliberately — constant tweaks are the most common hot-reload edit
+    # and warning on each would reintroduce the alarm fatigue #83 removes.
+    mod, path, rec = loader(
+        "hr_init_const", "class C:\n  def __init__(self):\n    self.x = 1\n"
+    )
+    path.write_text(
+        "class C:\n  def __init__(self):\n    self.x = 2\n",
+        encoding="utf-8",
+    )
+    rep = ReloadReport()
+    superreload(rec, rep)
+    assert not any("__init__ changed" in w for w in rep.warnings)
     assert rep.requires_app == []
 
 
