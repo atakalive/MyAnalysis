@@ -160,11 +160,15 @@ def _build_analysis(parent, dataset, name: str):
         except (OSError, ValueError):
             bak_ok = False
         if bak_ok:
+            # --dataset=<token> + `--` 前置で、シェルメタ文字と先頭ハイフンの
+            # 有効名の両方に耐える agent-facing コマンドにする（reviewer code P1/P2）。
+            recover_cmd = (
+                f"python -m llm_bridge recover-analysis "
+                f"{shlex.quote(f'--dataset={dataset}')} -- {shlex.quote(name)}"
+            )
             raise ValueError(
                 f"analyses/{name}/analysis.py が空です（0 バイト — 同期ドライブへの"
-                f"書き込み失敗の可能性）。バックアップから復旧できます: "
-                f"python -m llm_bridge recover-analysis "
-                f"{shlex.quote(name)} --dataset {shlex.quote(dataset)}"
+                f"書き込み失敗の可能性）。バックアップから復旧できます: {recover_cmd}"
             )
         raise ValueError(
             f"analyses/{name}/analysis.py が空です（0 バイト）。バックアップ"

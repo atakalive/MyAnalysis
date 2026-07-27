@@ -32,6 +32,22 @@ def _target(dataset: str, name: str):
         raise SystemExit(f"error: {e}")
 
 
+def _safe_cmd(prefix: str, dataset: str, name: str) -> str:
+    """Build an agent-facing ``<prefix> --dataset=<ds> -- <name>`` command that
+    survives BOTH shell metacharacters AND option-looking valid names.
+
+    validate_identifier_name accepts ``;`` ``$()`` etc. (shell-unsafe) *and*
+    leading hyphens, so a name/dataset like ``-x`` would otherwise be parsed by
+    argparse as an option in ``<verb> -x --dataset ds`` (reviewer code P1 + P2).
+    Fix on both axes: emit ``--dataset=<value>`` as one shlex-quoted token (the
+    ``=`` form binds a leading-hyphen value literally) and place the positional
+    ``name`` after ``--`` (end-of-options) so it is never read as a flag.
+    """
+    return (
+        f"{prefix} {shlex.quote(f'--dataset={dataset}')} -- {shlex.quote(name)}"
+    )
+
+
 def _defines_build_tab(tree: ast.Module) -> bool:
     """True if the module top level binds the name ``build_tab`` by any common
     static form: def / async def / assignment / annotated assignment / import.
@@ -67,37 +83,34 @@ def _defines_build_tab(tree: ast.Module) -> bool:
 
 
 def draft_analysis(dataset: str, name: str) -> None:
-    # agent-facing commands are run in a shell, but analysis/dataset names are
-    # not shell-safe (validate_identifier_name allows ; ` $() & etc.), so quote
-    # every interpolated token to prevent injection/arg-splitting (reviewer P1).
-    qn, qd = shlex.quote(name), shlex.quote(dataset)
     af = _target(dataset, name)
     if not af.is_file():
         raise SystemExit(
-            f"error: no analysis named {name!r} under {dataset!r}; "
-            f"create it with: python -m newanalysis {qn} --dataset {qd}"
+            f"error: no analysis named {name!r} under {dataset!r}; create it "
+            f"with: {_safe_cmd('python -m newanalysis', dataset, name)}"
         )
     try:
         source = af.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as e:
         raise SystemExit(
             f"error: cannot read {af} ({e}); if it is empty/corrupt, run: "
-            f"python -m llm_bridge recover-analysis {qn} --dataset {qd}"
+            f"{_safe_cmd('python -m llm_bridge recover-analysis', dataset, name)}"
         )
     if not source:   # byte-exact: 真の 0 バイトだけを recover 案内にする（統一規約）
         raise SystemExit(
             f"error: {af} is empty (0 bytes); recover it first: "
-            f"python -m llm_bridge recover-analysis {qn} --dataset {qd}"
+            f"{_safe_cmd('python -m llm_bridge recover-analysis', dataset, name)}"
         )
     out_dir = dataset_config.analysis_out_dir(dataset, name, create=True)
     draft = out_dir / "analysis.draft.py"
     atomic_write_text(draft, source)
     print(str(draft))
     # reload は dataset を受け取らず active dataset のタブを対象にするので、
-    # 同名衝突を避けるため set-active-dataset を前置する（reviewer R2 P2）。
+    # 同名衝突を避けるため set-active-dataset を前置する（reviewer R2 P2）。window の
+    # k=v トークン（name=/target=）は先頭が英字なので option 誤認せず、値だけ quote。
     print(
         f"edit the file above, then promote it: "
-        f"python -m llm_bridge apply-analysis {qn} --dataset {qd} && "
+        f"{_safe_cmd('python -m llm_bridge apply-analysis', dataset, name)} && "
         f"python -m llm_bridge window set-active-dataset "
         f"{shlex.quote(f'name={dataset}')} --wait && "
         f"python -m llm_bridge window reload scope=tab "
@@ -106,7 +119,6 @@ def draft_analysis(dataset: str, name: str) -> None:
 
 
 def apply_analysis(dataset: str, name: str) -> None:
-    qn, qd = shlex.quote(name), shlex.quote(dataset)   # shell-safe (reviewer P1)
     af = _target(dataset, name)
     try:
         out_dir = dataset_config.analysis_out_dir(dataset, name, create=False)
@@ -116,7 +128,7 @@ def apply_analysis(dataset: str, name: str) -> None:
     if not draft.is_file():
         raise SystemExit(
             f"error: no draft for {name!r}; run: "
-            f"python -m llm_bridge draft-analysis {qn} --dataset {qd}"
+            f"{_safe_cmd('python -m llm_bridge draft-analysis', dataset, name)}"
         )
     # read_text（universal newline）で読む＝改行を '\n' に正規化してから
     # atomic_write_text（newline=None）で書き直すので二重CRにならない。
@@ -164,7 +176,6 @@ def apply_analysis(dataset: str, name: str) -> None:
 
 
 def recover_analysis(dataset: str, name: str) -> None:
-    qn, qd = shlex.quote(name), shlex.quote(dataset)   # shell-safe (reviewer P1)
     af = _target(dataset, name)
     try:
         current = af.read_text(encoding="utf-8")
@@ -219,5 +230,5 @@ def recover_analysis(dataset: str, name: str) -> None:
         print(draft_note)
     print(
         f"before editing again run: "
-        f"python -m llm_bridge draft-analysis {qn} --dataset {qd}"
+        f"{_safe_cmd('python -m llm_bridge draft-analysis', dataset, name)}"
     )

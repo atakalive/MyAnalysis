@@ -53,8 +53,8 @@ def test_draft_creates_draft_and_prints_followup(ds, capsys):
     assert draft.is_file()
     assert draft.read_text(encoding="utf-8") == _GOOD
     assert str(draft) in out                       # absolute draft path printed
-    assert f"apply-analysis {NAME} --dataset {DS}" in out
-    assert "--dataset" in out
+    # --dataset=<ds> 形 + positional は `--` の後（option 誤認防止・reviewer code P2）
+    assert f"apply-analysis --dataset={DS} -- {NAME}" in out
 
 
 def test_draft_missing_analysis_points_at_newanalysis(ds):
@@ -89,6 +89,45 @@ def test_draft_followup_command_is_shell_quoted(ds, capsys):
     # クォート付き部分文字列は現れないので、これが quote 実施の確証になる。
     assert shlex.quote(evil) in out                    # positional
     assert shlex.quote(f"target={evil}") in out        # reload の k=v トークン全体
+
+
+def test_guidance_safe_for_option_looking_names(ds, capsys):
+    """reviewer code P2 R2: 先頭ハイフンの有効名（-x）でも案内コマンドが壊れない。
+
+    validate_identifier_name は先頭ハイフンを拒否しないので `-x` は有効。旧形
+    `apply-analysis -x --dataset ds` は argparse が -x を option 誤認して失敗する。
+    --dataset=<ds> 形＋positional を `--` の後に置く形へ寄せる。draft の follow-up
+    （apply）と、missing→newanalysis / empty→recover 案内の各出力を検証。
+    """
+    # follow-up (apply) — 既存 analysis から draft を作る
+    _write_analysis(ds, name="-x")
+    analysis_edit.draft_analysis(DS, "-x")
+    out = capsys.readouterr().out
+    assert f"apply-analysis --dataset={DS} -- -x" in out
+    assert "apply-analysis -x --dataset" not in out    # 旧・壊れる形が無いこと
+    # missing analysis → newanalysis 案内
+    with pytest.raises(SystemExit) as ei:
+        analysis_edit.draft_analysis(DS, "-nope")
+    assert f"newanalysis --dataset={DS} -- -nope" in str(ei.value)
+    # empty analysis → recover 案内
+    _write_analysis(ds, source="", name="-e")
+    with pytest.raises(SystemExit) as ei2:
+        analysis_edit.draft_analysis(DS, "-e")
+    assert f"recover-analysis --dataset={DS} -- -e" in str(ei2.value)
+
+
+def test_cli_option_looking_name_parses(ds):
+    """`--dataset=<ds> -- -x` を CLI が argparse エラーにせず name=-x として受理する。
+
+    draft 不在で verb レベルの "no draft" に到達＝argparse が -x を positional name
+    として受理した証拠（option 誤認なら usage エラーで別メッセージになる）。
+    """
+    _write_analysis(ds, name="-x")                     # analysis はあるが draft 無し
+    from llm_bridge.__main__ import main
+
+    with pytest.raises(SystemExit) as ei:
+        main(["apply-analysis", f"--dataset={DS}", "--", "-x"])
+    assert "no draft" in str(ei.value)
 
 
 # --- apply-analysis ---------------------------------------------------------
