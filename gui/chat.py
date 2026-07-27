@@ -356,7 +356,7 @@ class ChatWidget(QWidget):
         # 横幅に収まらないタブを N 段に折り返す（MultiRowTabBar が elide/expanding/
         # scrollButtons を自前設定するので、ここで重ねて設定しない）。閉じるは×ボタン
         # ではなくタブ右クリックメニュー「閉じる」から（_on_tab_context_menu）。
-        self._tab_bar = MultiRowTabBar()
+        self._tab_bar = MultiRowTabBar(compact_width_hint=True)
         self._tab_bar.setMovable(True)
         self._tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tab_bar.currentChanged.connect(self._on_switch_session)

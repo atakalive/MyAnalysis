@@ -39,10 +39,13 @@ class MultiRowTabBar(QTabBar):
     _detachable = False
     _pending_detach = False
     _press_name = ""
+    _compact_width_hint = False
 
     tabDetachRequested = Signal(str, QPoint)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, compact_width_hint: bool = False
+    ) -> None:
         super().__init__(parent)
         self.setElideMode(Qt.TextElideMode.ElideNone)  # 省略は自前で行う
         self.setExpanding(False)
@@ -58,6 +61,7 @@ class MultiRowTabBar(QTabBar):
         self._detachable = False
         self._pending_detach = False
         self._press_name = ""
+        self._compact_width_hint = bool(compact_width_hint)
 
     def set_detachable(self, on: bool) -> None:
         self._detachable = bool(on)
@@ -102,9 +106,14 @@ class MultiRowTabBar(QTabBar):
 
     # --- サイズヒント（幅方針は sizeHint と minimumSizeHint で非対称）-----
     def sizeHint(self) -> QSize:
-        # 幅: 全タブを単段に並べた自然幅を要求する。QTabWidget は非 expanding の
-        # バー幅を sizeHint().width() を上限に決めるため、ここを compact にすると
-        # バーが全幅へストレッチせず常時多段化する。超過分は _relayout が折り返す。
+        if self._compact_width_hint:
+            # 素置き（QTabWidget 非内蔵）用: 幅を固定下限に抑え、ドック／中央が
+            # 全タブ自然幅まで膨張するのを防ぐ。高さ（段数）は従来通り。実幅への
+            # 追従・折り返しは resizeEvent → _relayout（実幅駆動）が担うので不変。
+            return QSize(_MIN_BAR_WIDTH, max(1, self._row_count) * self._row_height)
+        # 既定（QTabWidget 内蔵時に必須）: 全タブを単段に並べた自然幅を要求する。
+        # QTabWidget は非 expanding のバー幅を sizeHint().width() を上限に決めるため、
+        # ここを compact にするとバーが全幅へストレッチせず常時多段化する。
         return QSize(
             super().sizeHint().width(),
             max(1, self._row_count) * self._row_height,

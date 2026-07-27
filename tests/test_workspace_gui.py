@@ -230,6 +230,122 @@ def test_close_tab_keeps_zero_tab_real_dataset(win, tmp_path):
     assert None not in win._groups                            # (empty) は作らない
 
 
+# ---- Issue #90: 復元スキップの警告表示 + ログ ----
+
+def _patch_warning(monkeypatch):
+    """gw.QMessageBox.warning を記録用に差し替え、(呼び出し本文の) list を返す。"""
+    import gui.window as gw
+    calls: list[str] = []
+    monkeypatch.setattr(
+        gw.QMessageBox, "warning",
+        lambda parent, title, body, *a, **k: calls.append(body),
+    )
+    return calls
+
+
+def test_restore_partial_failure_warns_and_continues(win, tmp_path, monkeypatch):
+    """dsA は不在（error:）、dsB はディレクトリのみ（no-session:）。dsB は復元・active
+    になり、警告が 1 回・本文に dsA のみ列挙され dsB は含まれない。"""
+    from llm_bridge import paths
+    (tmp_path / "dsB").mkdir()             # dsB: dir only → no-session:dsB
+    # dsA: no dir → error:dsA
+    lw = tmp_path / "last_window.json"
+    lw.write_text(json.dumps(
+        {"version": 1, "datasets": ["dsA", "dsB"], "active": "dsB"}), encoding="utf-8")
+    monkeypatch.setattr(paths, "last_window_path", lambda: lw)
+    warns = _patch_warning(monkeypatch)
+
+    win._restore_last_session()
+
+    assert win.current_dataset == "dsB"
+    assert "dsB" in win.open_dataset_names()
+    assert len(warns) == 1
+    assert "dsA" in warns[0]
+    assert "dsB" not in warns[0]
+
+
+def test_restore_all_fail_still_warns(win, tmp_path, monkeypatch):
+    """dsA/dsB とも不在（両方 error:）。何も開かないが警告は必ず 1 回出る。"""
+    from llm_bridge import paths
+    lw = tmp_path / "last_window.json"
+    lw.write_text(json.dumps(
+        {"version": 1, "datasets": ["dsA", "dsB"], "active": "dsA"}), encoding="utf-8")
+    monkeypatch.setattr(paths, "last_window_path", lambda: lw)
+    warns = _patch_warning(monkeypatch)
+
+    win._restore_last_session()
+
+    assert "dsA" not in win.open_dataset_names()
+    assert "dsB" not in win.open_dataset_names()
+    assert len(warns) == 1
+    assert "dsA" in warns[0] and "dsB" in warns[0]
+
+
+def test_restore_dispatch_exception_logged_and_listed(
+    win, tmp_path, monkeypatch, caplog
+):
+    """dispatch_command が特定 DS で例外 → _log.exception が記録され、その DS が
+    警告本文に列挙される。"""
+    import logging
+    from llm_bridge import paths
+    _write_analysis(tmp_path, "dsA", "a")
+    from llm_bridge import session
+    session.write_session("dsA", {
+        "version": 1, "dataset": "dsA", "active_tab": "a",
+        "tabs": [{"name": "a", "kind": "analysis", "module": "a"}]})
+    lw = tmp_path / "last_window.json"
+    lw.write_text(json.dumps(
+        {"version": 1, "datasets": ["dsBoom", "dsA"], "active": "dsA"}), encoding="utf-8")
+    monkeypatch.setattr(paths, "last_window_path", lambda: lw)
+    warns = _patch_warning(monkeypatch)
+
+    orig = win.dispatch_command
+
+    def boom(verb, **kw):
+        if verb == "open-dataset" and kw.get("name") == "dsBoom":
+            raise RuntimeError("boom")
+        return orig(verb, **kw)
+
+    monkeypatch.setattr(win, "dispatch_command", boom)
+
+    with caplog.at_level(logging.WARNING, logger="gui.window"):
+        win._restore_last_session()
+
+    assert "dsA" in win.open_dataset_names()
+    assert len(warns) == 1
+    assert "dsBoom" in warns[0]
+    assert any("dsBoom" in r.getMessage() for r in caplog.records)
+
+
+def test_open_dataset_dialog_error_warns(win, tmp_path, monkeypatch):
+    """_open_dataset 単体: ダイアログが実体無し DS を返す → error: 結果で警告 1 回・
+    本文に当該 DS 名。"""
+    import config
+    monkeypatch.setattr(config, "reload_datasets", lambda: None)
+    monkeypatch.setattr(config, "DATASETS", {"dsGhost": {}})
+    warns = _patch_warning(monkeypatch)
+
+    from PySide6.QtWidgets import QDialog
+    import gui.open_dataset_dialog as odd
+
+    class _FakeDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_dataset(self):
+            return "dsGhost"
+
+    monkeypatch.setattr(odd, "OpenDatasetDialog", _FakeDialog)
+
+    win._open_dataset()
+
+    assert len(warns) == 1
+    assert "dsGhost" in warns[0]
+
+
 # ---- Issue #59: DS タブのドラッグ並べ替え＋順序永続化 ----
 
 def _open_three(win, tmp_path):

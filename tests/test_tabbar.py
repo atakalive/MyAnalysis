@@ -228,6 +228,43 @@ def test_min_width_independent_of_label_length(qapp):
     assert barB._row_count > 1
 
 
+# 16. compact_width_hint: 素置きバーの sizeHint().width() がタブ数に依存しない
+def test_compact_width_hint_width_independent_of_tab_count(qapp):
+    from gui.tabbar import MultiRowTabBar, _MIN_BAR_WIDTH
+    bar = MultiRowTabBar(compact_width_hint=True)
+    for i in range(2):
+        bar.addTab(f"TabLabel{i}")
+    w2 = bar.sizeHint().width()
+    assert w2 == _MIN_BAR_WIDTH
+    for i in range(2, 20):
+        bar.addTab(f"TabLabel{i}")
+    assert bar.sizeHint().width() == w2 == _MIN_BAR_WIDTH
+    bar._relayout(300)
+    assert bar._row_count > 1
+    assert bar.sizeHint().height() == max(1, bar._row_count) * bar._row_height
+
+
+# 17. 回帰ガード: 非 compact（QTabWidget 内蔵の既定）はタブ数で自然幅が増える
+def test_default_width_hint_grows_with_tab_count(qapp):
+    host2, bar2 = _make_bar(qapp, 2)
+    w2 = bar2.sizeHint().width()
+    host20, bar20 = _make_bar(qapp, 20)
+    assert bar20.sizeHint().width() > w2
+
+
+# 18. compact/非 compact とも高さの式は同一（compact 化が高さを変えない回帰ガード）
+def test_compact_and_default_height_formula_match(qapp):
+    from gui.tabbar import MultiRowTabBar
+    barc = MultiRowTabBar(compact_width_hint=True)
+    for i in range(20):
+        barc.addTab(f"TabLabel{i}")
+    barc._relayout(300)
+    assert barc.sizeHint().height() == max(1, barc._row_count) * barc._row_height
+    host, bard = _make_bar(qapp, 20)
+    bard._relayout(300)
+    assert bard.sizeHint().height() == max(1, bard._row_count) * bard._row_height
+
+
 def test_disabled_stub_tab_text_is_dimmed(qapp):
     """A disabled tab (the #56 float-position stub) renders its label clearly
     dimmer than a normal enabled tab (MultiRowTabBar.paintEvent). Guards the

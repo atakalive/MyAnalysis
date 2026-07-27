@@ -65,6 +65,9 @@
 "err.close_dataset_save_failed" = "Aborted closing dataset {dataset}: saving its layout failed"
 "err.save_partial.title"      = "Some datasets could not be saved"
 "err.save_partial.body"       = "Datasets that failed to save:\n{datasets}"
+"err.restore_partial.title"   = "Some datasets could not be restored"
+"err.restore_partial.body"    = "Datasets that could not be restored:\n{datasets}\nTheir directory is missing or unreadable (check config.py / the synced drive; see log)."
+"err.open_dataset.body"       = "Cannot open dataset {dataset} (its directory is missing or unreadable; check config.py / the synced drive; see log)."
 "err.register.title"          = "Registration error"
 
 # --- dev (devtools/qt_integration.py) ---

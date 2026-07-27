@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, QThread, Signal
@@ -23,6 +24,8 @@ from common.i18n import tr
 from gui.floating_window import FloatingTabWindow
 from gui.tab import AnalysisTab
 from gui.tabbar import MultiRowTabBar
+
+_log = logging.getLogger(__name__)
 
 
 # フロート中タブの位置スタブ（無効タブ）ラベルに付ける識別記号。通常タブと一目で
@@ -117,7 +120,7 @@ class DatasetSwitcher(MultiRowTabBar):
     """
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, compact_width_hint=True)
         self.setMovable(True)
 
 
@@ -1033,21 +1036,30 @@ class ToolWindow(QMainWindow):
             QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
             return
         try:
-            self.dispatch_command("open-dataset", name=name)
+            res = self.dispatch_command("open-dataset", name=name)
         except Exception as e:
             QMessageBox.critical(self, tr("err.open_dataset.title"), str(e))
+            return
+        if isinstance(res, str) and res.startswith("error:"):
+            _log.warning("open-dataset returned %r for %r", res, name)
+            QMessageBox.warning(
+                self,
+                tr("err.open_dataset.title"),
+                tr("err.open_dataset.body", dataset=name),
+            )
 
     def _restore_last_session(self) -> None:
         """Restore the last saved workspace (which datasets were open + active).
 
         ADDITIVE: already-open datasets/tabs are never closed or overwritten;
-        open-dataset just focuses an already-open dataset. Missing file/empty →
-        an info message only.
+        open-dataset just focuses an already-open dataset. Missing file / empty /
+        non-list payload → an info message only. Datasets that fail to open are
+        skipped, logged, and surfaced in a single warning; the rest still restore.
         """
         from llm_bridge import session
         state = session.read_last_window()
         datasets = state.get("datasets") if isinstance(state, dict) else None
-        if not datasets:
+        if not isinstance(datasets, list) or not datasets:
             QMessageBox.information(
                 self, tr("dlg.restore_session.title"), tr("dlg.restore_session.empty")
             )
@@ -1056,12 +1068,17 @@ class ToolWindow(QMainWindow):
             QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
             return
         opened: list[str] = []
+        failed: list[str] = []
         for ds in datasets:
             try:
                 res = self.dispatch_command("open-dataset", name=ds)
             except Exception:
+                _log.exception("restore: open-dataset raised for %r", ds)
+                failed.append(str(ds))
                 continue
             if isinstance(res, str) and res.startswith("error:"):
+                _log.warning("restore: open-dataset returned %r for %r", res, ds)
+                failed.append(str(ds))
                 continue
             opened.append(ds)
         active = state.get("active") if isinstance(state, dict) else None
@@ -1071,6 +1088,12 @@ class ToolWindow(QMainWindow):
                 self.set_active_dataset(target)
             except LookupError:
                 pass
+        if failed:
+            QMessageBox.warning(
+                self,
+                tr("err.restore_partial.title"),
+                tr("err.restore_partial.body", datasets="\n".join(failed)),
+            )
 
     def _save_session(self) -> None:
         if self._session_saver is None:

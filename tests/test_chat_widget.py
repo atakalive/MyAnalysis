@@ -562,6 +562,41 @@ def test_session_tabs_wrap_when_dock_narrow(widget, qapp):
         widget.hide()
 
 
+def test_session_tab_bar_does_not_inflate_dock(qapp):
+    """多数セッションを復元してもチャットタブバーの sizeHint 幅がドックを膨張させない
+    （compact_width_hint=True）。バーは実ドック幅いっぱいに広がり多段折り返しするが、
+    自然幅ヒントで中央の解析パネルを圧殺しないこと。"""
+    from gui.window import ToolWindow
+    from gui.chat import ChatWidget
+    from llm_bridge import chat_store
+
+    win = ToolWindow()
+    chat = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)
+    win.set_chat_widget(chat)
+    chat._current_dataset = None
+    chat._sessions = [
+        chat_store.new_session(
+            "mock", "sys", dataset=None,
+            title=f"これは長めのセッションタイトルです {i:02d}",
+        )
+        for i in range(20)
+    ]
+    chat._active = chat._sessions[0]
+    chat._rebuild_tab_bar()
+
+    win.show()
+    qapp.processEvents()
+    win.resize(1400, 800)
+    qapp.processEvents()
+    try:
+        assert chat._tab_bar.sizeHint().width() <= 200
+        assert win._chat_dock.width() <= 600
+        assert win.centralWidget().width() >= 600
+        assert chat._tab_bar._row_count > 1
+    finally:
+        win.hide()
+
+
 def test_close_from_menu_confirms_then_deletes(widget, monkeypatch):
     """「閉じる」が呼ぶ _on_delete_session は確認ダイアログ Yes でセッションを削除する。"""
     from gui.chat import QMessageBox
