@@ -1159,8 +1159,9 @@ def test_share_window_smoke(qapp, monkeypatch):
 # ---- local mode (Issue #44): tunnel + stop ordering + stale signal ----
 
 class _FakeServer:
-    def __init__(self, port=54321):
+    def __init__(self, port=54321, bind_host="127.0.0.1"):
         self.port = port
+        self.bind_host = bind_host
         self.state = None
         self.shut = 0
 
@@ -1171,8 +1172,10 @@ class _FakeServer:
 def _local_relay(monkeypatch, win, *, port=54321):
     mr, r = _make_relay(monkeypatch, win)
     r._remote_base = ""   # local mode
-    monkeypatch.setattr(mr.local_relay, "start_server",
-                        lambda admin_key, **kw: _FakeServer(port=port))
+    monkeypatch.setattr(
+        mr.local_relay, "start_server",
+        lambda admin_key, **kw: _FakeServer(port=(kw.get("port") or port),
+                                            bind_host=kw.get("bind_host", "127.0.0.1")))
     return mr, r
 
 
@@ -1586,3 +1589,194 @@ def test_shareable_ds_keys_order(qapp, monkeypatch):
         {"id": "c", "dataset": None},         # null group
     ]
     assert r._shareable_ds_keys(sessions) == ["ds1", "dsSess", "", "dsTabOnly"]
+
+
+# ---- Issue #85: LAN 直結リンク ----
+
+def _lan_urlopen(mr, monkeypatch):
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: None)
+
+
+def test_lan_tunnel_failure_is_non_fatal(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    r._on_tunnel_failed(r._gen, "boom")
+    assert r.is_sharing() is True
+    assert r.share_status() == "external_unavailable"
+    assert r.channel() is not None
+    link = r.lan_link()
+    assert link and "http://192.168.1.50:" in link and "/#token=" in link
+    assert r.current_token() == ""          # 外部専用: LAN トークンは漏れない
+    assert r._tunnel is None
+    r.stop()
+
+
+def test_lan_env_host_fallback(qapp, monkeypatch):
+    monkeypatch.setenv("RELAY_LAN_HOST", "10.0.0.7")
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600, lan=True)          # host_ip 省略 → env フォールバック
+    link = r.lan_link()
+    assert "http://10.0.0.7:" in link and "/#token=" in link
+    r.stop()
+
+
+def test_lan_rebind_new_before_old_shutdown(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600)                    # loopback
+    r.stop()                                 # loopback は畳まれない
+    assert r._local_server is not None
+    old = r._local_server
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    assert old.shut == 1                     # 新生成後に旧を畳む
+    assert r._local_server.bind_host == "0.0.0.0"
+    r.stop()
+
+
+def test_stop_folds_public_server(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    srv = r._local_server
+    assert srv.bind_host == "0.0.0.0"
+    r.stop()
+    assert srv.shut == 1 and r._local_server is None
+    # loopback 共有では stop() 後も残る（app-scoped）
+    r.meeting_start(3600)
+    assert r._local_server is not None
+    r.stop()
+    assert r._local_server is not None
+
+
+def test_expired_folds_public_server(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    srv = r._local_server
+    r._on_state("expired")
+    assert srv.shut == 1 and r._local_server is None
+    # loopback 共有では expired でも残る
+    r.meeting_start(3600)
+    assert r._local_server is not None
+    r._on_state("expired")
+    assert r._local_server is not None
+    r.stop()
+
+
+def test_post_failure_folds_public_server(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    r._remote_base = ""
+    created = []
+
+    def fake_start(admin_key, **kw):
+        s = _FakeServer(port=54321, bind_host=kw.get("bind_host", "127.0.0.1"))
+        created.append(s)
+        return s
+
+    monkeypatch.setattr(mr.local_relay, "start_server", fake_start)
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: None)
+
+    def boom(req, timeout=None):
+        raise OSError("post fail")
+
+    monkeypatch.setattr(mr.urllib.request, "urlopen", boom)
+    with pytest.raises(OSError):
+        r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    assert r._local_server is None
+    assert created and created[-1].shut == 1
+    assert r.is_sharing() is False
+
+    # loopback: POST 失敗でも app-scoped は残る（fold は no-op）
+    created.clear()
+    with pytest.raises(OSError):
+        r.meeting_start(3600)
+    assert r._local_server is not None
+
+
+def test_lan_base_url_strict_gate(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    # LAN 再バインド失敗後の壊れた状態を直接組み立てる: 旧 loopback が残存
+    r._sharing = False
+    r._lan = True
+    r._lan_host = "192.168.1.50"
+    r._channel = "c"
+    r._secret = "s"
+    r._local_server = _FakeServer(bind_host="127.0.0.1")
+    assert r.lan_base_url() == ""
+    assert r.lan_link() == ""
+    # 共有中でも loopback bind なら空（bind_host ゲート）
+    r._sharing = True
+    assert r.lan_base_url() == ""
+    # 正常な LAN 共有中（public bind）では非空
+    r._local_server = _FakeServer(bind_host="0.0.0.0", port=54321)
+    assert r.lan_base_url() == "http://192.168.1.50:54321"
+
+
+def test_last_tunnel_failed_lifecycle(qapp, monkeypatch):
+    # external_unavailable の後、手動停止/TTL 失効は idle に落ちる
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    r._on_tunnel_failed(r._gen, "boom")
+    assert r.share_status() == "external_unavailable"
+    r.meeting_stop()
+    assert r.share_status() == "idle"        # 手動停止は失敗表示にしない
+
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    r._on_tunnel_failed(r._gen, "boom")
+    assert r.share_status() == "external_unavailable"
+    r._on_state("expired")
+    assert r.share_status() == "idle"        # TTL 失効も idle
+    r.stop()
+
+
+def test_flag_strict_bool(qapp):
+    from llm_bridge import _flag
+    assert _flag("false") is False
+    assert _flag("true") is True
+    assert _flag(0) is False
+    assert _flag(1) is True
+    with pytest.raises(ValueError):
+        _flag("nonsense")
+
+
+def test_primary_ip_prefers_lan(qapp, monkeypatch):
+    import socket
+    from gui.meeting_share import MeetingShareWindow
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+
+    def gai(ips):
+        return lambda host, *a, **kw: [
+            (socket.AF_INET, None, None, "", (ip, 0)) for ip in ips]
+
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        gai(["25.0.0.1", "192.168.1.50", "127.0.0.1"]))
+    assert sw._primary_ip() == "192.168.1.50"
+    monkeypatch.setattr(socket, "getaddrinfo", gai(["127.0.0.1", "169.254.1.1"]))
+    assert sw._primary_ip() == ""
+    r.stop()

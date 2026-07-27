@@ -11,8 +11,9 @@ Issue #44 で設計を見直し、**Cloudflare Worker + KV/R2 を廃止**して
 
 ## 公開トンネルの選択（`RELAY_TUNNEL`、既定 `cloudflared`）
 
-ローカルリレーは `127.0.0.1` にしか bind しないので、外部公開は公開トンネル経由。プロバイダは
-`RELAY_TUNNEL` で差し替え可能（[../meeting/tunnel.py](../meeting/tunnel.py)）:
+ローカルリレーは**既定では loopback（`127.0.0.1`）のみに bind** するので、外部公開は公開トンネル経由。
+（LAN リンク ON 時のみ、同一リレーを `0.0.0.0` にもバインドし LAN 直結の第2リンクを出す。後述「LAN 直結リンク」参照。）
+プロバイダは `RELAY_TUNNEL` で差し替え可能（[../meeting/tunnel.py](../meeting/tunnel.py)）:
 
 | 値 | 中身 | URL |
 |---|---|---|
@@ -30,6 +31,8 @@ Issue #44 で設計を見直し、**Cloudflare Worker + KV/R2 を廃止**して
 | `CLOUDFLARE_TUNNEL_HOSTNAME` | `route dns` した固定ホスト名 | cloudflared 時**必須** |
 | `CLOUDFLARED_BIN` | cloudflared が PATH に無いとき | 任意 |
 | `CLOUDFLARE_TUNNEL_CRED` | 認証情報ファイル（別PCで `login` 省略用） | 任意 |
+| `RELAY_LAN_HOST` | LAN URL のホスト初期値／CLI 単独 LAN 起動時のホスト供給源（Issue #85） | 既定**未設定** |
+| `RELAY_LAN_PORT` | LAN リンクの固定ポート要求（**bare integer 必須**）。**衝突時は ephemeral に落とさず `OSError`＝起動失敗として通知**。未設定/非整数は ephemeral | 既定**未設定** |
 | `RELAY_BASE_URL` | legacy override（設定すると remote relay を直叩き） | 既定**未設定** |
 
 **`RELAY_ADMIN_KEY` のみ無条件必須。** 公開トンネルは admin 含む全ルートをインターネットに
@@ -90,15 +93,47 @@ CLOUDFLARE_TUNNEL_HOSTNAME=relay.example.com
 
 共有開始（GUI または CLI/llm_bridge）で：
 
-1. ローカル・インメモリ・リレーが `127.0.0.1:<エフェメラルポート>` に起動（外部直アクセス不可）。
+1. ローカル・インメモリ・リレーが起動（既定は `127.0.0.1:<エフェメラルポート>` の loopback のみ＝外部直アクセス不可。
+   LAN リンク ON 時のみ `0.0.0.0:<ポート>` にもバインドし LAN 直結を許す）。
 2. `RELAY_TUNNEL` のプロバイダがトンネルを起動。cloudflared なら
    `cloudflared tunnel run --url http://127.0.0.1:<port> <name>` で **固定**ホスト名
    `https://<CLOUDFLARE_TUNNEL_HOSTNAME>` を公開（URL は毎回同じ）。`--url` でアドホック ingress を
    渡すので、ephemeral なローカルポートを config ファイルに焼く必要が無い。
 3. ゲストはトークン内の公開 URL を開いて入室。チャット双方向・ライブビュー・公開トグル・即時失効は従来どおり。
 
-ホスト自身は `127.0.0.1` のローカルリレーに話す（Cloudflare エッジを通らない）。エッジを通るのは
-ゲスト（実ブラウザ）のみ ＝ ホスト側 PC の DNS が当該ホスト名を引けなくても機能には影響しない。
+ホスト自身は（LAN の ON/OFF に関わらず）常に `127.0.0.1` のローカルリレーに話す（Cloudflare エッジを通らない）。
+エッジを通るのはゲスト（実ブラウザ）のみ ＝ ホスト側 PC の DNS が当該ホスト名を引けなくても機能には影響しない。
+
+## LAN 直結リンク（Issue #85）
+
+組織ネットワークの DNS がトンネルのホスト名を NXDOMAIN で解決できない環境向けに、内部ゲストをトンネル経由でなく
+**ホスト PC へ LAN 直結**させる第2リンクを併発できる。共有ダイアログの「LAN リンクも出す」を ON にすると
+（既定 OFF）、同一 channel/secret のまま同一リレーを `0.0.0.0` にもバインドし、`base_url` をホストの
+LAN URL にした第2トークンを生成する。外部リンク（トンネル https）とLAN リンク（LAN http）は同時に有効で、
+内外ゲストが同一会議に混在できる。CLI は `python -m llm_bridge meeting-start lan=true`＋`meeting-lan-link`。
+
+**配布はフルリンク/QR のみ（素トークンは配らない）**: LAN リンクは http。https ページから http を fetch すると
+ブラウザが mixed-content で強制ブロックするため、LAN 内ゲストは **http のディープリンク
+（`http://<ip>:<port>/#token=…`）でページごと開く**必要がある（ページ origin を http にする）。よって
+GitLab Pages の https 専用ページに素トークンを貼る既存運用はLAN 内では使えない。
+
+**固定ポート要求（`RELAY_LAN_PORT`）**: 告知済み URL / Firewall 規則 / ゲスト案内が固定ポート前提のとき、
+黙って別ポートに変わるとゲストが到達不能になる。よって**衝突時は ephemeral に落とさず `OSError`＝起動失敗**として
+通知する（別の `RELAY_LAN_PORT` で再試行）。稀な自己衝突（旧 loopback の ephemeral ポートが偶然要求固定ポートを
+保持）でも同様にクリーン失敗し、**旧 loopback サーバは無傷で残る**（旧を先に畳んで retry はしない）。未設定/非整数は ephemeral。
+
+### セキュリティ（`0.0.0.0` バインドの露出）
+
+1節にまとめて明記する:
+
+- **(a)** `0.0.0.0` はグローバル IP を持つホストではネットワークの firewall 次第で**インターネットからも到達し得る**
+  （SoftEther 仮想アダプタや他 NIC にも露出）。門番は per-meeting secret（`token_urlsafe(32)`）＋ admin_key ＋ TTL ＋
+  heartbeat-grace。**public バインドは共有中のみ**（`stop`/`expired`/`start` 失敗の全経路で畳む）。
+- **(b)** LAN は平文 http なので secret はローカルネットワーク上で平文で流れる（配布はフルリンク/QR のみ）。
+- **(c)** ゲストは HTTPS-Only を切って http フルリンクで開く（企業ポリシーで ON 固定だと開けない）。
+- **(d)** Windows Firewall は inbound を**プログラム単位（`pythonw.exe`）で許可 + ephemeral ポート**推奨。
+- **将来の締め（follow-up #88）**: `0.0.0.0` でなく「loopback ＋ LAN IP 専用」の2ソケットを同一 `RelayState` で
+  待つと SoftEther/グローバル面を除外できる。
 
 ## 旧 Cloudflare Worker の退役（手動）
 

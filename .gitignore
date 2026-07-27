@@ -39,6 +39,7 @@ llm_backend/config.toml
 # pi runtime artifacts — track only the committed skill
 /.pi/*
 !/.pi/skills/
+
 !/.pi/skills/**
 
 # wrangler local cache/state (relay-worker deploy)

@@ -449,6 +449,8 @@ class MeetingRelay(QObject):
         self._tunnel_starter: _TunnelStarter | None = None
         self._gen = 0                   # tunnel-start generation (stale-signal guard)
         self._last_tunnel_failed = False
+        self._lan = False        # LAN リンクを出すか（非同期スロットが参照するので永続化）
+        self._lan_host = ""      # LAN URL のホスト（ユーザ入力 or RELAY_LAN_HOST env or 検出 IP）
 
         # Streaming relay state: _stream_ids maps a session id to the stream_id of
         # its in-flight assistant turn so the final messageAdded reuses it (replace
@@ -493,10 +495,15 @@ class MeetingRelay(QObject):
 
     def share_status(self) -> str:
         if self._sharing:
-            return "sharing" if self._guest_base_url else "starting"
+            if self._guest_base_url:
+                return "sharing"
+            if self._last_tunnel_failed and self._lan:
+                return "external_unavailable"   # 外部だけ失敗・LAN 稼働
+            return "starting"
         return "tunnel_failed" if self._last_tunnel_failed else "idle"
 
     def current_token(self) -> str:
+        # 外部（トンネル）トークン専用。LAN は lan_link() から取得する。
         if self._sharing and self._guest_base_url and self._channel and self._secret:
             return self._make_token()
         return ""
@@ -706,14 +713,58 @@ class MeetingRelay(QObject):
 
     # ---- lifecycle ----
 
-    def _make_token(self) -> str:
-        token_obj = {"base_url": self._guest_base_url, "channel": self._channel,
-                     "secret": self._secret}
+    def _make_token(self, base_url=None) -> str:
+        token_obj = {"base_url": base_url or self._guest_base_url,
+                     "channel": self._channel, "secret": self._secret}
         return base64.urlsafe_b64encode(
-            json.dumps(token_obj).encode("utf-8")
-        ).decode("ascii").rstrip("=")
+            json.dumps(token_obj).encode("utf-8")).decode("ascii").rstrip("=")
 
-    def meeting_start(self, ttl_sec: int) -> None:
+    def lan_base_url(self) -> str:
+        # LAN リンクは「共有中 かつ ローカルサーバが実際に public(0.0.0.0) bind」の
+        # ときだけ有効。これが無いと、LAN 再バインド失敗（自己衝突）後に _local_server が
+        # 旧 loopback のまま・_lan=True・_lan_host 入り・stale な _channel/_secret 残存で
+        # lan_link() が http://<LAN IP>:<loopback port>/#token=... の壊れたリンクを返し得る
+        # （reviewer R3 P2-1）。ポートは実 bind された _local_server.port から作る。
+        if not (self._sharing and self._lan and self._lan_host
+                and self._local_server is not None
+                and getattr(self._local_server, "bind_host", "127.0.0.1") != "127.0.0.1"):
+            return ""
+        return f"http://{self._lan_host}:{self._local_server.port}"
+
+    def lan_token(self) -> str:
+        # 内部ヘルパ（lan_link が使う）。素トークンとしては配布しない。
+        lb = self.lan_base_url()
+        if not lb or not self._channel or not self._secret:
+            return ""      # ← 空を _make_token に渡さない（or フォールバック回避）
+        return self._make_token(lb)
+
+    def lan_link(self) -> str:
+        # 外部に渡してよい唯一の LAN 表現＝フルディープリンク（http origin）。
+        lb, tok = self.lan_base_url(), self.lan_token()
+        if not lb or not tok:
+            return ""
+        return lb.rstrip("/") + "/#token=" + tok
+
+    def _lan_req_port(self) -> int:
+        raw = os.environ.get("RELAY_LAN_PORT", "").strip()
+        if not raw:
+            return 0                       # 未設定 → ephemeral
+        try:
+            return int(raw)
+        except ValueError:
+            _log.warning("RELAY_LAN_PORT=%r is not an integer; using an ephemeral port", raw)
+            return 0
+
+    def _fold_public_server(self) -> None:
+        """0.0.0.0 (public) バインドは『共有中のみ』。共有が終わる全経路で畳む。
+        loopback (127.0.0.1) は app-scoped で残す（外部露出しないため再利用）。冪等。"""
+        if (self._local_server is not None
+                and getattr(self._local_server, "bind_host", "127.0.0.1") != "127.0.0.1"):
+            self._local_server.shutdown()
+            self._local_server = None
+
+    def meeting_start(self, ttl_sec: int, *, lan: bool = False,
+                      host_ip: "str | None" = None) -> None:
         """Create the channel, start the worker + capture timer; deliver the token
         asynchronously via ``tokenReady`` (the tunnel URL resolves off-thread).
 
@@ -738,11 +789,29 @@ class MeetingRelay(QObject):
         secret_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
         # base_url: the only `self` writes before the POST (the POST needs them).
+        self._lan = bool(lan)
+        # GUI は IP 欄で host_ip を渡す。CLI 単独起動は host_ip=None なので
+        # RELAY_LAN_HOST env にフォールバック（無いと CLI の lan=True は lan_host
+        # 空 → lan_base_url()/lan_link() が空になり LAN リンクが死ぬ）。
+        self._lan_host = (host_ip or "").strip() or os.environ.get("RELAY_LAN_HOST", "").strip()
         if self._remote_base:
+            # RELAY_BASE_URL リモートモード: local server も tunnel も起動しない。
             self._host_base_url = self._guest_base_url = self._remote_base
         else:
+            self._guest_base_url = ""          # 再共有で旧外部 URL を残さない (reviewer P2-4)
+            desired = "0.0.0.0" if self._lan else "127.0.0.1"
+            req_port = self._lan_req_port() if self._lan else 0
             if self._local_server is None:
-                self._local_server = local_relay.start_server(self._admin_key)
+                self._local_server = local_relay.start_server(
+                    self._admin_key, bind_host=desired, port=req_port)
+            elif getattr(self._local_server, "bind_host", "127.0.0.1") != desired:
+                # 新サーバ生成が「成功してから」旧サーバを畳む (reviewer P2-4)。逆順だと
+                # start_server が例外を投げたとき app-scoped 旧 loopback サーバを破棄済みで
+                # _local_server が死サーバを指し、次回 loopback 共有が死サーバへ POST する。
+                new_server = local_relay.start_server(
+                    self._admin_key, bind_host=desired, port=req_port)
+                self._local_server.shutdown()
+                self._local_server = new_server
             self._host_base_url = f"http://127.0.0.1:{self._local_server.port}"
 
         body = {"ch": ch, "ttl_sec": ttl, "secret_hash": secret_hash}
@@ -752,8 +821,13 @@ class MeetingRelay(QObject):
             headers={"Authorization": "Bearer " + self._admin_key,
                      "Content-Type": "application/json", "User-Agent": _UA},
         )
-        with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            # start 失敗経路（POST/JSON 例外）で 0.0.0.0 サーバを残さない。
+            self._fold_public_server()
+            raise
 
         # POST succeeded → now commit the sharing state.
         self._expires_at = int(data.get("expires_at", 0) or 0)
@@ -816,6 +890,22 @@ class MeetingRelay(QObject):
     def _on_tunnel_failed(self, gen: int, msg: str) -> None:
         if gen != self._gen:
             return
+        if self._lan and self.lan_base_url():
+            # LAN 会議は生かす。外部リンクだけ失う。
+            self._last_tunnel_failed = True
+            self._guest_base_url = ""          # 外部トークンの供給源をクリア
+            t = self._tunnel
+            if t is not None:
+                t.stop()
+            self._tunnel = None
+            ts = self._tunnel_starter
+            if ts is not None:
+                ts.requestInterruption()
+                ts.wait(8000)
+                self._tunnel_starter = None
+            self.channelStateChanged.emit("external_unavailable")
+            return
+        # 非 LAN（または LAN 配信不能）: 現状維持。
         # Order matters: channelStateChanged is delivered synchronously on a
         # same-thread connection, so the GUI slot runs mid-emit. Flip _sharing
         # off FIRST (via meeting_stop) so the GUI sees is_sharing()==False and
@@ -863,7 +953,10 @@ class MeetingRelay(QObject):
             self._tunnel_starter = None
         self._tunnel = None
         self._guest_base_url = ""
-        # _host_base_url and _local_server are app-scoped (reused across shares).
+        self._fold_public_server()
+        self._last_tunnel_failed = False
+        # loopback サーバは app-scoped で再利用、0.0.0.0 サーバは共有中のみ
+        # （stop/expired/start 失敗で _fold_public_server が畳む）。
 
     def shutdown(self) -> None:
         """App-teardown path (idempotent): stop sharing AND close the local server."""
@@ -878,6 +971,8 @@ class MeetingRelay(QObject):
         if state == "expired":
             self._sharing = False
             self._capture_timer.stop()
+            self._fold_public_server()        # TTL 失効でも 0.0.0.0 を残さない (reviewer R2 P1)
+            self._last_tunnel_failed = False  # TTL 失効は「失敗」でない→idle 表示 (reviewer R3 P2-2)
         self.channelStateChanged.emit(state)
 
     def _on_participants(self, data) -> None:

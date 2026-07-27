@@ -736,6 +736,7 @@ class LocalRelayServer:
         self.state = state
         self._thread = thread
         self.port = httpd.server_address[1]
+        self.bind_host = httpd.server_address[0]
         self._closed = False
 
     def shutdown(self) -> None:
@@ -748,7 +749,8 @@ class LocalRelayServer:
             self._httpd.server_close()
 
 
-def start_server(admin_key: str, *, html_path: "Path | None" = None) -> LocalRelayServer:
+def start_server(admin_key: str, *, html_path: "Path | None" = None,
+                 bind_host: str = "127.0.0.1", port: int = 0) -> LocalRelayServer:
     state = RelayState(admin_key, html_path=html_path)
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -783,7 +785,11 @@ def start_server(admin_key: str, *, html_path: "Path | None" = None) -> LocalRel
         do_DELETE = _dispatch
         do_OPTIONS = _dispatch
 
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # ThreadingHTTPServer eager-binds the socket in its constructor, so a
+    # fixed `port` already in use raises OSError HERE — deliberately NOT caught:
+    # a silent ephemeral fallback would move an announced URL / Firewall rule out
+    # from under guests. `port == 0` lets the OS pick a free port (no collision).
+    httpd = http.server.ThreadingHTTPServer((bind_host, port), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return LocalRelayServer(httpd, state, thread)

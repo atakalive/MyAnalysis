@@ -7,6 +7,7 @@ Opened from View → ミーティング共有…. All user-facing strings go thr
 
 from __future__ import annotations
 
+import os
 import time
 
 from PySide6.QtCore import Qt, QTimer
@@ -90,6 +91,18 @@ class MeetingShareWindow(QWidget):
         start_row.addWidget(self._start_btn)
         root.addLayout(start_row)
 
+        # ----- LAN link controls -----
+        lan_row = QHBoxLayout()
+        self._lan_link_check = QCheckBox(tr("meeting.check.lan_link"))
+        self._lan_host_caption = QLabel(tr("meeting.label.lan_host"))
+        self._lan_host_edit = QLineEdit()
+        self._lan_host_edit.setText(
+            os.environ.get("RELAY_LAN_HOST", "") or self._primary_ip())
+        lan_row.addWidget(self._lan_link_check)
+        lan_row.addWidget(self._lan_host_caption)
+        lan_row.addWidget(self._lan_host_edit, stretch=1)
+        root.addLayout(lan_row)
+
         # ----- token -----
         self._token_caption = QLabel(tr("meeting.label.token"))
         root.addWidget(self._token_caption)
@@ -106,18 +119,32 @@ class MeetingShareWindow(QWidget):
         self._reveal_btn = QPushButton(tr("meeting.btn.reveal"))
         self._reveal_btn.clicked.connect(self._on_reveal)
         self._qr_btn = QPushButton(tr("meeting.btn.qr"))
-        self._qr_btn.clicked.connect(self._on_qr)
+        # clicked emits a bool (checked); wrap so it isn't passed as `url`.
+        self._qr_btn.clicked.connect(lambda: self._on_qr())
         self._qr_btn.setEnabled(_qr_available())
+        # LAN twin buttons: full deep-link copy + QR only (no bare LAN token).
+        self._copy_lan_link_btn = QPushButton(tr("meeting.btn.copy_lan_link"))
+        self._copy_lan_link_btn.clicked.connect(self._on_copy_lan_link)
+        self._copy_lan_link_feedback = self._make_copied_timer(
+            self._copy_lan_link_btn, "meeting.btn.copy_lan_link")
+        self._qr_lan_btn = QPushButton(tr("meeting.btn.qr_lan"))
+        self._qr_lan_btn.clicked.connect(self._on_qr_lan)
         token_row.addWidget(self._token_edit, stretch=1)
         token_row.addWidget(self._copy_btn)
         token_row.addWidget(self._copy_link_btn)
         token_row.addWidget(self._reveal_btn)
         token_row.addWidget(self._qr_btn)
+        token_row.addWidget(self._copy_lan_link_btn)
+        token_row.addWidget(self._qr_lan_btn)
         root.addLayout(token_row)
         self._token_hint = QLabel(tr("meeting.token.hint"))
         self._token_hint.setWordWrap(True)
         self._token_hint.setStyleSheet("color:#888;font-size:11px")
         root.addWidget(self._token_hint)
+        self._lan_https_hint = QLabel(tr("meeting.lan.https_hint"))
+        self._lan_https_hint.setWordWrap(True)
+        self._lan_https_hint.setStyleSheet("color:#888;font-size:11px")
+        root.addWidget(self._lan_https_hint)
         self._remaining_label = QLabel("")
         root.addWidget(self._remaining_label)
         self._expiry_note = QLabel(tr("meeting.expiry.delayed"))
@@ -219,13 +246,21 @@ class MeetingShareWindow(QWidget):
             return
         self._relay.set_host_name(self._name_edit.text())
         ttl = self._ttl_combo.currentData()
+        lan = self._lan_link_check.isChecked()
+        host_ip = self._lan_host_edit.text().strip()
         try:
-            self._relay.meeting_start(int(ttl))
+            self._relay.meeting_start(int(ttl), lan=lan, host_ip=host_ip)
         except Exception as e:
             self._log_line(f"start failed: {e!r}")
             return
+        # LAN が有効なら実際の ip:port をログ表示（固定ポート要求が typo 等で ephemeral
+        # 化した場合に「要求ポートで無い」ことを可視化する。reviewer R2 P2-2）。
+        lan_base = self._relay.lan_base_url()
+        if lan_base:
+            self._log_line(tr("meeting.lan.ready", url=lan_base))
         # Token arrives asynchronously via _on_token_ready (tunnel URL resolves
-        # off-thread); just reflect the new "starting"/"sharing" state here.
+        # off-thread); LAN リンクは meeting_start 完了時点で final（_update_enabled が
+        # relay.lan_link() を live 照会して LAN ボタンを有効化する）。
         self._update_state_label()
         self._update_enabled()
 
@@ -287,15 +322,16 @@ class MeetingShareWindow(QWidget):
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )
 
-    def _on_qr(self) -> None:
-        if not self._token or not _qr_available():
+    def _on_qr(self, url: "str | None" = None) -> None:
+        if not _qr_available():
+            return
+        # url 省略時は外部トークンリンク（_on_qr_lan は LAN フルリンクを渡す）。
+        url = self._share_url() if url is None else url
+        if not url:
             return
         try:
             import io
             import qrcode
-            url = self._share_url()
-            if not url:
-                return
             img = qrcode.make(url)
             buf = io.BytesIO()
             img.save(buf, format="PNG")
@@ -311,6 +347,41 @@ class MeetingShareWindow(QWidget):
         lbl.setPixmap(pix)
         lay.addWidget(lbl)
         dlg.exec()
+
+    def _lan_share_url(self) -> str:
+        return self._relay.lan_link()
+
+    def _on_copy_lan_link(self) -> None:
+        url = self._lan_share_url()
+        if url:
+            QApplication.clipboard().setText(url)
+            self._show_copied(self._copy_lan_link_btn, self._copy_lan_link_feedback)
+
+    def _on_qr_lan(self) -> None:
+        self._on_qr(self._lan_share_url())
+
+    def _primary_ip(self) -> str:
+        """LAN 配布に使うホストの IPv4 候補（推定）。失敗しても空文字で返し、
+        meeting_start を落とさない。VPN/loopback/link-local は後回し。"""
+        import socket
+        candidates: list[str] = []
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip and ip not in candidates:
+                    candidates.append(ip)
+        except Exception:
+            candidates = []
+
+        def _rank(ip: str) -> tuple:
+            # loopback を最後、link-local を次、VPN 帯(25./100.64.)を後ろ、私設 LAN を前。
+            return (ip.startswith("127."), ip.startswith("169.254."),
+                    ip.startswith("25.") or ip.startswith("100.64."), ip)
+
+        for ip in sorted(candidates, key=_rank):
+            if not ip.startswith("127.") and not ip.startswith("169.254."):
+                return ip
+        return ""
 
     def _on_name_changed(self, text: str) -> None:
         self._relay.set_host_name(text)
@@ -328,7 +399,13 @@ class MeetingShareWindow(QWidget):
             self._conn_label.setText(tr("meeting.conn.ok"))
         elif state == "starting":
             self._log_line(tr("meeting.state.starting"))
+        elif state == "external_unavailable":
+            # 外部トークン表示のみクリア。LAN は relay.lan_link() live 照会で維持。
+            self._token = ""
+            self._token_edit.setText("")
+            self._log_line(tr("meeting.state.external_unavailable"))
         elif state == "tunnel_failed":
+            # 外部トークンのみクリア（LAN ボタンを道連れにしない）。
             self._token = ""
             self._token_edit.setText("")
             self._log_line(tr("meeting.state.tunnel_failed"))
@@ -529,24 +606,36 @@ class MeetingShareWindow(QWidget):
         self._log.appendPlainText(time.strftime("%H:%M:%S ") + text)
 
     def _update_state_label(self) -> None:
+        # relay.share_status() を SSOT にする（_token/_lan_link の有無から派生させると
+        # external_unavailable が "sharing" に上書きされる。reviewer P1-1）。
+        st = self._relay.share_status()
+        label_key = {
+            "sharing": "meeting.state.sharing",
+            "external_unavailable": "meeting.state.external_unavailable",
+            "starting": "meeting.state.starting",
+            "tunnel_failed": "meeting.state.tunnel_failed",
+            "idle": "meeting.state.idle",
+        }.get(st, "meeting.state.idle")
+        self._state_label.setText(tr(label_key))
         if self._relay.is_sharing():
-            self._state_label.setText(
-                tr("meeting.state.sharing") if self._token
-                else tr("meeting.state.starting"))
-            ch = self._relay.channel() or ""
-            self._channel_label.setText(tr("meeting.label.channel") + ": " + ch)
+            self._channel_label.setText(
+                tr("meeting.label.channel") + ": " + (self._relay.channel() or ""))
         else:
-            self._state_label.setText(tr("meeting.state.idle"))
             self._channel_label.setText("")
         self._relay_label.setText(tr("meeting.label.relay") + ": " + self._relay.base_url())
 
     def _update_enabled(self) -> None:
         configured = self._relay.is_configured()
         sharing = self._relay.is_sharing()
+        lan_ready = bool(self._relay.lan_link())
         self._not_configured.setVisible(not configured)
         self._start_btn.setEnabled(configured and not sharing)
         self._ttl_combo.setEnabled(not sharing)
         self._stop_btn.setEnabled(sharing)
+        self._lan_link_check.setEnabled(not sharing)     # 開始後は変更不可
+        self._lan_host_edit.setEnabled(not sharing)
+        self._copy_lan_link_btn.setEnabled(lan_ready)    # LAN リンク実在時のみ
+        self._qr_lan_btn.setEnabled(lan_ready and _qr_available())
         self._update_state_label()
 
     def retranslate(self) -> None:
@@ -568,6 +657,14 @@ class MeetingShareWindow(QWidget):
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )
         self._qr_btn.setText(tr("meeting.btn.qr"))
+        if self._copy_lan_link_feedback.isActive():
+            self._copy_lan_link_btn.setText(tr("meeting.btn.copied"))
+        else:
+            self._copy_lan_link_btn.setText(tr("meeting.btn.copy_lan_link"))
+        self._qr_lan_btn.setText(tr("meeting.btn.qr_lan"))
+        self._lan_link_check.setText(tr("meeting.check.lan_link"))
+        self._lan_host_caption.setText(tr("meeting.label.lan_host"))
+        self._lan_https_hint.setText(tr("meeting.lan.https_hint"))
         self._token_hint.setText(tr("meeting.token.hint"))
         self._expiry_note.setText(tr("meeting.expiry.delayed"))
         self._sess_group.setTitle(tr("meeting.section.sessions"))

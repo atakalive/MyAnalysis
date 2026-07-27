@@ -742,6 +742,40 @@ def test_socket_smoke(tmp_path):
         srv.shutdown()   # idempotent
 
 
+# ---- Issue #85: bind_host / fixed-port contract ----
+
+def test_start_server_bind_host():
+    srv = lr.start_server(ADMIN, bind_host="0.0.0.0")
+    try:
+        assert srv.bind_host == "0.0.0.0"
+    finally:
+        srv.shutdown()
+
+
+def test_start_server_fixed_port_no_silent_fallback():
+    """Linux/WSL semantics: a fixed port already in use raises OSError (no silent
+    ephemeral fallback); after shutdown the same port re-binds (no port leak)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    srv = lr.start_server(ADMIN, port=port)
+    try:
+        assert srv.port == port
+        with pytest.raises(OSError):
+            lr.start_server(ADMIN, port=port)   # collision → OSError, no fallback
+    finally:
+        srv.shutdown()
+
+    srv2 = lr.start_server(ADMIN, port=port)    # freed → re-binds same port
+    try:
+        assert srv2.port == port
+    finally:
+        srv2.shutdown()
+
+
 # ---- Issue #81: guest-requested new chat sessions ----
 
 def test_newsession_guest_auth(clock):

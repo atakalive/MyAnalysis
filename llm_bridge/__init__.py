@@ -28,6 +28,23 @@ _building_dataset: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+def _flag(v) -> bool:
+    """CLI kv フラグを厳格に bool 化。_parse_kvs は int/float/str を返すので
+    1/0・true/false・yes/no・on/off を受理し、それ以外は ValueError。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        if v in (0, 1):
+            return bool(v)
+        raise ValueError(f"invalid boolean flag: {v!r} (use true/false)")
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off", ""):
+        return False
+    raise ValueError(f"invalid boolean flag: {v!r} (use true/false)")
+
+
 @contextlib.contextmanager
 def _building(dataset: str | None):
     """build_tab 実行中だけ dataset を contextvar に立てる。テスト/将来の再利用用に公開。"""
@@ -659,16 +676,26 @@ def _rewire_window(window) -> None:
     window.register_command(
         "chat-list-sessions", lambda: window.chat_widget().session_summaries()
     )
+    # meeting-start の lan=true でLAN リンクを併発する。CLI 単独起動は
+    # ホスト IP を渡せないため meeting_start が RELAY_LAN_HOST env を読む
+    # （未設定で lan=true にすると LAN リンクは空＝トンネル失敗時も非致命分岐に入らない）。
+    # 固定ポート要求 RELAY_LAN_PORT は衝突時 OSError で起動失敗（サイレント別ポート化しない）。
     window.register_command(
         "meeting-start",
-        lambda ttl_sec=10800:
-            window._meeting_relay.meeting_start(int(ttl_sec))
+        lambda ttl_sec=10800, lan=False:
+            window._meeting_relay.meeting_start(int(ttl_sec), lan=_flag(lan))
             or window._meeting_relay.current_token()
             or "starting",
     )
     window.register_command(
         "meeting-token",
         lambda: window._meeting_relay.current_token() or window._meeting_relay.share_status(),
+    )
+    # LAN 配布用: フルディープリンク（http origin）のみを返す。素 LAN トークンは
+    # 配らない（mixed-content で http fetch がブロックされるため）。
+    window.register_command(
+        "meeting-lan-link",
+        lambda: window._meeting_relay.lan_link() or "no-lan",
     )
     window.register_command(
         "meeting-stop", lambda: window._meeting_relay.meeting_stop() or "stopped"
