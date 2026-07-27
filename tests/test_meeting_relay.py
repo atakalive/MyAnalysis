@@ -1052,7 +1052,8 @@ def test_participants_ds_gating_and_watched_render(qapp, monkeypatch):
 
     # capture tick: active dsA + watched dsB are rendered; dsC (unwatched) is not.
     r._worker._outbox.clear()
-    r._view_hashes = {}; r._view_cachekeys = {}   # force fresh capture (bypass dedup)
+    r._view_hashes = {}
+    r._view_cachekeys = {}   # force fresh capture (bypass dedup)
     r._on_capture_tick()
     view_ds = {i["ds"] for i in r._worker._outbox if i["kind"] == "view"}
     assert "dsA" in view_ds and "dsB" in view_ds and "dsC" not in view_ds
@@ -1078,7 +1079,8 @@ def test_watched_render_capped(qapp, monkeypatch):
     for i in range(cap + 3):
         r._watched_ds_until[f"bg{i}"] = now + 100 + i
     r._worker._outbox.clear()
-    r._view_hashes = {}; r._view_cachekeys = {}   # force fresh capture (bypass dedup)
+    r._view_hashes = {}
+    r._view_cachekeys = {}   # force fresh capture (bypass dedup)
     r._on_capture_tick()
     view_ds = {i["ds"] for i in r._worker._outbox if i["kind"] == "view"}
     bg_rendered = {d for d in view_ds if d.startswith("bg")}
