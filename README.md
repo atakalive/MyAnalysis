@@ -254,7 +254,9 @@ guest-local; the host's active dataset only seeds the default on first load). A
 persisted; switching it ON snaps the guest to the host's active dataset and keeps it
 in sync, and clicking any dataset chip turns it back OFF (Issue #80). Switching
 datasets stashes the unsent message draft per dataset, so a host-driven switch never
-re-targets half-typed text at another dataset's chat.
+re-targets half-typed text at another dataset's chat. The meeting relay itself uses
+only the stdlib — see `relay-worker/` (local in-memory relay + public tunnel, $0)
+for deployment details.
 
 **Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
 resident while open, so opening many large datasets at once can pressure memory
