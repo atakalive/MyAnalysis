@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from llm_backend.base import NO_LOCAL_PERSISTENCE
+from llm_backend.base import MOUNT_SAFE_EDITS, NO_LOCAL_PERSISTENCE
 
 
 def test_rule_is_nonempty_and_names_the_offenders():
@@ -28,16 +28,26 @@ def test_rule_is_nonempty_and_names_the_offenders():
     assert "work_dir" in NO_LOCAL_PERSISTENCE
 
 
+def test_mount_safe_edits_names_the_three_verbs():
+    # The constant is the single source of the mount-safe edit guidance; it must
+    # name all three verbs so agents learn the full draft → apply → recover loop.
+    assert isinstance(MOUNT_SAFE_EDITS, str) and MOUNT_SAFE_EDITS.strip()
+    for verb in ("draft-analysis", "apply-analysis", "recover-analysis"):
+        assert verb in MOUNT_SAFE_EDITS
+
+
 def test_claude_backend_prompt_includes_rule():
     from llm_backend.claude_code import _SYSTEM_PROMPT
 
     assert NO_LOCAL_PERSISTENCE in _SYSTEM_PROMPT
+    assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT
 
 
 def test_pi_backend_prompt_includes_rule():
     from llm_backend.pi import _SYSTEM_PROMPT_PI
 
     assert NO_LOCAL_PERSISTENCE in _SYSTEM_PROMPT_PI
+    assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT_PI
 
 
 def test_gui_chat_prompt_includes_rule():
@@ -47,3 +57,4 @@ def test_gui_chat_prompt_includes_rule():
     from gui.chat import _SYSTEM_PROMPT
 
     assert NO_LOCAL_PERSISTENCE in _SYSTEM_PROMPT
+    assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT

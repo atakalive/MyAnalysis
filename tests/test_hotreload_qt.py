@@ -364,6 +364,82 @@ def test_tier2_build_failure_preserves_unreadable_current_json(window, probe_ana
     assert cj.read_bytes() == b""   # unreadable → restore-write skipped (not b"{}")
 
 
+def test_tier2_empty_analysis_retains_tab_with_recover_hint(window, probe_analysis):
+    # A 0-byte analysis.py (mount truncation) must be detected at build with a
+    # diagnostic carrying the recover command, and the old tab must survive.
+    name, af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    old_tab = next(t for t in window.tabs() if t.name == name)
+
+    af.write_text("", encoding="utf-8")   # 0-byte truncation on the mount
+    result = window.dispatch_command("reload", scope="tab", target=name)
+    assert result.startswith("reload-tab-error:build failed:")
+    assert "recover-analysis" in result
+    assert next(t for t in window.tabs() if t.name == name) is old_tab   # retained
+
+
+def test_tier2_reload_success_updates_bak(window, probe_analysis):
+    from common.paths import bak_path
+
+    name, af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    # add-tab already snapshotted v1 to .bak.
+    assert bak_path(af).read_text(encoding="utf-8") == _ANALYSIS_SRC.format(name=name, v=1)
+
+    new_src = _ANALYSIS_SRC.format(name=name, v=2)
+    af.write_text(new_src, encoding="utf-8")
+    assert window.dispatch_command("reload", scope="tab", target=name) \
+        == f"reloaded-tab:{name}"
+    assert bak_path(af).read_text(encoding="utf-8") == new_src   # .bak advanced
+
+
+def test_tier2_name_mismatch_does_not_update_bak(window, probe_analysis):
+    from common.paths import bak_path
+
+    name, af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    v1 = _ANALYSIS_SRC.format(name=name, v=1)
+    assert bak_path(af).read_text(encoding="utf-8") == v1
+
+    af.write_text(
+        "import llm_bridge\n"
+        "def build_tab(parent, data):\n"
+        "    from gui.tab import AnalysisTab\n"
+        "    tab = AnalysisTab(name='WRONG', parent=parent)\n"
+        "    tab._watchers = llm_bridge.attach_tab(tab, lambda: {})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
+    result = window.dispatch_command("reload", scope="tab", target=name)
+    assert result.startswith("reload-tab-error:")
+    assert bak_path(af).read_text(encoding="utf-8") == v1   # unchanged
+
+
+def test_tier2_sync_failure_does_not_update_bak(window, probe_analysis):
+    from common.paths import bak_path
+
+    name, af = probe_analysis
+    window.dispatch_command("add-tab", name=name, dataset=HR_DS)
+    v1 = _ANALYSIS_SRC.format(name=name, v=1)
+    assert bak_path(af).read_text(encoding="utf-8") == v1
+
+    af.write_text(
+        "import llm_bridge\n"
+        f"NAME = {name!r}\n"
+        "def apply_state(tab, state):\n"
+        "    raise RuntimeError('boom')\n"
+        "def build_tab(parent, data):\n"
+        "    from gui.tab import AnalysisTab\n"
+        "    tab = AnalysisTab(name=NAME, parent=parent)\n"
+        "    tab._watchers = llm_bridge.attach_tab(tab, lambda: {})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
+    result = window.dispatch_command("reload", scope="tab", target=name)
+    assert result.startswith("reload-tab-error:")
+    assert bak_path(af).read_text(encoding="utf-8") == v1   # unchanged
+
+
 def test_tier2_reload_rejects_non_analysis_tab(window, qapp, tmp_path):
     """同名の figure/viewer タブを解析として reload しない (kind ガード)。
 

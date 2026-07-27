@@ -21,6 +21,8 @@ import pytest
 from common.paths import (
     atomic_write_bytes,
     atomic_write_text,
+    backup_text_if_changed,
+    bak_path,
     durable_read_json,
     durable_write_json,
     read_json_classified,
@@ -291,3 +293,54 @@ def test_bak_is_not_matched_by_json_glob(tmp_path):
     durable_write_json(tmp_path / "s.json", {"x": 1})
     assert [q.name for q in tmp_path.glob("*.json")] == ["s.json"]
     assert (tmp_path / "s.json.bak").exists()
+
+
+# --- backup_text_if_changed (Issue #89) -------------------------------------
+
+def test_backup_text_creates_when_absent(tmp_path):
+    p = tmp_path / "analysis.py"
+    assert backup_text_if_changed(p, "code v1\n") is True
+    assert bak_path(p).read_text(encoding="utf-8") == "code v1\n"
+
+
+def test_backup_text_skips_when_identical(tmp_path, monkeypatch):
+    import common.paths as cp
+
+    p = tmp_path / "analysis.py"
+    backup_text_if_changed(p, "same\n")
+    calls = {"n": 0}
+    real = cp.atomic_write_text
+
+    def _counting(path, text, **kw):
+        calls["n"] += 1
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(cp, "atomic_write_text", _counting)
+    assert backup_text_if_changed(p, "same\n") is False
+    assert calls["n"] == 0   # identical content → no rewrite
+
+
+def test_backup_text_rewrites_when_changed(tmp_path, monkeypatch):
+    import common.paths as cp
+
+    p = tmp_path / "analysis.py"
+    backup_text_if_changed(p, "v1\n")
+    calls = {"n": 0}
+    real = cp.atomic_write_text
+
+    def _counting(path, text, **kw):
+        calls["n"] += 1
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(cp, "atomic_write_text", _counting)
+    assert backup_text_if_changed(p, "v2\n") is True
+    assert calls["n"] == 1
+    assert bak_path(p).read_text(encoding="utf-8") == "v2\n"
+
+
+def test_backup_text_rewrites_when_bak_unreadable(tmp_path):
+    # A corrupt/non-UTF-8 .bak is treated as "needs (re)write", not a match.
+    p = tmp_path / "analysis.py"
+    bak_path(p).write_bytes(b"\xff\xfe not utf8")
+    assert backup_text_if_changed(p, "good\n") is True
+    assert bak_path(p).read_text(encoding="utf-8") == "good\n"

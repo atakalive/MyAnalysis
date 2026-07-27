@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 import dataset_config
-from common.paths import safe_resolve
+from common.paths import safe_resolve, bak_path, backup_text_if_changed
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
@@ -125,7 +125,7 @@ def _resolve_analysis_file(dataset, name: str):
 
 def _build_analysis(parent, dataset, name: str):
     """Fresh-import analyses/<name>/analysis.py, run load() + build_tab(parent),
-    and assign session_spec. Returns ``(tab, mod)``.
+    and assign session_spec. Returns ``(tab, mod, source)``.
 
     Shared by the `add-tab` verb and the hot-reload Tier 2 `reload_tab` path.
     `parent` is the Qt parent widget for the constructed tab (the live window
@@ -153,6 +153,22 @@ def _build_analysis(parent, dataset, name: str):
     # filesystem-mtime second (the exact agent edit-then-reload pattern). The
     # module is never registered in sys.modules, so it's always a fresh build.
     source = analysis_file.read_text(encoding="utf-8")
+    if not source:   # 真の 0 バイト（Edit 失敗の truncate）だけを診断対象にする
+        bp = bak_path(analysis_file)
+        try:
+            bak_ok = bool(bp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            bak_ok = False
+        if bak_ok:
+            raise ValueError(
+                f"analyses/{name}/analysis.py が空です（0 バイト — 同期ドライブへの"
+                f"書き込み失敗の可能性）。バックアップから復旧できます: "
+                f"python -m llm_bridge recover-analysis {name} --dataset {dataset}"
+            )
+        raise ValueError(
+            f"analyses/{name}/analysis.py が空です（0 バイト）。バックアップ"
+            f"（{bp}）も見つかりません。チャット履歴・git 等から内容を復元してください。"
+        )
     code = compile(source, str(analysis_file), "exec")
     exec(code, mod.__dict__)
     if not hasattr(mod, "build_tab"):
@@ -170,7 +186,7 @@ def _build_analysis(parent, dataset, name: str):
     tab.session_spec = {
         "kind": "analysis", "name": name, "module": name, "dataset": dataset,
     }
-    return tab, mod
+    return tab, mod, source
 
 
 def _make_add_tab_handler(window) -> Callable[..., str]:
@@ -229,7 +245,7 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         captured_status, captured_state = state.read_status(dataset, name)
         sandbox = QWidget()
         try:
-            new_tab, mod = _build_analysis(sandbox, dataset, name)
+            new_tab, mod, source = _build_analysis(sandbox, dataset, name)
         except Exception:
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
@@ -271,6 +287,14 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
                 hr.note_analysis_opened(dataset, name)
             except Exception:
                 pass
+        # 最後まで成立した成功経路でのみ last-good を .bak に退避（best-effort）。
+        # suppress は Exception まで広げる: パス再解決（dataset_config.analysis_file は
+        # KeyError/RuntimeError もあり得る）含め、この副作用が add-tab の成功を巻き添えに
+        # しないため（reviewer R2 P2）。純粋な副作用なので fail-open が正。
+        with contextlib.suppress(Exception):
+            backup_text_if_changed(
+                dataset_config.analysis_file(dataset, name), source
+            )
         return f"added:{name}"
 
     return _add_tab

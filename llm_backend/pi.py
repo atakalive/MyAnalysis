@@ -23,7 +23,7 @@ from collections.abc import Iterator
 from common.paths import repo_root
 from common.proc import no_window_kwargs
 from llm_backend.base import (
-    Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
+    Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     build_prompt_with_history,
 )
 
@@ -38,6 +38,8 @@ _SYSTEM_PROMPT_PI = (
     "across all open datasets), list-open-datasets, "
     "window <verb> [k=v] [--wait], tab <name> <verb> [k=v] [--wait], "
     "annotate <name> marker|note [k=v], clear-annotations <name>, "
+    "draft-analysis <name> --dataset <ds>, apply-analysis <name> --dataset <ds>, "
+    "recover-analysis <name> --dataset <ds>, "
     "set-description <ds> \"<text>\" (writes the dataset's picker 概要/description). "
     "Multiple datasets can be open; active returns open_datasets + active_dataset. "
     "Switch with `window set-active-dataset name=<ds>`; when a tab name exists in "
@@ -48,7 +50,7 @@ _SYSTEM_PROMPT_PI = (
     " Never modify measurement files (CSV etc.); analysis output is written by"
     " the tools to the dataset's per-dataset work_dir (default _work, set in"
     " myanalysis.toml)."
-) + "\n" + NO_LOCAL_PERSISTENCE
+) + "\n" + NO_LOCAL_PERSISTENCE + "\n" + MOUNT_SAFE_EDITS
 
 
 class PiCodingAgentBackend:

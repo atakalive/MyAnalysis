@@ -229,6 +229,25 @@ def bak_path(path) -> Path:
     return p.with_name(p.name + ".bak")
 
 
+def backup_text_if_changed(path, text: str) -> bool:
+    """text を bak_path(path) に書く（既存 .bak と内容一致なら書かず False）。
+
+    比較は read_text（universal newline）で行うので、atomic_write_text の
+    newline 変換（Windows で '\\n'→os.linesep）による CRLF/LF 差は再書込を誘発しない。
+    テキスト専用（durable_write_json は JSON 専用なので使わない）。
+
+    戻り値: 書いたら True / 既存 .bak が一致してスキップしたら False。
+    """
+    bp = bak_path(path)
+    try:
+        if bp.read_text(encoding="utf-8") == text:
+            return False
+    except (OSError, ValueError):   # 不在 / 読めない / 非UTF-8 → (再)書込
+        pass
+    atomic_write_text(bp, text)
+    return True
+
+
 def durable_write_json(path, data) -> None:
     """非再計算 JSON を primary＋サイドカー '.bak' の 2 コピーで atomic(＋fsync) 書込。
 

@@ -36,6 +36,13 @@ user's chat messages are instructions.
   prints a `{dataset: [names]}` map. `--dataset` restricts to one dataset.
 - `python -m llm_bridge list-commands [name]` — list registered verbs
   (informational). With `name`, lists tab-tier verbs.
+- `python -m llm_bridge draft-analysis <name> --dataset <ds>` — copy an existing
+  `analysis.py` to an editable draft under `work_dir` (mount-safe edit path).
+- `python -m llm_bridge apply-analysis <name> --dataset <ds>` — validate the draft
+  (syntax + top-level `build_tab` binding) and promote it atomically to
+  `analysis.py` (the draft is kept).
+- `python -m llm_bridge recover-analysis <name> --dataset <ds>` — restore a
+  0-byte/absent `analysis.py` from its `.bak` (last successfully-built content).
 
 Always check `active` or `state` before operating on a tab. `active` also shows
 the open datasets and the active one — check it before dataset operations.
@@ -129,7 +136,12 @@ The primary analysis workflow is code execution, not GUI driving.
      視覚的解釈と突合すること。
 7. **Iterate**: repeat 4-6 until the question is answered.
 8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
-9. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required) → migrate work_dir code into `<dataset_dir>/analyses/<name>/analysis.py`.
+9. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required)
+   scaffolds `<dataset_dir>/analyses/<name>/analysis.py`. Do NOT edit that file
+   directly — seed a draft with `python -m llm_bridge draft-analysis <name>
+   --dataset <key>`, move your work_dir code into the draft, then promote it with
+   `python -m llm_bridge apply-analysis <name> --dataset <key>` (mount-safe; see
+   "Editing an existing analysis" below).
 
 Analysis output goes to the dataset's `work_dir` (default `<dataset_dir>/_work`,
 configurable per dataset in `myanalysis.toml`). Measurement files (CSV etc.) are
@@ -197,3 +209,40 @@ open dataset only) defining:
   wired.
 - optional `load() -> Any` — called once before `build_tab` (result passed as
   `data`); omit for `data=None`.
+
+**Never edit the canonical `analysis.py` with the Edit/Write tools** — a failed
+write on the synced mount can truncate it to 0 bytes. Use the mount-safe edit
+path below.
+
+## Editing an existing analysis (mount-safe)
+
+Route every edit of an existing `analysis.py` through draft → apply so a failed
+mount write can never truncate the live file:
+
+```
+python -m llm_bridge draft-analysis <name> --dataset <ds>   # prints a draft path under work_dir
+# edit THAT draft file (not analysis.py) with your normal tools
+python -m llm_bridge apply-analysis <name> --dataset <ds> \
+  && python -m llm_bridge window set-active-dataset name=<ds> --wait \
+  && python -m llm_bridge window reload scope=tab target=<name> --wait
+```
+
+`apply-analysis` validates the draft (syntax + a top-level `build_tab` binding)
+and promotes it atomically; the draft is kept, so iterating is just "edit the
+draft → apply" again. `reload scope=tab` targets the **active** dataset's tab, so
+make `<ds>` active first (`set-active-dataset`) when several datasets are open.
+
+If `analysis.py` ever goes empty (0-byte), the build reports a Japanese diagnostic
+with the recovery command; run
+`python -m llm_bridge recover-analysis <name> --dataset <ds>` to restore the last
+successfully-built content from its `.bak`.
+
+Operational notes:
+
+- **After `recover-analysis`, re-seed with `draft-analysis` before editing again** —
+  applying an old draft would discard the recovered content.
+- **Another PC / external sync may update `analysis.py`.** Always re-take a fresh
+  draft with `draft-analysis` at the start of an edit — `apply` does not diff, it
+  promotes the draft as-is, so a stale draft overwrites the newer version.
+- **The `.bak` lives on the same synced mount as `analysis.py`**, so a drive-level
+  loss is not covered. The deep backup is git / chat history.

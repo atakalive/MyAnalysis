@@ -143,6 +143,15 @@ def main(argv: list[str] | None = None) -> int:
     p_clr.add_argument("kind", nargs="?", choices=["marker", "note"], default=None)
     p_clr.add_argument("--dataset", default=None)
 
+    for _verb, _help in (
+        ("draft-analysis", "Copy analysis.py to an editable draft (mount-safe)"),
+        ("apply-analysis", "Validate the draft and promote it to analysis.py"),
+        ("recover-analysis", "Restore a 0-byte/absent analysis.py from its .bak"),
+    ):
+        _p = sub.add_parser(_verb, help=_help)
+        _p.add_argument("name")
+        _p.add_argument("--dataset", default=None)
+
     p_csync = sub.add_parser("config-sync", help="R2 と設定を双方向同期（収束）")
     p_csync.add_argument("--dry-run", action="store_true", default=False)
     p_csync.add_argument("--include-env", action="store_true", default=False)
@@ -400,6 +409,25 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("error: no dataset open; pass --dataset")
         _check_analysis_exists(ds, args.name)
         annotations.clear(ds, args.name, args.kind)
+        return 0
+
+    if args.cmd in ("draft-analysis", "apply-analysis", "recover-analysis"):
+        ds = _resolve_dataset(args)
+        if ds is None:
+            raise SystemExit("error: no dataset open; pass --dataset")
+        from llm_bridge import analysis_edit
+        fn = {
+            "draft-analysis": analysis_edit.draft_analysis,
+            "apply-analysis": analysis_edit.apply_analysis,
+            "recover-analysis": analysis_edit.recover_analysis,
+        }[args.cmd]
+        try:
+            fn(ds, args.name)
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
+            # 未捕捉の書き込み系例外（atomic_write_text/mkdir/analysis_out_dir(create=True)
+            # の OSError 等）を agent-facing な SystemExit に正規化（reviewer R2 P2）。
+            # 対象がまさに同期マウントの書き込み失敗なので traceback を面に出さない。
+            raise SystemExit(f"error: {e}")
         return 0
 
     if args.cmd in ("config-sync", "config-push", "config-pull"):

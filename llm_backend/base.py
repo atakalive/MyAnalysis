@@ -35,6 +35,31 @@ NO_LOCAL_PERSISTENCE = (
 )
 
 
+# Shared across ALL backend system prompts. Editing an existing analysis's
+# canonical analysis.py directly with Edit/Write on the synced mount can truncate
+# it to 0 bytes on a failed write, so route edits through the mount-safe
+# draft → apply → recover verbs (Issue #89). Names the three verbs so
+# tests/test_backend_prompts.py can guard their presence.
+MOUNT_SAFE_EDITS = (
+    "Editing analysis code (mount-safe): NEVER edit the canonical "
+    "analyses/<name>/analysis.py directly with the Edit/Write tools or a shell "
+    "redirect — a failed write on the synced mount can truncate it to 0 bytes. "
+    "Instead: `python -m llm_bridge draft-analysis <name> --dataset <ds>` prints a "
+    "draft path under the dataset's work_dir; edit THAT draft file freely (it is "
+    "not the live analysis, and apply rejects it if it is broken); then promote it "
+    "atomically with `python -m llm_bridge apply-analysis <name> --dataset <ds> && "
+    "python -m llm_bridge window set-active-dataset name=<ds> --wait && python -m "
+    "llm_bridge window reload scope=tab target=<name> --wait` (reload targets the "
+    "active dataset's tab, so make <ds> active first when several are open). If "
+    "analysis.py ever goes empty, restore the last built version with `python -m "
+    "llm_bridge recover-analysis <name> --dataset <ds>` (then re-seed with "
+    "draft-analysis before editing again). Create a new analysis with `python -m "
+    "newanalysis <name> --dataset <ds>`. Always pass --dataset when more than one "
+    "dataset is open. save_fig / save_code and the llm_bridge verbs are already "
+    "mount-safe."
+)
+
+
 @dataclass
 class TextDelta:
     text: str

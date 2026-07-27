@@ -153,3 +153,150 @@ def test_add_tab_same_name_figure_viewer_raises(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="already open"):
         add_tab("demo", dataset="dsA")
     assert win.activated == []  # viewer を focus しない
+
+
+# --- Issue #89: last-good .bak snapshot on add-tab success -------------------
+
+import common.paths as _cp  # noqa: E402
+from common.paths import bak_path  # noqa: E402
+
+
+def _bak_of(tmp_path, ds, name):
+    return bak_path(tmp_path / ds / "analyses" / name / "analysis.py")
+
+
+def _bak_write_spy(monkeypatch):
+    """Count atomic_write_text calls that target an analysis.py.bak."""
+    real = _cp.atomic_write_text
+    hits = []
+
+    def spy(path, text, **kw):
+        if str(path).endswith("analysis.py.bak"):
+            hits.append(str(path))
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(_cp, "atomic_write_text", spy)
+    return hits
+
+
+def test_add_tab_success_snapshots_bak(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    assert add_tab("demo", dataset="dsA").startswith("added")
+    bak = _bak_of(tmp_path, "dsA", "demo")
+    src = (tmp_path / "dsA" / "analyses" / "demo" / "analysis.py").read_text(encoding="utf-8")
+    assert bak.read_text(encoding="utf-8") == src
+
+
+def test_add_tab_reopen_same_content_no_rewrite(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    add_tab("demo", dataset="dsA")
+    assert _bak_of(tmp_path, "dsA", "demo").is_file()
+    # Close and re-add with identical content: .bak must not be rewritten.
+    hits = _bak_write_spy(monkeypatch)
+    win.close_tab("demo", dataset="dsA")
+    add_tab("demo", dataset="dsA")
+    assert hits == []
+
+
+def test_add_tab_zero_byte_with_bak_points_at_recover(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    af = tmp_path / "dsA" / "analyses" / "demo" / "analysis.py"
+    bak_path(af).write_text("last good\n", encoding="utf-8")
+    af.write_text("", encoding="utf-8")   # 0-byte truncation
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(ValueError, match="recover-analysis"):
+        add_tab("demo", dataset="dsA")
+
+
+def test_add_tab_zero_byte_no_bak_reports_missing(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    _write_analysis(tmp_path, "dsA", "demo")
+    af = tmp_path / "dsA" / "analyses" / "demo" / "analysis.py"
+    af.write_text("", encoding="utf-8")   # 0-byte, no .bak
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(ValueError, match="見つかりません"):
+        add_tab("demo", dataset="dsA")
+
+
+def test_add_tab_build_failure_writes_no_bak(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    d = tmp_path / "dsA" / "analyses" / "demo"
+    d.mkdir(parents=True)
+    (d / "analysis.py").write_text("x = 1\n", encoding="utf-8")  # no build_tab
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(AttributeError):
+        add_tab("demo", dataset="dsA")
+    assert not _bak_of(tmp_path, "dsA", "demo").exists()
+
+
+def test_add_tab_name_mismatch_writes_no_bak(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    d = tmp_path / "dsA" / "analyses" / "demo"
+    d.mkdir(parents=True)
+    (d / "analysis.py").write_text(
+        "import llm_bridge\n"
+        "from gui.tab import AnalysisTab\n"
+        "def build_tab(parent, data):\n"
+        "    tab = AnalysisTab('WRONG')\n"   # name != 'demo'
+        "    llm_bridge.attach_tab(tab, lambda: {})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(ValueError, match="name mismatch"):
+        add_tab("demo", dataset="dsA")
+    assert not _bak_of(tmp_path, "dsA", "demo").exists()
+
+
+def test_add_tab_sync_state_failure_writes_no_bak(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
+    (tmp_path / "dsA").mkdir()
+    d = tmp_path / "dsA" / "analyses" / "demo"
+    d.mkdir(parents=True)
+    (d / "analysis.py").write_text(
+        "import llm_bridge\n"
+        "from gui.tab import AnalysisTab\n"
+        "def apply_state(tab, state):\n"
+        "    raise RuntimeError('boom')\n"
+        "def build_tab(parent, data):\n"
+        "    tab = AnalysisTab('demo')\n"
+        "    llm_bridge.attach_tab(tab, lambda: {})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    add_tab = llm_bridge._make_add_tab_handler(win)
+    with pytest.raises(RuntimeError):
+        add_tab("demo", dataset="dsA")
+    assert not _bak_of(tmp_path, "dsA", "demo").exists()

@@ -340,7 +340,7 @@ class HotReloadController(QObject):
         view = _capture_view(old_tab)
         sandbox = QWidget()
         try:
-            new_tab, mod = _m("llm_bridge")._build_analysis(sandbox, dataset, name)
+            new_tab, mod, source = _m("llm_bridge")._build_analysis(sandbox, dataset, name)
         except Exception as e:  # noqa: BLE001 — keep old tab on any build failure
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
@@ -372,6 +372,13 @@ class HotReloadController(QObject):
         window.set_active_tab(name, dataset=dataset)
         _restore_view(new_tab, view)
         self._reloader.mark_analysis_clean(dataset, name)
+        # 最後まで成立した成功経路でのみ last-good を .bak に退避（best-effort）。
+        # suppress を Exception まで広げるのは、パス再解決含むスナップショットが reload
+        # 本体（既にタブ差し替え済み）の成功を巻き添えにしないため（reviewer R2 P2）。
+        try:
+            _m("common.paths").backup_text_if_changed(af, source)
+        except Exception:   # noqa: BLE001 — best-effort; never break a successful reload
+            pass
         return f"reloaded-tab:{name}"
 
     # -- Tier 3 --

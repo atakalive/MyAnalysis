@@ -126,6 +126,10 @@ guards that every prompt still contains it.
 locking is abstracted in `common/filelock.py` (`exclusive_lock`): `fcntl` on
 POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 
+### 既存 analysis.py の編集はマウント安全経路で（Issue #89）
+
+チャットエージェントが既存 `analyses/<name>/analysis.py` を Edit/Write で直接編集すると、同期マウント上の書き込み失敗で 0 バイトに truncate され得る。安全経路の 3 verb を使う（いずれも `--dataset <ds>` 基本形）: `draft-analysis <name> --dataset <ds>`（analysis.py を work_dir 上の編集用 draft へコピー）→ draft を自由に編集 → `apply-analysis <name> --dataset <ds>`（構文＋トップレベル `build_tab` 束縛を検証してから `atomic_write_text` で昇格。draft は残す）。0 バイト化してしまったら `recover-analysis <name> --dataset <ds>`（`.bak` から復旧。0 バイト or 不在のときだけ復旧し中身があれば上書きしない）。`.bak` は **「最後にアプリへ正常反映（タブ成立）したビルドの内容」** を add-tab / reload-tab の成功末尾で自動退避したもの。ただし `.bak` は analysis.py と同じ同期マウント上にあり drive 単位の障害は救えない — 深いバックアップは git／チャット履歴。
+
 ## Exploratory analysis — `common/explore.py`
 
 LLM agents analyse data via code execution + CLI, not just GUI remote control.
