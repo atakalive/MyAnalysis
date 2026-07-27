@@ -638,8 +638,9 @@ class OpenDatasetDialog(QDialog):
         self._model.update_meta(fresh)
         # update_meta's dataChanged has no roles so dynamicSortFilter re-evaluates
         # both proxies; invalidate explicitly to avoid re-entrancy/ordering skew.
-        # (invalidate() is the file's idiom — see set_needle — and re-runs the
-        # filter; invalidateFilter is deprecated in this PySide6.)
+        # (invalidate() is the file's idiom — see set_needle — and re-applies both
+        # filter and sort, whereas invalidateFilter re-runs only the filter; the
+        # extra sort re-apply is harmless here and keeps section order consistent.)
         self._proxy.invalidate()
         self._completed_proxy.invalidate()
         self._sync_completed_section()
