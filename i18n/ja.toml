@@ -206,3 +206,8 @@
 "picker.desc.dialog.title"       = "概要を編集"
 "picker.desc.dialog.label"       = "このデータセットの概要:"
 "picker.desc.edit_failed"        = "概要を保存できませんでした"
+"picker.completed.header"        = "完了済み ({n})"
+"picker.btn.mark_completed"      = "完了にする"
+"picker.btn.unmark_completed"    = "完了を解除"
+"picker.completed.save_failed"   = "完了状態を保存できませんでした"
+"picker.badge.completed"         = "✔ 完了済み"

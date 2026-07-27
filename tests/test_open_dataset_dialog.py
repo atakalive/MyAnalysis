@@ -273,3 +273,244 @@ def test_edit_desc_failure_warns(qapp, patch_picker, monkeypatch):
     dlg, _m, _h = _make_dialog(qapp)
     dlg._on_edit_desc()
     assert warned["v"] is True
+
+
+# ---- Issue #91: completed flag + completed section ----
+
+def _patch_toggle(monkeypatch, state):
+    """Install patch_completed/load_one stubs backed by `state` (name→bool)."""
+    from gui import open_dataset_dialog as mod
+    monkeypatch.setattr(mod.dataset_meta, "patch_completed",
+                        lambda ds, val: state.__setitem__(ds, bool(val)))
+    monkeypatch.setattr(mod.dataset_meta, "load_one",
+                        lambda n: _meta(n, completed=state.get(n, False)))
+
+
+def test_completed_splits_into_two_sections(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._proxy.rowCount() == 1
+    assert dlg._completed_proxy.rowCount() == 1
+
+
+def test_completed_section_collapsed_by_default(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._completed_toggle.isChecked() is False
+    assert dlg._completed_view.isHidden() is True
+    assert dlg._completed_toggle.isHidden() is False   # header shown (n=1)
+
+
+def test_completed_toggle_expands(qapp, patch_picker):
+    from PySide6.QtCore import Qt
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    assert dlg._completed_view.isHidden() is False
+    assert dlg._completed_toggle.arrowType() == Qt.ArrowType.DownArrow
+    dlg._completed_toggle.setChecked(False)
+    assert dlg._completed_view.isHidden() is True
+    assert dlg._completed_toggle.arrowType() == Qt.ArrowType.RightArrow
+
+
+def test_completed_header_hidden_when_none(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("b")])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._completed_toggle.isHidden() is True
+    assert dlg._completed_view.isHidden() is True
+
+
+def test_header_count_tracks_needle(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("xdone", completed=True),
+                  _meta("ydone", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert "2" in dlg._completed_toggle.text()
+    dlg._filter.setText("xdone")
+    assert "1" in dlg._completed_toggle.text()
+
+
+def test_unmark_last_completed_while_expanded_hides_section(qapp, patch_picker,
+                                                            monkeypatch):
+    state = {"done": True}
+    _patch_toggle(monkeypatch, state)
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)                 # select the completed row
+    assert dlg._current_meta().name == "done"
+    dlg._on_toggle_completed()                       # unmark → moves up
+    assert dlg._completed_proxy.rowCount() == 0
+    assert dlg._completed_toggle.isHidden() is True
+    assert dlg._completed_view.isHidden() is True
+
+
+def test_needle_matches_completed_only_auto_expands(qapp, patch_picker):
+    patch_picker([_meta("alpha"), _meta("zbeta", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._filter.setText("zbeta")
+    assert dlg._completed_toggle.isChecked() is True
+    assert dlg._active_view is dlg._completed_view
+    assert dlg._current_meta().name == "zbeta"
+
+
+def test_needle_clear_keeps_completed_selection(qapp, patch_picker):
+    patch_picker([_meta("alpha"), _meta("zbeta", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._filter.setText("zbeta")
+    assert dlg._current_meta().name == "zbeta"
+    dlg._filter.setText("")                          # top list returns
+    assert dlg._proxy.rowCount() == 1
+    assert dlg._current_meta().name == "zbeta"       # selection stays on completed
+
+
+def test_selection_filtered_out_disables_buttons(qapp, patch_picker):
+    patch_picker([_meta("alpha"), _meta("beta")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)
+    assert dlg._current_meta() is not None
+    dlg._filter.setText("nomatch")
+    assert dlg._current_meta() is None
+    assert dlg._open_btn.isEnabled() is False
+    assert dlg._edit_btn.isEnabled() is False
+    assert dlg._complete_btn.isEnabled() is False
+
+
+def test_mark_moves_down_collapsed(qapp, patch_picker, monkeypatch):
+    state = {"a": False, "b": False}
+    _patch_toggle(monkeypatch, state)
+    patch_picker([_meta("a"), _meta("b")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)                           # select "a"
+    dlg._on_toggle_completed()                       # mark completed
+    assert state["a"] is True
+    assert dlg._completed_proxy.rowCount() == 1
+    assert dlg._proxy.rowCount() == 1
+    assert dlg._active_view is dlg._view             # collapsed → stays on top list
+    assert dlg._current_meta().name == "b"
+
+
+def test_unmark_moves_up(qapp, patch_picker, monkeypatch):
+    state = {"a": True, "b": False}
+    _patch_toggle(monkeypatch, state)
+    patch_picker([_meta("a", completed=True), _meta("b")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)                 # select "a" in completed
+    dlg._on_toggle_completed()                       # unmark → up
+    assert state["a"] is False
+    assert dlg._proxy.rowCount() == 2
+    assert dlg._active_view is dlg._view
+    assert dlg._current_meta().name == "a"
+
+
+def test_mark_last_top_row_clears_selection(qapp, patch_picker, monkeypatch):
+    state = {"only": False}
+    _patch_toggle(monkeypatch, state)
+    patch_picker([_meta("only")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)
+    dlg._on_toggle_completed()                       # top list becomes empty
+    assert dlg._proxy.rowCount() == 0
+    assert dlg._current_meta() is None
+    assert dlg._open_btn.isEnabled() is False
+    assert dlg._edit_btn.isEnabled() is False
+    assert dlg._complete_btn.isEnabled() is False
+
+
+def test_collapse_hides_completed_selection(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)
+    assert dlg._current_meta().name == "done"
+    dlg._completed_toggle.setChecked(False)          # collapse
+    assert dlg._active_view is dlg._view
+    m = dlg._current_meta()
+    assert m is not None                             # top list has "a"
+    assert m.name == "a"                             # never returns hidden completed row
+
+
+def test_collapse_with_empty_top_clears_selection(qapp, patch_picker):
+    patch_picker([_meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    # auto-expanded at construction (top empty, completed present)
+    assert dlg._completed_toggle.isChecked() is True
+    assert dlg._current_meta().name == "done"
+    dlg._completed_toggle.setChecked(False)          # collapse, top empty
+    assert dlg._active_view is dlg._view
+    assert dlg._current_meta() is None
+    assert dlg._open_btn.isEnabled() is False
+
+
+def test_needle_matches_both_sections(qapp, patch_picker):
+    patch_picker([_meta("shared_a"), _meta("shared_done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._filter.setText("shared")
+    assert dlg._proxy.rowCount() == 1
+    assert dlg._completed_proxy.rowCount() == 1
+
+
+def test_completed_double_click_accepts(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)
+    accepted = {"v": False}
+    dlg.accepted.connect(lambda: accepted.__setitem__("v", True))
+    dlg._accept()
+    assert accepted["v"] is True
+    assert dlg.selected_dataset() == "done"
+
+
+def test_two_views_mutually_exclusive_selection(qapp, patch_picker):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._view.selectRow(0)
+    assert dlg._active_view is dlg._view
+    dlg._completed_view.selectRow(0)
+    assert dlg._active_view is dlg._completed_view
+    assert not dlg._view.selectionModel().selectedRows()   # top cleared
+
+
+def test_complete_button_label_switches(qapp, patch_picker):
+    from common.i18n import tr
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)                            # not completed
+    assert dlg._complete_btn.text() == tr("picker.btn.mark_completed")
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)                 # completed
+    assert dlg._complete_btn.text() == tr("picker.btn.unmark_completed")
+
+
+def test_completed_badge_shown(qapp, patch_picker):
+    from PySide6.QtWidgets import QLabel
+    from common.i18n import tr
+    patch_picker([_meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    labels = [w.text() for w in dlg.findChildren(QLabel)]
+    assert tr("picker.badge.completed") in labels
+
+
+def test_toggle_completed_failure_warns(qapp, patch_picker, monkeypatch):
+    from gui import open_dataset_dialog as mod
+    patch_picker([_meta("a")])
+    monkeypatch.setattr(mod.dataset_meta, "patch_completed",
+                        lambda ds, val: (_ for _ in ()).throw(RuntimeError("gone")))
+    warned = {"v": False}
+    monkeypatch.setattr(mod.QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warned.__setitem__("v", True)))
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)
+    dlg._on_toggle_completed()
+    assert warned["v"] is True
+
+
+def test_all_completed_auto_expands(qapp, patch_picker):
+    patch_picker([_meta("x", completed=True), _meta("y", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._proxy.rowCount() == 0
+    assert dlg._completed_toggle.isChecked() is True
+    assert dlg._active_view is dlg._completed_view
+    assert dlg._current_meta() is not None

@@ -206,3 +206,8 @@
 "picker.desc.dialog.title"       = "Edit description"
 "picker.desc.dialog.label"       = "Description for this dataset:"
 "picker.desc.edit_failed"        = "Could not save description"
+"picker.completed.header"        = "Completed ({n})"
+"picker.btn.mark_completed"      = "Mark completed"
+"picker.btn.unmark_completed"    = "Unmark completed"
+"picker.completed.save_failed"   = "Could not save completed state"
+"picker.badge.completed"         = "✔ Completed"

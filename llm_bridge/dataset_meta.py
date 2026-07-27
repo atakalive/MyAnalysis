@@ -2,9 +2,9 @@
 
 Each dataset carries a `<dataset_dir>/meta.json` cache of display-only info
 (description + derived metrics) so the picker reads one small JSON per dataset
-instead of rescanning the synced drive every time. The only durable field is
-`description`; everything else is a derived value re-computed on the next
-rebuild.
+instead of rescanning the synced drive every time. The only durable fields are
+`description` and `completed`; everything else is a derived value re-computed on
+the next rebuild.
 
 Metrics split by cost into LIGHT (a handful of small JSON reads + O(analyses)
 stat/glob) and HEAVY (a full dataset_dir os.walk + per-analysis content parse).
@@ -47,6 +47,7 @@ _NUM_FIELDS = ("version", "analysis_count", "last_touched", "open_tab_count",
                "annotation_total", "export_png_count", "updated_at")
 _LIST_FIELDS = ("analysis_names", "open_analysis_names")
 _STR_FIELDS = ("description", "thumbnail", "format")
+_BOOL_FIELDS = ("completed",)
 
 
 @dataclasses.dataclass
@@ -57,7 +58,7 @@ class DatasetMeta:
     filled by load_one). `name` comes from the registry key and is authoritative
     — any `name` inside meta.json is ignored.
     """
-    # --- meta.json schema ---
+    # --- meta.json schema (durable: description + completed; rest is derived) ---
     version: int | None = None
     description: str = ""
     analysis_count: int | None = None
@@ -73,6 +74,7 @@ class DatasetMeta:
     annotation_total: int | None = None
     export_png_count: int | None = None
     updated_at: float | None = None
+    completed: bool = False
     # --- live overlay (not persisted) ---
     name: str | None = None
     available: bool = False
@@ -97,6 +99,11 @@ class DatasetMeta:
                 isinstance(v, (int, float)) and not isinstance(v, bool)
             ):
                 continue                                  # non-numeric → drop (=missing)
+            # Asymmetric with the numeric fields above: numeric fields REJECT
+            # bool (a stray True must not read as 1); completed keeps only bool
+            # (1/"yes" etc. → drop → default False).
+            if k in _BOOL_FIELDS and not isinstance(v, bool):
+                continue
             if k in _LIST_FIELDS:
                 if not isinstance(v, list):
                     continue
@@ -150,6 +157,7 @@ def _merge_meta(existing: dict, computed: dict, *, heavy: bool) -> dict:
         # heavy & not cancelled & missing → genuine failure → drop
     desc = existing.get("description")
     merged["description"] = desc if isinstance(desc, str) else ""   # None/non-str → ""
+    merged["completed"] = existing.get("completed") is True   # 未検証 dict → is True で正規化
     merged["version"] = META_VERSION
     merged["updated_at"] = time.time()
     return merged
@@ -418,6 +426,19 @@ def patch_description(dataset: str, text: str) -> None:
         _status, meta = durable_read_json(_meta_path(dataset))
         meta = meta or {}                      # 意図的な description 書込。unreadable でも書く
         meta["description"] = text             # （durable_write が primary＋.bak を再確立する）
+        meta.setdefault("version", META_VERSION)
+        write_meta(dataset, meta)
+
+
+def patch_completed(dataset: str, completed: bool) -> None:
+    """Set meta.json's completed flag, preserving other fields. Does NOT bump
+    updated_at. A meta created from scratch here lacks analysis_count, so it is
+    _is_stale → picked up by the background heavy rebuild.
+    Mirrors patch_description: writes even when the primary is unreadable."""
+    with exclusive_lock(_meta_lock_path(dataset)):
+        _status, meta = durable_read_json(_meta_path(dataset))
+        meta = meta or {}
+        meta["completed"] = bool(completed)
         meta.setdefault("version", META_VERSION)
         write_meta(dataset, meta)
 

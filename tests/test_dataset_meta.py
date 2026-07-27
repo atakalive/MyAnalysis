@@ -192,6 +192,23 @@ def test_merge_heavy_kept_on_cancel():
     assert merged["disk_size_bytes"] == 999
 
 
+@pytest.mark.parametrize("heavy", [False, True])
+def test_merge_preserves_completed(heavy):
+    merged = _merge_meta({"completed": True}, {"analysis_count": 1}, heavy=heavy)
+    assert merged["completed"] is True
+
+
+@pytest.mark.parametrize("existing,expected", [
+    ({"completed": 1}, False),        # non-bool existing → normalized to False
+    ({"completed": "yes"}, False),
+    ({}, False),                      # absent → False
+    ({"completed": False}, False),
+])
+def test_merge_normalizes_completed(existing, expected):
+    merged = _merge_meta(existing, {}, heavy=False)
+    assert merged["completed"] is expected
+
+
 # ---- rebuild_meta ----
 
 def test_rebuild_preserves_description(ds_env):
@@ -239,6 +256,43 @@ def test_patch_description_from_scratch_is_stale(ds_env):
     m = dataset_meta.read_meta("ds")
     assert "analysis_count" not in m
     assert _is_stale(m) is True
+
+
+# ---- patch_completed ----
+
+def test_patch_completed_writes(ds_env):
+    dataset_meta.patch_completed("ds", True)
+    assert dataset_meta.read_meta("ds")["completed"] is True
+    dataset_meta.patch_completed("ds", False)
+    assert dataset_meta.read_meta("ds")["completed"] is False
+
+
+def test_patch_completed_no_updated_at_and_preserves(ds_env):
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    dataset_meta.patch_description("ds", "keep")
+    before = dataset_meta.read_meta("ds")
+    dataset_meta.patch_completed("ds", True)
+    after = dataset_meta.read_meta("ds")
+    assert after["completed"] is True
+    assert after["description"] == "keep"
+    assert after.get("updated_at") == before.get("updated_at")   # not bumped
+    assert after["analysis_count"] == before["analysis_count"]
+
+
+def test_patch_completed_from_scratch_is_stale(ds_env):
+    dataset_meta.patch_completed("ds", True)
+    m = dataset_meta.read_meta("ds")
+    assert "analysis_count" not in m
+    assert _is_stale(m) is True
+
+
+@pytest.mark.parametrize("heavy", [False, True])
+def test_patch_completed_survives_rebuild(ds_env, heavy):
+    """Regression: the ride-along rebuild (open dataset / save session / 更新)
+    must NOT strip completed. Guards变更 1-3 の剥がれ防止を直接検証."""
+    dataset_meta.patch_completed("ds", True)
+    dataset_meta.rebuild_meta("ds", heavy=heavy)
+    assert dataset_meta.read_meta("ds")["completed"] is True
 
 
 # ---- _is_stale ----
@@ -343,6 +397,21 @@ def test_from_dict_bad_numeric_dropped():
 def test_from_dict_bool_rejected_for_numeric():
     m = DatasetMeta.from_dict({"analysis_count": True})
     assert m.analysis_count is None
+
+
+def test_from_dict_completed_true():
+    assert DatasetMeta.from_dict({"completed": True}).completed is True
+
+
+def test_from_dict_completed_missing_defaults_false():
+    assert DatasetMeta.from_dict({}).completed is False
+
+
+@pytest.mark.parametrize("v", [1, "yes", 0, None, []])
+def test_from_dict_completed_non_bool_dropped(v):
+    # Mirror of test_from_dict_bool_rejected_for_numeric: completed keeps only
+    # bool; 1/"yes"/etc. drop → default False.
+    assert DatasetMeta.from_dict({"completed": v}).completed is False
 
 
 def test_from_dict_list_element_filter():

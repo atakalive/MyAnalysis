@@ -118,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
     p_sd.add_argument("dataset")
     p_sd.add_argument("text")
 
+    p_sc = sub.add_parser("set-completed",
+                          help="Mark a dataset completed in the picker (meta.json)")
+    p_sc.add_argument("dataset")
+    p_sc.add_argument("--off", action="store_true", default=False,
+                      help="Unmark (set completed=False)")
+
     p_lc = sub.add_parser("list-commands", help="List registered verbs (informational)")
     p_lc.add_argument("name", nargs="?")
 
@@ -250,7 +256,9 @@ def main(argv: list[str] | None = None) -> int:
                 entry["format"] = None
                 print(f"warning: could not read format for {name!r}: {e}", file=sys.stderr)
             from llm_bridge import dataset_meta
-            entry["description"] = (dataset_meta.read_meta(name) or {}).get("description", "")
+            meta = dataset_meta.read_meta(name) or {}
+            entry["description"] = meta.get("description", "")
+            entry["completed"] = meta.get("completed") is True   # 未検証 dict → is True で正規化
             result.append(entry)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -264,6 +272,20 @@ def main(argv: list[str] | None = None) -> int:
         from llm_bridge import dataset_meta
         try:
             dataset_meta.patch_description(args.dataset, args.text)
+        except (KeyError, RuntimeError, OSError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        return 0
+
+    if args.cmd == "set-completed":
+        import config
+        config.reload_datasets()
+        if args.dataset not in config.DATASETS:
+            print(f"error: unknown dataset {args.dataset!r}", file=sys.stderr)
+            return 1
+        from llm_bridge import dataset_meta
+        try:
+            dataset_meta.patch_completed(args.dataset, not args.off)
         except (KeyError, RuntimeError, OSError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1

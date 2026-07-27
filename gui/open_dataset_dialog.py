@@ -12,6 +12,7 @@ import time
 from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
+    QSignalBlocker,
     QSortFilterProxyModel,
     Qt,
     QThread,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -162,19 +164,26 @@ class DatasetTableModel(QAbstractTableModel):
 class DatasetFilterProxyModel(QSortFilterProxyModel):
     """Filters across name + description; sorts by the clicked column's UserRole."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, completed: bool | None = None):
         super().__init__(parent)
         self._needle = ""
+        self._completed = completed   # None = completed フィルタなし(既存互換)
 
     def set_needle(self, text: str) -> None:
         self._needle = (text or "").lower()
         self.invalidate()
 
     def filterAcceptsRow(self, source_row, source_parent) -> bool:
+        m = self.sourceModel().meta_at(source_row)
+        # completed セクション振り分け: needle が空でも必ず評価する。
+        # _completed is None(既定 proxy・後方互換)のときは振り分けをスキップ。
+        # m is None(範囲外/stale)は completed=False 扱い → 完了=False の proxy だけ
+        # accept し、両 proxy が accept して二重表示になるのを防ぐ。
+        completed_val = getattr(m, "completed", False) if m is not None else False
+        if self._completed is not None and bool(completed_val) != self._completed:
+            return False
         if not self._needle:
             return True
-        model = self.sourceModel()
-        m = model.meta_at(source_row)
         if m is None:
             return True
         hay = f"{m.name or ''}\n{m.description or ''}".lower()
@@ -247,32 +256,49 @@ class OpenDatasetDialog(QDialog):
         # freshly captured on-screen view (see _on_refresh / _render_detail).
         self._live_thumbs: dict[str, str] = {}
         self._model = DatasetTableModel(metas, self, open_names=self._open_names)
-        self._proxy = DatasetFilterProxyModel(self)
+        self._proxy = DatasetFilterProxyModel(self, completed=False)
         self._proxy.setSourceModel(self._model)
+        self._completed_proxy = DatasetFilterProxyModel(self, completed=True)
+        self._completed_proxy.setSourceModel(self._model)
 
         # --- layout ---
         outer = QVBoxLayout(self)
         self._filter = QLineEdit(self)
         self._filter.setPlaceholderText(tr("picker.filter.placeholder"))
-        self._filter.textChanged.connect(self._proxy.set_needle)
+        self._filter.textChanged.connect(self._on_filter_changed)
         outer.addWidget(self._filter)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        self._view = QTableView(splitter)
-        self._view.setModel(self._proxy)
-        self._view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self._view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
-        self._view.setSortingEnabled(True)
-        # Disable the initial sort setSortingEnabled(True) triggers on column 0,
-        # so the construction-time composite (MRU) order is preserved until the
-        # user clicks a header.
-        self._view.horizontalHeader().setSortIndicator(
-            -1, Qt.SortOrder.AscendingOrder)
-        self._view.horizontalHeader().setStretchLastSection(True)
-        self._view.doubleClicked.connect(lambda _idx: self._accept())
-        self._view.selectionModel().selectionChanged.connect(
-            lambda *_: self._on_selection_changed())
-        splitter.addWidget(self._view)
+
+        # Left side: normal list (top) + collapsible completed section (bottom).
+        left = QWidget(splitter)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        self._view = QTableView(left)
+        self._completed_toggle = QToolButton(left)
+        self._completed_toggle.setCheckable(True)
+        self._completed_toggle.setChecked(False)   # collapsed by default
+        self._completed_toggle.setAutoRaise(True)
+        self._completed_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._completed_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._completed_toggle.toggled.connect(self._on_completed_toggle)
+        self._completed_view = QTableView(left)
+        self._completed_view.setVisible(False)
+        left_layout.addWidget(self._view, 1)
+        left_layout.addWidget(self._completed_toggle)
+        left_layout.addWidget(self._completed_view, 1)
+        self._configure_view(self._view, self._proxy)
+        self._configure_view(self._completed_view, self._completed_proxy)
+        self._active_view = self._view
+        splitter.addWidget(left)
+
+        # Keep the completed header/section in sync with filtered counts.
+        for proxy in (self._proxy, self._completed_proxy):
+            proxy.rowsInserted.connect(lambda *_: self._sync_completed_section())
+            proxy.rowsRemoved.connect(lambda *_: self._sync_completed_section())
+            proxy.modelReset.connect(lambda *_: self._sync_completed_section())
+            proxy.layoutChanged.connect(lambda *_: self._sync_completed_section())
 
         # detail pane
         detail = QWidget(splitter)
@@ -287,8 +313,11 @@ class OpenDatasetDialog(QDialog):
         self._refresh_btn.clicked.connect(self._on_refresh)
         self._edit_btn = QPushButton(tr("picker.btn.edit_desc"), detail)
         self._edit_btn.clicked.connect(self._on_edit_desc)
+        self._complete_btn = QPushButton(tr("picker.btn.mark_completed"), detail)
+        self._complete_btn.clicked.connect(self._on_toggle_completed)
         btn_row.addWidget(self._refresh_btn)
         btn_row.addWidget(self._edit_btn)
+        btn_row.addWidget(self._complete_btn)
         detail_layout.addLayout(btn_row)
         detail_layout.addStretch(1)
         splitter.addWidget(detail)
@@ -309,9 +338,17 @@ class OpenDatasetDialog(QDialog):
         outer.addWidget(self._buttons)
         self._open_btn = self._buttons.button(QDialogButtonBox.StandardButton.Open)
 
-        # Select first row (if any) and render detail.
+        # Select first row (if any) and render detail. Degenerate case: no
+        # normal rows but completed rows exist → auto-expand and select there so
+        # the dialog isn't blank.
+        self._sync_completed_section()
         if self._proxy.rowCount() > 0:
+            self._active_view = self._view
             self._view.selectRow(0)
+        elif self._completed_proxy.rowCount() > 0:
+            self._completed_toggle.setChecked(True)
+            self._active_view = self._completed_view
+            self._completed_view.selectRow(0)
         self._on_selection_changed()
 
         # Background heavy rebuild for stale rows or rows missing any HEAVY field.
@@ -326,6 +363,69 @@ class OpenDatasetDialog(QDialog):
         ]
         if stale_names:
             self._start_worker(stale_names)
+
+    # ----- views / completed section -----
+
+    def _configure_view(self, view, proxy) -> None:
+        view.setModel(proxy)
+        view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        view.setSortingEnabled(True)
+        # Disable the initial sort setSortingEnabled(True) triggers on column 0,
+        # so the construction-time composite (MRU) order is preserved until the
+        # user clicks a header.
+        view.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        view.horizontalHeader().setStretchLastSection(True)
+        view.doubleClicked.connect(lambda _idx: self._accept())
+        view.selectionModel().selectionChanged.connect(
+            lambda *_: self._on_view_selection(view))
+
+    def _on_filter_changed(self, text: str) -> None:
+        self._proxy.set_needle(text)
+        self._completed_proxy.set_needle(text)
+        self._sync_completed_section()
+        # needle が完了済みのみにマッチしたときダイアログが空白に見えるのを防ぐ:
+        # 上 proxy が 0 行かつ完了 proxy が >0 行なら完了セクションを開いて選択を乗せる。
+        if self._proxy.rowCount() == 0 and self._completed_proxy.rowCount() > 0:
+            self._completed_toggle.setChecked(True)
+            self._active_view = self._completed_view
+            self._completed_view.selectRow(0)
+        # 現在の選択がフィルタで落ちたら _current_meta()==None → ボタン無効化。
+        self._on_selection_changed()
+
+    def _sync_completed_section(self) -> None:
+        n = self._completed_proxy.rowCount()   # needle 適用後カウント
+        self._completed_toggle.setText(tr("picker.completed.header", n=n))
+        # n==0 のときヘッダと view の両方を非表示(ヘッダだけ隠すと展開中に最後の
+        # 完了 DS を解除したとき空テーブルが残る)。展開状態は非表示中も保持し、
+        # n>0 復帰時に再現。
+        self._completed_toggle.setVisible(n > 0)
+        self._completed_view.setVisible(n > 0 and self._completed_toggle.isChecked())
+
+    def _on_completed_toggle(self, checked: bool) -> None:
+        self._completed_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+        if not checked and self._active_view is self._completed_view:
+            # 畳む: 隠れる完了行が current に残らないよう選択を通常リストへ退避
+            with QSignalBlocker(self._completed_view.selectionModel()):
+                self._completed_view.clearSelection()
+            self._active_view = self._view
+            if self._proxy.rowCount() > 0:
+                self._view.selectRow(0)           # → _on_view_selection → _on_selection_changed
+            else:
+                with QSignalBlocker(self._view.selectionModel()):
+                    self._view.clearSelection()
+                self._on_selection_changed()      # 選択無し → Open/編集/完了ボタンを無効化
+        self._sync_completed_section()
+
+    def _on_view_selection(self, view) -> None:
+        if not view.selectionModel().selectedRows():
+            return                              # clearSelection 由来の空通知は無視
+        self._active_view = view
+        other = self._completed_view if view is self._view else self._view
+        with QSignalBlocker(other.selectionModel()):
+            other.clearSelection()
+        self._on_selection_changed()
 
     # ----- worker -----
 
@@ -364,10 +464,11 @@ class OpenDatasetDialog(QDialog):
     # ----- selection / detail -----
 
     def _current_meta(self) -> DatasetMeta | None:
-        idxs = self._view.selectionModel().selectedRows()
+        view = self._active_view
+        idxs = view.selectionModel().selectedRows()
         if not idxs:
             return None
-        src = self._proxy.mapToSource(idxs[0])
+        src = view.model().mapToSource(idxs[0])
         return self._model.meta_at(src.row())
 
     def _on_selection_changed(self) -> None:
@@ -377,6 +478,13 @@ class OpenDatasetDialog(QDialog):
         if self._open_btn is not None:
             self._open_btn.setEnabled(avail)
         self._edit_btn.setEnabled(avail)
+        # Manual organize flag: label reflects the current state; gated like
+        # [概要を編集] (unavailable rows can't be toggled).
+        self._complete_btn.setText(
+            tr("picker.btn.unmark_completed")
+            if (m and getattr(m, "completed", False))
+            else tr("picker.btn.mark_completed"))
+        self._complete_btn.setEnabled(avail)
         # [更新] stays enabled even for unavailable rows (rebuild_meta is a
         # best-effort no-op there).
         self._refresh_btn.setEnabled(m is not None)
@@ -407,6 +515,10 @@ class OpenDatasetDialog(QDialog):
             open_lbl = QLabel(tr("picker.badge.open"))
             open_lbl.setStyleSheet("color:#6ec1e4;font-weight:bold")
             add("", open_lbl)
+        if getattr(m, "completed", False):
+            completed_lbl = QLabel(tr("picker.badge.completed"))
+            completed_lbl.setStyleSheet("color:#6ec1e4;font-weight:bold")
+            add("", completed_lbl)
         add(tr("picker.col.description"),
             _lbl(m.description or tr("picker.unwritten")))
         add(tr("picker.detail.format"), _lbl(_txt(m.format)))
@@ -504,6 +616,85 @@ class OpenDatasetDialog(QDialog):
         fresh = dataset_meta.load_one(m.name)
         self._model.update_meta(fresh)
         self._render_detail(fresh)
+
+    def _on_toggle_completed(self) -> None:
+        m = self._current_meta()
+        if m is None or not m.name or not m.available:
+            return
+        name = m.name
+        current = bool(getattr(m, "completed", False))
+        prev_row = None
+        if self._active_view is self._view:
+            idxs = self._view.selectionModel().selectedRows()
+            if idxs:
+                prev_row = idxs[0].row()
+        try:
+            dataset_meta.patch_completed(name, not current)
+        except (KeyError, RuntimeError, OSError, ValueError):
+            QMessageBox.warning(
+                self, self.windowTitle(), tr("picker.completed.save_failed"))
+            return
+        fresh = dataset_meta.load_one(name)
+        self._model.update_meta(fresh)
+        # update_meta's dataChanged has no roles so dynamicSortFilter re-evaluates
+        # both proxies; invalidate explicitly to avoid re-entrancy/ordering skew.
+        # (invalidate() is the file's idiom — see set_needle — and re-runs the
+        # filter; invalidateFilter is deprecated in this PySide6.)
+        self._proxy.invalidate()
+        self._completed_proxy.invalidate()
+        self._sync_completed_section()
+
+        if current:
+            # 解除(→上へ): 移動先の行を name で探して通常リストで選択。
+            row = self._find_proxy_row(self._proxy, name)
+            if row is not None:
+                self._active_view = self._view
+                with QSignalBlocker(self._completed_view.selectionModel()):
+                    self._completed_view.clearSelection()
+                self._view.selectRow(row)
+                self._view.scrollTo(self._proxy.index(row, 0))
+            else:
+                self._clear_all_selection()
+        else:
+            # 完了化(→下へ): セクション展開中ならそこで選択。collapsed 中は
+            # auto-expand しない — 上リストの最寄り行を選択する。
+            if self._completed_toggle.isChecked():
+                row = self._find_proxy_row(self._completed_proxy, name)
+                if row is not None:
+                    self._active_view = self._completed_view
+                    with QSignalBlocker(self._view.selectionModel()):
+                        self._view.clearSelection()
+                    self._completed_view.selectRow(row)
+                    self._completed_view.scrollTo(
+                        self._completed_proxy.index(row, 0))
+                else:
+                    self._clear_all_selection()
+            else:
+                base = prev_row if prev_row is not None else 0
+                new_row = min(base, self._proxy.rowCount() - 1)
+                if new_row >= 0:
+                    self._active_view = self._view
+                    with QSignalBlocker(self._completed_view.selectionModel()):
+                        self._completed_view.clearSelection()
+                    self._view.selectRow(new_row)
+                else:
+                    self._clear_all_selection()
+
+    def _find_proxy_row(self, proxy, name: str) -> int | None:
+        for r in range(proxy.rowCount()):
+            src = proxy.mapToSource(proxy.index(r, 0))
+            m = self._model.meta_at(src.row())
+            if m is not None and m.name == name:
+                return r
+        return None
+
+    def _clear_all_selection(self) -> None:
+        with QSignalBlocker(self._view.selectionModel()):
+            self._view.clearSelection()
+        with QSignalBlocker(self._completed_view.selectionModel()):
+            self._completed_view.clearSelection()
+        self._active_view = self._view
+        self._on_selection_changed()
 
     def selected_dataset(self) -> str | None:
         m = self._current_meta()
