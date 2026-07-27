@@ -24,12 +24,6 @@ from gui.floating_window import FloatingTabWindow
 from gui.tab import AnalysisTab
 from gui.tabbar import MultiRowTabBar
 
-RESERVED_WINDOW_VERBS = frozenset([
-    "add-tab", "close-tab", "list-tabs", "open-dataset",
-    "set-active-tab", "show", "toggle-chat-float",
-    "list-open-datasets", "set-active-dataset", "switch-dataset", "close-dataset",
-])
-
 
 # フロート中タブの位置スタブ（無効タブ）ラベルに付ける識別記号。通常タブと一目で
 # 区別するため名前の前に置く（バーが狭くて右省略されても記号は残る）。#56

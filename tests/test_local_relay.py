@@ -589,7 +589,7 @@ def test_not_found(clock):
     assert status == 404 and _json(p) == {"error": "not found"}
 
 
-# 17. non-dict / null JSON bodies (worker.js SSOT: parse error -> 400, valid
+# 17. non-dict / null JSON bodies (the reference Worker SSOT: parse error -> 400, valid
 #     non-object -> coerced default, never 500). (reviewer code P2)
 def test_nondict_json_bodies(clock):
     st = RelayState(ADMIN)
@@ -616,7 +616,7 @@ def test_nondict_json_bodies(clock):
 #     (reviewer code P2)
 def test_orphan_channel_reaped_and_reads_dont_create(clock):
     st = RelayState(ADMIN)
-    # read on a non-existent channel must NOT create it (worker.js never creates on read)
+    # read on a non-existent channel must NOT create it (the reference Worker never creates on read)
     status, _, p = _call(st, "GET", "/inbound/ghost", _admin_h())
     assert status == 200 and _json(p)["messages"] == []
     assert "ghost" not in st._ch

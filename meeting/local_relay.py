@@ -1,21 +1,18 @@
 """In-memory local relay (Issue #44).
 
-Re-implements every route of ``relay-worker/worker.js`` against a process-local,
+Re-implements the meeting wire protocol against a process-local,
 ``threading.Lock``-guarded in-memory store instead of Cloudflare KV/R2. The host
-runs this on ``127.0.0.1:<ephemeral>`` and exposes it to guests through a
-Tailscale Funnel (see ``meeting/tunnel.py``).
+runs this on ``127.0.0.1:<ephemeral>`` and exposes it to guests through a public
+tunnel (cloudflared; see ``meeting/tunnel.py``).
 
-``relay-worker/worker.js`` documents the pre-#51 wire format: response shapes,
+This module is the single source of truth for the wire format: response shapes,
 ``server_now_ms``, the ``ts13-rand13`` mid format, and the ``{"error": "..."}``
-error bodies originate there. Since the dataset layer (Issue #51 follow-up) the
-protocol has DIVERGED on ``PUT /tabs`` (object body with ``active_dataset``),
-``GET /poll`` (``active_dataset`` field) and ``GET /history`` (``has_more`` on
-unpublished sids) — for those routes THIS module is the single source of truth;
-worker.js is kept as a pre-DS reference only.
+error bodies. Since the dataset layer (Issue #51 follow-up) the protocol added
+``PUT /tabs`` (object body with ``active_dataset``), ``GET /poll``
+(``active_dataset`` field) and ``GET /history`` (``has_more`` on unpublished sids).
 
-Two routes are local-relay-only extensions, NOT present in worker.js (the Worker
-path is no longer in the data path — the runtime is this module, the HTML is
-served by GitLab Pages + this server):
+Two routes are local-relay-only extensions (the runtime is this module; the HTML
+is served by GitLab Pages + this server):
   PUT /backlog/{ch}/{sid}   (admin)  — stage a session's pre-meeting transcript
   GET /history/{ch}/{sid}   (guest)  — backward, turn-paginated history fetch
 Together they let a guest fetch the full chat history (incl. before sharing
@@ -40,7 +37,7 @@ from pathlib import Path
 
 from common.paths import repo_root
 
-# Constants (same values as worker.js). BUCKET_MS / MAX_BUCKETS are intentionally
+# Constants (same values as the reference Worker). BUCKET_MS / MAX_BUCKETS are intentionally
 # absent: there is no KV list() mechanism, so no message bucketing is needed.
 LOOKBACK_MS = 15000
 PRES_TTL = 90          # presence entry liveness (seconds)
@@ -53,7 +50,7 @@ MAX_NEW_SESSIONS = 20  # guest new-chat request queue cap (abuse backstop, Issue
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 # Sentinel for "body was not valid JSON" — distinct from a valid JSON ``null``
-# (which decodes to ``None``). worker.js: ``request.json()`` throws ONLY on invalid
+# (which decodes to ``None``). The reference Worker: ``request.json()`` throws ONLY on invalid
 # JSON (-> 400 "bad json"); a valid non-object body is accepted and field access
 # on it yields ``undefined`` -> coerced defaults. We mirror that: parse failure ->
 # ``_BAD`` (400), valid-but-non-dict -> ``{}`` so ``.get()`` yields defaults.
@@ -88,7 +85,7 @@ def _b36(n: int) -> str:
 
 
 def gen_mid(now_ms_val: int) -> str:
-    """worker.js genMid: "<ts13>-<rand13>", both fixed width (lexical=time order)."""
+    """The reference Worker genMid: "<ts13>-<rand13>", both fixed width (lexical=time order)."""
     rand = int.from_bytes(secrets.token_bytes(8), "big")
     rand13 = _b36(rand).rjust(13, "0")[-13:]
     return f"{now_ms_val:013d}-{rand13}"
@@ -121,7 +118,7 @@ class RelayState:
         self._lock = threading.Lock()
         self._ch: dict[str, dict] = {}
 
-    # ---- time / since (worker.js parity) ----
+    # ---- time / since (the reference Worker parity) ----
 
     @staticmethod
     def compute_since(since: "str | None", now_ms_val: int) -> str:
@@ -224,7 +221,7 @@ class RelayState:
         out.sort(key=lambda m: m["mid"])
         return out
 
-    # ---- auth helpers (worker.js parity) ----
+    # ---- auth helpers (the reference Worker parity) ----
 
     def _bearer(self, headers) -> str:
         m = _BEARER_RE.match(_header_get(headers, "Authorization") or "")
@@ -459,7 +456,7 @@ class RelayState:
             return self._json({"ok": True, "count": len(backlog)})
 
         # GET /inbound/{ch}?since= (host) — in: only, all sid.
-        # Read routes use _ch.get (NOT _ensure_channel): worker.js never creates KV
+        # Read routes use _ch.get (NOT _ensure_channel): the reference Worker never creates KV
         # on a read, and creating an empty channel here would leak orphans. (reviewer P2)
         if seg[:1] == ["inbound"] and len(seg) == 2 and method == "GET":
             if not self._is_admin(headers):
@@ -705,7 +702,7 @@ class RelayState:
 
         Returns ``(obj, None)`` on success, or ``(None, error_response)`` on parse
         failure. A valid-but-non-dict body (null/number/array/string) is coerced to
-        ``{}`` so field access yields defaults — matching worker.js field access on a
+        ``{}`` so field access yields defaults — matching the reference Worker field access on a
         non-object (undefined -> default), which 400s on the missing field, never 500s.
         """
         obj = self._parse_json(body)

@@ -4,8 +4,8 @@
   Served by meeting/local_relay.py at GET / (and mirrored to GitLab Pages).
   Strings carry a minimal ja/en switch in-file (the Python i18n catalog is not
   shipped to guests). Since the dataset layer (Issue #51 follow-up) the wire
-  format diverged from relay-worker/worker.js — worker.js documents the pre-DS
-  protocol only; meeting/local_relay.py is the live server.
+  format diverged from the earlier protocol; meeting/local_relay.py is the live
+  server.
 -->
 <html lang="en">
 <head>
@@ -203,7 +203,7 @@ const T = {
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
-// ---- constants (mirror worker.js) ----
+// ---- constants ----
 const LOOKBACK_MS = 15000;
 const POLL_MIN = 1000, POLL_MAX = 30000;
 const FETCH_TIMEOUT_MS = 10000;

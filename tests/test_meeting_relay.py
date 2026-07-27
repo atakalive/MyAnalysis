@@ -145,6 +145,11 @@ def _sess(sid):
 
 _UI_PREFS: dict = {}
 
+# Tunnel.start stub の戻り値専用のフェイク URL。base_url に埋まるだけで実接続は起きない
+# （Tunnel.start / _TunnelStarter.start が全て stub 済・実通信は 127.0.0.1 への POST のみ）。
+# ".invalid" は RFC 6761 予約 TLD で名前解決されないため、誤ってコード側に転記されても外部接続に至らない。
+_FAKE_TUNNEL_URL = "https://relay.example.invalid"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_ui_prefs(monkeypatch):
@@ -160,13 +165,22 @@ def _isolate_ui_prefs(monkeypatch):
                         lambda key, value: _UI_PREFS.__setitem__(key, value))
 
 
-def _make_relay(monkeypatch, win, *, ui_prefs=None):
+def _make_relay(monkeypatch, win, *, ui_prefs=None, port=54321):
     import meeting.relay as mr
     if ui_prefs:
         _UI_PREFS.update(ui_prefs)
     monkeypatch.setattr(mr._RelayWorker, "start", lambda self: None)
+    # 既定で hermetic（実ソケット / cloudflared 不使用）。meeting_start() は local-server +
+    # tunnel 経路を通り、両方 stub される。異なる挙動が要るテストはこの後に
+    # local_relay.start_server / _TunnelStarter.start / Tunnel.start を再 setattr する
+    # （monkeypatch は後勝ち）。
+    monkeypatch.setattr(
+        mr.local_relay, "start_server",
+        lambda admin_key, **kw: _FakeServer(port=(kw.get("port") or port),
+                                            bind_host=kw.get("bind_host", "127.0.0.1")))
+    monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: self.run())
+    monkeypatch.setattr(mr.Tunnel, "start", lambda self, port, **kw: _FAKE_TUNNEL_URL)
     r = mr.MeetingRelay(win)
-    r._remote_base = "http://relay.test"   # legacy mode → synchronous token, no socket/tunnel
     r._admin_key = "ADMIN"
     return mr, r
 
@@ -208,7 +222,7 @@ def test_meeting_start_and_token(qapp, monkeypatch):
     pad = token + "=" * (-len(token) % 4)
     obj = json.loads(base64.urlsafe_b64decode(pad))
     assert obj["channel"] == r.channel()
-    assert obj["base_url"] == "http://relay.test"
+    assert obj["base_url"] == _FAKE_TUNNEL_URL
     assert obj["secret"]
     assert r.current_token() == token
     r.stop()
@@ -1170,13 +1184,8 @@ class _FakeServer:
 
 
 def _local_relay(monkeypatch, win, *, port=54321):
-    mr, r = _make_relay(monkeypatch, win)
-    r._remote_base = ""   # local mode
-    monkeypatch.setattr(
-        mr.local_relay, "start_server",
-        lambda admin_key, **kw: _FakeServer(port=(kw.get("port") or port),
-                                            bind_host=kw.get("bind_host", "127.0.0.1")))
-    return mr, r
+    # _make_relay が既に hermetic-local。start_server/tunnel stub は _make_relay 側に集約済み。
+    return _make_relay(monkeypatch, win, port=port)
 
 
 def test_meeting_start_local_tunnel(qapp, monkeypatch):
@@ -1194,7 +1203,7 @@ def test_meeting_start_local_tunnel(qapp, monkeypatch):
     # Hermetic tunnel: run() executes synchronously, Tunnel.start returns a URL.
     monkeypatch.setattr(mr._TunnelStarter, "start", lambda self: self.run())
     monkeypatch.setattr(mr.Tunnel, "start",
-                        lambda self, port, **kw: "https://x.trycloudflare.com")
+                        lambda self, port, **kw: _FAKE_TUNNEL_URL)
 
     tokens = []
     r.tokenReady.connect(tokens.append)
@@ -1203,8 +1212,8 @@ def test_meeting_start_local_tunnel(qapp, monkeypatch):
     assert seen_urls and seen_urls[0] == "http://127.0.0.1:54321/admin/channel"
     pad = tokens[-1] + "=" * (-len(tokens[-1]) % 4)
     obj = json.loads(base64.urlsafe_b64decode(pad))
-    assert obj["base_url"] == "https://x.trycloudflare.com"
-    assert r.base_url() == "https://x.trycloudflare.com"
+    assert obj["base_url"] == _FAKE_TUNNEL_URL
+    assert r.base_url() == _FAKE_TUNNEL_URL
     assert r.current_token() == tokens[-1]
     assert obj["channel"] == r.channel()
     r.stop()
@@ -1322,7 +1331,7 @@ def test_share_url_and_copy_link(qapp, monkeypatch):
     # Issue #47: 共有 URL ヘルパ + 「リンクをコピー」ボタン
     chat = FakeChat([{"id": "a", "title": "A", "busy": False, "dataset": "ds1"}])
     win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
-    mr, r = _make_relay(monkeypatch, win)   # legacy → base_url() == "http://relay.test"
+    mr, r = _make_relay(monkeypatch, win)   # base_url() == _FAKE_TUNNEL_URL
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
                             json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
@@ -1336,7 +1345,7 @@ def test_share_url_and_copy_link(qapp, monkeypatch):
     sw._timer.stop()
 
     # happy path: guest base（末尾スラッシュ除去）+ "/#token=" + token
-    assert sw._share_url() == "http://relay.test/#token=" + tok
+    assert sw._share_url() == _FAKE_TUNNEL_URL + "/#token=" + tok
     # コピーハンドラは _share_url() の薄いラッパ。例外を出さないこと（スモーク）
     sw._on_copy_link()
     # token 無し → 空 URL（クラッシュしない）
@@ -1682,7 +1691,6 @@ def test_post_failure_folds_public_server(qapp, monkeypatch):
     chat = FakeChat()
     win = FakeWindow(chat, tabs=[])
     mr, r = _make_relay(monkeypatch, win)
-    r._remote_base = ""
     created = []
 
     def fake_start(admin_key, **kw):

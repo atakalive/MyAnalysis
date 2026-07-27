@@ -49,12 +49,6 @@ _log = logging.getLogger(__name__)
 
 _LOOKBACK_MS = 15000
 _REQ_TIMEOUT = 5.0
-# Cloudflare's edge bot protection (error 1010) rejects the default
-# "Python-urllib/x" UA with a 403 before the request reaches the Worker. Send a
-# browser-like UA so host requests pass the signature check (guests use a real
-# browser and are unaffected).
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 _HEARTBEAT_SEC = 20.0
 _PRESENCE_POLL_SEC = 5.0
 _FAIL_THRESHOLD = 5
@@ -173,7 +167,7 @@ class _RelayWorker(QThread):
 
     def _req(self, method: str, path: str, data=None, is_png: bool = False):
         url = self._base + path
-        headers = {"Authorization": "Bearer " + self._admin, "User-Agent": _UA}
+        headers = {"Authorization": "Bearer " + self._admin}
         body = None
         if is_png:
             headers["Content-Type"] = "image/png"
@@ -368,7 +362,7 @@ class _RelayWorker(QThread):
 
 
 class _TunnelStarter(QThread):
-    """Starts the public tunnel (provider per RELAY_TUNNEL) off the GUI thread.
+    """Starts the cloudflared public tunnel off the GUI thread.
     Tags every signal with its own generation so MeetingRelay can drop stale
     results after a stop / re-start."""
 
@@ -439,9 +433,6 @@ class MeetingRelay(QObject):
         # mints a fresh cacheKey, so it harmlessly falls through to the hash gate).
         self._view_cachekeys: dict[tuple[str, str], int] = {}
         self._admin_key = os.environ.get("RELAY_ADMIN_KEY", "") or ""
-        # Legacy remote-relay override: when set, no local server / tunnel is
-        # started and this URL is the shared host+guest base_url.
-        self._remote_base = os.environ.get("RELAY_BASE_URL", "") or ""
         self._host_base_url = ""        # host's own admin/worker target
         self._guest_base_url = ""       # URL baked into the guest token
         self._local_server: LocalRelayServer | None = None
@@ -794,32 +785,28 @@ class MeetingRelay(QObject):
         # RELAY_LAN_HOST env にフォールバック（無いと CLI の lan=True は lan_host
         # 空 → lan_base_url()/lan_link() が空になり LAN リンクが死ぬ）。
         self._lan_host = (host_ip or "").strip() or os.environ.get("RELAY_LAN_HOST", "").strip()
-        if self._remote_base:
-            # RELAY_BASE_URL リモートモード: local server も tunnel も起動しない。
-            self._host_base_url = self._guest_base_url = self._remote_base
-        else:
-            self._guest_base_url = ""          # 再共有で旧外部 URL を残さない (reviewer P2-4)
-            desired = "0.0.0.0" if self._lan else "127.0.0.1"
-            req_port = self._lan_req_port() if self._lan else 0
-            if self._local_server is None:
-                self._local_server = local_relay.start_server(
-                    self._admin_key, bind_host=desired, port=req_port)
-            elif getattr(self._local_server, "bind_host", "127.0.0.1") != desired:
-                # 新サーバ生成が「成功してから」旧サーバを畳む (reviewer P2-4)。逆順だと
-                # start_server が例外を投げたとき app-scoped 旧 loopback サーバを破棄済みで
-                # _local_server が死サーバを指し、次回 loopback 共有が死サーバへ POST する。
-                new_server = local_relay.start_server(
-                    self._admin_key, bind_host=desired, port=req_port)
-                self._local_server.shutdown()
-                self._local_server = new_server
-            self._host_base_url = f"http://127.0.0.1:{self._local_server.port}"
+        self._guest_base_url = ""          # 再共有で旧外部 URL を残さない (reviewer P2-4)
+        desired = "0.0.0.0" if self._lan else "127.0.0.1"
+        req_port = self._lan_req_port() if self._lan else 0
+        if self._local_server is None:
+            self._local_server = local_relay.start_server(
+                self._admin_key, bind_host=desired, port=req_port)
+        elif getattr(self._local_server, "bind_host", "127.0.0.1") != desired:
+            # 新サーバ生成が「成功してから」旧サーバを畳む (reviewer P2-4)。逆順だと
+            # start_server が例外を投げたとき app-scoped 旧 loopback サーバを破棄済みで
+            # _local_server が死サーバを指し、次回 loopback 共有が死サーバへ POST する。
+            new_server = local_relay.start_server(
+                self._admin_key, bind_host=desired, port=req_port)
+            self._local_server.shutdown()
+            self._local_server = new_server
+        self._host_base_url = f"http://127.0.0.1:{self._local_server.port}"
 
         body = {"ch": ch, "ttl_sec": ttl, "secret_hash": secret_hash}
         req = urllib.request.Request(
             self._host_base_url.rstrip("/") + "/admin/channel",
             data=json.dumps(body).encode("utf-8"), method="POST",
             headers={"Authorization": "Bearer " + self._admin_key,
-                     "Content-Type": "application/json", "User-Agent": _UA},
+                     "Content-Type": "application/json"},
         )
         try:
             with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
@@ -867,18 +854,14 @@ class MeetingRelay(QObject):
         # Push the initial snapshots immediately (don't wait for the first tick).
         self._on_capture_tick()
 
-        if self._remote_base:
-            # _guest_base_url already resolved → token is ready synchronously.
-            self.tokenReady.emit(self._make_token())
-        else:
-            self._gen += 1
-            gen = self._gen
-            self.channelStateChanged.emit("starting")
-            self._tunnel = Tunnel()
-            self._tunnel_starter = _TunnelStarter(self._tunnel, self._local_server.port, gen)
-            self._tunnel_starter.sig_ready.connect(self._on_tunnel_ready)
-            self._tunnel_starter.sig_failed.connect(self._on_tunnel_failed)
-            self._tunnel_starter.start()
+        self._gen += 1
+        gen = self._gen
+        self.channelStateChanged.emit("starting")
+        self._tunnel = Tunnel()
+        self._tunnel_starter = _TunnelStarter(self._tunnel, self._local_server.port, gen)
+        self._tunnel_starter.sig_ready.connect(self._on_tunnel_ready)
+        self._tunnel_starter.sig_failed.connect(self._on_tunnel_failed)
+        self._tunnel_starter.start()
         return None
 
     def _on_tunnel_ready(self, gen: int, url: str) -> None:
@@ -921,8 +904,7 @@ class MeetingRelay(QObject):
                 req = urllib.request.Request(
                     self._host_base_url.rstrip("/") + "/admin/channel/" + _q(ch),
                     method="DELETE",
-                    headers={"Authorization": "Bearer " + self._admin_key,
-                             "User-Agent": _UA},
+                    headers={"Authorization": "Bearer " + self._admin_key},
                 )
                 urllib.request.urlopen(req, timeout=_REQ_TIMEOUT).close()
             except Exception:
@@ -939,7 +921,7 @@ class MeetingRelay(QObject):
             w.requestInterruption()
             w.wait(8000)
             self._worker = None
-        # Stop the tunnel BEFORE waiting on the starter: cloudflared/pinggy
+        # Stop the tunnel BEFORE waiting on the starter: cloudflared
         # start() blocks waiting for the tunnel to come up, so t.stop() must
         # terminate that process first to unblock the starter thread we then join
         # (it also flips _stop_requested so a concurrent start() can't re-enable).
@@ -992,10 +974,9 @@ class MeetingRelay(QObject):
         self.participantsUpdated.emit(self._participants)
 
     def _on_remote_message(self, sid: str, name: str, text: str) -> None:
-        # in: receive gate — symmetric to the out: send gate. KV is eventually
-        # consistent, so a guest may POST to a just-opted-out sid within the
-        # propagation window; drop it here so a private session never drives the
-        # agent (tool-operation rights). Gated on _published_session_ids only:
+        # in: receive gate — symmetric to the out: send gate. A guest may POST to a
+        # just-opted-out sid before the opt-out reaches it; drop it here so a private
+        # session never drives the agent (tool-operation rights). Gated on _published_session_ids only:
         # all open DSs are shared now (Issue #78), so a guest may legitimately
         # inject into a background-DS session.
         if sid not in self._published_session_ids:
@@ -1191,8 +1172,8 @@ class MeetingRelay(QObject):
         if not self._sharing or self._worker is None:
             return
         if self._expires_at and time.time() >= self._expires_at:
-            # Host-side expiry: the local admin routes don't check expiry (worker.js
-            # SSOT), so writing past TTL would re-create metadata-less channels that
+            # Host-side expiry: the local admin routes don't check expiry (this module
+            # is the SSOT), so writing past TTL would re-create metadata-less channels that
             # _evict_expired_channels can't reap. Self-stop + DELETE so memory frees,
             # symmetric to the guest 410.
             self.meeting_stop()

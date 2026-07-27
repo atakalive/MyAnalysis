@@ -9,7 +9,7 @@ def no_window_kwargs() -> dict:
     """Popen/run に渡すと Windows でコンソール窓を出さない kwargs を返す。
 
     windowless GUI（run.bat → pythonw、コンソール無し）から claude/pi エンジンや
-    tailscale・taskkill 等のコンソール子プロセスを spawn すると、抑止しない限り
+    cloudflared・taskkill 等のコンソール子プロセスを spawn すると、抑止しない限り
     新しいコンソール窓が開く。POSIX では {} を返す（no-op）。
 
     ``subprocess.CREATE_NO_WINDOW`` は win32 の Python にのみ存在する。テストが
