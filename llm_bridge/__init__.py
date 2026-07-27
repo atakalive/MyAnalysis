@@ -11,8 +11,8 @@ import contextlib
 import contextvars
 import importlib.util
 import json
+import shlex
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 import dataset_config
 from common.paths import safe_resolve, bak_path, backup_text_if_changed
@@ -163,7 +163,8 @@ def _build_analysis(parent, dataset, name: str):
             raise ValueError(
                 f"analyses/{name}/analysis.py が空です（0 バイト — 同期ドライブへの"
                 f"書き込み失敗の可能性）。バックアップから復旧できます: "
-                f"python -m llm_bridge recover-analysis {name} --dataset {dataset}"
+                f"python -m llm_bridge recover-analysis "
+                f"{shlex.quote(name)} --dataset {shlex.quote(dataset)}"
             )
         raise ValueError(
             f"analyses/{name}/analysis.py が空です（0 バイト）。バックアップ"

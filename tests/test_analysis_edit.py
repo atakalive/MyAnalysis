@@ -46,7 +46,7 @@ def _draft_path(tmp_path, name=NAME):
 # --- draft-analysis ---------------------------------------------------------
 
 def test_draft_creates_draft_and_prints_followup(ds, capsys):
-    af = _write_analysis(ds)
+    _write_analysis(ds)
     analysis_edit.draft_analysis(DS, NAME)
     out = capsys.readouterr().out
     draft = _draft_path(ds)
@@ -64,10 +64,31 @@ def test_draft_missing_analysis_points_at_newanalysis(ds):
 
 
 def test_draft_empty_analysis_points_at_recover(ds):
-    af = _write_analysis(ds, source="")   # 0-byte
+    _write_analysis(ds, source="")   # 0-byte
     with pytest.raises(SystemExit) as ei:
         analysis_edit.draft_analysis(DS, NAME)
     assert "recover-analysis" in str(ei.value)
+
+
+def test_draft_followup_command_is_shell_quoted(ds, capsys):
+    """reviewer code P1: 名前にシェルメタ文字が入っても出力コマンドが安全に quote される。
+
+    ';' は validate_identifier_name を通る（禁止文字は <>:"|?* と区切り/制御のみ）が
+    shell では危険。follow-up の apply/set-active-dataset/reload 全トークンで確認する。
+    """
+    import shlex
+
+    evil = "a;b"
+    _write_analysis(ds, name=evil)
+    analysis_edit.draft_analysis(DS, evil)
+    out = capsys.readouterr().out
+    # 生の "a;b" が unquoted のまま positional に出ていないこと（回帰で bare に戻ると
+    # "apply-analysis a;b " が現れて落ちる）。
+    assert f"apply-analysis {evil} " not in out
+    # quote 形（'a;b' / 'target=a;b'）で埋め込まれていること。bare 出力ではこの
+    # クォート付き部分文字列は現れないので、これが quote 実施の確証になる。
+    assert shlex.quote(evil) in out                    # positional
+    assert shlex.quote(f"target={evil}") in out        # reload の k=v トークン全体
 
 
 # --- apply-analysis ---------------------------------------------------------
@@ -248,6 +269,8 @@ def test_cli_unresolved_dataset_errors(monkeypatch, tmp_path):
     ("async def build_tab(p, d):\n    pass\n", True),
     ("build_tab = _impl\n", True),
     ("build_tab: object = None\n", True),
+    # annotation-only: no value → only __annotations__, no module attr (reviewer P2)
+    ("build_tab: object\n", False),
     ("from m import build_tab\n", True),
     ("import m as build_tab\n", True),
     ("def other(p, d):\n    pass\n", False),
