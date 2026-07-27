@@ -101,7 +101,7 @@ CLOUDFLARE_TUNNEL_HOSTNAME=relay.example.com
 LAN URL にした第2トークンを生成する。外部リンク（トンネル https）とLAN リンク（LAN http）は同時に有効で、
 内外ゲストが同一会議に混在できる。CLI は `python -m llm_bridge meeting-start lan=true`＋`meeting-lan-link`。
 
-**配布はフルリンク/QR のみ（素トークンは配らない）**: LAN リンクは http。https ページから http を fetch すると
+**配布はフルリンクのみ（素トークンは配らない）**: LAN リンクは http。https ページから http を fetch すると
 ブラウザが mixed-content で強制ブロックするため、LAN 内ゲストは **http のディープリンク
 （`http://<ip>:<port>/#token=…`）でページごと開く**必要がある（ページ origin を http にする）。よって
 GitLab Pages の https 専用ページに素トークンを貼る既存運用はLAN 内では使えない。
@@ -118,7 +118,7 @@ GitLab Pages の https 専用ページに素トークンを貼る既存運用は
 - **(a)** `0.0.0.0` はグローバル IP を持つホストではネットワークの firewall 次第で**インターネットからも到達し得る**
   （SoftEther 仮想アダプタや他 NIC にも露出）。門番は per-meeting secret（`token_urlsafe(32)`）＋ admin_key ＋ TTL ＋
   heartbeat-grace。**public バインドは共有中のみ**（`stop`/`expired`/`start` 失敗の全経路で畳む）。
-- **(b)** LAN は平文 http なので secret はローカルネットワーク上で平文で流れる（配布はフルリンク/QR のみ）。
+- **(b)** LAN は平文 http なので secret はローカルネットワーク上で平文で流れる（配布はフルリンクのみ）。
 - **(c)** ゲストは HTTPS-Only を切って http フルリンクで開く（企業ポリシーで ON 固定だと開けない）。
 - **(d)** Windows Firewall は inbound を**プログラム単位（`pythonw.exe`）で許可 + ephemeral ポート**推奨。
 - **将来の締め（follow-up #88）**: `0.0.0.0` でなく「loopback ＋ LAN IP 専用」の2ソケットを同一 `RelayState` で

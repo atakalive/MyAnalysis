@@ -20,7 +20,6 @@ PySide6  pyqtgraph  numpy  pandas  matplotlib
 **任意依存**（特定の解析を動かす時だけ）:
 
 - `h5py` — `.h5` カメラ画像を扱う解析（例: `dataset_d`）でのみ必要。`load()` 内で遅延 import される。
-- `qrcode` + `Pillow` — ミーティング共有ウィンドウ（Issue #42）の QR ボタンでのみ必要。遅延 import で、無ければ QR ボタンが無効になるだけ。リレー本体は標準ライブラリのみで動く。`relay-worker/`（ローカル・インメモリ・リレー + 公開トンネル・$0）を参照。
 - `tifffile` + `Pillow` — ImageJ 風 画像ビューア（Issue #60, `show_image`）でのみ必要。`tifffile` は 16bit / 多ページ / N 次元 TIFF を、`Pillow` は PNG/JPG/BMP を開く。どちらも `common/image_io.py` 内で遅延 import され、無ければ TIFF / ラスタ読込が `pip install` を案内する graceful な `ImportError` を出す。
 
 **設定ファイル**（いずれも `.example` をコピーして使う。実体は gitignore）:

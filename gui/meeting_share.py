@@ -11,9 +11,8 @@ import os
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -22,15 +21,6 @@ from common.i18n import tr
 # Duration options (label suffix, seconds). Max 24h, server-clamped to [1h, 24h].
 _TTL_OPTIONS = [("1h", 3600), ("3h", 10800), ("6h", 21600),
                 ("12h", 43200), ("24h", 86400)]
-
-
-def _qr_available() -> bool:
-    try:
-        import qrcode  # noqa: F401
-        import PIL  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 class MeetingShareWindow(QWidget):
@@ -110,33 +100,28 @@ class MeetingShareWindow(QWidget):
         self._token_edit = QLineEdit()
         self._token_edit.setReadOnly(True)
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._reveal_btn = QPushButton(tr("meeting.btn.reveal"))
+        self._reveal_btn.clicked.connect(self._on_reveal)
         self._copy_btn = QPushButton(tr("meeting.btn.copy"))
         self._copy_btn.clicked.connect(self._on_copy)
         self._copy_link_btn = QPushButton(tr("meeting.btn.copy_link"))
         self._copy_link_btn.clicked.connect(self._on_copy_link)
         self._copy_feedback = self._make_copied_timer(self._copy_btn, "meeting.btn.copy")
         self._copy_link_feedback = self._make_copied_timer(self._copy_link_btn, "meeting.btn.copy_link")
-        self._reveal_btn = QPushButton(tr("meeting.btn.reveal"))
-        self._reveal_btn.clicked.connect(self._on_reveal)
-        self._qr_btn = QPushButton(tr("meeting.btn.qr"))
-        # clicked emits a bool (checked); wrap so it isn't passed as `url`.
-        self._qr_btn.clicked.connect(lambda: self._on_qr())
-        self._qr_btn.setEnabled(_qr_available())
-        # LAN twin buttons: full deep-link copy + QR only (no bare LAN token).
+        # LAN link: full deep-link copy only (no bare LAN token).
         self._copy_lan_link_btn = QPushButton(tr("meeting.btn.copy_lan_link"))
         self._copy_lan_link_btn.clicked.connect(self._on_copy_lan_link)
         self._copy_lan_link_feedback = self._make_copied_timer(
             self._copy_lan_link_btn, "meeting.btn.copy_lan_link")
-        self._qr_lan_btn = QPushButton(tr("meeting.btn.qr_lan"))
-        self._qr_lan_btn.clicked.connect(self._on_qr_lan)
         token_row.addWidget(self._token_edit, stretch=1)
-        token_row.addWidget(self._copy_btn)
-        token_row.addWidget(self._copy_link_btn)
         token_row.addWidget(self._reveal_btn)
-        token_row.addWidget(self._qr_btn)
-        token_row.addWidget(self._copy_lan_link_btn)
-        token_row.addWidget(self._qr_lan_btn)
         root.addLayout(token_row)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._copy_btn)
+        btn_row.addWidget(self._copy_link_btn)
+        btn_row.addWidget(self._copy_lan_link_btn)
+        btn_row.addStretch(1)
+        root.addLayout(btn_row)
         self._token_hint = QLabel(tr("meeting.token.hint"))
         self._token_hint.setWordWrap(True)
         self._token_hint.setStyleSheet("color:#888;font-size:11px")
@@ -322,32 +307,6 @@ class MeetingShareWindow(QWidget):
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )
 
-    def _on_qr(self, url: "str | None" = None) -> None:
-        if not _qr_available():
-            return
-        # url 省略時は外部トークンリンク（_on_qr_lan は LAN フルリンクを渡す）。
-        url = self._share_url() if url is None else url
-        if not url:
-            return
-        try:
-            import io
-            import qrcode
-            img = qrcode.make(url)
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            pix = QPixmap()
-            pix.loadFromData(buf.getvalue(), "PNG")
-        except Exception as e:
-            self._log_line(f"qr failed: {e!r}")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("QR")
-        lay = QVBoxLayout(dlg)
-        lbl = QLabel()
-        lbl.setPixmap(pix)
-        lay.addWidget(lbl)
-        dlg.exec()
-
     def _lan_share_url(self) -> str:
         return self._relay.lan_link()
 
@@ -356,9 +315,6 @@ class MeetingShareWindow(QWidget):
         if url:
             QApplication.clipboard().setText(url)
             self._show_copied(self._copy_lan_link_btn, self._copy_lan_link_feedback)
-
-    def _on_qr_lan(self) -> None:
-        self._on_qr(self._lan_share_url())
 
     def _primary_ip(self) -> str:
         """LAN 配布に使うホストの IPv4 候補（推定）。失敗しても空文字で返し、
@@ -635,7 +591,6 @@ class MeetingShareWindow(QWidget):
         self._lan_link_check.setEnabled(not sharing)     # 開始後は変更不可
         self._lan_host_edit.setEnabled(not sharing)
         self._copy_lan_link_btn.setEnabled(lan_ready)    # LAN リンク実在時のみ
-        self._qr_lan_btn.setEnabled(lan_ready and _qr_available())
         self._update_state_label()
 
     def retranslate(self) -> None:
@@ -656,12 +611,10 @@ class MeetingShareWindow(QWidget):
         self._reveal_btn.setText(
             tr("meeting.btn.hide") if self._token_revealed else tr("meeting.btn.reveal")
         )
-        self._qr_btn.setText(tr("meeting.btn.qr"))
         if self._copy_lan_link_feedback.isActive():
             self._copy_lan_link_btn.setText(tr("meeting.btn.copied"))
         else:
             self._copy_lan_link_btn.setText(tr("meeting.btn.copy_lan_link"))
-        self._qr_lan_btn.setText(tr("meeting.btn.qr_lan"))
         self._lan_link_check.setText(tr("meeting.check.lan_link"))
         self._lan_host_caption.setText(tr("meeting.label.lan_host"))
         self._lan_https_hint.setText(tr("meeting.lan.https_hint"))
