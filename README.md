@@ -6,6 +6,30 @@ Experimental measurement-data analysis project (Python). It provides a **PySide6
 
 ---
 
+## How MyAnalysis works (concept)
+
+MyAnalysis is built around one idea: **you analyze measurement data by telling an AI agent in the chat dock what you want to know — in plain language — and it does the analysis and drives the GUI for you.** You are not expected to hand-write plotting code or memorize commands; you direct the work at the level of *questions and goals*, and the agent handles the mechanics (finding the data's real layout, loading it, plotting, saving, laying out tabs).
+
+**Design principles**
+
+1. **Everything lives with the data, on the synced drive.** Only the application code is in this repository. Each dataset is self-contained — its settings (`myanalysis.toml`), its analysis code (`analyses/<name>/`), and its output (`_work/`) all sit under the dataset directory on the synced drive. The point: *the same analysis resumes identically on any PC.*
+2. **The chat agent is a data analyst, not an app developer.** Its job is to analyze the registered datasets and operate the GUI — never to modify MyAnalysis itself.
+3. **Inspect first.** No data layout is assumed. The agent looks at a dataset's real structure before loading it, so you can point it at a brand-new dataset and it works out the shape.
+4. **No local persistence.** Figures, code, and state are written only to the dataset's `work_dir` on the synced drive; nothing is stashed on the local machine. This is what makes "resume on any PC" hold.
+
+**How you instruct it** — say what you want in ordinary language. The agent decides where to load from, where to save (the `work_dir` is automatic — you never specify it), how to label things, and which GUI operations to run. For example:
+
+- "Open `<Dataset Name>` and explain the overview."
+- "Visualize the relationship between `<quantity A>` and `<quantity B>`."
+- "Display the results of the current `<Tab A>` and `<Tab B>` side by side in a vertical panel split."
+- "Apply an equivalent analysis to `<Dataset A>` and `<Dataset B>` and compare them."
+- "Summarize the overall conclusion as a single presentation slide."
+- "Explain exactly what this analysis did."
+
+Under the hood the agent analyzes with Python (`common/explore.py`) and drives the GUI with `python -m llm_bridge` verbs — but you don't have to think about that. For the exact agent contract, see the chat system prompt in [llm_backend/claude_code.py](llm_backend/claude_code.py); for conventions, [CLAUDE.md](CLAUDE.md).
+
+---
+
 ## Requirements / Setup
 
 - **Python 3.11 or newer is required** (the code uses `tomllib` from the standard library; 3.10 and earlier will not work).
@@ -67,12 +91,17 @@ When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are writte
 | [llm_backend/](llm_backend/) | LLM backend abstraction (claude / openai / pi / mock) |
 | [llm_bridge/](llm_bridge/) | GUI↔CLI bridge (over the filesystem, cross-platform) |
 | [devtools/](devtools/) | Hot reload (`hotreload.py`, `qt_integration.py`) |
-| [analyses/](analyses/) | Analysis modules (1 directory = 1 analysis, each with `analysis.py`) |
+| [meeting/](meeting/) | Meeting-share relay (local in-memory relay + cloudflared tunnel) |
+| [relay-worker/](relay-worker/) | Meeting-share guest page (`chatdock.html`, published to GitLab Pages) + its setup README |
+| [config_share.py](config_share.py) | Optional Cloudflare R2 sync for `config.py` (push / pull / sync) |
+| [i18n/](i18n/) | UI text catalogs (`en.toml` / `ja.toml`) |
 | [newanalysis/](newanalysis/) | Analysis-module scaffold generator |
 | [export/](export/) | Headless PNG export driver |
 | [tests/](tests/) | pytest test suite |
 | `data/` | Gitignored local scratch space (outputs, caches). Never commit its contents |
 | `docs/` | Documentation (currently mostly empty) |
+
+Analysis modules are **not** in the repository — each analysis lives with its data on the synced drive at `<dataset_dir>/analyses/<name>/analysis.py` (see "Adding an analysis & exporting" below).
 
 ---
 
@@ -190,21 +219,38 @@ Runs `build_export_figs()` on the Agg backend and writes PNGs to `<work_dir>/ana
 
 ## LLM chat & backends
 
-Chat-dock LLM access goes through [llm_backend/](llm_backend/). Four backends:
+The chat dock talks to an LLM backend through [llm_backend/](llm_backend/). Four backends exist, but **in practice MyAnalysis runs on the `claude` backend**:
 
 | Backend | Description |
 |---|---|
-| `claude` | Reuses the VS Code Claude Code extension's bundled engine (stream-json mode) |
+| `claude` | **Default in practice.** Reuses the VS Code Claude Code extension's bundled engine (stream-json mode) and your VS Code login |
 | `openai` | OpenAI-compatible HTTP (including local endpoints like Ollama) |
 | `pi` | pi-coding-agent subprocess |
-| `mock` | Offline smoke test |
+| `mock` | Offline smoke test (no LLM) |
+
+### Setting up the `claude` backend (recommended)
+
+1. Install the **VS Code Claude Code extension and sign in** — the backend reuses its bundled engine and `~/.claude` login, so there is no API key to put in `.env`.
+2. In `llm_backend/config.toml`, set `[backend].name = "claude"` (leave `bin` empty to auto-detect the bundled binary; `permission_mode = "bypassPermissions"` is the default and is what lets the agent drive the GUI unattended).
+3. In `models.toml`, set the `[claude_code]` knobs — e.g. `model = "claude-opus-4-8"`, `thinking = "enabled"`, `effort = "xhigh"`.
+4. **Restart the app** — `config.toml` and `models.toml` are read once at startup.
+
+> The shipped `llm_backend/config.example.toml` defaults `[backend].name` to `pi` (a development placeholder); change it to `claude` for normal use.
+
+### Other backends (optional)
+
+- `openai` — point `.env`'s `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` at any OpenAI-compatible endpoint (e.g. a local Ollama).
+- `pi` — `npm i -g @mariozechner/pi-coding-agent`; operational settings go in `config.toml`, secrets in `.env`.
+- `mock` — offline, no configuration; useful for smoke-testing the GUI.
 
 **Selection order**: env `LLM_BACKEND` → `[backend].name` in `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
 
 **Where settings live**:
-- `.env` — connection & secrets (API keys, etc.).
-- `llm_backend/config.toml` — backend selection and operational settings (cwd / bin / tools, etc.).
+- `.env` — connection & secrets. Note: real shell environment variables override `.env`, and inline `# comments` are **not** supported there (`KEY=value # x` sets the value to `value # x`).
+- `llm_backend/config.toml` — backend selection and operational settings (bin / cwd / tools, etc.).
 - `models.toml` — model knobs (`model` / `thinking` / `effort` / `provider`).
+
+`config.toml` and `models.toml` are loaded once — restart to apply edits.
 
 ---
 
@@ -229,6 +275,7 @@ Key verbs:
 | `window <verb> [k=v] [--wait]` | Window ops (`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload`, etc.) |
 | `tab <target> <verb> [k=v]` | Tab ops (`set-split` / `snapshot` / `refresh-state`, etc.) |
 | `annotate` / `clear-annotations` | Add/clear annotations (marker / note) |
+| `meeting-start [lan=true]` / `meeting-lan-link` | Start a meeting share / get the in-facility LAN link (see "Meeting share (hosting)") |
 
 ### Multiple datasets
 
@@ -254,9 +301,12 @@ guest-local; the host's active dataset only seeds the default on first load). A
 persisted; switching it ON snaps the guest to the host's active dataset and keeps it
 in sync, and clicking any dataset chip turns it back OFF (Issue #80). Switching
 datasets stashes the unsent message draft per dataset, so a host-driven switch never
-re-targets half-typed text at another dataset's chat. The meeting relay itself uses
-only the stdlib — see `relay-worker/` (local in-memory relay + public tunnel, $0)
-for deployment details.
+re-targets half-typed text at another dataset's chat. Guests also get their own "new
+chat session" button and their chat send-key follows the host's (Issues #81, #82), and
+an optional in-facility LAN direct link can be emitted alongside the public one for
+guests whose network can't resolve the tunnel host (Issue #85). The relay itself uses
+only the stdlib — see the [Meeting share (hosting)](#meeting-share-hosting) section and
+[relay-worker/README.md](relay-worker/README.md) for how to set it up.
 
 **Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
 resident while open, so opening many large datasets at once can pressure memory
@@ -270,6 +320,21 @@ python -m llm_bridge window open-dataset name=my_dataset --wait 30
 python -m llm_bridge window set-active-dataset name=other_dataset --wait
 python -m llm_bridge tab summary snapshot dataset=other_dataset --wait
 ```
+
+---
+
+## Meeting share (hosting)
+
+Meeting share (View → ミーティング共有…) live-shares your chat dock and analysis view to remote guests in their browser — by default every open dataset's tabs and chat are broadcast (Issue #78; making an item private is an explicit opt-out). Guests join by opening a link; nothing is persisted server-side.
+
+**Architecture.** A local in-memory relay (bound to `127.0.0.1` by default) plus a single public tunnel — a **cloudflared named tunnel**. It costs $0 and uses no external key/value store. The full walkthrough and source of truth is [relay-worker/README.md](relay-worker/README.md); the `.env` variables are documented in [.env.example](.env.example).
+
+**What you need to host a share** — all in `.env`, which is read once at startup (restart the GUI after editing):
+
+1. `RELAY_ADMIN_KEY` — **required**, a non-empty secret (generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`). If it is empty, the share feature is simply disabled and nothing else is affected.
+2. For the public (external) link, cloudflared needs `CLOUDFLARE_TUNNEL_NAME` and `CLOUDFLARE_TUNNEL_HOSTNAME`, plus a one-time cloudflared setup (delegate a domain to Cloudflare, then `cloudflared tunnel login` / `create` / `route dns`). See [relay-worker/README.md](relay-worker/README.md).
+
+**In-facility LAN direct link (Issue #85, optional).** For guests on a venue network whose DNS can't resolve the tunnel hostname, you can emit a *second* link that connects them straight to the host PC over the LAN. Turn on "LAN リンクも出す" in the share dialog (default OFF), or run `python -m llm_bridge meeting-start lan=true` (plus `meeting-lan-link`); related env: `RELAY_LAN_HOST` / `RELAY_LAN_PORT`. The external (tunnel, https) and in-facility (LAN, http) links are active at the same time, so internal and external guests can join one meeting. The LAN link is distributed as a full copy-link only (it is http, so a bare token pasted onto an https page would be blocked as mixed content), and the relay binds `0.0.0.0` only while a share is live — see the security notes in [relay-worker/README.md](relay-worker/README.md).
 
 ---
 

@@ -41,7 +41,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。**別データセットの同名解析を同時に開くのは Issue #51 で対応済み**：タブはデータセットごとの `_DatasetGroup`（トップの `DatasetSwitcher` で切替）にグループ化され、タブ ID は「グループ内で一意」になる。エージェント/CLI は衝突時のみ `dataset=` でアドレッシングを修飾する（`add-tab`/`show`/`set-active-tab`/`close-tab`/tab-tier verb が任意 `dataset=` を受ける）。
 
-リポジトリ直下の旧 `analyses/`（4 件）はコードから参照されなくなり不活性化済み（物理削除はせず、手動移行は範囲外）。`data/analyses/` への書き込みは全廃。
+リポジトリ直下の旧 `analyses/` は削除済み（解析はデータセット配下 `<dataset_dir>/analyses/<name>/` に自己完結）。`data/analyses/` への書き込みは全廃。
 
 ## Git workflow
 
