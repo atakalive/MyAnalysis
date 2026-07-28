@@ -829,6 +829,10 @@ def test_merge_incoming_archived_hides_and_redraws(widget):
         chat_store.new_session("mock", "sys", dataset="ds", title="A"))
     b = _with_history(
         chat_store.new_session("mock", "sys", dataset="ds", title="B"))
+    # b に固有の本文を持たせる。_render_session は messages を描画し title は描かない
+    # ので、この文字列が transcript に出るかどうかが「新 active(B) を再描画したか」を
+    # 弁別する。a の "hi" とも区別できる。
+    b.messages.append(Message(role="user", content="uniqB-transcript"))
     widget._sessions = [a, b]
     widget._active = a
     widget._current_dataset = "ds"
@@ -847,8 +851,10 @@ def test_merge_incoming_archived_hides_and_redraws(widget):
     assert merged.archived is True
     assert widget._active is not merged         # active 付け替え
     assert widget._active is widget._session_by_id(b.id)
-    # transcript が新 active(B) を映しているか（3.10 の再描画をロック）。
-    assert "B" in widget._log.toPlainText() or widget._active.title == "B"
+    # transcript が新 active(B) を映しているか（3.10 の再描画をロック）。b 固有本文で
+    # 検査する: merge の `if self._active.id != prev_id: self._render_session(...)` を
+    # 外すと _log は旧 active(a) のままで "uniqB-transcript" は出ず fail する。
+    assert "uniqB-transcript" in widget._log.toPlainText()
 
 
 def test_archived_chats_dialog_rows_and_selection(qapp):
