@@ -20,7 +20,13 @@ from pathlib import Path
 
 import config
 import dataset_config
-from common.paths import durable_read_json, durable_write_json, safe_resolve
+from common.paths import (
+    bak_path,
+    durable_read_json,
+    durable_write_json,
+    read_json_classified,
+    safe_resolve,
+)
 from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
@@ -90,14 +96,19 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
     if kind == "figure":
         fig = spec.get("figure")
         try:
-            rel = str(Path(fig).relative_to(work_dir))
+            # as_posix: session.json は PC 間を渡る同期資産なので相対パスは常に
+            # '/' 区切りで書く（Windows ネイティブ区切りだと POSIX 側の復元で
+            # 単一ファイル名扱いになりタブが黙って落ちる）。Windows の pathlib は
+            # '/' を解決できるので読み手は無改修・旧 '\\' 入りセッションも
+            # Windows 上では従来どおり読める（次回保存で正規化される）。
+            rel = Path(fig).relative_to(work_dir).as_posix()
         except (ValueError, TypeError):
             rel = fig
         entry: dict = {"name": spec.get("name"), "kind": "figure", "figure": rel}
     elif kind == "image":
         img = spec.get("image")
         try:
-            rel = str(Path(img).relative_to(work_dir))
+            rel = Path(img).relative_to(work_dir).as_posix()
         except (ValueError, TypeError):
             rel = img
         entry = {"name": spec.get("name"), "kind": "image", "image": rel}
@@ -120,7 +131,7 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
             )
             if fig2 is not None:
                 try:
-                    rel2 = str(Path(fig2).relative_to(work_dir))
+                    rel2 = Path(fig2).relative_to(work_dir).as_posix()
                 except (ValueError, TypeError):
                     rel2 = str(fig2)
                 entry["figure2"] = rel2
@@ -137,7 +148,7 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
             )
             if img2 is not None:
                 try:
-                    rel2 = str(Path(img2).relative_to(work_dir))
+                    rel2 = Path(img2).relative_to(work_dir).as_posix()
                 except (ValueError, TypeError):
                     rel2 = str(img2)
                 entry["image2"] = rel2
@@ -181,6 +192,20 @@ def read_session(dataset: str) -> dict | None:
         _log.warning("read_session: %s unreadable; recovered from .bak", path)
         return data
     if status == "absent":
+        # durable_read_json の 'absent' は「primary が本当に無い」だけで、.bak が
+        # 『存在するのに読めない』ケースも丸め込む（common/paths.py）。それを
+        # no-session にすると、evict で primary が消え .bak が transient に
+        # 読めないだけの状態を「セッション無し」と誤読し、次の保存が .bak を
+        # 上書きして最後の復旧材料を潰す。存在判定できない場合も安全側（raise）。
+        try:
+            bak_present = bak_path(path).exists()
+        except OSError:
+            bak_present = True
+        if bak_present:
+            raise SessionUnreadableError(
+                f"session.json for {dataset!r} is absent but its .bak exists "
+                f"and is unreadable (transient mount failure?): {path}"
+            )
         return None
     raise SessionUnreadableError(
         f"session.json for {dataset!r} exists but is unreadable "
@@ -191,21 +216,32 @@ def read_session(dataset: str) -> dict | None:
 def write_session(dataset: str, payload: dict) -> None:
     """Durably write <work_dir>/session.json and verify (side-effecting resolve).
 
-    durable_write_json = primary + `.bak` の 2 コピー。書後に primary を
-    read-back し、書いた payload と一致しなければ SessionPersistError（recovered
-    = 直後に primary が読めないのもマウント異常のサインなので失敗扱い）。
-    write-back cache が read-back を騙す（書込成功に見えて後段 upload が失敗する）
-    ケースは `.bak` が第二防衛線。比較は JSON 正規化後（非 JSON 型の混入で
-    偽陽性の保存失敗を出さないため）。
+    durable_write_json = primary + `.bak` の 2 コピー。書後に primary と `.bak` を
+    それぞれ read-back し、書いた payload と一致しなければ SessionPersistError
+    （recovered = 直後に primary が読めないのもマウント異常のサインなので失敗扱い。
+    `.bak` 単独の truncate も二重化の黙った劣化なので失敗扱い）。write-back cache
+    が read-back を騙す（書込成功に見えて後段 upload が失敗する）ケースは
+    `.bak` が第二防衛線。比較は JSON 正規化後（非 JSON 型の混入で偽陽性の
+    保存失敗を出さないため）。
     """
     work_dir = dataset_config.get_work_dir(dataset)
     target = work_dir / "session.json"
     durable_write_json(target, payload)
+    normalized = json.loads(json.dumps(payload, ensure_ascii=False))
     status, data = durable_read_json(target)
-    if status != "ok" or data != json.loads(json.dumps(payload, ensure_ascii=False)):
+    if status != "ok" or data != normalized:
         raise SessionPersistError(
             f"session.json write verification failed for {dataset!r} "
             f"(read-back status={status}): {target}"
+        )
+    # .bak も個別に read-back する: durable_read_json は primary が 'ok' なら
+    # .bak を見ないため、.bak 側だけが truncate されると二重化が黙って 1 コピーに
+    # 劣化する（脅威モデルの truncate は 2 書込のどちらにも等確率で起こる）。
+    bstatus, bdata = read_json_classified(bak_path(target))
+    if bstatus != "ok" or bdata != normalized:
+        raise SessionPersistError(
+            f"session.json .bak write verification failed for {dataset!r} "
+            f"(read-back status={bstatus}): {bak_path(target)}"
         )
 
 

@@ -107,6 +107,36 @@ def test_write_session_truncated_write_raises(ds_env, monkeypatch):
         session.write_session("ds_a", _PAYLOAD)
 
 
+def test_write_session_bak_truncate_detected(ds_env, monkeypatch):
+    """.bak 側だけが truncate されても検出する（二重化の黙った劣化を許さない）。"""
+    from common import paths as common_paths
+    real = common_paths.atomic_write_text
+
+    def selective(path, text, **k):
+        if str(path).endswith(".bak"):
+            Path(path).write_text("", encoding="utf-8")
+        else:
+            real(path, text, **k)
+
+    monkeypatch.setattr(common_paths, "atomic_write_text", selective)
+    with pytest.raises(session.SessionPersistError):
+        session.write_session("ds_a", _PAYLOAD)
+
+
+def test_read_session_absent_primary_corrupt_bak_raises(ds_env):
+    """primary 消失 + .bak 破損 → no-session ではなく unreadable。
+
+    no-session に丸めると次の保存が .bak を上書きし、マウント回復後なら読めた
+    かもしれない最後の復旧材料を潰す（レビュー #92 指摘の残存損失経路）。
+    """
+    session.write_session("ds_a", _PAYLOAD)
+    work_dir = dataset_config.get_work_dir("ds_a")
+    (work_dir / "session.json").unlink()
+    (work_dir / "session.json.bak").write_text("", encoding="utf-8")
+    with pytest.raises(session.SessionUnreadableError):
+        session.read_session("ds_a")
+
+
 # ---- infer_dataset ----
 
 def test_infer_dataset_matches(ds_env):
@@ -661,9 +691,10 @@ def test_save_all_persists_layout_and_figure2(ds_env):
     session.save_all(win)
     data = session.read_session("ds_a")
     entry = data["tabs"][0]
-    # 相対化は str(Path.relative_to(...)) なので区切りは OS ネイティブ。
-    assert entry["figure"] == str(Path("figures") / "a.png")
-    assert entry["figure2"] == str(Path("figures") / "b.png")
+    # session.json は cross-PC 資産なので相対パスは OS に依らず '/' 区切り
+    # （as_posix。Windows ネイティブ区切りだと POSIX 復元でタブが黙って落ちる）。
+    assert entry["figure"] == "figures/a.png"
+    assert entry["figure2"] == "figures/b.png"
     assert entry["layout"] == layout
 
 
@@ -680,7 +711,7 @@ def test_save_dataset_persists_layout_and_figure2(ds_env):
     win = _FakeWindow([tab], active=None)
     assert session.save_dataset(win, "ds_a") is True
     entry = session.read_session("ds_a")["tabs"][0]
-    assert entry["figure2"] == str(Path("figures") / "b.png")
+    assert entry["figure2"] == "figures/b.png"
     assert entry["layout"] == layout
 
 
