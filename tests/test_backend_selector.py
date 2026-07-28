@@ -123,3 +123,49 @@ def test_reject_stops_live_worker(monkeypatch, parent_widget):
     backend.cancel.assert_called_once()
     worker.wait.assert_called()
     backend.kill.assert_called()          # still running → escalates to kill
+
+
+def test_ping_locks_selection_until_result(monkeypatch, parent_widget):
+    # reviewer code P1: while a ping is in flight, selection + Apply are locked so a
+    # result can never be shown against a different selection.
+    import gui.backend_selector_dialog as mod
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    _patch_config(monkeypatch, engine_id="mock")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    monkeypatch.setattr(mod, "build_backend", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self: None)   # don't spawn
+    ok = dlg._buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+    dlg._on_test()
+    assert not dlg._engine_combo.isEnabled()
+    assert not dlg._model_combo.isEnabled()
+    assert not ok.isEnabled()
+
+    from llm_backend.ping import PingResult
+    dlg._on_ping_result(PingResult(ok=True, elapsed=0.1, model="m", text="pong"))
+    assert dlg._engine_combo.isEnabled()
+    assert dlg._model_combo.isEnabled()
+    assert ok.isEnabled()
+
+
+def test_apply_io_error_shows_message(monkeypatch, parent_widget):
+    # reviewer code P2: apply_selection can raise OSError (IO) too — it must surface
+    # as a message, not an uncaught Qt slot exception.
+    import gui.backend_selector_dialog as mod
+    from PySide6.QtWidgets import QDialog
+
+    _patch_config(monkeypatch, engine_id="claude-vscode", model="opus")
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+
+    shown = {}
+    monkeypatch.setattr(mod, "apply_selection", _boom)
+    monkeypatch.setattr(
+        mod.QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True)
+    )
+    dlg, _ = _make_dialog(monkeypatch, parent_widget, busy=False)
+    dlg._on_apply()
+    assert shown.get("called")
+    assert dlg.result() != QDialog.DialogCode.Accepted   # stays open

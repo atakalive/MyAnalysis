@@ -140,3 +140,14 @@ class TestOpenAIResolution:
         monkeypatch.delenv("OPENAI_MODEL", raising=False)
         backend = llm_backend._make_openai()
         assert backend.model == "gpt-4o-mini"
+
+
+def test_model_config_corrupt_returns_empty(tmp_path, monkeypatch):
+    # reviewer code P2: corrupt (hand-edited) models.toml must not crash at read time.
+    (tmp_path / "models.toml").write_text("[[[not valid toml", encoding="utf-8")
+    monkeypatch.setattr(ms, "repo_root", lambda: tmp_path)
+    ms.model_config.cache_clear()
+    try:
+        assert ms.model_config() == {}
+    finally:
+        ms.model_config.cache_clear()

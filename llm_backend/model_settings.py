@@ -30,7 +30,10 @@ def model_config() -> dict:
     try:
         with open(p, "rb") as f:
             return tomllib.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, tomllib.TOMLDecodeError):
+        # Corrupt (hand-edited) TOML must not crash the app at read time — return
+        # {} so the app falls back to defaults and the View → backend/model dialog
+        # can still open and self-heal it (settings_store .bak + regenerate).
         return {}
 
 

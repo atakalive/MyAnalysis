@@ -187,6 +187,15 @@ class BackendSelectorDialog(QDialog):
     def _on_engine_changed(self, _idx: int = 0) -> None:
         self._sync_engine_widgets()
 
+    def _set_selection_enabled(self, enabled: bool) -> None:
+        """Lock/unlock the selection inputs + Apply while a ping is in flight so a
+        connectivity result can never be shown against a *different* selection
+        (e.g. a slow claude OK landing after the user switched to mock)."""
+        self._engine_combo.setEnabled(enabled)
+        self._model_combo.setEnabled(enabled)
+        self._provider_combo.setEnabled(enabled)
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
+
     # ----- connectivity check -----
 
     def _on_test(self) -> None:
@@ -200,6 +209,7 @@ class BackendSelectorDialog(QDialog):
         )
         backend = build_backend(engine.backend_key, settings)
         self._test_btn.setEnabled(False)
+        self._set_selection_enabled(False)
         self._result_label.setText(tr("backend.dialog.testing"))
 
         worker = _PingWorker(backend, QApplication.instance())
@@ -237,6 +247,7 @@ class BackendSelectorDialog(QDialog):
         if self._ping_kill is not None:
             self._ping_kill.stop()
         self._test_btn.setEnabled(True)
+        self._set_selection_enabled(True)
         if result.ok:
             self._result_label.setText(
                 tr(
@@ -298,7 +309,10 @@ class BackendSelectorDialog(QDialog):
             apply_selection(
                 engine, model, provider, engine_changed=self._engine_changed()
             )
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
+            # RuntimeError = set_toml_keys validation / rollback double-fault;
+            # OSError (incl. PermissionError) = raw IO on either write. Both must
+            # surface to the user, not become an uncaught Qt slot exception.
             QMessageBox.critical(self, tr("backend.dialog.title"), str(e))
             return
         self._stop_ping_worker()

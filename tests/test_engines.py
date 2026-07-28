@@ -229,6 +229,20 @@ def test_apply_config_fail_unlinks_absent_models(apply_env, monkeypatch):
     assert not apply_env.mdl_p.exists()   # created then rolled back (unlinked)
 
 
+def test_apply_config_fail_rollback_preserves_crlf(apply_env, monkeypatch):
+    # reviewer/reviewer code P2: the pre-apply snapshot must keep CRLF verbatim so the
+    # rollback is byte-exact (Path.read_text would collapse CRLF→LF).
+    apply_env.cfg_p.write_text(
+        '[backend]\nname = "claude"\n\n[claude_code]\nbin = ""\n', encoding="utf-8"
+    )
+    crlf = b'[claude_code]\r\nmodel = "oldm"\r\n'
+    apply_env.mdl_p.write_bytes(crlf)
+    monkeypatch.setattr(engines, "set_toml_keys", _fail_on_config(apply_env.cfg_p))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert apply_env.mdl_p.read_bytes() == crlf   # byte-exact, CRLF not LF-ified
+
+
 def test_apply_env_rewrite_when_set_and_differs(apply_env, monkeypatch):
     apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
     monkeypatch.setenv("LLM_BACKEND", "mock")

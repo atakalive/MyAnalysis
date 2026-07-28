@@ -43,3 +43,17 @@ def test_get_backend_env_precedence(monkeypatch):
     monkeypatch.setenv("LLM_BACKEND", "mock")
     b = get_backend()
     assert b.name == "mock"
+
+
+def test_backend_config_corrupt_returns_empty(tmp_path, monkeypatch):
+    # reviewer code P2: corrupt (hand-edited) config.toml must not crash at read time
+    # — return {} so the dialog can still open and self-heal on apply.
+    d = tmp_path / "llm_backend"
+    d.mkdir()
+    (d / "config.toml").write_text("[[[not valid toml", encoding="utf-8")
+    monkeypatch.setattr(llm_backend, "repo_root", lambda: tmp_path)
+    llm_backend.backend_config.cache_clear()
+    try:
+        assert llm_backend.backend_config() == {}
+    finally:
+        llm_backend.backend_config.cache_clear()

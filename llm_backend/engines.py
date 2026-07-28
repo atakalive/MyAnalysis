@@ -173,9 +173,13 @@ def apply_selection(
     models_path = models_toml_path()
     config_path = config_toml_path()
 
-    # 1. pre-apply snapshot of models.toml.
+    # 1. pre-apply snapshot of models.toml. newline="" keeps CRLF verbatim (Path.
+    #    read_text would collapse CRLF→LF via universal newlines) so the rollback
+    #    below is byte-exact — matching settings_store's CRLF-preserving contract,
+    #    which is the whole reason atomic_write_text grew a newline parameter.
     try:
-        models_before: str | None = models_path.read_text(encoding="utf-8")
+        with open(models_path, encoding="utf-8", newline="") as f:
+            models_before: str | None = f.read()
         models_existed = True
     except FileNotFoundError:
         models_before = None
