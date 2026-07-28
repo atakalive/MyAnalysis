@@ -355,6 +355,12 @@ def main(argv: list[str] | None = None) -> int:
                     r = result.get("result", "")
                     if isinstance(r, str) and r.startswith("error:"):
                         print(f"registered but could not open: {r}", file=sys.stderr)
+                    elif isinstance(r, str) and r.startswith("unreadable-session:"):
+                        print(
+                            "opened, but session.json is corrupt — tabs not "
+                            "restored (file left untouched; see GUI log)",
+                            file=sys.stderr,
+                        )
                     elif isinstance(r, str) and r.startswith("no-session:"):
                         print(f"opened (no saved session)")
                     elif isinstance(r, str) and r.startswith("restored:"):

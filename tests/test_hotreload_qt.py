@@ -266,6 +266,38 @@ def test_consume_manifest_missing_keys_no_crash(window, monkeypatch, tmp_path):
     assert not mpath.exists()
 
 
+def test_consume_manifest_open_failure_warns_deferred(window, monkeypatch, tmp_path):
+    """manifest 中の開けない DS（error:）は黙殺されず警告 1 回で顕在化する。
+
+    表示は singleShot(0) の遅延（consume_manifest は window.show() 前に走る）
+    なので、consume 直後は未表示 → イベント処理後に 1 回。
+    """
+    import json
+
+    from devtools import qt_integration
+    from llm_bridge import paths
+
+    mpath = tmp_path / "reload_manifest.json"
+    mpath.write_text(json.dumps({"datasets": ["dsGone"]}), encoding="utf-8")
+    monkeypatch.setattr(paths, "reload_manifest_path", lambda: mpath)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        qt_integration.QMessageBox, "warning",
+        lambda parent, title, body, *a, **k: calls.append(body),
+    )
+
+    assert qt_integration.consume_manifest(window) is True
+    assert calls == []          # まだ出ていない（遅延表示）
+    from PySide6.QtWidgets import QApplication
+    for _ in range(5):
+        QApplication.processEvents()
+        if calls:
+            break
+    assert len(calls) == 1
+    assert "dsGone" in calls[0]
+
+
 # ---------------------------------------------------------------------------
 # Tier 2 — reload_tab (sandbox build → swap)
 # ---------------------------------------------------------------------------

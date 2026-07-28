@@ -54,14 +54,57 @@ def test_read_missing_returns_none(ds_env):
     assert session.read_session("ds_a") is None
 
 
-def test_read_bad_json_returns_none(ds_env):
+def test_read_bad_json_no_bak_raises(ds_env):
+    """破損 JSON（.bak 無し）→ SessionUnreadableError。
+
+    旧仕様の「破損 → None」は 0 バイト truncate（同期マウント障害）を
+    no-session と混同し、タブ構成の黙殺消失になるため廃止。
+    """
     work_dir = dataset_config.get_work_dir("ds_a")
     (work_dir / "session.json").write_text("{ not json", encoding="utf-8")
-    assert session.read_session("ds_a") is None
+    with pytest.raises(session.SessionUnreadableError):
+        session.read_session("ds_a")
 
 
 def test_read_unknown_dataset_returns_none(ds_env):
     assert session.read_session("nope") is None
+
+
+# ---- durable session.json（.bak 二重化 + read-back 検証）----
+
+_PAYLOAD = {
+    "version": 1,
+    "dataset": "ds_a",
+    "active_tab": "fig1",
+    "tabs": [{"name": "fig1", "kind": "figure", "figure": "figures/fig1.png"}],
+}
+
+
+def test_write_session_writes_bak(ds_env):
+    import json as _json
+    session.write_session("ds_a", _PAYLOAD)
+    work_dir = dataset_config.get_work_dir("ds_a")
+    bak = work_dir / "session.json.bak"
+    assert _json.loads(bak.read_text(encoding="utf-8")) == _PAYLOAD
+
+
+def test_read_session_recovers_from_bak(ds_env):
+    """primary が 0 バイト化しても .bak から復元される（今回の実障害の形）。"""
+    session.write_session("ds_a", _PAYLOAD)
+    work_dir = dataset_config.get_work_dir("ds_a")
+    (work_dir / "session.json").write_text("", encoding="utf-8")
+    assert session.read_session("ds_a") == _PAYLOAD
+
+
+def test_write_session_truncated_write_raises(ds_env, monkeypatch):
+    """書込が黙って空を書く（マウント truncate 相当）→ read-back 検証が raise。"""
+    from common import paths as common_paths
+    monkeypatch.setattr(
+        common_paths, "atomic_write_text",
+        lambda path, text, **k: Path(path).write_text("", encoding="utf-8"),
+    )
+    with pytest.raises(session.SessionPersistError):
+        session.write_session("ds_a", _PAYLOAD)
 
 
 # ---- infer_dataset ----
@@ -164,6 +207,28 @@ def test_save_all_partial_failure(ds_env, monkeypatch):
     assert saved == ["ds_a"]
     assert failed == ["ds_b"]
     assert not win.dirty_cleared  # dirty kept on partial failure
+
+
+def test_save_all_truncated_write_marks_failed(ds_env, monkeypatch):
+    """write_session の read-back 検証失敗が save_all の failed に載る。
+
+    この failed 経路が Tier 3/4 リロードの中止（qt_integration の既存 abort）、
+    「保存して終了」の close 拒否、close_dataset の中止を駆動する — つまり
+    truncate をここで検出できれば黙殺消失は起きない。
+    """
+    session._touched.clear()
+    spec_a = {"kind": "figure", "name": "fa", "dataset": "ds_a",
+              "figure": str(ds_env["ds_a"] / "_work" / "fa.png")}
+    win = _FakeWindow([_FakeTab("fa", spec_a)], active=None)
+    from common import paths as common_paths
+    monkeypatch.setattr(
+        common_paths, "atomic_write_text",
+        lambda path, text, **k: Path(path).write_text("", encoding="utf-8"),
+    )
+    saved, failed = session.save_all(win)
+    assert saved == []
+    assert failed == ["ds_a"]
+    assert not win.dirty_cleared
 
 
 def test_save_all_touched_removed_after_empty_save(ds_env):
@@ -270,6 +335,23 @@ def test_open_dataset_no_session_no_touched(ds_env):
     result = session.open_dataset(win, "ds_a")
     assert result.startswith("no-session:")
     assert "ds_a" not in session._touched
+
+
+def test_open_dataset_unreadable_session(ds_env):
+    """(7d) 0 バイト session.json（.bak 無し）→ unreadable-session:。
+
+    破損ファイルは上書きされず、_touched も汚染されず、DS 自体は開く
+    （note_current_dataset が呼ばれる）。no-session と混同しない。
+    """
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    (work_dir / "session.json").write_text("", encoding="utf-8")
+    win = _DispatchWindow()
+    result = session.open_dataset(win, "ds_a")
+    assert result == "unreadable-session:ds_a"
+    assert (work_dir / "session.json").read_text(encoding="utf-8") == ""
+    assert "ds_a" not in session._touched
+    assert win.noted_datasets == ["ds_a"]
 
 
 def test_open_dataset_all_figures_missing_no_touched(ds_env):
@@ -579,8 +661,9 @@ def test_save_all_persists_layout_and_figure2(ds_env):
     session.save_all(win)
     data = session.read_session("ds_a")
     entry = data["tabs"][0]
-    assert entry["figure"] == "figures/a.png"
-    assert entry["figure2"] == "figures/b.png"
+    # 相対化は str(Path.relative_to(...)) なので区切りは OS ネイティブ。
+    assert entry["figure"] == str(Path("figures") / "a.png")
+    assert entry["figure2"] == str(Path("figures") / "b.png")
     assert entry["layout"] == layout
 
 
@@ -597,7 +680,7 @@ def test_save_dataset_persists_layout_and_figure2(ds_env):
     win = _FakeWindow([tab], active=None)
     assert session.save_dataset(win, "ds_a") is True
     entry = session.read_session("ds_a")["tabs"][0]
-    assert entry["figure2"] == "figures/b.png"
+    assert entry["figure2"] == str(Path("figures") / "b.png")
     assert entry["layout"] == layout
 
 

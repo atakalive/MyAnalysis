@@ -152,6 +152,7 @@ to discover registered dataset names.
 - 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
 - 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。
 - `llm_bridge/session.py` が中核。`show` verb の `dataset=` 引数でタブ→データセット紐付け。
+- `session.json` は durable 書込（`common/paths.py` の `durable_write_json` = primary + `.bak` の 2 コピー＋書込後 read-back 検証。同期マウントの 0 バイト truncate 対策）。検証失敗は `save_all` の failed に載り、Tier 3/4 リロード中止・「保存して終了」の close 拒否・close_dataset 中止という既存経路が発火する。読取は `.bak` フォールバック付きで、破損して回復不能なら `no-session` と区別して `unreadable-session:<ds>`（GUI が警告・破損ファイルは上書きしない）。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
 
 ### Multiple datasets（Issue #51 — ワークスペース）

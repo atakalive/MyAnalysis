@@ -346,6 +346,63 @@ def test_open_dataset_dialog_error_warns(win, tmp_path, monkeypatch):
     assert "dsGhost" in warns[0]
 
 
+# ---- session.json 破損（unreadable ≠ no-session）の顕在化 ----
+
+def test_restore_unreadable_session_warns_but_opens(win, tmp_path, monkeypatch):
+    """0 バイト session.json の DS → 警告 1 回・本文に DS 名。DS 自体は開き
+    active になれる（タブだけ未復元）。破損ファイルは上書きされない。"""
+    from llm_bridge import paths
+    wd = tmp_path / "dsB" / "_work"
+    wd.mkdir(parents=True)
+    (wd / "session.json").write_text("", encoding="utf-8")
+    lw = tmp_path / "last_window.json"
+    lw.write_text(json.dumps(
+        {"version": 1, "datasets": ["dsB"], "active": "dsB"}), encoding="utf-8")
+    monkeypatch.setattr(paths, "last_window_path", lambda: lw)
+    warns = _patch_warning(monkeypatch)
+
+    win._restore_last_session()
+
+    assert "dsB" in win.open_dataset_names()
+    assert win.current_dataset == "dsB"
+    assert len(warns) == 1
+    assert "dsB" in warns[0]
+    assert (wd / "session.json").read_text(encoding="utf-8") == ""
+
+
+def test_open_dataset_dialog_unreadable_warns(win, tmp_path, monkeypatch):
+    """_open_dataset 単体: 破損 session.json の DS → 警告 1 回・本文に DS 名、
+    DS は開く。"""
+    import config
+    wd = tmp_path / "dsU" / "_work"
+    wd.mkdir(parents=True)
+    (wd / "session.json").write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "reload_datasets", lambda: None)
+    monkeypatch.setattr(config, "DATASETS", {"dsU": {}})
+    warns = _patch_warning(monkeypatch)
+
+    from PySide6.QtWidgets import QDialog
+    import gui.open_dataset_dialog as odd
+
+    class _FakeDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_dataset(self):
+            return "dsU"
+
+    monkeypatch.setattr(odd, "OpenDatasetDialog", _FakeDialog)
+
+    win._open_dataset()
+
+    assert len(warns) == 1
+    assert "dsU" in warns[0]
+    assert "dsU" in win.open_dataset_names()
+
+
 # ---- Issue #59: DS タブのドラッグ並べ替え＋順序永続化 ----
 
 def _open_three(win, tmp_path):

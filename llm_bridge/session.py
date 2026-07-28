@@ -20,12 +20,30 @@ from pathlib import Path
 
 import config
 import dataset_config
-from common.paths import atomic_write_text, safe_resolve
+from common.paths import durable_read_json, durable_write_json, safe_resolve
 from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+
+class SessionPersistError(RuntimeError):
+    """write_session の read-back 検証失敗（書いた直後の primary が読み戻せない）。
+
+    同期マウント（rclone/WinFsp）は書込を例外なしに 0 バイトへ truncate し得る。
+    save_all/save_dataset がこれを捕捉して failed 扱いにすることで、Tier 3/4
+    リロードの中止・「保存して終了」の close 拒否・close_dataset の中止という
+    既存の失敗経路に乗る（黙ってタブ構成を失わない）。
+    """
+
+
+class SessionUnreadableError(RuntimeError):
+    """session.json が存在するのに読めない（0byte/破損で .bak でも回復不能）。
+
+    「セッションが無い」(no-session) と混同してはならない — 混同すると
+    transient なマウント障害が恒久的なタブ構成の消失として観測される。
+    """
 
 # Datasets that held (or once held) a tracked tab whose empty `tabs:[]`
 # persistence is not yet complete. See module docstring of the issue for the
@@ -141,31 +159,54 @@ def _resolve_work_dir_readonly(dataset: str) -> Path:
 
 
 def read_session(dataset: str) -> dict | None:
-    """Read <work_dir>/session.json. Returns None on any failure.
+    """Read <work_dir>/session.json (durable: primary → `.bak` fallback).
 
-    work_dir resolution failure, missing file, and JSON parse failure all
-    return None (caught individually).
+    Returns the session dict, or None when there is genuinely no session
+    (work_dir resolution failure, or primary AND `.bak` both absent). A primary
+    that exists but cannot be parsed — and cannot be recovered from `.bak` —
+    raises SessionUnreadableError instead of returning None: callers must not
+    treat a corrupt session.json (0-byte truncation on the synced mount) as
+    "no session".
     """
     try:
         work_dir = _resolve_work_dir_readonly(dataset)
     except Exception:
         return None
     path = work_dir / "session.json"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
+    status, data = durable_read_json(path)
+    if status == "ok":
+        return data
+    if status == "recovered":
+        # primary は次回の write_session（durable_write_json）が自己修復する。
+        _log.warning("read_session: %s unreadable; recovered from .bak", path)
+        return data
+    if status == "absent":
         return None
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
+    raise SessionUnreadableError(
+        f"session.json for {dataset!r} exists but is unreadable "
+        f"(0-byte/corrupt; .bak unusable): {path}"
+    )
 
 
 def write_session(dataset: str, payload: dict) -> None:
-    """Atomically write <work_dir>/session.json (side-effecting work_dir resolve)."""
+    """Durably write <work_dir>/session.json and verify (side-effecting resolve).
+
+    durable_write_json = primary + `.bak` の 2 コピー。書後に primary を
+    read-back し、書いた payload と一致しなければ SessionPersistError（recovered
+    = 直後に primary が読めないのもマウント異常のサインなので失敗扱い）。
+    write-back cache が read-back を騙す（書込成功に見えて後段 upload が失敗する）
+    ケースは `.bak` が第二防衛線。比較は JSON 正規化後（非 JSON 型の混入で
+    偽陽性の保存失敗を出さないため）。
+    """
     work_dir = dataset_config.get_work_dir(dataset)
     target = work_dir / "session.json"
-    atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2))
+    durable_write_json(target, payload)
+    status, data = durable_read_json(target)
+    if status != "ok" or data != json.loads(json.dumps(payload, ensure_ascii=False)):
+        raise SessionPersistError(
+            f"session.json write verification failed for {dataset!r} "
+            f"(read-back status={status}): {target}"
+        )
 
 
 def save_all(window) -> tuple[list[str], list[str]]:
@@ -388,7 +429,12 @@ def open_dataset(window, dataset: str) -> str:
     Chat persistence is independent of tab persistence, so a dataset may have
     chat_sessions/ but no session.json (opened, chatted, saved). Chat restore +
     the final current-dataset push therefore run on every non-`error:` path
-    (including `no-session:`), not just `restored:N`.
+    (including `no-session:` and `unreadable-session:`), not just `restored:N`.
+
+    Result strings: `restored:N` / `no-session:<ds>` / `unreadable-session:<ds>`
+    (session.json exists but is corrupt and `.bak` cannot recover it — the file
+    is left untouched, tabs are not restored, the dataset still opens) /
+    `error:<ds>`.
 
     New side effects (on the resolved path only): rebuilds the synced
     `<dataset_dir>/meta.json` (rebuild_meta, heavy=False) and stamps the
@@ -419,9 +465,23 @@ def open_dataset(window, dataset: str) -> str:
         except Exception:
             return f"error:{dataset}"
 
-        sess = read_session(dataset)
+        unreadable = False
+        try:
+            sess = read_session(dataset)
+        except SessionUnreadableError:
+            # 破損 session.json は上書きも削除もしない（復旧材料を保全）。DS は
+            # 開く（チャット復元・グループ生成は下の非 error 経路が担う）。
+            _log.warning(
+                "open_dataset: unreadable session.json for %r (left untouched)",
+                dataset, exc_info=True,
+            )
+            sess = None
+            unreadable = True
         if sess is None:
-            result = f"no-session:{dataset}"
+            result = (
+                f"unreadable-session:{dataset}" if unreadable
+                else f"no-session:{dataset}"
+            )
         else:
             restored = 0
             for entry in sess.get("tabs", []):

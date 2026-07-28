@@ -68,6 +68,8 @@
 "err.restore_partial.title"   = "一部のデータセットを復元できません"
 "err.restore_partial.body"    = "復元できなかったデータセット:\n{datasets}\nディレクトリが存在しないか読み取れません（config.py・同期ドライブを確認。詳細はログ）。"
 "err.open_dataset.body"       = "データセット {dataset} を開けません（ディレクトリが存在しないか読み取れません。config.py・同期ドライブを確認。詳細はログ）。"
+"err.session_unreadable.title" = "セッションを復元できません"
+"err.session_unreadable.body"  = "session.json が破損しているため、以下のデータセットのタブ構成を復元できません:\n{dataset}\n破損ファイルは上書きしていません（.bak でも回復できませんでした。詳細はログ）。"
 "err.register.title"          = "登録エラー"
 
 # --- dev (devtools/qt_integration.py) ---

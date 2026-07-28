@@ -1047,6 +1047,13 @@ class ToolWindow(QMainWindow):
                 tr("err.open_dataset.title"),
                 tr("err.open_dataset.body", dataset=name),
             )
+        elif isinstance(res, str) and res.startswith("unreadable-session:"):
+            _log.warning("open-dataset returned %r for %r", res, name)
+            QMessageBox.warning(
+                self,
+                tr("err.session_unreadable.title"),
+                tr("err.session_unreadable.body", dataset=name),
+            )
 
     def _restore_last_session(self) -> None:
         """Restore the last saved workspace (which datasets were open + active).
@@ -1055,6 +1062,8 @@ class ToolWindow(QMainWindow):
         open-dataset just focuses an already-open dataset. Missing file / empty /
         non-list payload → an info message only. Datasets that fail to open are
         skipped, logged, and surfaced in a single warning; the rest still restore.
+        Datasets whose session.json is corrupt (`unreadable-session:`) DO open
+        (tabs only are missing) and get their own warning.
         """
         from llm_bridge import session
         state = session.read_last_window()
@@ -1069,6 +1078,7 @@ class ToolWindow(QMainWindow):
             return
         opened: list[str] = []
         failed: list[str] = []
+        unreadable: list[str] = []
         for ds in datasets:
             try:
                 res = self.dispatch_command("open-dataset", name=ds)
@@ -1080,6 +1090,10 @@ class ToolWindow(QMainWindow):
                 _log.warning("restore: open-dataset returned %r for %r", res, ds)
                 failed.append(str(ds))
                 continue
+            if isinstance(res, str) and res.startswith("unreadable-session:"):
+                # DS 自体は開いている（タブだけ未復元）ので opened にも載せる。
+                _log.warning("restore: open-dataset returned %r for %r", res, ds)
+                unreadable.append(str(ds))
             opened.append(ds)
         active = state.get("active") if isinstance(state, dict) else None
         target = active if active in opened else (opened[0] if opened else None)
@@ -1093,6 +1107,12 @@ class ToolWindow(QMainWindow):
                 self,
                 tr("err.restore_partial.title"),
                 tr("err.restore_partial.body", datasets="\n".join(failed)),
+            )
+        if unreadable:
+            QMessageBox.warning(
+                self,
+                tr("err.session_unreadable.title"),
+                tr("err.session_unreadable.body", dataset="\n".join(unreadable)),
             )
 
     def _save_session(self) -> None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -28,6 +29,8 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from devtools import hotreload
+
+_log = logging.getLogger(__name__)
 
 
 def _m(name: str):
@@ -184,11 +187,46 @@ def _restore_from_manifest(window, data: dict) -> None:
             window.restoreGeometry(QByteArray.fromHex(bytes(geo, "ascii")))
         except Exception:
             pass
+    # open-dataset の失敗を黙って握らない（#90/#92 系）: error:（DS 不在等）と
+    # unreadable-session:（session.json 破損 — DS は開くがタブ未復元）を分けて
+    # 収集し、復元完了後に警告する。表示は singleShot(0) で遅延 — ここは起動時
+    # （tool.py の consume_manifest）も Tier 3 再構築中も window.show() より前に
+    # 走るため、直接モーダルを出さない。
+    open_failed: list[str] = []
+    open_unreadable: list[str] = []
     for ds in data.get("datasets", []) or []:
         try:
-            window.dispatch_command("open-dataset", name=ds)
+            res = window.dispatch_command("open-dataset", name=ds)
         except Exception:
+            _log.warning("manifest restore: open-dataset raised for %r",
+                         ds, exc_info=True)
+            open_failed.append(str(ds))
             continue
+        if isinstance(res, str) and res.startswith("error:"):
+            _log.warning("manifest restore: open-dataset returned %r for %r",
+                         res, ds)
+            open_failed.append(str(ds))
+        elif isinstance(res, str) and res.startswith("unreadable-session:"):
+            _log.warning("manifest restore: open-dataset returned %r for %r",
+                         res, ds)
+            open_unreadable.append(str(ds))
+    if open_failed or open_unreadable:
+        def _warn(failed=open_failed, unreadable=open_unreadable):
+            tr = _m("common.i18n").tr
+            if failed:
+                QMessageBox.warning(
+                    window,
+                    tr("err.restore_partial.title"),
+                    tr("err.restore_partial.body", datasets="\n".join(failed)),
+                )
+            if unreadable:
+                QMessageBox.warning(
+                    window,
+                    tr("err.session_unreadable.title"),
+                    tr("err.session_unreadable.body",
+                       dataset="\n".join(unreadable)),
+                )
+        QTimer.singleShot(0, _warn)
     ws = data.get("window_state") or ""
     if ws:
         try:
