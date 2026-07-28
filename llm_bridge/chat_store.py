@@ -30,6 +30,9 @@ SCHEMA_VERSION = 1
 _DEFAULT_TITLE = "新しいチャット"
 
 
+# NOTE: __slots__ を付けないこと — hot-reload 中の旧インスタンスへの動的属性追加
+# (archived 等) が壊れる。session_to_dict の getattr 防御と setattr 経路が
+# __dict__ 動的属性を前提にしている。
 @dataclass
 class ChatSession:
     id: str
@@ -42,6 +45,7 @@ class ChatSession:
     updated: float
     order: float = 0.0  # explicit tab position; persisted, lower = leftmost
     tool_display: str | None = None  # per-session display override; None = follow default
+    archived: bool = False
     # Per-tab unsent composer text. Deliberately NOT persisted: session_to_dict
     # omits it and session_from_dict never reads it, so a draft lives only as
     # long as the process. Kept on the session (not a side dict) so deleting a
@@ -92,6 +96,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "updated": sess.updated,
         "order": sess.order,
         "tool_display": sess.tool_display,
+        "archived": bool(getattr(sess, "archived", False)),
     }
 
 
@@ -121,6 +126,7 @@ def session_from_dict(data: dict) -> ChatSession:
         updated=data.get("updated"),
         order=data.get("order", 0.0),
         tool_display=tool_display,
+        archived=bool(data.get("archived", False)),
     )
 
 

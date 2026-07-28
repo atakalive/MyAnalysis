@@ -1790,3 +1790,152 @@ def test_primary_ip_prefers_lan(qapp, monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", gai(["127.0.0.1", "169.254.1.1"]))
     assert sw._primary_ip() == ""
     r.stop()
+
+
+# ---- archived chat sessions (Issue #93) ----
+
+def _sess_a(sid, dataset="ds1", archived=False):
+    return {"id": sid, "title": sid.upper(), "busy": False,
+            "dataset": dataset, "archived": archived}
+
+
+def _urlopen_ok(mr, monkeypatch):
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: FakeResp(
+                            json.dumps({"expires_at": 9999999999,
+                                        "server_now_ms": 1}).encode()))
+
+
+def test_meeting_start_excludes_archived_from_published(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("b", archived=True)])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    # archived b is excluded from published but present in known / start ids.
+    assert r.published_session_ids() == {"a"}
+    assert r._session_known == {"a", "b"}
+    assert r._meeting_start_ids == {"a", "b"}
+    # unarchiving b does NOT auto-publish it (known-but-not-published).
+    chat._summaries = [_sess_a("a"), _sess_a("b", archived=False)]
+    assert r.absorb_new_sessions() == []
+    assert "b" not in r.published_session_ids()
+    r.stop()
+
+
+def test_start_archived_no_false_has_new(qapp, monkeypatch):
+    # _meeting_start_ids must include archived-at-start ids so unarchiving one is
+    # not misread as a brand-new session by meeting_share's has_new check.
+    chat = FakeChat([_sess_a("a"), _sess_a("b", archived=True)])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": False})
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+    # unarchive b mid-meeting.
+    chat._summaries = [_sess_a("a"), _sess_a("b", archived=False)]
+    sw._refresh_lists()
+    # b existed at start → not "new" → the new-session note must stay hidden.
+    assert not sw._new_session_note.isVisible()
+    r.stop()
+
+
+def test_capture_tick_archive_drops_from_wire_keeps_published(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("b")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"a", "b"}
+
+    # archive b mid-meeting.
+    chat._summaries = [_sess_a("a"), _sess_a("b", archived=True)]
+    r._last_sessions_json = None
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
+    assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"a"}
+    # b stays in the published set (preserved for revival on unarchive).
+    assert "b" in r.published_session_ids()
+
+    # unarchive b → reappears on the wire without any explicit re-publish.
+    chat._summaries = [_sess_a("a"), _sess_a("b", archived=False)]
+    r._last_sessions_json = None
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
+    assert sess_puts and {s["id"] for s in sess_puts[-1]["data"]} == {"a", "b"}
+    r.stop()
+
+
+def test_absorb_new_sessions_skips_archived_but_marks_known(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("s1")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": True})
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    # a brand-new but archived session: not published, but marked known.
+    chat._summaries.append(_sess_a("s2", archived=True))
+    assert r.absorb_new_sessions() == []
+    assert "s2" not in r.published_session_ids()
+    assert "s2" in r._session_known
+    r.stop()
+
+
+def test_backfill_skips_archived(qapp, monkeypatch):
+    chat = FakeChat(
+        [_sess_a("a"), _sess_a("b", archived=True)],
+        messages={"a": [FakeMsg("user", "q1")],
+                  "b": [FakeMsg("user", "q2")]},
+    )
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)   # first tick backfills
+    backlogs = [i for i in r._worker._outbox if i["kind"] == "backlog"]
+    sids = {i["sid"] for i in backlogs}
+    assert "a" in sids and "b" not in sids
+    assert "b" not in r._backfilled_ids   # so unarchive → next tick backfills
+    r.stop()
+
+
+def _share_window_with_two_published(qapp, monkeypatch):
+    """Meeting sharing s1+s2; return (relay, share window) with rows rendered."""
+    chat = FakeChat([_sess_a("s1"), _sess_a("s2")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+    sw._refresh_lists()
+    return chat, r, sw
+
+
+def test_session_toggle_preserves_hidden_published(qapp, monkeypatch):
+    chat, r, sw = _share_window_with_two_published(qapp, monkeypatch)
+    assert r.published_session_ids() == {"s1", "s2"}
+    # archive s1 mid-meeting → its row disappears from _sess_boxes.
+    chat._summaries = [_sess_a("s1", archived=True), _sess_a("s2")]
+    sw._refresh_lists()
+    assert "s1" not in sw._sess_boxes
+    # a toggle interaction on the remaining visible rows must not drop s1.
+    sw._on_session_toggle()
+    assert "s1" in r.published_session_ids()
+    r.stop()
+
+
+def test_select_all_sessions_preserves_hidden_published(qapp, monkeypatch):
+    chat, r, sw = _share_window_with_two_published(qapp, monkeypatch)
+    chat._summaries = [_sess_a("s1", archived=True), _sess_a("s2")]
+    sw._refresh_lists()
+    assert "s1" not in sw._sess_boxes
+    # master select-all/none must not drop the hidden-but-published s1.
+    sw._on_select_all_sessions()
+    assert "s1" in r.published_session_ids()
+    sw._on_select_all_sessions()
+    assert "s1" in r.published_session_ids()
+    r.stop()

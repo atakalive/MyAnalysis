@@ -412,6 +412,9 @@ class MeetingShareWindow(QWidget):
         sharing = self._relay.is_sharing()
         self._relay.absorb_new_sessions(summaries)
         published = self._relay.published_session_ids()
+        # absorb は archived 込みの full summaries で known をマークできるが、以降の表示
+        # ・件数（行・has_new）は archived を除外する。
+        summaries = [s for s in summaries if not s.get("archived")]
 
         sig = tuple((s["id"], s["dataset"], s["title"]) for s in summaries) + (sharing,)
         if sig != self._sess_sig:
@@ -502,8 +505,10 @@ class MeetingShareWindow(QWidget):
 
     def _on_session_toggle(self, _checked=False) -> None:
         if self._relay.is_sharing():
-            ids = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
-            self._relay.set_published_sessions(ids)
+            checked = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
+            visible = set(self._sess_boxes)                          # いま描画中の box の全 sid
+            preserved = self._relay.published_session_ids() - visible  # 非表示だが published（archived 等）
+            self._relay.set_published_sessions(checked | preserved)
         self._sync_select_all(self._sess_boxes, self._sess_select_all)
 
     def _on_auto_share_toggled(self, checked: bool) -> None:
@@ -527,8 +532,9 @@ class MeetingShareWindow(QWidget):
             b.setChecked(target)
             b.blockSignals(False)
         if self._relay.is_sharing():
-            ids = {sid for sid, b in boxes.items() if b.isChecked()}
-            self._relay.set_published_sessions(ids)
+            checked = {sid for sid, b in boxes.items() if b.isChecked()}
+            preserved = self._relay.published_session_ids() - set(boxes)  # 非表示だが published を温存
+            self._relay.set_published_sessions(checked | preserved)
         self._sync_select_all(boxes, self._sess_select_all)
 
     def _on_select_all_tabs(self, _checked=False) -> None:

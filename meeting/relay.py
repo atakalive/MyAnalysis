@@ -698,7 +698,7 @@ class MeetingRelay(QObject):
         self._session_known.update(s["id"] for s in new)
         if not self._auto_share_new_sessions:
             return []                            # toggle off: known but NOT published
-        to_pub = [s["id"] for s in new]
+        to_pub = [s["id"] for s in new if not s.get("archived")]
         self._published_session_ids.update(to_pub)
         return to_pub
 
@@ -826,9 +826,13 @@ class MeetingRelay(QObject):
         # absorb_new_tabs/absorb_new_sessions decide all open datasets too, so an
         # item opened mid-meeting in any dataset auto-absorbs on the next tick.
         all_ids = {s["id"] for s in summaries}
-        self._published_session_ids = set(all_ids)
+        self._published_session_ids = {s["id"] for s in summaries if not s.get("archived")}
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
-        self._meeting_start_ids = set(self._published_session_ids)
+        # 開始時に存在した全 id（archived 含む）。_meeting_start_ids は published 由来に
+        # せず all_ids 由来にする — meeting_share の has_new「新規」判定が「開始時に存在した
+        # もの全部」を意味論として要求するため（archived を落とすと開始時アーカイブ済みの
+        # 解除が「新規」と誤判定される）。
+        self._meeting_start_ids = set(all_ids)
         self._session_known = set(all_ids)
         all_pairs = self._all_ds_tab_pairs()
         self._published_tabs = set(all_pairs)
@@ -1031,7 +1035,8 @@ class MeetingRelay(QObject):
             )
             return
         summaries = cw.session_summaries()
-        pub = [s for s in summaries if s["id"] in self._published_session_ids]
+        pub = [s for s in summaries
+               if s["id"] in self._published_session_ids and not s.get("archived")]
         allowed = {k for k in self._shareable_ds_keys(pub) if k}
         if ds not in allowed:
             cur = self._active_dataset()
@@ -1194,6 +1199,7 @@ class MeetingRelay(QObject):
             # datasets (Issue #78) — a deleted session drops out via ∩ existing.
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
+            archived_ids = {s["id"] for s in summaries if s.get("archived")}
             self.absorb_new_sessions(summaries)
             self._published_session_ids &= existing
             # Stage each newly-published session's pre-meeting transcript once so
@@ -1204,7 +1210,7 @@ class MeetingRelay(QObject):
             if not hasattr(self, "_backfilled_ids"):
                 self._backfilled_ids = set()
             if cw is not None:
-                for sid in list(self._published_session_ids - self._backfilled_ids):
+                for sid in list(self._published_session_ids - self._backfilled_ids - archived_ids):
                     self._backfill_session(sid, cw)
                     self._backfilled_ids.add(sid)
             # Each session carries its dataset (str or None) so guests can bucket
@@ -1213,7 +1219,8 @@ class MeetingRelay(QObject):
             pub = [
                 {"id": s["id"], "title": s["title"], "busy": s["busy"],
                  "dataset": s.get("dataset")}
-                for s in summaries if s["id"] in self._published_session_ids
+                for s in summaries
+                if s["id"] in self._published_session_ids and not s.get("archived")
             ]
             sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
             if sj != self._last_sessions_json:

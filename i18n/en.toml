@@ -55,6 +55,11 @@
 "dlg.rename.title"            = "Rename"
 "dlg.rename.label"            = "Chat name:"
 "dlg.delete.title"            = "Delete chat"
+"dlg.archived.title"          = "Archived chats"
+"dlg.archived.col.title"      = "Title"
+"dlg.archived.col.updated"    = "Last updated"
+"dlg.archived.restore"        = "Restore & open"
+"dlg.archived.close"          = "Close"
 
 # --- errors ---
 "err.generic.title"           = "Error"
@@ -92,6 +97,8 @@
 "chat.btn.stop"               = "Stop"
 "chat.btn.send"               = "Send"
 "chat.menu.rename"            = "Rename"
+"chat.menu.archive"           = "Archive"
+"chat.menu.show_archived"     = "Show archived… ({n})"
 "chat.menu.close"             = "Close"
 "chat.menu.tool_display"          = "Tool call display"
 "chat.menu.tool_display.default"  = "Follow default"

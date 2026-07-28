@@ -629,6 +629,264 @@ def test_close_from_menu_cancel_keeps_session(widget, monkeypatch):
     assert len(widget._sessions) == before
 
 
+# ---- archive / unarchive (Issue #93) ----
+
+
+def _with_history(sess):
+    """Give a session a real (non-system) message so _can_archive accepts it."""
+    from llm_backend.base import Message
+    sess.messages.append(Message(role="user", content="hi"))
+    return sess
+
+
+def test_archive_hides_tab_but_keeps_session(widget, monkeypatch):
+    from gui.chat import QMessageBox
+
+    # archive は無確認 — question が呼ばれたら fail。
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: pytest.fail("archive must not confirm"),
+    )
+    sess = _with_history(_make_session(widget, dataset="ds", title="対象"))
+    widget._active = sess
+    widget._rebuild_tab_bar()
+    before = sess.updated
+    idx = _tab_index_for(widget, sess)
+
+    widget._on_archive_session(idx)
+
+    assert sess.archived is True
+    assert sess in widget._sessions            # 消さない
+    assert sess not in widget._visible_sessions()   # タブから隠れる
+    assert _tab_index_for(widget, sess) == -1
+    assert not widget._deleted                  # tombstone なし
+    assert sess.updated > before
+    assert widget._window.mark_chat_dirty.call_count >= 1
+
+
+def test_archive_active_falls_back_to_blank(widget):
+    # dataset に他チャットが無い状態で唯一のアクティブをアーカイブ → blank 補充。
+    sess = _with_history(_make_session(widget, dataset="ds", title="唯一"))
+    # 開いていた自動 blank を除去して sess のみ可視にする。
+    widget._sessions = [sess]
+    widget._active = sess
+    widget._rebuild_tab_bar()
+    idx = _tab_index_for(widget, sess)
+
+    widget._on_archive_session(idx)
+
+    assert widget._active is not sess
+    assert widget._active.dataset is None       # dataset 非依存 blank
+    assert not widget._has_history(widget._active)
+
+
+def test_archive_active_falls_back_to_sibling(widget):
+    from llm_bridge import chat_store
+
+    a = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="A"))
+    b = chat_store.new_session("mock", "sys", dataset="ds", title="B")
+    widget._sessions = [a, b]
+    widget._active = a
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+    idx = _tab_index_for(widget, a)
+
+    widget._on_archive_session(idx)
+
+    assert a.archived is True
+    assert widget._active is b
+
+
+def test_archive_nonactive_keeps_active(widget):
+    from llm_bridge import chat_store
+
+    a = chat_store.new_session("mock", "sys", dataset="ds", title="A")
+    b = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="B"))
+    widget._sessions = [a, b]
+    widget._active = a
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+    idx = _tab_index_for(widget, b)
+
+    widget._on_archive_session(idx)
+
+    assert b.archived is True
+    assert widget._active is a                  # 非アクティブアーカイブは active 不変
+
+
+def test_can_archive_guards(widget):
+    from llm_bridge import chat_store
+
+    # unbound (dataset None) — 履歴あっても不可。
+    unbound = _with_history(_make_session(widget, dataset=None))
+    assert not widget._can_archive(unbound)
+
+    # 履歴なし — 不可。
+    nohist = _make_session(widget, dataset="ds")
+    assert not widget._can_archive(nohist)
+
+    # busy (_turns 在中) — 不可。
+    busy = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="busy"))
+    widget._sessions.append(busy)
+    widget._turns[busy.id] = object()
+    assert not widget._can_archive(busy)
+
+    # 既にアーカイブ済み — 不可。
+    arch = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="a"))
+    arch.archived = True
+    assert not widget._can_archive(arch)
+
+
+def test_archive_handler_noop_when_guard_fails(widget):
+    # 履歴なし → ハンドラは no-op（archived を立てない）。
+    sess = _make_session(widget, dataset="ds")
+    widget._active = sess
+    widget._rebuild_tab_bar()
+    idx = _tab_index_for(widget, sess)
+    widget._on_archive_session(idx)
+    assert sess.archived is False
+
+
+def test_unarchive_reshows_and_activates(widget):
+    from llm_bridge import chat_store
+
+    keep = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="keep"))
+    arch = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="arch"))
+    arch.archived = True
+    widget._sessions = [keep, arch]
+    widget._active = keep
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+    before = arch.updated
+
+    widget._on_unarchive_session(arch.id)
+
+    assert arch.archived is False
+    assert arch in widget._visible_sessions()
+    assert widget._active is arch
+    assert widget._last_active_by_ds["ds"] == arch.id
+    assert arch.updated > before
+    assert widget._window.mark_chat_dirty.call_count >= 1
+
+
+def test_tab_moved_reorders_with_archived_present(widget):
+    """slots 方式の _on_tab_moved が archived 混在でも可視のみ並べ替える回帰ロック。"""
+    from llm_bridge import chat_store
+
+    a = _with_history(chat_store.new_session("mock", "sys", dataset="ds", title="A"))
+    arch = _with_history(chat_store.new_session("mock", "sys", dataset="ds", title="X"))
+    arch.archived = True
+    b = chat_store.new_session("mock", "sys", dataset="ds", title="B")
+    c = chat_store.new_session("mock", "sys", dataset="ds", title="C")
+    widget._sessions = [a, arch, b, c]
+    widget._current_dataset = "ds"
+    widget._active = a
+    widget._rebuild_tab_bar()
+    # Visible tabs: [A, B, C]; archived X hidden. Drag C (2) → front (0).
+    widget._tab_bar.moveTab(2, 0)
+
+    assert [s.title for s in widget._visible_sessions()] == ["C", "A", "B"]
+    assert arch in widget._sessions             # archived は pool に残る
+
+
+def test_session_summaries_includes_archived(widget):
+    from llm_bridge import chat_store
+
+    arch = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="a"))
+    arch.archived = True
+    widget._sessions.append(arch)
+    summ = {s["id"]: s for s in widget.session_summaries()}
+    assert summ[arch.id]["archived"] is True
+
+
+def test_set_active_session_by_id_ignores_archived(widget):
+    from llm_bridge import chat_store
+
+    keep = _make_session(widget, dataset="ds", title="keep")
+    widget._active = keep
+    arch = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="a"))
+    arch.archived = True
+    widget._sessions.append(arch)
+
+    widget.set_active_session_by_id(arch.id)
+    assert widget._active is keep               # archived への切替は no-op
+
+
+def test_merge_incoming_archived_hides_and_redraws(widget):
+    """同期で archived=True(updated 新)の同 id が来たら非表示化＋新 active に再描画。"""
+    from llm_bridge import chat_store
+    from llm_backend.base import Message
+
+    a = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="A"))
+    b = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="B"))
+    widget._sessions = [a, b]
+    widget._active = a
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+
+    # incoming: 同 id a のアーカイブ済みコピー（updated 新）。
+    incoming = chat_store.new_session("mock", "sys", dataset="ds", title="A")
+    incoming.id = a.id
+    incoming.messages.append(Message(role="user", content="hi"))
+    incoming.archived = True
+    incoming.updated = a.updated + 10.0
+
+    widget.merge_dataset_sessions("ds", [incoming])
+
+    merged = widget._session_by_id(a.id)
+    assert merged.archived is True
+    assert widget._active is not merged         # active 付け替え
+    assert widget._active is widget._session_by_id(b.id)
+    # transcript が新 active(B) を映しているか（3.10 の再描画をロック）。
+    assert "B" in widget._log.toPlainText() or widget._active.title == "B"
+
+
+def test_archived_chats_dialog_rows_and_selection(qapp):
+    from gui.chat import _ArchivedChatsDialog
+
+    rows = [
+        ("新しい方", "2026-07-28 10:00", "id-new"),
+        ("古い方", "2026-07-01 09:00", "id-old"),
+    ]
+    dlg = _ArchivedChatsDialog(rows)
+    assert dlg._table.rowCount() == 2
+    assert dlg._table.item(0, 0).text() == "新しい方"
+    assert dlg._table.item(0, 1).text() == "2026-07-28 10:00"
+    assert dlg._table.item(1, 0).text() == "古い方"
+    # 選択なし → None。
+    assert dlg.selected_sid() is None
+    dlg._table.selectRow(1)
+    assert dlg.selected_sid() == "id-old"
+
+
+def test_archived_sessions_sorted_updated_desc(widget):
+    from llm_bridge import chat_store
+
+    older = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="old"))
+    older.archived = True
+    older.updated = 100.0
+    newer = _with_history(
+        chat_store.new_session("mock", "sys", dataset="ds", title="new"))
+    newer.archived = True
+    newer.updated = 200.0
+    widget._sessions = [older, newer]
+    widget._current_dataset = "ds"
+
+    got = widget._archived_sessions()
+    assert [s.title for s in got] == ["new", "old"]
+
+
 # ---- live streaming respects the display mode (Issue: hide tool calls live) ----
 
 def _start_inflight(widget, *, mode_default):

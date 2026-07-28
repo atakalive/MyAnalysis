@@ -440,3 +440,49 @@ def test_fork_session_is_nondestructive_and_deepcopies():
     assert len(new.messages) == 2
     # src itself keeps its own mutations but fork stayed independent
     assert src.backend_session_id == "sess"
+
+
+# ---- archived (Issue #93) ----
+
+
+def test_archived_roundtrip():
+    sess = _sample_session()
+    sess.archived = True
+    d = session_to_dict(sess)
+    assert d["archived"] is True
+    assert session_from_dict(d).archived is True
+
+
+def test_archived_default_false_roundtrip():
+    sess = _sample_session()
+    d = session_to_dict(sess)
+    assert d["archived"] is False
+    assert session_from_dict(d).archived is False
+
+
+def test_archived_missing_key_defaults_false():
+    d = session_to_dict(_sample_session())
+    del d["archived"]
+    assert session_from_dict(d).archived is False
+
+
+def _s_arch(id, updated, archived):
+    s = _s(id, updated)
+    s.archived = archived
+    return s
+
+
+def test_merge_newer_archived_replaces():
+    a = _s_arch("a", 1.0, False)
+    a2 = _s_arch("a", 5.0, True)
+    out = merge_sessions([a], [a2])
+    assert out[0] is a2
+    assert out[0].archived is True
+
+
+def test_merge_older_archived_does_not_replace():
+    a = _s_arch("a", 5.0, False)
+    a_old = _s_arch("a", 1.0, True)
+    out = merge_sessions([a], [a_old])
+    assert out[0] is a
+    assert out[0].archived is False

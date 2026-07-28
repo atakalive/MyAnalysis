@@ -5,6 +5,7 @@ import html
 import json
 import time
 import uuid
+from datetime import datetime
 from functools import partial
 from typing import Callable
 
@@ -19,8 +20,9 @@ from PySide6.QtGui import (
     QTextDocumentFragment,
 )
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSplitter, QTextBrowser, QToolButton,
+    QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView,
+    QInputDialog, QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -309,6 +311,59 @@ class _Turn:
         self.stream_id = ""
 
 
+def _is_archived(sess) -> bool:
+    """アーカイブ済みか。hot-reload で新フィールドを持たない旧インスタンス防御に
+    getattr で読む。"""
+    return bool(getattr(sess, "archived", False))
+
+
+class _ArchivedChatsDialog(QDialog):
+    """アーカイブ済みチャットの一覧。行は事前計算済み (title, updated_str, sid)。
+    ウィジェット内部状態に依存しないのでテストで直接構築できる。"""
+
+    def __init__(self, rows: list[tuple[str, str, str]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("dlg.archived.title"))
+        self.resize(480, 360)
+        self._rows = rows                      # index 揃えで sid を引くため保持
+        layout = QVBoxLayout(self)
+        self._table = QTableWidget(len(rows), 2, self)
+        self._table.setHorizontalHeaderLabels(
+            [tr("dlg.archived.col.title"), tr("dlg.archived.col.updated")]
+        )
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        for r, (title, updated_str, _sid) in enumerate(rows):
+            self._table.setItem(r, 0, QTableWidgetItem(title))
+            self._table.setItem(r, 1, QTableWidgetItem(updated_str))
+        self._table.doubleClicked.connect(lambda *_: self.accept())
+        self._table.itemSelectionChanged.connect(self._sync_restore_enabled)
+        layout.addWidget(self._table)
+        btns = QDialogButtonBox(self)
+        self._restore_btn = btns.addButton(
+            tr("dlg.archived.restore"), QDialogButtonBox.ButtonRole.AcceptRole)
+        btns.addButton(
+            tr("dlg.archived.close"), QDialogButtonBox.ButtonRole.RejectRole)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+        self._sync_restore_enabled()
+
+    def _sync_restore_enabled(self) -> None:
+        self._restore_btn.setEnabled(self._table.currentRow() >= 0)
+
+    def selected_sid(self) -> str | None:
+        r = self._table.currentRow()
+        if not (0 <= r < len(self._rows)):
+            return None
+        return self._rows[r][2]
+
+
 class ChatWidget(QWidget):
     # Emitted when a message is appended to a session. origin ∈ {"local","remote"}:
     # host-typed sends and assistant completions are "local"; remote (guest)
@@ -572,7 +627,7 @@ class ChatWidget(QWidget):
     def set_active_session_by_id(self, sid) -> None:
         """Re-select the active session by id (best-effort; no-op if unknown)."""
         sess = self._session_by_id(sid)
-        if sess is None:
+        if sess is None or _is_archived(sess):
             return
         prev_id = self._active.id
         self._commit_draft()
@@ -650,9 +705,13 @@ class ChatWidget(QWidget):
         its own, an EMPTY unbound blank is hidden — opening a dataset that has
         chats must not show a stray "新しいチャット" tab. A history-bearing scratch
         (an unsaved conversation) is always shown; explicit [+] chats are bound
-        to the dataset and so are always shown too."""
+        to the dataset and so are always shown too.
+
+        archived セッションは除外する（アーカイブ = タブバーから隠す）。全セッションが
+        アーカイブされた DS は has_bound が False になり共有 blank が出る。"""
         ds = self._current_dataset
-        matched = [s for s in self._sessions if s.dataset in (ds, None)]
+        matched = [s for s in self._sessions
+                   if s.dataset in (ds, None) and not _is_archived(s)]
         has_bound = ds is not None and any(s.dataset == ds for s in matched)
         if not has_bound:
             return matched
@@ -807,6 +866,19 @@ class ChatWidget(QWidget):
             if s.id == sid:
                 return s
         return None
+
+    def _can_archive(self, sess) -> bool:
+        return (sess.dataset is not None and self._has_history(sess)
+                and sess.id not in self._turns and not _is_archived(sess))
+
+    def _archived_sessions(self) -> list[ChatSession]:
+        ds = self._current_dataset
+        if ds is None:
+            return []
+        return sorted(
+            (s for s in self._sessions if _is_archived(s) and s.dataset == ds),
+            key=lambda s: -(s.updated or 0.0),   # updated=None 防御（None で sort 例外を避ける）
+        )
 
     # ----- per-tab draft (composer はアクティブセッションに紐づく) -----
 
@@ -979,6 +1051,18 @@ class ChatWidget(QWidget):
         # 確認ダイアログ・in-flight 停止・空時のブランク補充まで担う。index は
         # menu.exec（同期）中に発火するため late-binding でも安全。
         menu.addSeparator()
+        archive_action = menu.addAction(tr("chat.menu.archive"))
+        archive_action.setEnabled(self._can_archive(sess))
+        archive_action.triggered.connect(
+            lambda _checked=False, i=index: self._on_archive_session(i)
+        )
+        n_arch = len(self._archived_sessions())
+        show_action = menu.addAction(tr("chat.menu.show_archived", n=n_arch))
+        show_action.setEnabled(n_arch > 0)
+        show_action.triggered.connect(
+            lambda _checked=False: self._on_show_archived()
+        )
+        menu.addSeparator()
         close_action = menu.addAction(tr("chat.menu.close"))
         close_action.triggered.connect(lambda: self._on_delete_session(index))
         menu.exec(self._tab_bar.mapToGlobal(pos))
@@ -1067,6 +1151,55 @@ class ChatWidget(QWidget):
         self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
+    def _on_archive_session(self, index: int) -> None:
+        sess = self._session_by_id(self._tab_bar.tabData(index))
+        if sess is None or not self._can_archive(sess):
+            return
+        prev_id = self._active.id
+        self._commit_draft()
+        sess.archived = True
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        self._mark_chat_dirty()               # closeEvent の dirty ゲート通過に必須
+        if self._active is sess:
+            self._sync_active_to_visible()    # 可視外れた active の付け替え（remembered→vis[0]→blank）
+        self._rebuild_tab_bar()
+        self._render_session(self._active)
+        self._switch_active_composer(prev_id)
+        self._update_turn_ui()
+
+    def _on_unarchive_session(self, sid) -> None:
+        sess = self._session_by_id(sid)
+        if sess is None or not _is_archived(sess):
+            return
+        prev_id = self._active.id
+        self._commit_draft()
+        sess.archived = False
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        self._mark_chat_dirty()
+        self._active = sess
+        self._last_active_by_ds[self._current_dataset] = sess.id   # _on_switch_session と同型
+        self._rebuild_tab_bar()
+        self._render_session(sess)
+        self._switch_active_composer(prev_id)
+        self._update_turn_ui()
+
+    def _on_show_archived(self) -> None:
+        archived = self._archived_sessions()
+        if not archived:
+            return
+        rows = [
+            (self._display_title(s),
+             datetime.fromtimestamp(s.updated or 0.0).strftime("%Y-%m-%d %H:%M"),
+             s.id)
+            for s in archived
+        ]
+        dlg = _ArchivedChatsDialog(rows, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sid = dlg.selected_sid()
+        if sid is not None:
+            self._on_unarchive_session(sid)
+
     # ----- dataset binding -----
 
     def set_current_dataset(self, ds: str | None) -> None:
@@ -1126,6 +1259,11 @@ class ChatWidget(QWidget):
             # Newly merged-in chats should hide a stray blank and take focus.
             self._sync_active_to_visible()
             self._rebuild_tab_bar()
+            if self._active.id != prev_id:
+                # _sync_active_to_visible が active を差し替えた（例: 同期で来た archived
+                # フラグが旧 active を hidden 化）場合、rebuild は QSignalBlocker 内なので
+                # currentChanged が飛ばず transcript が旧いまま残る → 明示再描画する。
+                self._render_session(self._active)
             self._switch_active_composer(prev_id)
 
     # ----- send / receive -----
@@ -1285,10 +1423,15 @@ class ChatWidget(QWidget):
         `dataset` lets the relay/share window decide the default (current
         dataset) vs opt-in (other datasets) publish scope; the authoritative
         published set lives in the relay's `_published_session_ids`.
+
+        archived セッションも含めて返す。relay の _published_session_ids &= existing
+        がこれに依存する（除外・物理削除しないこと）: 会議中アーカイブ→解除で配信復活
+        の前提として、archived な id が existing に残り続ける必要がある。
         """
         return [
             {"id": s.id, "title": self._display_title(s),
-             "busy": s.id in self._turns, "dataset": s.dataset}
+             "busy": s.id in self._turns, "dataset": s.dataset,
+             "archived": _is_archived(s)}
             for s in self.sessions_for_persistence()
         ]
 

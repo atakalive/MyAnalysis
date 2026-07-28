@@ -55,6 +55,11 @@
 "dlg.rename.title"            = "名前変更"
 "dlg.rename.label"            = "チャット名:"
 "dlg.delete.title"            = "チャットを削除"
+"dlg.archived.title"          = "アーカイブ済みチャット"
+"dlg.archived.col.title"      = "タイトル"
+"dlg.archived.col.updated"    = "最終更新"
+"dlg.archived.restore"        = "復元して開く"
+"dlg.archived.close"          = "閉じる"
 
 # --- errors ---
 "err.generic.title"           = "エラー"
@@ -92,6 +97,8 @@
 "chat.btn.stop"               = "Stop"
 "chat.btn.send"               = "Send"
 "chat.menu.rename"            = "名前変更"
+"chat.menu.archive"           = "アーカイブ"
+"chat.menu.show_archived"     = "アーカイブ済みを表示… ({n})"
 "chat.menu.close"             = "閉じる"
 "chat.menu.tool_display"          = "ツール呼び出し表示"
 "chat.menu.tool_display.default"  = "既定に従う"
