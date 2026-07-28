@@ -65,3 +65,36 @@ def test_resume_session_no_replay(monkeypatch, tmp_path):
     prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, session_id="sid")
     assert "<prior_conversation>" not in prompt
     assert prompt == "user2"
+
+
+# ----- _resolve_bin (Issue #94) -----
+
+def test_resolve_bin_bare_name_uses_which(monkeypatch):
+    monkeypatch.setattr(
+        "llm_backend.claude_code.shutil.which",
+        lambda v: "/usr/local/bin/claude" if v == "claude" else None,
+    )
+    assert ClaudeCodeBackend._resolve_bin("claude") == "/usr/local/bin/claude"
+
+
+def test_resolve_bin_absolute_is_literal(monkeypatch):
+    monkeypatch.setattr("llm_backend.claude_code.shutil.which", lambda v: "/wrong")
+    assert ClaudeCodeBackend._resolve_bin("/abs/path/claude") == "/abs/path/claude"
+
+
+def test_resolve_bin_path_separator_is_literal(monkeypatch):
+    monkeypatch.setattr("llm_backend.claude_code.shutil.which", lambda v: "/wrong")
+    assert ClaudeCodeBackend._resolve_bin("dir/claude") == "dir/claude"
+    assert ClaudeCodeBackend._resolve_bin("dir\\claude") == "dir\\claude"
+
+
+def test_resolve_bin_which_miss_falls_back_to_literal(monkeypatch):
+    monkeypatch.setattr("llm_backend.claude_code.shutil.which", lambda v: None)
+    assert ClaudeCodeBackend._resolve_bin("claude") == "claude"
+
+
+def test_resolve_bin_existing_file_is_literal(monkeypatch, tmp_path):
+    f = tmp_path / "claude"
+    f.write_text("x")
+    monkeypatch.setattr("llm_backend.claude_code.shutil.which", lambda v: "/wrong")
+    assert ClaudeCodeBackend._resolve_bin(str(f)) == str(f)

@@ -256,6 +256,11 @@ class ToolWindow(QMainWindow):
             lambda checked=False: self._set_use_provider_prompt(checked)
         )
 
+        self._backend_selector_action = self._view_menu.addAction(
+            tr("menu.view.backend_selector")
+        )
+        self._backend_selector_action.triggered.connect(self._open_backend_selector)
+
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
         self._about_action = self._help_menu.addAction(tr("menu.help.about"))
         self._about_action.triggered.connect(
@@ -279,6 +284,7 @@ class ToolWindow(QMainWindow):
         self._tool_display_actions["compact"].setText(tr("menu.view.tool_display.compact"))
         self._tool_display_actions["hidden"].setText(tr("menu.view.tool_display.hidden"))
         self._provider_prompt_action.setText(tr("menu.view.provider_prompt"))
+        self._backend_selector_action.setText(tr("menu.view.backend_selector"))
         self._help_menu.setTitle(tr("menu.help"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
@@ -329,6 +335,20 @@ class ToolWindow(QMainWindow):
         if self._chat_widget is not None \
                 and hasattr(self._chat_widget, "set_use_provider_system_prompt"):
             self._chat_widget.set_use_provider_system_prompt(value)
+
+    def _open_backend_selector(self) -> None:
+        from gui.backend_selector_dialog import BackendSelectorDialog
+        dlg = BackendSelectorDialog(self, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        w = self.chat_widget()
+        if w is None:
+            return
+        applied = w.apply_backend_change()
+        if applied:
+            self.statusBar().showMessage(tr("backend.applied"), 5000)
+        else:
+            self.statusBar().showMessage(tr("backend.applied_config_only"), 5000)
 
     # ------------------------------------------------------------------ #
     # Dataset groups (top-level "open datasets" layer)                   #

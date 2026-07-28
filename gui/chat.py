@@ -662,12 +662,17 @@ class ChatWidget(QWidget):
             backend._session_id = None
 
     def _capture_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
-        """After a turn, harvest the backend's (already-updated) _session_id back
-        into this session — only when the backend name still matches."""
-        if not hasattr(backend, "_session_id"):
-            return
-        if sess.backend_name == backend.name:
-            sess.backend_session_id = backend._session_id
+        """After a turn, adopt the backend that actually ran this session's turn.
+
+        Unconditional adoption (name + resume token): the caller always passes the
+        session's own backend (turn.backend), so mis-propagation is structurally
+        impossible. A backend with no _session_id (openai/mock) sets the token to
+        None — correct, since the session's history no longer matches the old native
+        session; a later claude turn just replays full history instead of resuming.
+        This also fixes a latent bug where switching claude→openai→claude would
+        silently resume a stale native session with an old token."""
+        sess.backend_name = backend.name
+        sess.backend_session_id = getattr(backend, "_session_id", None)
 
     # ----- helpers -----
 
@@ -763,6 +768,22 @@ class ChatWidget(QWidget):
 
     def set_use_provider_system_prompt(self, value: bool) -> None:  # メニューから
         _save_use_provider_prompt(value)   # 保存のみ（transcript 再描画は不要）
+
+    def apply_backend_change(self) -> bool:
+        """Adopt a just-applied backend/model selection across all sessions.
+
+        Returns False (no change) if a turn is streaming — same UX as reload-busy;
+        the selection is already on disk, so the next fresh backend build picks it
+        up regardless. Otherwise drop the per-session backend cache so the next
+        _start_turn rebuilds from the new config, refresh the display prototype, and
+        repaint the header. Existing sessions get the new backend lazily on their
+        next send (resume-token invalidation is handled by _load_backend_session)."""
+        if self.is_busy():
+            return False
+        self._session_backends.clear()
+        self._backend = self._backend_factory()
+        self._render_session(self._active)
+        return True
 
     def _set_session_tool_display(self, sess: ChatSession, value: str | None) -> None:
         sess.tool_display = value

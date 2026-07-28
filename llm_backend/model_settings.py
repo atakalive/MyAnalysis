@@ -21,7 +21,11 @@ from common.paths import repo_root
 
 @functools.lru_cache(maxsize=1)
 def model_config() -> dict:
-    """Load ``models.toml`` (repo root) once. Restart to pick up edits."""
+    """Load ``models.toml`` (repo root) once.
+
+    Cached; pick up edits via ``model_config.cache_clear()`` (the View →
+    backend/model dialog does this on apply) or a process restart.
+    """
     p = repo_root() / "models.toml"
     try:
         with open(p, "rb") as f:

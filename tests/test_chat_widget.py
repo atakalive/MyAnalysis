@@ -1510,3 +1510,48 @@ def test_create_remote_session_does_not_mark_dirty(widget):
     widget.create_remote_session("ds")
 
     assert widget._window.mark_chat_dirty.call_count == 0
+
+
+# ----- backend apply + capture (Issue #94) -----
+
+def test_apply_backend_change_busy_returns_false(widget):
+    widget._turns["t"] = object()             # simulate an in-flight turn
+    widget._session_backends["s"] = _FakeBackend()
+    assert widget.apply_backend_change() is False
+    assert "s" in widget._session_backends    # untouched while busy
+
+
+def test_apply_backend_change_clears_and_rebuilds(widget):
+    widget._session_backends["s"] = _FakeBackend()
+    old = widget._backend
+    assert widget.apply_backend_change() is True
+    assert widget._session_backends == {}
+    assert widget._backend is not old         # fresh prototype from the factory
+
+
+def test_capture_backend_session_adopts_name_and_token(widget):
+    from llm_bridge import chat_store
+
+    sess = chat_store.new_session("mock", "sys")
+
+    class _B:
+        name = "claude-code"
+        _session_id = "tok123"
+
+    widget._capture_backend_session(_B(), sess)
+    assert sess.backend_name == "claude-code"
+    assert sess.backend_session_id == "tok123"
+
+
+def test_capture_backend_session_nulls_token_for_tokenless_backend(widget):
+    from llm_bridge import chat_store
+
+    sess = chat_store.new_session("claude-code", "sys")
+    sess.backend_session_id = "old-token"
+
+    class _B:
+        name = "mock"       # no _session_id attribute
+
+    widget._capture_backend_session(_B(), sess)
+    assert sess.backend_name == "mock"
+    assert sess.backend_session_id is None

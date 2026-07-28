@@ -22,13 +22,18 @@ __all__ = [
     "Message",
     "LLMBackend",
     "get_backend",
+    "build_backend",
     "backend_config",
 ]
 
 
 @functools.lru_cache(maxsize=1)
 def backend_config() -> dict:
-    """Load llm_backend/config.toml once. Process must restart to pick up edits."""
+    """Load llm_backend/config.toml once.
+
+    Cached; pick up edits via ``backend_config.cache_clear()`` (the View →
+    backend/model dialog does this on apply) or a process restart.
+    """
     p = repo_root() / "llm_backend" / "config.toml"
     try:
         with open(p, "rb") as f:
@@ -37,12 +42,13 @@ def backend_config() -> dict:
         return {}
 
 
-def _make_openai() -> LLMBackend:
+def _make_openai(settings: dict | None = None) -> LLMBackend:
     from llm_backend.openai_compat import OpenAICompatBackend
 
-    settings = merged_settings(
-        "openai-compat", backend_config().get("openai-compat", {})
-    )
+    if settings is None:
+        settings = merged_settings(
+            "openai-compat", backend_config().get("openai-compat", {})
+        )
     # models.toml [openai-compat].model is canonical; OPENAI_MODEL env is a
     # back-compat fallback. base_url / api_key are endpoint/secret → stay in env.
     model = settings.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
@@ -54,34 +60,53 @@ def _make_openai() -> LLMBackend:
     )
 
 
-def _make_mock() -> LLMBackend:
+def _make_mock(settings: dict | None = None) -> LLMBackend:
     from llm_backend.mock import MockBackend
 
-    return MockBackend(model=os.environ.get("OPENAI_MODEL") or "mock-omni")
+    model = (settings or {}).get("model") or os.environ.get("OPENAI_MODEL") or "mock-omni"
+    return MockBackend(model=model)
 
 
-def _make_pi() -> LLMBackend:
+def _make_pi(settings: dict | None = None) -> LLMBackend:
     from llm_backend.pi import PiCodingAgentBackend
 
-    return PiCodingAgentBackend(
-        merged_settings("pi", backend_config().get("pi", {}))
-    )
+    if settings is None:
+        settings = merged_settings("pi", backend_config().get("pi", {}))
+    return PiCodingAgentBackend(settings)
 
 
-def _make_claude() -> LLMBackend:
+def _make_claude(settings: dict | None = None) -> LLMBackend:
     from llm_backend.claude_code import ClaudeCodeBackend
 
-    return ClaudeCodeBackend(
-        merged_settings("claude_code", backend_config().get("claude_code", {}))
-    )
+    if settings is None:
+        settings = merged_settings(
+            "claude_code", backend_config().get("claude_code", {})
+        )
+    return ClaudeCodeBackend(settings)
 
 
-_BACKENDS: dict[str, Callable[[], LLMBackend]] = {
+_BACKENDS: dict[str, Callable[[dict | None], LLMBackend]] = {
     "openai": _make_openai,
     "mock": _make_mock,
     "pi": _make_pi,
     "claude": _make_claude,
 }
+
+
+def build_backend(name: str, settings: dict | None = None) -> LLMBackend:
+    """Construct backend *name*, optionally overriding its settings dict.
+
+    ``settings=None`` reproduces the current config-derived construction (behaviour
+    unchanged). A non-None ``settings`` builds a candidate backend from the given
+    settings without touching global config/caches — used by the connectivity check
+    (see llm_backend.ping) to probe a not-yet-applied configuration.
+    """
+    factory = _BACKENDS.get(name)
+    if factory is None:
+        raise RuntimeError(
+            f"unknown backend: {name!r}. Known: {sorted(_BACKENDS)}"
+        )
+    return factory(settings)
 
 
 def get_backend() -> LLMBackend:
@@ -98,9 +123,4 @@ def get_backend() -> LLMBackend:
     if not name:
         base_url = os.environ.get("OPENAI_BASE_URL") or ""
         name = "mock" if base_url.strip().lower() == "mock" else "openai"
-    factory = _BACKENDS.get(name)
-    if factory is None:
-        raise RuntimeError(
-            f"unknown backend: {name!r}. Known: {sorted(_BACKENDS)}"
-        )
-    return factory()
+    return build_backend(name)

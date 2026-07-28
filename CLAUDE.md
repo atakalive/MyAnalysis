@@ -88,8 +88,12 @@ guards that every prompt still contains it.
   fallback; for the `openai-compat` backend, `OPENAI_MODEL` env is the fallback). Adding a new
   backend = add a section here + wrap its config with `merged_settings(key, …)`.
   For the claude engine, `effort = "ultracode"` expands to
-  `--effort xhigh --settings '{"ultracode": true}'`. Both files load once — restart
-  to pick up edits.
+  `--effort xhigh --settings '{"ultracode": true}'`. Both files load once (cached).
+  Pick up edits by restarting, or live via **View → バックエンド/モデル設定**: the
+  dialog rewrites `[backend].name` / `[claude_code].bin` in `config.toml` and the
+  `model`/`provider` keys in `models.toml` (comment-preserving), runs an optional
+  connectivity check, then `cache_clear()`s both loaders + reseeds every chat
+  session's backend so it applies from the next send — no restart (Issue #94).
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`

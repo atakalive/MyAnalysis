@@ -1,5 +1,7 @@
 # LLM backend configuration. Copy to config.toml to activate.
 # config.toml is gitignored; this example is committed.
+# View → backend/model settings rewrites [backend].name and [claude_code].bin
+# here (and the model/provider keys in models.toml) and applies without a restart.
 
 [backend]
 name = "pi"          # "claude" | "pi" | "openai" | "mock"

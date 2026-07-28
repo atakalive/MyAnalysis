@@ -423,6 +423,26 @@ class ClaudeCodeBackend:
         c = " ".join(str(c).split())
         return c if len(c) <= 200 else c[:199] + "…"
 
+    @staticmethod
+    def _resolve_bin(value: str) -> str:
+        """Resolve a configured/env bin: bare command names via PATH, else literal.
+
+        An existing file, an absolute path, or a value containing a path separator
+        (os.sep, or a literal "/" / "\\" that leaked in from the wrong OS) is
+        returned verbatim (current behaviour). A bare name like "claude" is looked
+        up on PATH with shutil.which so a PATH-installed CLI (or its claude.cmd /
+        claude.exe shim) is found; if which misses, the bare name is returned as-is.
+        """
+        if (
+            os.path.isabs(value)
+            or os.path.exists(value)
+            or os.sep in value
+            or "/" in value
+            or "\\" in value
+        ):
+            return value
+        return shutil.which(value) or value
+
     def _discover_binary(self) -> str:
         """Locate the claude engine binary.
 
@@ -431,10 +451,10 @@ class ClaudeCodeBackend:
         """
         configured = self._config.get("bin")
         if configured:
-            return configured
+            return self._resolve_bin(configured)
         env_bin = os.environ.get("CLAUDE_CODE_BIN")
         if env_bin:
-            return env_bin
+            return self._resolve_bin(env_bin)
 
         binname = "claude.exe" if sys.platform == "win32" else "claude"
         home = Path.home()

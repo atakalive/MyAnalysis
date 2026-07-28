@@ -102,7 +102,9 @@ def safe_resolve(path) -> Path:
         return Path(os.path.abspath(p))
 
 
-def atomic_write_text(path, text: str, *, encoding: str = "utf-8") -> None:
+def atomic_write_text(
+    path, text: str, *, encoding: str = "utf-8", newline: str | None = None
+) -> None:
     """一意 tmp + os.replace による atomic 書込（固定名 tmp を使わない）。
 
     固定名 `<target>.json.tmp` 等は rclone/WinFsp の VFS write-back キャッシュ上でゴースト化し、
@@ -130,7 +132,7 @@ def atomic_write_text(path, text: str, *, encoding: str = "utf-8") -> None:
             dir=path.parent, prefix=path.name + ".", suffix=".tmp"
         )
         tmp = Path(tmp_name)
-        f = os.fdopen(fd, "w", encoding=encoding)   # 成功で f が fd を所有
+        f = os.fdopen(fd, "w", encoding=encoding, newline=newline)   # 成功で f が fd を所有
         fd = None                                   # 所有権が f に移った
         with f:                                     # write の成否に関わらず f が fd を閉じる
             f.write(text)                           # newline 既定=None（write_text と同じ）

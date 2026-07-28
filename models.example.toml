@@ -7,7 +7,9 @@
 # conventional keys to its CLI/API; keys a backend doesn't use are ignored.
 #
 # Conventional keys: model / thinking / effort / provider.
-# Edits require a process restart to take effect (loaded once).
+# Applied on process start, or live via View → backend/model settings (which
+# rewrites the model/provider keys here + [backend].name / [claude_code].bin in
+# config.toml and refreshes the cache — no restart needed).
 
 [claude_code]
 # Reuses the VS Code Claude Code engine (stream-json mode).
