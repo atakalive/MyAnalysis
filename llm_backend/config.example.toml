@@ -31,7 +31,7 @@ permission_mode = "bypassPermissions"
 allowed_tools = ""   # 任意 --allowedTools 許可リスト(空白/カンマ区切り)
 # true(既定)= CC 同梱エンジンの既定システムプロンプトに MyAnalysis の指示を追記。
 # false     = CC 既定を使わず MyAnalysis の指示のみをシステムプロンプトにする
-#             (provider の押し付けプロンプトを無効化)。GUI: View メニューでも切替可。
+#             (provider の押し付けプロンプトを無効化)。GUI: 設定メニューでも切替可。
 use_provider_system_prompt = true
 # cwd 省略 → ~/.myanalysis/agent_home(リポジトリ外)。
 #   リポジトリ直下を cwd にすると開発者向け CLAUDE.md を読み込み「アプリ開発役」に

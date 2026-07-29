@@ -268,7 +268,7 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         with open(i18n_dir() / f"{lang}.toml", "rb") as f:
             cats[lang] = tomllib.load(f)
     keys = [e.label_key for e in ENGINES] + [
-        "menu.view.backend_selector",
+        "menu.settings.backend_selector",
         "backend.dialog.title",
         "backend.dialog.engine",
         "backend.dialog.model",

@@ -221,7 +221,10 @@ class ToolWindow(QMainWindow):
         self._meeting_share_action = self._view_menu.addAction(tr("menu.view.meeting_share"))
         self._meeting_share_action.triggered.connect(self._open_meeting_share)
 
-        self._language_menu = self._view_menu.addMenu(tr("menu.view.language"))
+        # 設定 sits between 表示 and ヘルプ; the 開発 menu is appended later by
+        # devtools.install_hotreload(), so it stays rightmost.
+        self._settings_menu = self.menuBar().addMenu(tr("menu.settings"))
+        self._language_menu = self._settings_menu.addMenu(tr("menu.settings.language"))
         self._language_group = QActionGroup(self)
         self._language_group.setExclusive(True)
         self._language_actions: dict[str, object] = {}
@@ -233,13 +236,15 @@ class ToolWindow(QMainWindow):
             self._language_group.addAction(act)
             self._language_actions[code] = act
 
-        self._tool_display_menu = self._view_menu.addMenu(tr("menu.view.tool_display"))
+        self._tool_display_menu = self._settings_menu.addMenu(tr("menu.settings.tool_display"))
         self._tool_display_group = QActionGroup(self)
         self._tool_display_group.setExclusive(True)
         self._tool_display_actions: dict[str, QAction] = {
-            "full": self._tool_display_menu.addAction(tr("menu.view.tool_display.full")),
-            "compact": self._tool_display_menu.addAction(tr("menu.view.tool_display.compact")),
-            "hidden": self._tool_display_menu.addAction(tr("menu.view.tool_display.hidden")),
+            "full": self._tool_display_menu.addAction(tr("menu.settings.tool_display.full")),
+            "compact": self._tool_display_menu.addAction(
+                tr("menu.settings.tool_display.compact")),
+            "hidden": self._tool_display_menu.addAction(
+                tr("menu.settings.tool_display.hidden")),
         }
         for mode, act in self._tool_display_actions.items():
             act.setCheckable(True)
@@ -248,7 +253,11 @@ class ToolWindow(QMainWindow):
             )
             self._tool_display_group.addAction(act)
 
-        self._provider_prompt_action = self._view_menu.addAction(tr("menu.view.provider_prompt"))
+        self._settings_menu.addSeparator()
+
+        self._provider_prompt_action = self._settings_menu.addAction(
+            tr("menu.settings.provider_prompt")
+        )
         self._provider_prompt_action.setCheckable(True)
         from gui.chat import _effective_use_provider_prompt
         self._provider_prompt_action.setChecked(_effective_use_provider_prompt())
@@ -256,8 +265,8 @@ class ToolWindow(QMainWindow):
             lambda checked=False: self._set_use_provider_prompt(checked)
         )
 
-        self._backend_selector_action = self._view_menu.addAction(
-            tr("menu.view.backend_selector")
+        self._backend_selector_action = self._settings_menu.addAction(
+            tr("menu.settings.backend_selector")
         )
         self._backend_selector_action.triggered.connect(self._open_backend_selector)
 
@@ -278,13 +287,14 @@ class ToolWindow(QMainWindow):
         self._view_menu.setTitle(tr("menu.view"))
         self._chat_action.setText(tr("menu.view.toggle_chat"))
         self._meeting_share_action.setText(tr("menu.view.meeting_share"))
-        self._language_menu.setTitle(tr("menu.view.language"))
-        self._tool_display_menu.setTitle(tr("menu.view.tool_display"))
-        self._tool_display_actions["full"].setText(tr("menu.view.tool_display.full"))
-        self._tool_display_actions["compact"].setText(tr("menu.view.tool_display.compact"))
-        self._tool_display_actions["hidden"].setText(tr("menu.view.tool_display.hidden"))
-        self._provider_prompt_action.setText(tr("menu.view.provider_prompt"))
-        self._backend_selector_action.setText(tr("menu.view.backend_selector"))
+        self._settings_menu.setTitle(tr("menu.settings"))
+        self._language_menu.setTitle(tr("menu.settings.language"))
+        self._tool_display_menu.setTitle(tr("menu.settings.tool_display"))
+        self._tool_display_actions["full"].setText(tr("menu.settings.tool_display.full"))
+        self._tool_display_actions["compact"].setText(tr("menu.settings.tool_display.compact"))
+        self._tool_display_actions["hidden"].setText(tr("menu.settings.tool_display.hidden"))
+        self._provider_prompt_action.setText(tr("menu.settings.provider_prompt"))
+        self._backend_selector_action.setText(tr("menu.settings.backend_selector"))
         self._help_menu.setTitle(tr("menu.help"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
@@ -944,7 +954,7 @@ class ToolWindow(QMainWindow):
         # Push the initial dataset (the explicitly-selected current dataset).
         if hasattr(widget, "set_current_dataset"):
             widget.set_current_dataset(self._current_dataset)
-        # Sync the View-menu tool-display radio to the widget's current default.
+        # Sync the Settings-menu tool-display radio to the widget's current default.
         if hasattr(widget, "tool_display_default"):
             cur = widget.tool_display_default()
             act = self._tool_display_actions.get(cur)

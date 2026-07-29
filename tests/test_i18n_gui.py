@@ -42,6 +42,37 @@ def test_language_switch_live_reflects(qapp, tmp_path, monkeypatch):
     assert en_title == i18n._catalogs["en"]["menu.file"]
 
 
+def test_settings_menu_holds_the_preference_items(qapp):
+    """表示 keeps window commands only; the persisted preferences live under 設定.
+
+    Asserted by object identity, not by label text, so the check is independent
+    of the active language. A bare ToolWindow() has no 開発 menu (installed later
+    by devtools.install_hotreload).
+    """
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+
+    # Compare via menuAction(); QAction.menu() hands the QMenu's ownership to
+    # Python and the C++ object dies as soon as the wrapper is dropped.
+    assert win.menuBar().actions() == [
+        win._file_menu.menuAction(),
+        win._view_menu.menuAction(),
+        win._settings_menu.menuAction(),
+        win._help_menu.menuAction(),
+    ]
+
+    assert win._view_menu.actions() == [win._chat_action, win._meeting_share_action]
+
+    # Submenus appear in the parent's action list as their menuAction().
+    settings = win._settings_menu.actions()
+    for act in (win._language_menu.menuAction(),
+                win._tool_display_menu.menuAction(),
+                win._provider_prompt_action,
+                win._backend_selector_action):
+        assert act in settings
+
+
 def test_retranslate_hooks_fire_and_never_raise(qapp):
     """Menus built outside ToolWindow (e.g. the devtools 開発 menu) re-translate
     via register_retranslate_hook; a broken hook must not block the others."""

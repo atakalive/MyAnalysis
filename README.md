@@ -212,7 +212,7 @@ Runs `build_export_figs()` on the Agg backend and writes PNGs to `<work_dir>/ana
 
 - **Multi-tab** — reorder analysis tabs by drag & drop.
 - **LLM chat dock** (right side, floatable) — multiple session tabs, Ctrl+Enter to send, streaming output, tool calls (tab control, snapshots, etc.), font zoom.
-- **Menus** — File / View / Help / Develop(&D).
+- **Menus** — File / View / Settings / Help / Develop(&D).
 - **Session save/restore** — per-dataset tab layout and chat are saved/restored under `work_dir` (File → Save session / on-exit dialog). For the saved-file breakdown, see [CLAUDE.md](CLAUDE.md) / [llm_bridge/session.py](llm_bridge/session.py).
 
 ---

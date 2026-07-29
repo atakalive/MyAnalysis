@@ -1,6 +1,6 @@
 """Backend / model selector dialog + connectivity-check worker.
 
-View menu → 「バックエンド/モデル設定」. Pick an *engine* (利用方法) and a *model*,
+設定 menu → 「バックエンド/モデル設定」. Pick an *engine* (利用方法) and a *model*,
 optionally run a connectivity check on the candidate configuration (a minimal
 ``stream()`` turn on a background thread, UI non-blocking), then apply — which
 rewrites the truth-source TOMLs and refreshes caches so every chat session picks
