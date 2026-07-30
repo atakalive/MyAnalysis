@@ -190,16 +190,6 @@ path = get_dataset_dir("dataset_a")
 Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-datasets`
 shows the full registry; datasets without a path entry for the current host will
 raise `RuntimeError` on `load_dataset()`.
-Set a dataset's picker description with
-`python -m llm_bridge set-description <dataset> "<text>"` (writes
-`<dataset_dir>/meta.json`; shown in the "Open dataset" picker).
-Mark a dataset completed (manual organize flag; moves it into the picker's
-collapsed "Completed" section) with `python -m llm_bridge set-completed <dataset>`,
-or unmark with `--off` (writes `meta.json`; also surfaced as the `completed`
-field in `list-datasets --json`). Caveat: because `meta.json` syncs across PCs,
-an older-version GUI/CLI running on another PC can strip the `completed` flag on
-its next meta rebuild — update all PCs to keep the flag durable (re-set it if it
-gets lost during the transition).
 Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 **Never modify measurement files (CSV etc.).** Analysis output is written by the
 tools to the dataset's `work_dir` (default `<dataset_dir>/_work`, set per dataset in

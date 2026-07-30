@@ -79,7 +79,10 @@ def _resolve_dataset(args, active: dict | None = None, *,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m llm_bridge")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # metavar は choices の自動列挙（{state,active,…}）を抑える。help= を渡さない
+    # サブコマンドを --help から完全に隠すために必要（metavar が無いと usage 行に
+    # 名前が残る)。argparse は 'help' in kwargs のときだけ choices 行を登録する。
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="<subcommand>")
 
     p_state = sub.add_parser("state", help="Print state.json for an analysis")
     p_state.add_argument("name", nargs="?")
@@ -113,13 +116,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't auto-open the dataset in a running GUI (skip the 10s wait)",
     )
 
-    p_sd = sub.add_parser("set-description",
-                          help="Set a dataset's picker description (meta.json)")
+    # description / completed はユーザーが決める値。help= を省いて --help から隠し、
+    # エージェントが verb を発見して勝手に meta.json を書きに行くのを防ぐ（verb 自体は
+    # 人手/スクリプト用に残す。GUI の「概要を編集」は patch_description を直接呼ぶ）。
+    p_sd = sub.add_parser("set-description")
     p_sd.add_argument("dataset")
     p_sd.add_argument("text")
 
-    p_sc = sub.add_parser("set-completed",
-                          help="Mark a dataset completed in the picker (meta.json)")
+    p_sc = sub.add_parser("set-completed")
     p_sc.add_argument("dataset")
     p_sc.add_argument("--off", action="store_true", default=False,
                       help="Unmark (set completed=False)")

@@ -28,7 +28,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
-from common.paths import durable_read_json, durable_write_json, safe_resolve
+from common.paths import (bak_path, durable_read_json, durable_write_json,
+                          read_json_classified, safe_resolve)
 import dataset_config
 from common.filelock import exclusive_lock
 
@@ -161,6 +162,32 @@ def _merge_meta(existing: dict, computed: dict, *, heavy: bool) -> dict:
     merged["version"] = META_VERSION
     merged["updated_at"] = time.time()
     return merged
+
+
+def _content_equal(a: dict, b: dict) -> bool:
+    """updated_at を除いた内容一致。同期ドライブへの no-op 再書込を避ける判定用。
+
+    updated_at は rebuild のたびに必ず変わるので、これを含めて比較すると「中身は
+    同じなのにファイルは毎回別内容」になり、同期バックエンドが毎回再アップロード
+    する（＝競合の主因）。
+    """
+    def drop(d: dict) -> dict:
+        return {k: v for k, v in d.items() if k != "updated_at"}
+    return drop(a) == drop(b)
+
+
+def _is_noop_write(path: Path, existing: dict, merged: dict) -> bool:
+    """primary も .bak も merged と実質同内容なら書込不要。
+
+    .bak まで検査するのは #75 の冗長性を落とさないため: .bak が欠損/破損している間に
+    スキップすると、primary が evict された時に回復できなくなる。read_json_classified
+    は FileNotFoundError を即 'absent' で返す（sleep しない）ので、.bak 不在時の
+    追加コストは無い。
+    """
+    if not _content_equal(existing, merged):
+        return False
+    bstatus, bdata = read_json_classified(bak_path(path))
+    return bstatus == "ok" and _content_equal(bdata, merged)
 
 
 def compute_meta(
@@ -350,6 +377,12 @@ def compute_meta(
                         st = p.stat()
                     except OSError:
                         continue
+                    if fn.endswith((".tmp", ".lock")) \
+                            or fn in {"meta.json", "meta.json.bak"}:
+                        continue   # 自分たちのサイドカー。数えると (a) meta を書く
+                                   # たびに次回の disk_size_bytes が動いて no-op 判定
+                                   # が空振りし、(b) 並行 writer の .tmp を拾って値が
+                                   # 非決定になる（＝余計な再書込＝同期競合）。
                     total += st.st_size
                     if excluded:
                         continue
@@ -410,10 +443,16 @@ def rebuild_meta(
     computed = compute_meta(dataset, heavy=heavy, should_stop=should_stop)
     try:
         with exclusive_lock(_meta_lock_path(dataset)):
-            status, existing = durable_read_json(_meta_path(dataset))
+            path = _meta_path(dataset)
+            status, existing = durable_read_json(path)
             if status == "unreadable":
                 return   # primary も .bak も読めない → 上書きしない（description を守る）
-            write_meta(dataset, _merge_meta(existing or {}, computed, heavy=heavy))
+            merged = _merge_meta(existing or {}, computed, heavy=heavy)
+            # 'ok' に限定: absent/recovered は primary を（再）確立するため必ず書く。
+            # 'ok' は existing が dict であることも保証する。
+            if status == "ok" and _is_noop_write(path, existing, merged):
+                return   # 実質無変更 → 書かない（同期の再アップロードと .tmp 生成を止める）
+            write_meta(dataset, merged)
     except (KeyError, RuntimeError, OSError):
         return
 

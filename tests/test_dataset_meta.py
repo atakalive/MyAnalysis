@@ -239,6 +239,84 @@ def test_rebuild_compute_outside_lock(ds_env, monkeypatch):
     assert order.index("compute") < order.index("lock")
 
 
+# ---- rebuild_meta: no-op write skip (同期チャーン抑制) ----
+
+@pytest.fixture()
+def write_spy(monkeypatch):
+    """dataset_meta.write_meta の呼び出しを数える（実書込はそのまま行う）。
+
+    mtime/updated_at の比較は時計分解能でフレークするので、「書いたか」を直接数える。
+    """
+    calls: list[str] = []
+    real = dataset_meta.write_meta
+
+    def spy(dataset, meta):
+        calls.append(dataset)
+        real(dataset, meta)
+
+    monkeypatch.setattr(dataset_meta, "write_meta", spy)
+    return calls
+
+
+def test_rebuild_skips_write_when_nothing_changed(ds_env, write_spy):
+    # updated_at だけが毎回変わる値。それを理由に書くと同期が毎回再アップロードする。
+    _make_analysis(ds_env, "a1")
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    assert len(write_spy) == 1
+    before = dataset_meta.read_meta("ds")
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    assert len(write_spy) == 1                       # 実質無変更 → 書かない
+    assert dataset_meta.read_meta("ds") == before    # updated_at も据え置き
+
+
+def test_rebuild_writes_when_content_changed(ds_env, write_spy):
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    assert len(write_spy) == 1
+    _make_analysis(ds_env, "a1")                     # 実データが増えた
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    assert len(write_spy) == 2
+    assert dataset_meta.read_meta("ds")["analysis_count"] == 1
+
+
+def test_rebuild_rewrites_when_bak_missing(ds_env, write_spy):
+    # スキップして .bak の欠損を放置すると #75 の冗長性が静かに劣化する。
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    (ds_env / "meta.json.bak").unlink()
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    assert len(write_spy) == 2
+    assert (ds_env / "meta.json.bak").is_file()
+
+
+def test_rebuild_rewrites_when_bak_corrupt(ds_env, write_spy):
+    dataset_meta.rebuild_meta("ds", heavy=False)
+    (ds_env / "meta.json.bak").write_bytes(b"")      # 0byte 化（マウント事故）
+    dataset_meta.rebuild_meta("ds", heavy=False)     # 存在チェックだけでは見逃す経路
+    assert len(write_spy) == 2
+    healed = json.loads((ds_env / "meta.json.bak").read_text(encoding="utf-8"))
+    assert healed["version"] == META_VERSION
+
+
+def test_rebuild_heavy_skips_second_write(ds_env, write_spy):
+    """disk_size_bytes が自分の meta.json/.bak/.lock/.tmp を数えていると、meta を書く
+    たびに次回の値が動いて no-op 判定が空振りする（＝同期が延々と再アップロードする）。"""
+    _make_analysis(ds_env, "a1")
+    (ds_env / "raw.csv").write_text("x\n", encoding="utf-8")
+    dataset_meta.rebuild_meta("ds", heavy=True)
+    assert len(write_spy) == 1
+    dataset_meta.rebuild_meta("ds", heavy=True)
+    assert len(write_spy) == 1
+
+
+def test_disk_size_excludes_own_sidecars(ds_env):
+    (ds_env / "raw.csv").write_text("x" * 100, encoding="utf-8")
+    before = dataset_meta.compute_meta("ds", heavy=True)["disk_size_bytes"]
+    dataset_meta.patch_description("ds", "d" * 500)   # meta.json + .bak を大きく書く
+    (ds_env / "meta.json.lock").write_bytes(b"")
+    (ds_env / "meta.json.deadbeef.tmp").write_bytes(b"z" * 999)
+    after = dataset_meta.compute_meta("ds", heavy=True)["disk_size_bytes"]
+    assert after == before
+
+
 # ---- patch_description ----
 
 def test_patch_description_no_updated_at_and_preserves(ds_env):

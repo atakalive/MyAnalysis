@@ -50,6 +50,29 @@ def test_pi_backend_prompt_includes_rule():
     assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT_PI
 
 
+def test_prompts_do_not_advertise_meta_write_verbs():
+    """meta.json の description / completed はユーザーが決める値。
+
+    エージェント向けプロンプトに書込 verb を並べると、頼まれてもいないのに meta.json
+    を書きに行き、同期ドライブ上で競合を量産する。verb 自体は人手/GUI 用に残るが、
+    プロンプトからは載せない（llm_bridge --help からも隠してある）。
+    """
+    from llm_backend.claude_code import _SYSTEM_PROMPT as CLAUDE_PROMPT
+    from llm_backend.pi import _SYSTEM_PROMPT_PI
+
+    for prompt in (CLAUDE_PROMPT, _SYSTEM_PROMPT_PI):
+        assert "set-description" not in prompt
+        assert "set-completed" not in prompt
+
+
+def test_gui_chat_prompt_does_not_advertise_meta_write_verbs():
+    pytest.importorskip("PySide6")
+    from gui.chat import _SYSTEM_PROMPT
+
+    assert "set-description" not in _SYSTEM_PROMPT
+    assert "set-completed" not in _SYSTEM_PROMPT
+
+
 def test_gui_chat_prompt_includes_rule():
     # Covers the openai / mock backends too: gui.chat._SYSTEM_PROMPT is the
     # system message new_session() seeds and those backends transmit verbatim.
