@@ -157,7 +157,7 @@ python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 LLM エージェント／対話的な探索のために、[common/explore.py](common/explore.py) が最小限の API を提供します。
 
 ```python
-from common.explore import load_dataset, save_fig, save_code, dataset_summary
+from common.explore import load_dataset, save_fig, save_code, save_text, dataset_summary
 
 summary = dataset_summary("my_dataset")   # まず INSPECT: 実在の subdirs + 代表 CSV の columns/rows
 # 既定パターンは仮定しない — 上で見た実構成を使ってロードする:
@@ -165,8 +165,11 @@ sessions = load_dataset("my_dataset", subdir_pattern="<real_folder_*>", csv_name
 # → list[dict]: 各 {"name": str, "dir": Path, "df": DataFrame}
 
 save_fig("my_dataset", fig, "overview")    # → <work_dir>/figures/overview.png（保存後 fig は close）
-save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py
+save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py（.py 専用。label に拡張子は付けない）
+save_text("my_dataset", "reports/summary.md", md)   # → <work_dir>/reports/summary.md（任意の拡張子・サブディレクトリ可）
 ```
+
+`save_text` は汎用のテキスト書込です（メモ・レポート・派生 CSV/JSON）。相対パスは検証され（`..`・絶対パス・ドライブ相対・UNC・Windows 禁止文字・予約デバイス名 — `nul.txt` を含む — を拒否）、`work_dir` 配下に収まることを再確認します。`session.json`・`chat_sessions/`・任意の `*.bak` は GUI の live 状態なので拒否されます。`save_fig` / `save_code` の label にドットを含めることはできません（拡張子は自動付与）。3 つとも絶対 `Path` を返します。
 
 下位ローダは [common/loaders.py](common/loaders.py) の `load_csv_per_subdir`（サブディレクトリを glob して `pd.read_csv`）。出力先はデータセットの `work_dir`。
 

@@ -52,6 +52,73 @@ def test_analysis_py_gets_draft_apply_guidance(monkeypatch):
     assert "apply-analysis cov3" in reason
 
 
+def test_non_py_write_is_pointed_at_save_text(monkeypatch):
+    """`.py` 以外の宛先には save_text を案内する。
+
+    以前は save_code（.py 強制）しか案内しておらず、エージェントは拒否されたあと
+    Markdown を書く正規手段を持たなかった。
+    """
+    rc, res = _run(monkeypatch, {
+        "tool_name": "Write",
+        "tool_input": {"file_path": r"G:\data\ds\_work\summary.md"},
+    }, fragile=True)
+    assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "save_text" in res["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_allows_editing_the_draft(monkeypatch):
+    """draft は Write/Edit させる（MOUNT_SAFE_EDITS がそう案内している）。
+
+    ここを拒否していたため、宣伝している draft→apply ループが機械的に成立して
+    いなかった。apply-analysis が strip / ast.parse / build_tab の 3 ゲートを通すので、
+    draft が 0 バイト化しても analysis.py には伝播しない。
+    """
+    rc, res = _run(monkeypatch, {
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": r"G:\data\ds\_work\analyses\cov3\analysis.draft.py"},
+    }, fragile=True)
+    assert rc == 0 and res is None       # 出力なし = 許可
+
+
+def test_still_denies_the_canonical_analysis_py(monkeypatch):
+    """draft の許可が本体 analysis.py まで緩めていないこと。"""
+    rc, res = _run(monkeypatch, {
+        "tool_name": "Edit",
+        "tool_input": {"file_path": r"G:\data\ds\analyses\cov3\analysis.py"},
+    }, fragile=True)
+    assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_decision_json_is_pure_ascii(monkeypatch):
+    """stdout は ASCII だけで構成すること（deny を落とさないため）。
+
+    ensure_ascii=False だと非 ASCII が stdout のロケール既定で出るので、日本語
+    Windows では cp932 バイト列になり、UTF-8 で読む消費側が JSON をパースできず
+    **deny が失われて fail-open する**。実測でこの経路に乗っていた。
+    案内文を英語にしても救われない — 拒否理由には対象パスを埋め込むので、
+    G:\\測定\\... のような日本語パスだけで同じ事故になる。
+    """
+    rc, res = _run(monkeypatch, {
+        "tool_name": "Write",
+        "tool_input": {"file_path": "G:\\測定\\ds\\_work\\summary.md"},
+    }, fragile=True)
+    raw = json.dumps(res, ensure_ascii=False)   # _run が復元した dict
+    assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "測定" in res["hookSpecificOutput"]["permissionDecisionReason"], raw
+    # 実際に guard_write が書いたバイト列が ASCII のみであることを直接見る。
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"tool_input": {"file_path": "G:\\測定\\ds\\_work\\summary.md"}})))
+    monkeypatch.setattr("sys.stdout", out)
+    guard_write.main()
+    emitted = out.getvalue()
+    assert emitted.isascii(), f"non-ASCII in hook stdout: {emitted[:200]!r}"
+    # どのエンコーディングで往復しても同じ JSON に戻る。
+    for enc in ("utf-8", "cp932", "latin-1"):
+        assert json.loads(emitted.encode(enc).decode(enc)) == json.loads(emitted)
+
+
 def test_allows_local_path(monkeypatch):
     rc, res = _run(monkeypatch, {
         "tool_name": "Write",

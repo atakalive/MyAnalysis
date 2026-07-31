@@ -29,11 +29,17 @@ _PATH_KEYS = ("file_path", "notebook_path", "path")
 
 
 def _deny(reason: str) -> int:
+    # ensure_ascii=True（既定）は必須。ensure_ascii=False だと非 ASCII が stdout の
+    # ロケール既定エンコーディングで出るため、日本語 Windows では cp932 バイト列になり、
+    # UTF-8 で読む消費側が JSON をパースできず **deny が失われて fail-open する**。
+    # 案内文を英語にしても救われない —— 拒否理由には対象パスを埋め込むので、
+    # G:\測定\... のような日本語パスだけで同じ事故になる。
+    # ASCII エスケープ（\uXXXX）にしておけばどのエンコーディングでも同一に読める。
     json.dump({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason": reason,
-    }}, sys.stdout, ensure_ascii=False)
+    }}, sys.stdout)
     sys.stdout.write("\n")
     return 0
 
@@ -62,11 +68,15 @@ def _guidance(target: Path) -> str:
         ]
     else:
         parts += [
+            "  python -c \"from common.explore import save_text; "
+            "save_text('<dataset>', '<relpath>', content)\"",
+            "     → work_dir へ任意の拡張子・サブディレクトリで検証付き書込",
+            "       （例: 'summary.md', 'reports/2026-07.csv'）",
             "  python -c \"from common.explore import save_code; "
             "save_code('<dataset>', '<label>', content)\"",
-            "     → work_dir へ検証付きで書き込む",
-            "  そのほかのファイルは python から common.paths.atomic_write_text() 経由で",
-            "  書けば、戦略切替・read-back 検証・リトライが効きます。",
+            "     → work_dir/code/<label>.py（.py 専用。label に拡張子は付けない）",
+            "  図は save_fig('<dataset>', fig, '<label>') を使う。",
+            "  いずれも保存先の絶対パスを返すので print() すること。",
         ]
     parts += ["", "状態を確認するには: python -m llm_bridge doctor"]
     return "\n".join(parts)
@@ -86,6 +96,15 @@ def main(argv: list[str] | None = None) -> int:
                 target = Path(val)
                 break
         if target is None:
+            return _allow()
+
+        # draft は編集させる。MOUNT_SAFE_EDITS と下の _guidance が「draft は Write/Edit
+        # してよい」と案内している一方で、ここが fragile な宛先を無条件に拒否していたため
+        # 宣伝している draft→apply ループが機械的に成立していなかった。許可して安全なのは、
+        # apply_analysis が strip / ast.parse / build_tab 束縛の 3 ゲートを通してからしか
+        # 昇格させないので、draft が 0 バイト化しても analysis.py に伝播しないため
+        # （draft は使い捨てで、壊れたら draft-analysis で作り直せる）。
+        if target.name == "analysis.draft.py":
             return _allow()
 
         from common import fs_kind

@@ -135,8 +135,13 @@ The primary analysis workflow is code execution, not GUI driving.
      重要な判断には Compute ステップで統計量（最大値、最小値、平均値等）を数値出力し、
      視覚的解釈と突合すること。
 7. **Iterate**: repeat 4-6 until the question is answered.
-8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`.
-9. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required)
+8. **Save code**: `from common.explore import save_code; save_code("<name>", "<label>", code_str)` → `<work_dir>/code/<label>.py`（`.py` 専用。label に拡張子は付けない）。
+9. **Save notes / reports / 派生データ**: `from common.explore import save_text; save_text("<name>", "reports/summary.md", text)` → `<work_dir>/reports/summary.md`。
+   相対パスなので任意の拡張子とサブディレクトリが使える（`..`・絶対/ドライブ相対・Windows
+   禁止文字・予約デバイス名は拒否。`session.json` / `chat_sessions/` / `*.bak` も拒否）。
+   **マウント上では Write/Edit ツールが PreToolUse hook で機械的に拒否される**ので、
+   work_dir へファイルを置くときは必ず `save_text` / `save_code` / `save_fig` を使う。
+10. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required)
    scaffolds `<dataset_dir>/analyses/<name>/analysis.py`. Do NOT edit that file
    directly — seed a draft with `python -m llm_bridge draft-analysis <name>
    --dataset <key>`, move your work_dir code into the draft, then promote it with
@@ -146,7 +151,7 @@ The primary analysis workflow is code execution, not GUI driving.
 Analysis output goes to the dataset's `work_dir` (default `<dataset_dir>/_work`,
 configurable per dataset in `myanalysis.toml`). Measurement files (CSV etc.) are
 never modified; the tools only write the `myanalysis.toml` sidecar and files under
-`work_dir`. A hand-set `work_dir` may place new output (PNG/PY) in any subdirectory
+`work_dir`. A hand-set `work_dir` may place new output in any subdirectory
 of the dataset dir.
 
 ### Visual feedback setup
@@ -193,8 +198,11 @@ raise `RuntimeError` on `load_dataset()`.
 Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 **Never modify measurement files (CSV etc.).** Analysis output is written by the
 tools to the dataset's `work_dir` (default `<dataset_dir>/_work`, set per dataset in
-`myanalysis.toml`); use `save_fig()` / `save_code()` from `common.explore` for figures
-and code snippets. The `myanalysis.toml` sidecar is generated on first save.
+`myanalysis.toml`); use `save_fig()` / `save_code()` / `save_text()` from `common.explore`
+for figures, code snippets, and every other text file（メモ・レポート・派生 CSV/JSON）。
+`save_text()` は `<work_dir>` 直下の `session.json`・`chat_sessions/`・任意の `*.bak` への
+書込を拒否する（GUI の live 状態を壊さないため）。The `myanalysis.toml` sidecar is generated
+on first save.
 
 ## Authoring an analysis
 

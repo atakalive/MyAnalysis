@@ -168,6 +168,140 @@ def test_save_code_invalid_labels(monkeypatch, tmp_path, label):
         explore.save_code("ds", label, "x")
 
 
+def test_save_code_dotted_label_points_at_save_text(monkeypatch, tmp_path):
+    """報告された欠陥そのもの: 以前は黙って code/notes.md.py が出来ていた。"""
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    with pytest.raises(ValueError, match="save_text"):
+        explore.save_code("ds", "notes.md", "# report")
+    assert not (tmp_path / "_work" / "code" / "notes.md.py").exists()
+
+
+def test_save_code_accepts_explicit_py_suffix(monkeypatch, tmp_path):
+    """明示的な .py は冪等に扱う（snippet.py.py にしない）。"""
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    path = explore.save_code("ds", "snippet.py", "x = 1")
+    assert path == tmp_path / "_work" / "code" / "snippet.py"
+    assert path.read_text(encoding="utf-8") == "x = 1"
+
+
+def test_save_fig_dotted_label_rejected(monkeypatch, tmp_path):
+    """save_fig も同じ欠陥を持っていた（chart.png → chart.png.png）。"""
+    from matplotlib.figure import Figure
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    with pytest.raises(ValueError):
+        explore.save_fig("ds", Figure(), "chart.v2")
+    assert not (tmp_path / "_work" / "figures" / "chart.v2.png").exists()
+
+
+def test_save_fig_accepts_explicit_png_suffix(monkeypatch, tmp_path):
+    from matplotlib.figure import Figure
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    fig = Figure()
+    fig.add_subplot(111).plot([0, 1], [0, 1])
+    path = explore.save_fig("ds", fig, "chart.png")
+    assert path == tmp_path / "_work" / "figures" / "chart.png"
+
+
+# ---- save_text ----
+
+def test_save_text_creates_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    path = explore.save_text("ds", "notes.md", "# hello")
+    expected = tmp_path / "_work" / "notes.md"
+    assert path == expected
+    assert expected.read_text(encoding="utf-8") == "# hello"
+
+
+def test_save_text_creates_subdirs(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    path = explore.save_text("ds", "reports/2026-07/summary.md", "body")
+    expected = tmp_path / "_work" / "reports" / "2026-07" / "summary.md"
+    assert path == expected
+    assert expected.read_text(encoding="utf-8") == "body"
+
+
+def test_save_text_accepts_backslash_separator(monkeypatch, tmp_path):
+    """POSIX CI でも Windows でも同じ場所に落ちる（PureWindowsPath で解析するため）。"""
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    path = explore.save_text("ds", "reports\\summary.csv", "a,b\n1,2\n")
+    assert path == tmp_path / "_work" / "reports" / "summary.csv"
+
+
+def test_save_text_overwrites(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    explore.save_text("ds", "notes.md", "first")
+    path = explore.save_text("ds", "notes.md", "second")
+    assert path.read_text(encoding="utf-8") == "second"
+
+
+def test_save_text_respects_configured_work_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    (tmp_path / "myanalysis.toml").write_text(
+        'work_dir = "results"\nformat = "csv_per_subdir"\n', encoding="utf-8"
+    )
+    path = explore.save_text("ds", "notes.md", "x")
+    assert path == tmp_path / "results" / "notes.md"
+
+
+@pytest.mark.parametrize("relpath", [
+    "../../evil.md", "a/../../b.md", "C:/evil.md", "C:evil.md",
+    "/etc/evil", "\\\\srv\\share\\x.md", "nul.txt", ".hidden.md", "",
+])
+def test_save_text_rejects_escapes(monkeypatch, tmp_path, relpath):
+    """拒否時は tmp_path 配下に何も作られていないこと。
+
+    validate より先に mkdir する順序へ退行すると、拒否したパスの途中ディレクトリだけが
+    同期ドライブ上に残る。それを検出する。
+    """
+    dataset = tmp_path / "ds"
+    dataset.mkdir()
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: dataset)
+    with pytest.raises(ValueError):
+        explore.save_text("ds", relpath, "payload")
+    strays = [p for p in tmp_path.rglob("*")
+              if p.is_file() and p.name != "myanalysis.toml"]
+    assert strays == []
+
+
+@pytest.mark.parametrize("relpath", [
+    "session.json", "session.json.bak",
+    "chat_sessions/abc.json", "chat_sessions/abc.json.bak",
+    "figures/plot.png.bak",
+])
+def test_save_text_rejects_reserved_destinations(monkeypatch, tmp_path, relpath):
+    """work_dir 直下の live 状態（タブ構成・チャット履歴）を上書きさせない。"""
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    work = tmp_path / "_work"
+    work.mkdir()
+    victim = work / "session.json"
+    victim.write_text('{"tabs": ["keep me"]}', encoding="utf-8")
+    with pytest.raises(ValueError, match="live GUI state"):
+        explore.save_text("ds", relpath, "{}")
+    assert victim.read_text(encoding="utf-8") == '{"tabs": ["keep me"]}'
+
+
+def test_save_text_on_fragile_fs_never_renames(monkeypatch, tmp_path):
+    """新しい書込経路がマウント安全戦略に乗っている証明（Issue #96 の中核）。
+
+    fragile FS では os.replace を一度も呼ばず、.tmp も残さない。
+    """
+    import os
+    import common.fs_kind as fk
+    import common.paths as cp
+    monkeypatch.setattr(fk, "is_fragile", lambda _p: True)
+    monkeypatch.setattr(cp.time, "sleep", lambda _s: None)
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path)
+    calls = {"n": 0}
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace",
+                        lambda s, d: (calls.__setitem__("n", calls["n"] + 1),
+                                      real_replace(s, d))[1])
+    path = explore.save_text("ds", "reports/summary.md", "payload")
+    assert calls["n"] == 0
+    assert list(path.parent.glob("*.tmp")) == []
+    assert path.read_text(encoding="utf-8") == "payload"
+
+
 # ---- dataset_summary ----
 
 def _subdir_of(summary, name):

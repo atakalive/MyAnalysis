@@ -153,6 +153,14 @@
 "validate.reserved_name"      = "{name!r} は Windows の予約デバイス名のため使えません。"
 "validate.simple_name"        = "名前はパス区切り文字・相対パス要素・NUL バイトを含まない単純なディレクトリ名にしてください: {name!r}"
 
+# --- relpath (common/paths.py) ---
+"relpath.empty"               = "relpath が空です: {relpath!r}"
+"relpath.drive_rel"           = "relpath にドライブ相対パス・UNC パスは使えません: {relpath!r}"
+"relpath.root_rel"            = "relpath に絶対パス・ルート相対パスは使えません: {relpath!r}"
+"relpath.dotdot"              = "relpath に '..' は使えません: {relpath!r}"
+"relpath.trailing_dot_space"  = "パス要素を '.' または空白で終えることはできません（Windows が黙って削るため）: {name!r}"
+"relpath.escape"              = "relpath が {root} の外に解決されました: {relpath!r}"
+
 # --- workdir (dataset_config.py) ---
 "workdir.drive_rel"           = "work_dir にドライブ相対パスは使えません: {work_dir!r}"
 "workdir.root_rel"            = "work_dir にルート相対パスは使えません: {work_dir!r}"

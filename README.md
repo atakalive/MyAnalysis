@@ -157,7 +157,7 @@ Measurement files (CSV etc.) are never modified. `myanalysis.toml` is written me
 For LLM agents and interactive exploration, [common/explore.py](common/explore.py) offers a minimal surface:
 
 ```python
-from common.explore import load_dataset, save_fig, save_code, dataset_summary
+from common.explore import load_dataset, save_fig, save_code, save_text, dataset_summary
 
 summary = dataset_summary("my_dataset")   # INSPECT first: real subdirs + sample CSV columns/rows
 # No default pattern is assumed — use what you saw above to load:
@@ -165,8 +165,11 @@ sessions = load_dataset("my_dataset", subdir_pattern="<real_folder_*>", csv_name
 # → list[dict]: each {"name": str, "dir": Path, "df": DataFrame}
 
 save_fig("my_dataset", fig, "overview")    # → <work_dir>/figures/overview.png (fig is closed after save)
-save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py
+save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py   (.py only; no extension in the label)
+save_text("my_dataset", "reports/summary.md", md)   # → <work_dir>/reports/summary.md (any extension, subdirs OK)
 ```
+
+`save_text` is the general text writer — notes, reports, derived CSV/JSON. The relative path is validated (no `..`, no absolute/drive-relative/UNC paths, no Windows forbidden characters or reserved device names — `nul.txt` included) and re-checked to stay under `work_dir`; `session.json`, `chat_sessions/` and any `*.bak` are refused because they are live GUI state. `save_fig` / `save_code` labels must not contain a dot — the extension is added for you. All three return the absolute `Path`.
 
 The lower-level loader is `load_csv_per_subdir` in [common/loaders.py](common/loaders.py) (globs subdirectories and `pd.read_csv`). Output goes to the dataset's `work_dir`.
 

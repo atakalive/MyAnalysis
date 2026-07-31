@@ -51,7 +51,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
-- Exploratory analysis output (figures, code snippets, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()`.
+- Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
 - `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `PI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`), so non-secret config like dataset paths is fine to commit.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
@@ -185,7 +185,10 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   同じ失敗経路に乗る（実測で rename 失敗の 16%）。
 - **チャットエージェントの `Write`/`Edit` はマウント上で機械的に拒否される**（PreToolUse hook →
   `python -m llm_bridge guard-write`）。エージェントのツールは我々の chokepoint を通らないため。
-  拒否時は安全な CLI verb が案内される。hook は内部エラー時に必ず fail-open する。
+  拒否時は安全な経路（`save_text` / `save_code` / `save_fig` と draft→apply verb）が案内される。
+  例外は `analysis.draft.py` — draft は Write/Edit を許可する（`apply-analysis` が strip /
+  `ast.parse` / `build_tab` 束縛の 3 ゲートを通してからしか昇格させないので、draft が
+  0 バイト化しても `analysis.py` に伝播しない）。hook は内部エラー時に必ず fail-open する。
 
 診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`
 （0 バイトファイル・primary/.bak の乖離・空 TOML・rclone キャッシュの孤児 tmp・
@@ -205,14 +208,25 @@ LLM agents analyse data via code execution + CLI, not just GUI remote control.
 `common/explore.py` provides a minimal surface: `load_dataset(name, subdir_pattern=..., csv_name=...)`
 (config → loaders in one call — 既定パターンは無い。まず `dataset_summary` で実構成を確認してから
 実在のパターンを渡す), `save_fig(name, fig, label)` (saves to `<work_dir>/figures/<label>.png`),
-`save_code(name, label, content)` (saves to `<work_dir>/code/<label>.py`),
+`save_code(name, label, content)` (saves to `<work_dir>/code/<label>.py`。**label に拡張子は
+付けない** — ドットを含めると `save_text` を案内する ValueError。以前は黙って
+`notes.md.py` が出来ていた。`save_fig` の label も同様),
+`save_text(name, relpath, content)` (saves to `<work_dir>/<relpath>` — 任意の拡張子と
+サブディレクトリを受ける汎用テキスト書込。`.md`/`.csv`/`.json`/`.txt` はこれで書く。マウント上では
+エージェントの Write/Edit が hook で拒否されるので、これが唯一の正規経路),
 `dataset_summary(name)` (データセット直下の実構成＝subdirs と代表 CSV の columns/rows を歩いて報告する
 “まず見る”ステップ). Output goes to the
 dataset's `work_dir` (default `<dataset_dir>/_work`, set in `myanalysis.toml`); the
 sidecar `myanalysis.toml` and `work_dir` are created on first save. Measurement files
 (CSV etc.) are never modified — but a hand-set `work_dir` may place new output files
-(PNG/PY) in any subdirectory of the dataset dir. Use `python -m llm_bridge list-datasets`
+in any subdirectory of the dataset dir. Use `python -m llm_bridge list-datasets`
 to discover registered dataset names.
+
+`save_text` の relpath は `common/paths.py` の `validate_relpath` + `resolve_under` が検証する:
+`..`・絶対/ルート相対/ドライブ相対/UNC・Windows 禁止文字 `<>:"|?*`・先頭ドット・末尾ドット/空白・
+**拡張子付きも含む予約デバイス名**（`nul.txt` は NUL デバイス）を拒否し、work_dir 配下への
+封じ込めを `safe_resolve` で再チェックする（symlink 脱出もここで落ちる）。深さ上限は設けない。
+`<work_dir>/session.json` と `chat_sessions/`、および任意の `*.bak` は GUI の live 状態なので拒否する。
 
 ## Session save/restore
 

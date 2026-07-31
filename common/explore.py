@@ -1,4 +1,4 @@
-"""Exploratory analysis helpers: load, summarise, and save figures/code to a dataset's work_dir."""
+"""Exploratory analysis helpers: load, summarise, and save figures/code/text to a dataset's work_dir."""
 from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 
 
 _FIXED_EXCLUDE = frozenset({"analyses"})
+
+# <work_dir> 直下の live 状態。save_text にここを書かせない —— session.py / chat_store.py が
+# durable_write_json で管理しており、上書きすればタブ構成とチャット履歴が消える。
+# relpath を受ける API は素でここへ届いてしまうので、名前で塞ぐ。
+_RESERVED_WORK_DIR_TOP = frozenset({"session.json", "chat_sessions"})
 _MAX_SUBDIRS = 50
 _MAX_FILES = 50
 _MAX_CSV_SAMPLES = 20
@@ -116,6 +121,8 @@ def save_fig(name: str, fig: Figure, label: str) -> Path:
 
     work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。
     label のバリデーション: common.paths.validate_name を使用。
+    label にファイル拡張子は含めない（.png は自動付与。明示的な末尾 ".png" だけは
+    冪等に許容する）。ドットを含む label は黙って "<label>.png.png" になっていたので拒否する。
     figは save 後に close される（core/figures.save の仕様）。
 
     Returns: 保存先の Path（絶対パス）。
@@ -126,32 +133,91 @@ def save_fig(name: str, fig: Figure, label: str) -> Path:
     from common.paths import validate_name
     from dataset_config import get_work_dir
     from core.figures import save
-    validate_name(label)
-    path = get_work_dir(name) / "figures" / f"{label}.png"
+    stem = label[:-4] if label.endswith(".png") else label
+    if "." in stem:
+        raise ValueError(
+            f"save_fig always appends '.png', so the label must not contain '.': "
+            f"{label!r} would become {stem}.png.png. Pass the bare name instead."
+        )
+    validate_name(stem)
+    path = get_work_dir(name) / "figures" / f"{stem}.png"
     save(fig, path)
+    return path
+
+
+def save_text(name: str, relpath: str, content: str) -> Path:
+    """任意のテキストファイルを <dataset work_dir>/<relpath> に保存し、パスを返す。
+
+    save_code が .py 専用なのに対し、こちらは拡張子を問わない汎用の書込口。メモ・
+    レポート・派生 CSV/JSON はこれで書く。同期マウント上ではエージェントの Write/Edit が
+    PreToolUse hook（llm_bridge/guard_write.py）で機械的に拒否されるので、これが
+    work_dir へ任意のファイルを置く唯一の正規経路になる。
+
+    relpath はサブディレクトリを含んでよい相対パス（例 "summary.md",
+    "reports/2026-07.csv"）。検証規則は common.paths.validate_relpath を参照
+    （".." ・絶対/ドライブ相対・Windows 禁止文字・拡張子付きも含む予約デバイス名を拒否）。
+    親ディレクトリは自動生成し、content は UTF-8 で書き出す。既存ファイルは上書き。
+    書込は atomic_write_text 経由なので、fragile FS では in-place + read-back 検証になる。
+
+    work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。**初回書込で
+    myanalysis.toml と work_dir が作られる**（save_fig / save_code と同じ副作用）。
+
+    <work_dir> 直下の session.json / chat_sessions/ と、あらゆる *.bak は拒否する
+    （GUI の live 状態で、壊すとタブ構成やチャット履歴が失われるため）。
+
+    大きな派生データには向かない: atomic_write_text は検証のため書いた内容を読み直すので、
+    巨大な content はメモリとマウント I/O を 2 倍使う。セッション単位で分割して書くこと。
+
+    Returns: 保存先の Path（絶対パス）。
+
+    Raises:
+        ValueError: relpath が不正、work_dir 設定が不正、または宛先が予約済み。
+        MountWriteError: リトライしても書込を検証できなかった。
+    """
+    from common.paths import resolve_under
+    from dataset_config import get_work_dir
+    work_dir = get_work_dir(name)
+    path = resolve_under(work_dir, relpath)     # 検証と封じ込め。mkdir はこの後。
+    rel = path.relative_to(work_dir).parts
+    if rel[0] in _RESERVED_WORK_DIR_TOP or rel[-1].endswith(".bak"):
+        raise ValueError(
+            f"{relpath!r} targets live GUI state under work_dir. Reserved: "
+            f"{', '.join(sorted(_RESERVED_WORK_DIR_TOP))} and any *.bak — "
+            f"overwriting them destroys the saved tab layout or chat history. "
+            f"Pick another path."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, content)   # マウント上の truncate-in-place（0byte 化）を避ける
     return path
 
 
 def save_code(name: str, label: str, content: str) -> Path:
     """ad-hocコードスニペットを <dataset work_dir>/code/<label>.py に保存し、パスを返す。
 
+    **.py 専用。** label にファイル拡張子は含めない（.py は自動付与。明示的な末尾 ".py"
+    だけは冪等に許容する）。.md / .csv / .json など他の拡張子で書きたいときは save_text を
+    使う —— 以前は label にドットを入れると黙って "notes.md.py" が出来ていた。
+
     work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。
-    label のバリデーション: common.paths.validate_name を使用。
-    label にファイル拡張子は含めない（.py は自動付与）。
+    label のバリデーション: common.paths.validate_name（区切りを含まない単一名）。
     content は UTF-8 で書き出す。既存ファイルは上書き。
 
     Returns: 保存先の Path（絶対パス）。
 
     Raises:
-        ValueError: label が不正、または work_dir 設定が不正。
+        ValueError: label が不正（ドットを含む・区切りを含む等）、または work_dir 設定が不正。
+        MountWriteError: リトライしても書込を検証できなかった。
     """
     from common.paths import validate_name
-    from dataset_config import get_work_dir
-    validate_name(label)
-    path = get_work_dir(name) / "code" / f"{label}.py"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, content)   # マウント上の truncate-in-place（0byte 化）を避ける
-    return path
+    stem = label[:-3] if label.endswith(".py") else label
+    if "." in stem:
+        raise ValueError(
+            f"save_code always appends '.py', so the label must not contain '.': "
+            f"{label!r} would become {stem}.py. To write a .md / .csv / .json or any "
+            f"other file, use save_text({name!r}, 'reports/<file>.md', content) instead."
+        )
+    validate_name(stem)   # 単一名の契約を維持（save_text 経由でも "a/b" を通さない）
+    return save_text(name, f"code/{stem}.py", content)
 
 
 def dataset_summary(

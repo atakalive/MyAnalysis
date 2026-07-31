@@ -30,8 +30,11 @@ NO_LOCAL_PERSISTENCE = (
     "Never write memory, notes, progress/TODO, or scratch files to the local "
     "machine — not ~/.claude, ~/.myanalysis, your home dir, the working dir, or "
     "any path outside a dataset — and do not use any feature that persists "
-    "memory to local disk. Save figures/code only with save_fig / save_code "
-    "(they write to the dataset's work_dir); write nothing outside a dataset dir."
+    "memory to local disk. Save output only with save_fig / save_code / save_text "
+    "from common.explore (they write to the dataset's work_dir) — save_text(name, "
+    "relpath, content) is the sanctioned way to write notes, reports and derived "
+    ".md/.csv/.json/.txt, so there is never a reason to reach for Write/Edit there; "
+    "write nothing outside a dataset dir."
 )
 
 
@@ -55,8 +58,10 @@ MOUNT_SAFE_EDITS = (
     "llm_bridge recover-analysis <name> --dataset <ds>` (then re-seed with "
     "draft-analysis before editing again). Create a new analysis with `python -m "
     "newanalysis <name> --dataset <ds>`. Always pass --dataset when more than one "
-    "dataset is open. save_fig / save_code and the llm_bridge verbs are already "
-    "mount-safe."
+    "dataset is open. save_fig / save_code / save_text and the llm_bridge verbs are "
+    "already mount-safe; to write any OTHER file under a dataset (notes, reports, "
+    "derived CSV/JSON) use save_text(name, relpath, content) — the PreToolUse guard "
+    "mechanically rejects Write/Edit on the synced mount."
 )
 
 

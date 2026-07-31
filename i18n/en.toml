@@ -153,6 +153,14 @@
 "validate.reserved_name"      = "{name!r} is a reserved Windows device name and cannot be used."
 "validate.simple_name"        = "name must be a simple directory name without path separators, relative components, or NUL bytes: {name!r}"
 
+# --- relpath (common/paths.py) ---
+"relpath.empty"               = "relpath must not be empty: {relpath!r}"
+"relpath.drive_rel"           = "relpath must not be a drive-relative or UNC path: {relpath!r}"
+"relpath.root_rel"            = "relpath must not be an absolute or root-relative path: {relpath!r}"
+"relpath.dotdot"              = "relpath must not contain '..': {relpath!r}"
+"relpath.trailing_dot_space"  = "path component must not end with '.' or a space (Windows drops them silently): {name!r}"
+"relpath.escape"              = "relpath resolved outside {root}: {relpath!r}"
+
 # --- workdir (dataset_config.py) ---
 "workdir.drive_rel"           = "work_dir must not be a drive-relative path: {work_dir!r}"
 "workdir.root_rel"            = "work_dir must not be a root-relative path: {work_dir!r}"

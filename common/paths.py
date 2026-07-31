@@ -24,7 +24,7 @@ import logging
 import os
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from common import fs_kind
 
@@ -146,6 +146,68 @@ def validate_name(name: str) -> None:
         raise ValueError(tr("validate.simple_name", name=name))
 
 
+def validate_relpath(relpath: str) -> tuple[str, ...]:
+    """work_dir 配下へ書くための相対パスを検証し、正規化した構成要素を返す。
+
+    `validate_name` が「区切りを一切含まない単一名」を強制するのに対し、こちらは
+    サブディレクトリを許す（save_text が任意の拡張子とサブディレクトリを受けるため）。
+
+    受理: "notes.md" / "reports/summary.md" / "reports\\summary.md" / "日本語/メモ.md"
+          / "summary report.md" ——空白入りのファイル名は無害なので許可する。
+          解析名を縛る validate_identifier_name との意図的な差異（あちらは名前が
+          モジュール識別子と CLI トークンになるので空白を一律拒否している）。
+    拒否: 空・空白のみ / ".." / 絶対・ルート相対・ドライブ相対・UNC / NUL・制御文字
+          / Windows 禁止文字 <>:"|?* / 先頭ドット（dataset_summary が dotfile を読み飛ばす
+          ので、書いても書いた本人から見えない）/ 末尾ドット・末尾空白（Windows が黙って
+          落とすため、返した Path と実体が食い違う）/ **拡張子が付いていても** Windows
+          予約デバイス名（"nul.txt" は NUL デバイスであってファイルではない）。
+
+    解析を PureWindowsPath で行うので、判定は POSIX 上でも Windows と同一になる
+    （dataset_config.get_work_dir と同じ規律）。副産物として "." と重複区切りは解析時に
+    畳まれ、"\\" も区切りとして扱われる（プラットフォーム差を作らない）。
+
+    Returns:
+        正規化した構成要素のタプル（例: ("reports", "summary.md")）。
+        「文字列 A を検証して文字列 B を join する」型の取り違えを構造的に防ぐため、
+        呼び出し側はこの戻り値を使って join すること（→ resolve_under）。
+
+    Raises:
+        ValueError: 上記のいずれかに該当。
+    """
+    from common.i18n import tr
+    if not isinstance(relpath, str) or not relpath.strip():
+        raise ValueError(tr("relpath.empty", relpath=relpath))
+    pw = PureWindowsPath(relpath)
+    if pw.drive:            # "C:foo"（ドライブ相対）と UNC "\\\\srv\\share" の両方
+        raise ValueError(tr("relpath.drive_rel", relpath=relpath))
+    if pw.root:             # "/foo" / "\\foo"
+        raise ValueError(tr("relpath.root_rel", relpath=relpath))
+    parts = pw.parts
+    if not parts:           # "." は解析時に畳まれて空になる
+        raise ValueError(tr("relpath.empty", relpath=relpath))
+    if ".." in parts:
+        raise ValueError(tr("relpath.dotdot", relpath=relpath))
+    for part in parts:
+        for c in part:
+            if ord(c) < 32 or ord(c) == 127:    # NUL を含む制御文字
+                raise ValueError(tr("validate.control_char", name=part))
+        # ':' はここで捕まえる。"sum:mary.md" の drive は空なので上の drive 判定に乗らない。
+        bad = sorted(set(part) & _WINDOWS_FORBIDDEN)
+        if bad:
+            raise ValueError(
+                tr("validate.forbidden_char", chars="".join(bad), name=part)
+            )
+        if part.startswith("."):
+            raise ValueError(tr("validate.leading_dot", name=part))
+        if part[-1] in ". ":
+            raise ValueError(tr("relpath.trailing_dot_space", name=part))
+        # 予約デバイス名は拡張子が付いても device のまま（"nul.txt" は NUL に化ける）。
+        # _WINDOWS_RESERVED を名前全体と比べるだけでは取り逃すので stem で判定する。
+        if part.split(".")[0].lower() in _WINDOWS_RESERVED:
+            raise ValueError(tr("validate.reserved_name", name=part))
+    return parts
+
+
 def repo_root() -> Path:
     """Return the repo root, derived from this file's location.
 
@@ -187,6 +249,29 @@ def safe_resolve(path) -> Path:
         return p.resolve()
     except OSError:
         return Path(os.path.abspath(p))
+
+
+def resolve_under(root, relpath: str) -> Path:
+    """validate_relpath + 封じ込め再チェック。root 配下の絶対 Path を返す。
+
+    **mkdir はしない。** 拒否したパスの途中ディレクトリだけが残る事故を防ぐため、
+    呼び出し側は必ず「resolve_under を通す → それから mkdir」の順にすること。
+
+    封じ込めは safe_resolve(...).is_relative_to(safe_resolve(root)) で再確認する
+    （dataset_config.get_work_dir / analysis_file と同じ defense-in-depth）。
+    validate_relpath は字句的な検証しかしないので、root 配下の symlink 経由で外へ
+    出るケースはここでしか落とせない。
+
+    Raises:
+        ValueError: relpath が不正、または解決結果が root の外。
+    """
+    from common.i18n import tr
+    parts = validate_relpath(relpath)
+    root = Path(root)
+    target = root.joinpath(*parts)
+    if not safe_resolve(target).is_relative_to(safe_resolve(root)):
+        raise ValueError(tr("relpath.escape", root=root, relpath=relpath))
+    return target
 
 
 def _write_via_replace(path: Path, data, *, binary: bool, encoding, newline) -> None:

@@ -36,6 +36,60 @@ def test_mount_safe_edits_names_the_three_verbs():
         assert verb in MOUNT_SAFE_EDITS
 
 
+def test_rule_names_the_general_text_writer():
+    """save_text は work_dir へ任意拡張子のファイルを書く唯一の正規経路。
+
+    マウント上ではエージェントの Write/Edit が PreToolUse hook で機械的に拒否される
+    ので、これが載っていないとエージェントはメモもレポートも書けなくなる。
+    """
+    assert "save_text" in NO_LOCAL_PERSISTENCE
+    assert "save_text" in MOUNT_SAFE_EDITS
+
+
+def _all_backend_prompts() -> dict[str, str]:
+    """llm_backend/*.py の `_SYSTEM_PROMPT*` 定数を**動的に**集める。
+
+    明示リストにすると、バックエンドが増えたときに黙って漏れる（実際 codex
+    バックエンドが save_fig / save_code だけを名指しした状態で入った）。列挙を
+    パッケージ側から取ることで、新しいバックエンドは書いた時点でこの契約に縛られる。
+    """
+    import importlib
+    import pkgutil
+
+    import llm_backend
+
+    found: dict[str, str] = {}
+    for mod_info in pkgutil.iter_modules(llm_backend.__path__):
+        mod = importlib.import_module(f"llm_backend.{mod_info.name}")
+        for attr in dir(mod):
+            if attr.startswith("_SYSTEM_PROMPT"):
+                value = getattr(mod, attr)
+                if isinstance(value, str) and value.strip():
+                    found[f"{mod_info.name}.{attr}"] = value
+    return found
+
+
+def test_every_backend_prompt_names_save_text():
+    """save_text は work_dir へ任意拡張子のファイルを書く唯一の正規経路。
+
+    多くのバックエンドは共有定数経由でしか載せない（pi / gui-chat は自前で名指し
+    しない）。継承経路が切れていないこと、かつ自前でツール一覧を書くバックエンド
+    （claude / codex）が save_text を落としていないことを固定する。
+    """
+    prompts = _all_backend_prompts()
+    assert prompts, "no backend system prompts discovered — the sweep is broken"
+    missing = [name for name, text in prompts.items() if "save_text" not in text]
+    assert not missing, f"backend prompts missing save_text: {missing}"
+
+
+def test_gui_chat_prompt_names_save_text():
+    # openai / mock backends もここを system message として送るので別建てで見る。
+    pytest.importorskip("PySide6")
+    from gui.chat import _SYSTEM_PROMPT
+
+    assert "save_text" in _SYSTEM_PROMPT
+
+
 def test_claude_backend_prompt_includes_rule():
     from llm_backend.claude_code import _SYSTEM_PROMPT
 

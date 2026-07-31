@@ -26,7 +26,9 @@ from common.paths import (
     durable_read_json,
     durable_write_json,
     read_json_classified,
+    resolve_under,
     safe_resolve,
+    validate_relpath,
 )
 
 
@@ -547,3 +549,112 @@ def test_kill_switch_forces_replace(monkeypatch, tmp_path):
                                       real_replace(s, d))[1])
     atomic_write_text(tmp_path / "x.json", "v")
     assert calls["n"] == 1
+
+
+# ============================================================================
+# validate_relpath / resolve_under — work_dir 配下へ書くための相対パス検証
+#
+# validate_name（区切りを一切許さない単一名）では save_text の "reports/x.md" を
+# 通せないので別系統を用意した。判定は PureWindowsPath 上で行うため POSIX CI でも
+# Windows と同一の結果になる。
+# ============================================================================
+
+@pytest.mark.parametrize("relpath, expected", [
+    ("notes.md",               ("notes.md",)),
+    ("reports/summary.md",     ("reports", "summary.md")),
+    ("reports\\summary.md",    ("reports", "summary.md")),   # '\' も区切り扱い
+    ("a/./b.md",               ("a", "b.md")),               # '.' は解析時に畳まれる
+    ("a//b.md",                ("a", "b.md")),               # 重複区切りも畳まれる
+    ("日本語/メモ.md",          ("日本語", "メモ.md")),
+    ("summary report.md",      ("summary report.md",)),
+    ("reports/2026/07/31/x.md",
+     ("reports", "2026", "07", "31", "x.md")),               # 深さ上限は設けない
+])
+def test_validate_relpath_accepts(relpath, expected):
+    assert validate_relpath(relpath) == expected
+
+
+def test_validate_relpath_allows_whitespace_in_filenames():
+    """validate_identifier_name との意図的な差異。
+
+    あちらが空白を拒否するのは名前がモジュール識別子と CLI トークンになるからで、
+    ただのファイル名にその制約を持ち込む理由はない。回帰でうっかり厳しくしないよう固定する。
+    """
+    assert validate_relpath("summary report.md") == ("summary report.md",)
+
+
+@pytest.mark.parametrize("relpath", [
+    "",                        # 空
+    "   ",                     # 空白のみ
+    ".",                       # 解析すると空になる
+    "..",
+    "../../evil.md",
+    "a/../../b.md",
+    "C:/evil.md",              # ドライブ絶対
+    "C:evil.md",               # ドライブ相対（drive='C:' で捕まる）
+    "/etc/evil",               # ルート相対
+    "\\evil.md",
+    "\\\\srv\\share\\x.md",    # UNC
+    "sum:mary.md",             # ':' は drive 判定に乗らない → 禁止文字ルールで捕まえる
+    "a<b.md", "a>b.md", 'a"b.md', "a|b.md", "a?b.md", "a*b.md",
+    "a\x00b.md",               # NUL
+    "a\x1fb.md",               # 制御文字
+    ".hidden.md",              # 先頭ドット（dataset_summary が dotfile を読み飛ばす）
+    "reports/.hidden.md",
+    "x./y.md",                 # 末尾ドット
+    "notes .",                 # 末尾空白
+    "dir /x.md",
+])
+def test_validate_relpath_rejects(relpath):
+    with pytest.raises(ValueError):
+        validate_relpath(relpath)
+
+
+@pytest.mark.parametrize(
+    "relpath", ["nul.txt", "reports/con.md", "AUX.csv", "nul", "Com1.log"]
+)
+def test_validate_relpath_rejects_reserved_names_even_with_extension(relpath):
+    """Windows の予約デバイス名は拡張子が付いても device のまま。
+
+    validate_identifier_name の予約名チェックは名前**全体**を集合と比べるので
+    "nul.txt" を取り逃す。stem で判定していることをここで固定する
+    （取り逃すと save_text が NUL デバイスへ書いて内容が消える）。
+    """
+    with pytest.raises(ValueError):
+        validate_relpath(relpath)
+
+
+def test_validate_relpath_rejects_non_str():
+    with pytest.raises(ValueError):
+        validate_relpath(None)
+
+
+def test_resolve_under_joins_and_returns_absolute(tmp_path):
+    got = resolve_under(tmp_path, "reports/summary.md")
+    assert got == tmp_path / "reports" / "summary.md"
+    assert got.is_absolute()
+
+
+def test_resolve_under_does_not_mkdir(tmp_path):
+    """mkdir は呼び出し側の責務。拒否したパスで途中ディレクトリが残らない順序を固定する。"""
+    resolve_under(tmp_path, "reports/deep/summary.md")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_resolve_under_propagates_validation_errors(tmp_path):
+    with pytest.raises(ValueError):
+        resolve_under(tmp_path, "../evil.md")
+
+
+def test_resolve_under_rejects_symlink_escape(tmp_path):
+    """字句的には合法でも symlink 経由で root の外へ出るものは封じ込め再チェックで落とす。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (root / "out").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted (Windows needs Developer Mode/admin)")
+    with pytest.raises(ValueError):
+        resolve_under(root, "out/evil.md")
