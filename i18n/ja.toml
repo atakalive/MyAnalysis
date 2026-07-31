@@ -42,6 +42,7 @@
 "backend.engine.claude_vscode" = "Claude（VS Code 同梱エンジン）"
 "backend.engine.claude_cli"    = "Claude（PATH の CLI）"
 "backend.engine.pi"            = "pi コーディングエージェント"
+"backend.engine.codex"         = "Codex CLI（OpenAI）"
 "backend.engine.openai_http"   = "OpenAI 互換 HTTP"
 "backend.engine.mock"          = "モック（動作確認）"
 "menu.help"                   = "ヘルプ(&H)"

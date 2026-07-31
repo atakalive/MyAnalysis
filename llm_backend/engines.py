@@ -6,8 +6,8 @@ one operational knob that distinguishes same-backend variants — claude's
 ``[claude_code].bin`` (``""`` = VS Code bundled engine, ``"claude"`` = PATH CLI).
 The "model" is free text (no catalog), so the dialog offers an editable combo.
 
-Adding a future engine (e.g. codex CLI) = a backend module + a ``_BACKENDS`` entry
-+ one ``Engine`` here; the dialog needs no change.
+Adding a future engine = a backend module + a ``_BACKENDS`` entry
++ one ``Engine`` here; the dialog needs no change (codex was added exactly this way).
 """
 
 from __future__ import annotations
@@ -68,6 +68,24 @@ ENGINES: tuple[Engine, ...] = (
         # openai-codex の実在 ID (pi --list-models で確認)。ローカルモデルは
         # llama-server にロード済みのものしか catalog に出ないため静的な種は持てない
         # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。
+        model_suggestions=(
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+        ),
+    ),
+    Engine(
+        id="codex",
+        label_key="backend.engine.codex",
+        backend_key="codex",
+        settings_key="codex",
+        config_patch=(),
+        fields=("model",),
+        # ChatGPT サブスク側の Codex カタログ (pi の openai-codex provider と同じ
+        # モデル群)。空欄 = codex 既定モデル。
         model_suggestions=(
             "gpt-5.6-sol",
             "gpt-5.6-luna",

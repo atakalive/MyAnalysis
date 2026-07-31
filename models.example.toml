@@ -30,6 +30,11 @@ model    = "gpt-5.5"       # --model
 # model_choices    = ["gpt-5.6-sol", "gpt-5.5"]
 # provider_choices = ["openai-codex", "llama.cpp"]
 
+[codex]
+model  = ""     # --model (empty = codex default; 候補は ChatGPT 側 Codex カタログ)
+effort = ""     # -c model_reasoning_effort: minimal | low | medium | high
+                #   (empty = default; 値は無検証でそのまま渡す)
+
 [openai-compat]
 model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)
                 #   OPENAI_BASE_URL / OPENAI_API_KEY stay in .env (endpoint/secret).

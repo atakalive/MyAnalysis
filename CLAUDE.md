@@ -60,9 +60,9 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 Chat-dock LLM access goes through the `llm_backend/` package. Backends implement
 the `LLMBackend` Protocol in `llm_backend/base.py`; `get_backend()` selects one
-by name. Four backends ship: `claude` (VS Code Claude Code engine), `openai`
+by name. Five backends ship: `claude` (VS Code Claude Code engine), `openai`
 (OpenAI-compatible HTTP), `mock` (offline smoke test), `pi` (pi-coding-agent
-subprocess).
+subprocess), `codex` (OpenAI Codex CLI subprocess).
 
 **No local persistence (all backends).** Every backend's system prompt appends
 the shared `NO_LOCAL_PERSISTENCE` rule from `llm_backend/base.py`: the agent must
@@ -70,8 +70,9 @@ keep all work under the dataset's `work_dir` (synced) and never stash
 memory/notes/state on the local machine (e.g. the CC engine's `~/.claude`
 memory) — that's the "resume the same analysis on any PC" contract. Each backend
 builds its own prompt (`claude_code._SYSTEM_PROMPT`, `pi._SYSTEM_PROMPT_PI`,
-`gui/chat._SYSTEM_PROMPT` — the last also seeds the `openai`/`mock` system
-message), so a **new backend must append this constant too**. `tests/test_backend_prompts.py`
+`codex._SYSTEM_PROMPT_CODEX`, `gui/chat._SYSTEM_PROMPT` — the last also seeds
+the `openai`/`mock` system message), so a **new backend must append this
+constant too**. `tests/test_backend_prompts.py`
 guards that every prompt still contains it.
 
 - **Selection order**: env `LLM_BACKEND` → `[backend].name` in

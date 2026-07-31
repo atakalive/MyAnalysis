@@ -4,7 +4,7 @@
 # here (and the model/provider keys in models.toml) and applies without a restart.
 
 [backend]
-name = "pi"          # "claude" | "pi" | "openai" | "mock"
+name = "pi"          # "claude" | "pi" | "codex" | "openai" | "mock"
 
 [pi]
 # ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
@@ -14,6 +14,21 @@ bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
 # model / provider はモデル設定なので models.toml の [pi] で指定(models.example.toml 参照)
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
                      #   "read,write"=許可リスト, "none"=--no-tools)
+
+[codex]
+# OpenAI Codex CLI (npm i -g @openai/codex)。認証は ~/.codex を共有 (codex login)。
+# 1 ターン = 1 `codex exec --json`、2 ターン目以降は `codex exec resume <thread_id>`。
+bin = "codex"        # 実行ファイル(PATH 名 or 絶対パス。env CODEX_BIN でも上書き可)
+# 空(既定) = --dangerously-bypass-approvals-and-sandbox で無人実行。
+#   GUI 駆動 (python -m llm_bridge) とデータセット work_dir への書込を
+#   サンドボックス外で走らせるために必要 (claude の bypassPermissions 相当)。
+#   絞る場合は codex の OS サンドボックスを選択(書込先がサンドボックスに制限される):
+sandbox_mode = ""    # "" | "read-only" | "workspace-write" | "danger-full-access"
+# model / effort はモデル設定なので models.toml の [codex] で指定
+# cwd 省略 → ~/.myanalysis/codex_home(リポジトリ外)。MyAnalysis の指示を注入する
+#   AGENTS.md をこのディレクトリに自動生成・上書きする(手書きの AGENTS.md を
+#   置かないこと)。claude の agent_home とは分離してある。
+# cwd = '...'
 
 [claude_code]
 # Reuses the VS Code Claude Code extension's bundled engine (the `claude`

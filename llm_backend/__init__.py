@@ -88,11 +88,20 @@ def _make_claude(settings: dict | None = None) -> LLMBackend:
     return ClaudeCodeBackend(settings)
 
 
+def _make_codex(settings: dict | None = None) -> LLMBackend:
+    from llm_backend.codex import CodexBackend
+
+    if settings is None:
+        settings = merged_settings("codex", backend_config().get("codex", {}))
+    return CodexBackend(settings)
+
+
 _BACKENDS: dict[str, Callable[[dict | None], LLMBackend]] = {
     "openai": _make_openai,
     "mock": _make_mock,
     "pi": _make_pi,
     "claude": _make_claude,
+    "codex": _make_codex,
 }
 
 

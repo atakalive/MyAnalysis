@@ -42,6 +42,7 @@
 "backend.engine.claude_vscode" = "Claude (VS Code bundled engine)"
 "backend.engine.claude_cli"    = "Claude (CLI on PATH)"
 "backend.engine.pi"            = "pi coding agent"
+"backend.engine.codex"         = "Codex CLI (OpenAI)"
 "backend.engine.openai_http"   = "OpenAI-compatible HTTP"
 "backend.engine.mock"          = "Mock (smoke test)"
 "menu.help"                   = "Help(&H)"

@@ -50,6 +50,13 @@ def test_pi_backend_prompt_includes_rule():
     assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT_PI
 
 
+def test_codex_backend_prompt_includes_rule():
+    from llm_backend.codex import _SYSTEM_PROMPT_CODEX
+
+    assert NO_LOCAL_PERSISTENCE in _SYSTEM_PROMPT_CODEX
+    assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT_CODEX
+
+
 def test_prompts_do_not_advertise_meta_write_verbs():
     """meta.json の description / completed はユーザーが決める値。
 
@@ -58,9 +65,10 @@ def test_prompts_do_not_advertise_meta_write_verbs():
     プロンプトからは載せない（llm_bridge --help からも隠してある）。
     """
     from llm_backend.claude_code import _SYSTEM_PROMPT as CLAUDE_PROMPT
+    from llm_backend.codex import _SYSTEM_PROMPT_CODEX
     from llm_backend.pi import _SYSTEM_PROMPT_PI
 
-    for prompt in (CLAUDE_PROMPT, _SYSTEM_PROMPT_PI):
+    for prompt in (CLAUDE_PROMPT, _SYSTEM_PROMPT_PI, _SYSTEM_PROMPT_CODEX):
         assert "set-description" not in prompt
         assert "set-completed" not in prompt
 
