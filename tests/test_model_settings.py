@@ -96,9 +96,37 @@ class TestGenerationFlags:
         assert _generation_flags({"effort": "high"}) == ["--effort", "high"]
 
     def test_effort_ultracode(self):
-        assert _generation_flags({"effort": "ultracode"}) == [
-            "--effort", "xhigh", "--settings", '{"ultracode": true}',
-        ]
+        # `--settings` は _settings_payload が hooks とまとめて 1 回だけ渡す（Issue #96）。
+        # _generation_flags は effort の写像だけを担う。
+        assert _generation_flags({"effort": "ultracode"}) == ["--effort", "xhigh"]
+
+
+class TestSettingsPayload:
+    """`--settings` は 1 個しか渡せないので ultracode と hooks を必ず 1 dict にまとめる。"""
+
+    def test_ultracode_and_hooks_merged(self):
+        from llm_backend.claude_code import _settings_payload
+        p = _settings_payload({"effort": "ultracode"})
+        assert p["ultracode"] is True
+        assert "PreToolUse" in p["hooks"]
+
+    def test_guard_hook_present_by_default(self):
+        from llm_backend.claude_code import _settings_payload
+        p = _settings_payload({})
+        assert "ultracode" not in p
+        hook = p["hooks"]["PreToolUse"][0]
+        assert "Write" in hook["matcher"] and "Edit" in hook["matcher"]
+        assert "guard-write" in hook["hooks"][0]["command"]
+
+    def test_guard_hook_can_be_disabled(self):
+        from llm_backend.claude_code import _settings_payload
+        assert _settings_payload({"guard_mount_writes": False}) == {}
+
+    def test_payload_is_json_serialisable(self):
+        import json
+
+        from llm_backend.claude_code import _settings_payload
+        json.dumps(_settings_payload({"effort": "ultracode"}))
 
     def test_effort_blank_skipped(self):
         assert _generation_flags({"effort": "   "}) == []

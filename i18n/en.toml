@@ -112,6 +112,7 @@
 
 # --- status ---
 "status.active"               = "Active: {name}"
+"status.write_failed"         = "Save failed verification: {name} / run: python -m llm_bridge doctor"
 
 # --- chat ---
 "chat.input.placeholder"      = "Message... (Ctrl+Enter to send, Enter for newline)"
@@ -176,7 +177,7 @@
 "meeting.btn.copy_lan_link"      = "Copy LAN join link"
 "meeting.check.lan_link"         = "Also emit a LAN link"
 "meeting.label.lan_host"         = "Host IP"
-"meeting.lan.https_hint"         = "The LAN link is http — open the full link (a bare token will not work). Always verify/correct the auto-detected host IP."
+"meeting.lan.https_hint"         = "The LAN link is http / open the full link (a bare token will not work). Always verify/correct the auto-detected host IP."
 "meeting.lan.ready"              = "LAN link ready: {url}"
 "meeting.btn.reveal"             = "Reveal"
 "meeting.btn.hide"               = "Hide"
@@ -196,8 +197,8 @@
 "meeting.expiry.delayed"         = "Stopping and unpublishing take effect within a few seconds (poll interval); no propagation delay."
 "meeting.not_configured"         = "Set RELAY_ADMIN_KEY in .env to enable meeting sharing."
 "meeting.token.hint"             = "Share the link or token with your guest. Open the link or paste the token, then press Join to enter."
-"meeting.other_dataset_note"     = "(not in the current dataset — switch to view)"
-"meeting.new_session_note"       = "Sessions created after starting are not auto-shared — check them to publish."
+"meeting.other_dataset_note"     = "(not in the current dataset / switch to view)"
+"meeting.new_session_note"       = "Sessions created after starting are not auto-shared / check them to publish."
 "meeting.btn.auto_share_new_sessions" = "Auto-share new sessions"
 "meeting.participant_row"        = "{name} · last {age}s · tab:{tab}"
 

@@ -130,6 +130,58 @@ guards that every prompt still contains it.
 locking is abstracted in `common/filelock.py` (`exclusive_lock`): `fcntl` on
 POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 
+### 同期マウントへの書込規律（Issue #96 — 最重要）
+
+**同期マウント（rclone/WinFsp）上で rename-into-place をしてはならない。**
+
+`os.replace(tmp, target)` はマウント層では成功を返しながら rclone のキャッシュ層で
+`Access is denied` になり、rclone が cache item を破棄して**ファイルが 0 バイトに見える**。
+例外は一切上がらない。実測（`devtools/mount_probe.py`, n=30 × 4 条件）:
+
+| 条件 | rename 失敗 | 破損 |
+|---|---|---|
+| 書くだけ → `os.replace` | 0 | 0 |
+| in-place write | 0 | 0 |
+| **読んでから `os.replace`** | **26/30** | **26** |
+| 読んでから in-place | 0 | 0 |
+
+**直前に読んだファイルへの rename だけが壊れる**（読むと rclone が cache file の fd を
+保持し、`MoveFileEx` が宛先を置換できない）。`meta.json` のような read-modify-write が
+集中的に壊れ、`figures/*.png` のような書きっぱなしが無傷だったのはこのため。
+
+規律:
+
+- **書込は必ず `common/paths.py` の `atomic_write_text` / `atomic_write_bytes` を通す。**
+  FS 種別（`common/fs_kind.py`）で戦略を切り替え、fragile では in-place write、
+  local では従来の tmp+replace。どちらでも **read-back 検証 + 最大 5 回リトライ**を行い、
+  最後まで検証できなければ `MountWriteError` を送出する（黙って成功にしない）。
+- 生の `open(path,"w")` / `Path.write_text` / `QPixmap.save(path)` / `fig.savefig(path)` を
+  データセットディレクトリに向けてはならない。バイナリは BytesIO/QBuffer でバイト列にしてから
+  `atomic_write_bytes` へ渡す。
+- **非再計算の JSON は `durable_write_json` / `durable_read_json`**。2 コピー（primary + `.bak`）に
+  単調 `_seq` を刻み、読取は**両方を読んで新しい方を採る**（newest-wins）。`_seq` は読取時に
+  剥がされるので呼び出し側からは見えない。生読みして内容比較する側は `strip_seq()` を通すこと。
+- **読めないものを既定値で上書きしない。** `durable_read_json` が `unreadable` を返したら
+  書込を中止する（`patch_description` / `patch_completed` が status を捨てて `{}` から
+  書き直していたため、meta.json が 15 キー → 2 キーに縮退する事故が起きた）。
+  `myanalysis.toml` も 0 バイトは「設定なし」ではなく破損として `ConfigUnreadableError`。
+- ロックファイルはマウント外（`data/locks/`）へ自動マッピングされる（`common/filelock.py`）。
+  マウント上では排他が効いている保証がなく、同期チャーンも生むため。PC 間排他は元々成立しない。
+- バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と両バックエンドが設定）。
+  マウント上の `.py` を import すると CPython が `__pycache__/*.pyc` を tmp+rename で書き、
+  同じ失敗経路に乗る（実測で rename 失敗の 16%）。
+- **チャットエージェントの `Write`/`Edit` はマウント上で機械的に拒否される**（PreToolUse hook →
+  `python -m llm_bridge guard-write`）。エージェントのツールは我々の chokepoint を通らないため。
+  拒否時は安全な CLI verb が案内される。hook は内部エラー時に必ず fail-open する。
+
+診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`
+（0 バイトファイル・primary/.bak の乖離・空 TOML・rclone キャッシュの孤児 tmp・
+ログの失敗イベントを報告。`--repair` は newest-wins で収束、`--rescue` は 0 バイトファイルを
+キャッシュの孤児 tmp から復元）。実マウント上での検証は `python -m devtools.mount_probe`。
+
+キルスイッチ: `MYANALYSIS_WRITE_STRATEGY=replace` で従来挙動へ戻せる。
+`MYANALYSIS_FS_OVERRIDE="M:=fragile,D:=local"` で判定を明示上書き。
+
 ### 既存 analysis.py の編集はマウント安全経路で（Issue #89）
 
 チャットエージェントが既存 `analyses/<name>/analysis.py` を Edit/Write で直接編集すると、同期マウント上の書き込み失敗で 0 バイトに truncate され得る。安全経路の 3 verb を使う（いずれも `--dataset <ds>` 基本形）: `draft-analysis <name> --dataset <ds>`（analysis.py を work_dir 上の編集用 draft へコピー）→ draft を自由に編集 → `apply-analysis <name> --dataset <ds>`（構文＋トップレベル `build_tab` 束縛を検証してから `atomic_write_text` で昇格。draft は残す）。0 バイト化してしまったら `recover-analysis <name> --dataset <ds>`（`.bak` から復旧。0 バイト or 不在のときだけ復旧し中身があれば上書きしない）。`.bak` は **「最後にアプリへ正常反映（タブ成立）したビルドの内容」** を add-tab / reload-tab の成功末尾で自動退避したもの。ただし `.bak` は analysis.py と同じ同期マウント上にあり drive 単位の障害は救えない — 深いバックアップは git／チャット履歴。

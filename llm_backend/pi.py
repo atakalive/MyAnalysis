@@ -20,7 +20,7 @@ import sys
 import threading
 from collections.abc import Iterator
 
-from common.paths import repo_root
+from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
@@ -185,6 +185,8 @@ class PiCodingAgentBackend:
             [rr] + ([child_env["PYTHONPATH"]] if child_env.get("PYTHONPATH") else [])
         )
         child_env["PYTHONUTF8"] = "1"
+        # 同期マウント上に __pycache__ を作らせない（Issue #96 — claude_code.py と同じ理由）。
+        child_env.setdefault("PYTHONPYCACHEPREFIX", str(pycache_prefix()))
         py_dir = os.path.dirname(sys.executable)
         child_env["PATH"] = os.pathsep.join(
             [py_dir] + ([child_env["PATH"]] if child_env.get("PATH") else [])

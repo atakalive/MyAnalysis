@@ -82,10 +82,13 @@ _PAYLOAD = {
 
 def test_write_session_writes_bak(ds_env):
     import json as _json
+
+    from common.paths import strip_seq
     session.write_session("ds_a", _PAYLOAD)
     work_dir = dataset_config.get_work_dir("ds_a")
     bak = work_dir / "session.json.bak"
-    assert _json.loads(bak.read_text(encoding="utf-8")) == _PAYLOAD
+    # ディスク上には newest-wins 用の `_seq` が付く（Issue #96）。内容はそれ以外一致。
+    assert strip_seq(_json.loads(bak.read_text(encoding="utf-8"))) == _PAYLOAD
 
 
 def test_read_session_recovers_from_bak(ds_env):

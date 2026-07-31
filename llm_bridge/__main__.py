@@ -162,6 +162,19 @@ def main(argv: list[str] | None = None) -> int:
         _p.add_argument("name")
         _p.add_argument("--dataset", default=None)
 
+    # PreToolUse hook から呼ばれる内部 verb（人が直接使うものではないので help を出さない）
+    sub.add_parser("guard-write")
+
+    p_doc = sub.add_parser(
+        "doctor", help="同期マウント上のデータ健全性をチェック（Issue #96）")
+    p_doc.add_argument("--dataset", default=None)
+    p_doc.add_argument("--repair", action="store_true", default=False,
+                       help="primary/.bak の乖離を newest-wins で収束させる")
+    p_doc.add_argument("--rescue", action="store_true", default=False,
+                       help="0 バイトファイルを rclone キャッシュの孤児 tmp から復元する")
+    p_doc.add_argument("--cache", default=None, help="rclone の VFS キャッシュディレクトリ")
+    p_doc.add_argument("--log", default=None, help="rclone のログファイル")
+
     p_csync = sub.add_parser("config-sync", help="R2 と設定を双方向同期（収束）")
     p_csync.add_argument("--dry-run", action="store_true", default=False)
     p_csync.add_argument("--include-env", action="store_true", default=False)
@@ -294,6 +307,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
         return 0
+
+    if args.cmd == "guard-write":
+        from llm_bridge import guard_write
+        return guard_write.main()
+
+    if args.cmd == "doctor":
+        import config
+        config.reload_datasets()
+        from llm_bridge import doctor
+        return doctor.run(args.dataset, repair=args.repair, rescue=args.rescue,
+                          cache=args.cache, log=args.log)
 
     if args.cmd == "register-dataset":
         from config import register_dataset

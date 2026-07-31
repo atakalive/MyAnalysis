@@ -55,10 +55,29 @@ def test_load_config_missing_returns_defaults_without_write(ds_dir):
     assert not (ds_dir / "myanalysis.toml").exists()
 
 
-def test_load_config_merges_defaults(ds_dir):
-    # an empty file → work_dir filled from defaults.
-    (ds_dir / "myanalysis.toml").write_text("", encoding="utf-8")
+def test_load_config_comment_only_file_merges_defaults(ds_dir):
+    # 設定行が無いだけの（コメントのみ）ファイルは正常 → 既定値で埋める。
+    (ds_dir / "myanalysis.toml").write_text(
+        "# nothing set here\n", encoding="utf-8")
     assert dataset_config.load_config("ds")["work_dir"] == "_work"
+
+
+def test_load_config_empty_file_raises_rather_than_defaulting(ds_dir):
+    """0 バイトの myanalysis.toml を「設定なし」と解釈してはならない（Issue #96）。
+
+    tomllib は空ファイルを正常な空テーブルとして parse するので、同期マウント上で
+    truncate されると work_dir が黙って既定の `_work` に戻り、解析出力・session.json・
+    chat_sessions が別ディレクトリへ書かれて既存の作業が「セッション無し」に見える。
+    """
+    (ds_dir / "myanalysis.toml").write_text("", encoding="utf-8")
+    with pytest.raises(dataset_config.ConfigUnreadableError):
+        dataset_config.load_config("ds")
+
+
+def test_load_config_empty_file_does_not_silently_relocate_work_dir(ds_dir):
+    (ds_dir / "myanalysis.toml").write_bytes(b"")
+    with pytest.raises(dataset_config.ConfigUnreadableError):
+        dataset_config.get_work_dir("ds")
 
 
 def test_load_config_reads_value(ds_dir):

@@ -112,6 +112,7 @@
 
 # --- status ---
 "status.active"               = "アクティブ: {name}"
+"status.write_failed"         = "保存に失敗しました（検証NG）: {name} / 詳細は python -m llm_bridge doctor"
 
 # --- chat ---
 "chat.input.placeholder"      = "メッセージ...（Ctrl+Enter で送信、Enter で改行）"
@@ -196,8 +197,8 @@
 "meeting.expiry.delayed"         = "停止・非公開化は数秒以内（ポーリング間隔）に反映されます。伝播待ちはありません。"
 "meeting.not_configured"         = "ミーティング共有を使うには .env に RELAY_ADMIN_KEY を設定してください。"
 "meeting.token.hint"             = "リンクかトークンを相手に渡してください。リンクは開くだけ、トークンは専用ページに貼り付け。最後に Join で入室します。"
-"meeting.other_dataset_note"     = "（現在の dataset にありません — 切替で閲覧可）"
-"meeting.new_session_note"       = "開始後に作成したセッションは自動公開されません — チェックで公開できます。"
+"meeting.other_dataset_note"     = "（現在の dataset にありません / 切替で閲覧可）"
+"meeting.new_session_note"       = "開始後に作成したセッションは自動公開されません / チェックで公開できます。"
 "meeting.btn.auto_share_new_sessions" = "新規セッションを自動共有"
 "meeting.participant_row"        = "{name} · 最終 {age}s前 · タブ:{tab}"
 

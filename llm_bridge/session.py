@@ -26,6 +26,7 @@ from common.paths import (
     durable_write_json,
     read_json_classified,
     safe_resolve,
+    strip_seq,
 )
 from llm_bridge import chat_store
 
@@ -216,13 +217,12 @@ def read_session(dataset: str) -> dict | None:
 def write_session(dataset: str, payload: dict) -> None:
     """Durably write <work_dir>/session.json and verify (side-effecting resolve).
 
-    durable_write_json = primary + `.bak` の 2 コピー。書後に primary と `.bak` を
-    それぞれ read-back し、書いた payload と一致しなければ SessionPersistError
-    （recovered = 直後に primary が読めないのもマウント異常のサインなので失敗扱い。
-    `.bak` 単独の truncate も二重化の黙った劣化なので失敗扱い）。write-back cache
-    が read-back を騙す（書込成功に見えて後段 upload が失敗する）ケースは
-    `.bak` が第二防衛線。比較は JSON 正規化後（非 JSON 型の混入で偽陽性の
-    保存失敗を出さないため）。
+    durable_write_json = primary + `.bak` の 2 コピー。Issue #96 以降、各コピーの
+    read-back 検証とリトライは書込 chokepoint（common.paths）が担うので、ここは
+    「2 コピーが揃って正しく読み戻せる」という**最終的な整合性**だけを確認する。
+    primary が 'ok' で読めない（= 'recovered' に落ちる）のもマウント異常のサインなので
+    失敗扱い。`.bak` 単独の劣化も二重化の黙った喪失なので失敗扱い。比較は JSON 正規化後
+    （非 JSON 型の混入で偽陽性の保存失敗を出さないため）と `_seq` を除いた内容で行う。
     """
     work_dir = dataset_config.get_work_dir(dataset)
     target = work_dir / "session.json"
@@ -234,11 +234,10 @@ def write_session(dataset: str, payload: dict) -> None:
             f"session.json write verification failed for {dataset!r} "
             f"(read-back status={status}): {target}"
         )
-    # .bak も個別に read-back する: durable_read_json は primary が 'ok' なら
-    # .bak を見ないため、.bak 側だけが truncate されると二重化が黙って 1 コピーに
-    # 劣化する（脅威モデルの truncate は 2 書込のどちらにも等確率で起こる）。
+    # .bak も個別に read-back する: durable_read_json は 2 コピーのうち新しい方を
+    # 返すので、.bak 側だけが劣化しても primary が 'ok' なら気づけない。
     bstatus, bdata = read_json_classified(bak_path(target))
-    if bstatus != "ok" or bdata != normalized:
+    if bstatus != "ok" or strip_seq(bdata) != normalized:
         raise SessionPersistError(
             f"session.json .bak write verification failed for {dataset!r} "
             f"(read-back status={bstatus}): {bak_path(target)}"

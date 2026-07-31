@@ -41,6 +41,22 @@ format = "csv_per_subdir"
 """
 
 
+class ConfigUnreadableError(ValueError):
+    """myanalysis.toml が在るのに読めない/空（Issue #96）。
+
+    **空の TOML を「設定なし」と解釈してはならない。** tomllib は 0 バイトのファイルを
+    正常な空テーブルとして parse するので、同期マウント上で truncate されると
+    `work_dir` が黙って既定の `_work` に戻り、解析出力・session.json・chat_sessions が
+    別ディレクトリへ書かれて既存の作業が「セッション無し」に見える。ファイルが存在する
+    以上、空は破損の徴候であって設定内容ではない。
+
+    `ValueError` サブクラスにしてあるのは、既存の呼び出し側が
+    `except (..., ValueError, tomllib.TOMLDecodeError, ...)` で受けており
+    （`TOMLDecodeError` 自体も ValueError）、1 データセットの破損でピッカー全体が
+    落ちないようになっているため。
+    """
+
+
 def load_config(name: str) -> dict:
     """Read <dataset_dir>/myanalysis.toml, merged onto defaults.
 
@@ -51,15 +67,23 @@ def load_config(name: str) -> dict:
     Raises:
         ValueError: work_dir is present but not a string (hand-edit slipped in
                     e.g. ``work_dir = 123``).
+        ConfigUnreadableError: the file exists but is empty / unreadable.
     """
     from config import get_dataset_dir
     config_path = get_dataset_dir(name) / CONFIG_FILENAME
     cfg = dict(_DEFAULTS)
     try:
-        with open(config_path, "rb") as f:
-            cfg.update(tomllib.load(f))
+        raw = config_path.read_bytes()
     except FileNotFoundError:
-        pass
+        raw = None                       # 本当に無い＝既定でよい（新規データセット）
+    except OSError as e:
+        raise ConfigUnreadableError(f"cannot read {config_path}: {e}") from e
+    if raw is not None:
+        if not raw.strip():
+            raise ConfigUnreadableError(
+                f"{config_path} is empty (possible truncation on the synced mount); "
+                f"refusing to fall back to defaults, which would silently relocate work_dir")
+        cfg.update(tomllib.loads(raw.decode("utf-8")))
     if not isinstance(cfg["work_dir"], str):
         raise ValueError(
             f"work_dir must be a string, got {type(cfg['work_dir']).__name__}: "
@@ -107,18 +131,24 @@ def set_format(name: str, fmt: str) -> None:
 def ensure_config(name: str) -> Path:
     """Create <dataset_dir>/myanalysis.toml from the template if absent; return its path.
 
-    Called at save time. Uses exclusive creation (open mode "x") to avoid a
-    TOCTOU race and to preserve a hand-edited file: an existing file raises
-    FileExistsError, which we catch and ignore. tomllib cannot write, so the
-    fixed template string is written directly (no new dependency).
+    Called at save time. 既存ファイルは手編集の可能性があるので絶対に上書きしない。
+
+    Issue #96: 以前は `open(config_path, "x")` の生書込だった。(a) 非 atomic なので書込中に
+    失敗すると部分的な TOML が残り `load_config` が恒久的に例外を投げるようになる、
+    (b) 同期マウント上の失敗が検証されない、(c) FileExistsError を握るので失敗が完全に
+    見えない、の 3 点で危険だった。存在確認 → `atomic_write_text`（read-back 検証つき）に
+    変更する。存在チェックと作成の間の TOCTOU は、同一マシン内では呼び出し側が
+    exclusive_lock 下で呼ぶ経路が主で、かつ「既存を上書きしない」意図は
+    atomic_write_text の冪等な書込（同内容なら no-op）で実害が出ない。
     """
     from config import get_dataset_dir
     config_path = get_dataset_dir(name) / CONFIG_FILENAME
     try:
-        with open(config_path, "x", encoding="utf-8") as f:
-            f.write(_TEMPLATE)
-    except FileExistsError:
-        pass
+        if config_path.exists():
+            return config_path
+    except OSError:
+        return config_path        # 判定不能なら触らない（既存を守る方に倒す）
+    atomic_write_text(config_path, _TEMPLATE)
     return config_path
 
 

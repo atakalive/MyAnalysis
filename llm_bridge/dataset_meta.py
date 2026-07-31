@@ -29,11 +29,20 @@ from pathlib import Path
 
 import config
 from common.paths import (bak_path, durable_read_json, durable_write_json,
-                          read_json_classified, safe_resolve)
+                          read_json_classified, safe_resolve, strip_seq)
 import dataset_config
 from common.filelock import exclusive_lock
 
 META_VERSION = 1
+
+
+class MetaUnreadableError(RuntimeError):
+    """meta.json が読めないので更新を中止した（Issue #96）。
+
+    `RuntimeError` にしてあるのは、既存の呼び出し側 4 箇所（GUI の概要編集 / 完了トグル、
+    CLI の set-description / set-completed）が既に
+    `except (KeyError, RuntimeError, OSError, ValueError)` で受けて警告表示するため。
+    """
 
 LIGHT_FIELDS = ("analysis_count", "analysis_names", "last_touched",
                 "open_tab_count", "open_analysis_names", "chat_session_count",
@@ -190,7 +199,8 @@ def _is_noop_write(path: Path, existing: dict, merged: dict) -> bool:
     if not _content_equal(existing, merged):
         return False
     bstatus, bdata = read_json_classified(bak_path(path))
-    return bstatus == "ok" and _content_equal(bdata, merged)
+    # 生読みなので durable_* が刻む `_seq` を剥がしてから比較する（Issue #96）。
+    return bstatus == "ok" and _content_equal(strip_seq(bdata), merged)
 
 
 def compute_meta(
@@ -460,14 +470,29 @@ def rebuild_meta(
         return
 
 
+def _read_for_patch(dataset: str) -> dict:
+    """patch_* 用の read。読めないときは**書かせない**ために raise する（Issue #96）。
+
+    以前はここが `meta or {}` で、`durable_read_json` の status を捨てていた。同期マウントで
+    読取が一瞬失敗する（実測 407 回）と空 dict から 2 キーだけを書き、**primary と .bak の
+    両方**を潰していた（実際に dataset_h の meta.json が 15 キー → 2 キーに縮退した）。
+    'absent'（本当に無い）のときだけ新規作成を許す。
+    """
+    status, meta = durable_read_json(_meta_path(dataset))
+    if status == "unreadable":
+        raise MetaUnreadableError(
+            f"meta.json is unreadable for {dataset!r}; refusing to overwrite it "
+            f"(this would destroy description/completed)")
+    return meta or {}
+
+
 def patch_description(dataset: str, text: str) -> None:
     """Set meta.json's description, preserving other fields. Does NOT bump
     updated_at. A meta created from scratch here lacks analysis_count, so it is
     _is_stale → picked up by the background heavy rebuild."""
     with exclusive_lock(_meta_lock_path(dataset)):
-        _status, meta = durable_read_json(_meta_path(dataset))
-        meta = meta or {}                      # 意図的な description 書込。unreadable でも書く
-        meta["description"] = text             # （durable_write が primary＋.bak を再確立する）
+        meta = _read_for_patch(dataset)
+        meta["description"] = text
         meta.setdefault("version", META_VERSION)
         write_meta(dataset, meta)
 
@@ -476,10 +501,9 @@ def patch_completed(dataset: str, completed: bool) -> None:
     """Set meta.json's completed flag, preserving other fields. Does NOT bump
     updated_at. A meta created from scratch here lacks analysis_count, so it is
     _is_stale → picked up by the background heavy rebuild.
-    Mirrors patch_description: writes even when the primary is unreadable."""
+    Mirrors patch_description: aborts rather than write over an unreadable meta."""
     with exclusive_lock(_meta_lock_path(dataset)):
-        _status, meta = durable_read_json(_meta_path(dataset))
-        meta = meta or {}
+        meta = _read_for_patch(dataset)
         meta["completed"] = bool(completed)
         meta.setdefault("version", META_VERSION)
         write_meta(dataset, meta)

@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-from common.paths import repo_root
+from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
@@ -133,12 +133,39 @@ def _generation_flags(config: dict) -> list[str]:
     effort = config.get("effort")
     if isinstance(effort, str) and effort.strip():
         ev = effort.strip()
-        if ev == "ultracode":  # xhigh + dynamic-workflow orchestration
-            flags += ["--effort", "xhigh", "--settings", '{"ultracode": true}']
-        else:
-            flags += ["--effort", ev]
+        # ultracode = xhigh + dynamic-workflow orchestration。`ultracode: true` 自体は
+        # --settings で渡す（_settings_payload が hooks とマージして 1 回だけ渡す）。
+        flags += ["--effort", "xhigh" if ev == "ultracode" else ev]
 
     return flags
+
+
+def _settings_payload(config: dict) -> dict:
+    """`--settings` に渡す JSON を組み立てる。
+
+    `--settings` は 1 個しか渡せないので、ultracode フラグと PreToolUse hook を
+    **ここで 1 つの dict にまとめる**（Issue #96 以前は ultracode だけを直接
+    `--settings '{"ultracode": true}'` で渡しており、hook を足すと衝突していた）。
+
+    hook の役割: エージェント自身の Write/Edit は独自の tmp+rename でマウントへ
+    直書きするので、我々の書込 chokepoint を通らず 22% の確率で 0 バイト化を起こす
+    （キャッシュに `*.tmp.<pid>.<hex>` 形式の孤児が実在する）。プロンプトによる
+    お願い（MOUNT_SAFE_EDITS）は実測で守られなかったため、機械的に拒否して
+    安全な CLI verb へ誘導する。
+    """
+    payload: dict = {}
+    effort = config.get("effort")
+    if isinstance(effort, str) and effort.strip() == "ultracode":
+        payload["ultracode"] = True
+    if config.get("guard_mount_writes", True):
+        guard = f'"{sys.executable}" -m llm_bridge guard-write'
+        payload["hooks"] = {
+            "PreToolUse": [{
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": guard}],
+            }]
+        }
+    return payload
 
 
 def _system_prompt_args(use_provider_default: bool) -> list[str]:
@@ -191,6 +218,9 @@ class ClaudeCodeBackend:
         if perm:
             cmd += ["--permission-mode", perm]
         cmd += _generation_flags(config)
+        settings = _settings_payload(config)
+        if settings:
+            cmd += ["--settings", json.dumps(settings)]
         allowed = config.get("allowed_tools", "")
         if allowed:
             # space/comma-separated allowlist → variadic --allowedTools
@@ -545,6 +575,12 @@ class ClaudeCodeBackend:
             [rr] + ([child_env["PYTHONPATH"]] if child_env.get("PYTHONPATH") else [])
         )
         child_env["PYTHONUTF8"] = "1"
+        # 同期マウント上に __pycache__ を作らせない（Issue #96）。エージェントが
+        # <work_dir>/code/*.py を import すると CPython が tmp+rename で .pyc を書き、
+        # rclone のキャッシュ層で rename が失敗して 0 バイト化する経路に乗る
+        # （実測: rename 失敗 546 件のうち 90 件 = 16% が *.cpython-312.pyc）。
+        # 無効化ではなくローカルへの退避にするので、repo モジュールのキャッシュは効いたまま。
+        child_env.setdefault("PYTHONPYCACHEPREFIX", str(pycache_prefix()))
         py_dir = os.path.dirname(sys.executable)
         child_env["PATH"] = os.pathsep.join(
             [py_dir] + ([child_env["PATH"]] if child_env.get("PATH") else [])

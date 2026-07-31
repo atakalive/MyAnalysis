@@ -128,6 +128,7 @@ class ToolWindow(QMainWindow):
     tab_changed = Signal(int)
     dataset_changed = Signal(object)  # str | None
     open_datasets_changed = Signal()  # open-dataset set / active membership changed
+    write_failed = Signal(dict)       # common.paths の書込検証失敗 (Issue #96)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -162,6 +163,7 @@ class ToolWindow(QMainWindow):
         self.setCentralWidget(central)
         self._update_switcher_visibility()
         self.statusBar()
+        self._install_write_failure_sink()
 
         self._chat_dock = QDockWidget(tr("dock.chat"), self)
         self._chat_dock.setObjectName("ChatDock")
@@ -371,6 +373,26 @@ class ToolWindow(QMainWindow):
     def _update_switcher_visibility(self) -> None:
         # Hide the switcher when ≤1 dataset is open (single-dataset look).
         self._switcher.setVisible(self._switcher.count() > 1)
+
+    # ---- 書込失敗の可視化（Issue #96） ----------------------------------- #
+
+    def _install_write_failure_sink(self) -> None:
+        """common.paths の書込検証失敗をステータスバーに出す。
+
+        MountWriteError は `except OSError` を握っている既存経路に呑まれ得るので、
+        **例外とは別の経路**で必ずユーザーに見せる。sink は任意のスレッド
+        （メタ再構築ワーカー等）から呼ばれるため、Signal 経由で GUI スレッドへ渡す。
+        """
+        from common import paths as common_paths
+
+        self.write_failed.connect(self._on_write_failed)
+        common_paths.set_write_failure_sink(self.write_failed.emit)
+
+    def _on_write_failed(self, payload: dict) -> None:
+        import os.path
+        name = os.path.basename(str(payload.get("path", ""))) or "?"
+        logging.error("write verification failed: %s", payload)
+        self.statusBar().showMessage(tr("status.write_failed", name=name), 30000)
 
     def _ensure_group(self, ds: str | None) -> _DatasetGroup:
         """Return the group for *ds*, creating (and registering) it if absent.
