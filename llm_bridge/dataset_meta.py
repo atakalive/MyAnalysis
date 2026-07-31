@@ -160,6 +160,9 @@ def _merge_meta(existing: dict, computed: dict, *, heavy: bool) -> dict:
     merged["description"] = desc if isinstance(desc, str) else ""   # None/non-str → ""
     merged["completed"] = existing.get("completed") is True   # 未検証 dict → is True で正規化
     merged["version"] = META_VERSION
+    # 意味は「最後に**内容が変わった**時刻」であって「最後にスキャンした時刻」ではない。
+    # rebuild_meta が no-op（内容不変）を検出したときはこの値ごと書かずに捨てるため、
+    # 変化のないスキャンでは進まない。ピッカーは "最終更新" として表示する。
     merged["updated_at"] = time.time()
     return merged
 

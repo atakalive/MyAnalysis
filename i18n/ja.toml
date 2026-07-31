@@ -232,7 +232,7 @@
 "picker.detail.annotations"      = "注釈数"
 "picker.detail.exports"          = "export図数"
 "picker.detail.chats"            = "チャット数"
-"picker.detail.updated_at"       = "集計時刻"
+"picker.detail.updated_at"       = "最終更新"
 "picker.desc.dialog.title"       = "概要を編集"
 "picker.desc.dialog.label"       = "このデータセットの概要:"
 "picker.desc.edit_failed"        = "概要を保存できませんでした"

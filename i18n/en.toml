@@ -232,7 +232,7 @@
 "picker.detail.annotations"      = "Annotations"
 "picker.detail.exports"          = "Exported figures"
 "picker.detail.chats"            = "Chat sessions"
-"picker.detail.updated_at"       = "Computed at"
+"picker.detail.updated_at"       = "Last updated"
 "picker.desc.dialog.title"       = "Edit description"
 "picker.desc.dialog.label"       = "Description for this dataset:"
 "picker.desc.edit_failed"        = "Could not save description"
