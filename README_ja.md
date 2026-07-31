@@ -240,7 +240,7 @@ python -m export <dataset> <name>
 ### その他のバックエンド（任意）
 
 - `openai` — `.env` の `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` を任意の OpenAI 互換エンドポイント（例: ローカル Ollama）に向ける。
-- `pi` — `npm i -g @mariozechner/pi-coding-agent`。運用設定は `config.toml`、秘密は `.env`。
+- `pi` — `npm i -g @earendil-works/pi-coding-agent`（旧名 `@mariozechner/…` は deprecated）。運用設定は `config.toml`、秘密は `.env`。Windows では **Windows 側にインストール**すること（WSL 側だけのインストールは参照できない）。
 - `mock` — オフライン・設定不要。GUI のスモークテストに便利。
 
 **選択順**: 環境変数 `LLM_BACKEND` → `llm_backend/config.toml` の `[backend].name` → `OPENAI_BASE_URL` 後方互換。

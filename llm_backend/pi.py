@@ -1,4 +1,4 @@
-"""pi-coding-agent (@mariozechner/pi-coding-agent) as a dialogue backend.
+"""pi-coding-agent (@earendil-works/pi-coding-agent) as a dialogue backend.
 
 pi manages conversation state itself via `--session`; it does not accept an
 OpenAI-style messages[] array. Each turn we spawn `pi --mode json`, feed the
@@ -75,7 +75,7 @@ class PiCodingAgentBackend:
         if pi_bin is None:
             raise RuntimeError(
                 "pi not found in PATH. "
-                "Install: npm i -g @mariozechner/pi-coding-agent"
+                "Install: npm i -g @earendil-works/pi-coding-agent"
             )
 
         cmd = [pi_bin, "--mode", "json"]

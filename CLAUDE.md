@@ -119,8 +119,11 @@ guards that every prompt still contains it.
   **External dependency**: the VS Code Claude Code extension installed + logged in.
 - **pi backend** runs `python -m llm_bridge` via the `.pi/skills/myanalysis-bridge`
   skill to drive the GUI live. **External dependency**: Node + pi
-  (`npm i -g @mariozechner/pi-coding-agent`). On Windows pi additionally needs a
-  bash shell (Git Bash) for its tool execution.
+  (`npm i -g @earendil-works/pi-coding-agent` — the old `@mariozechner/…` name is
+  deprecated). On Windows pi additionally needs a bash shell (Git Bash) for its
+  tool execution, and **must be installed Windows-side**: `pi.py` resolves the
+  binary with `shutil.which` from the Windows Python process, so a WSL-only
+  install is unreachable (no `wsl.exe` wrapper, no path translation).
 - **Visual feedback** (chat self-view): requires a vision-capable `[pi].model`
   or the pi-vision-proxy extension (`PI_VISION_PROXY_MODEL`).
 

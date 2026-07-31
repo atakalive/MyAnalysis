@@ -240,7 +240,7 @@ The chat dock talks to an LLM backend through [llm_backend/](llm_backend/). Four
 ### Other backends (optional)
 
 - `openai` — point `.env`'s `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` at any OpenAI-compatible endpoint (e.g. a local Ollama).
-- `pi` — `npm i -g @mariozechner/pi-coding-agent`; operational settings go in `config.toml`, secrets in `.env`.
+- `pi` — `npm i -g @earendil-works/pi-coding-agent` (the old `@mariozechner/…` name is deprecated); operational settings go in `config.toml`, secrets in `.env`. On Windows it must be the Windows-side install — a WSL-only `pi` is not reachable.
 - `mock` — offline, no configuration; useful for smoke-testing the GUI.
 
 **Selection order**: env `LLM_BACKEND` → `[backend].name` in `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
