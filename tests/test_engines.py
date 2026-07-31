@@ -10,8 +10,11 @@ from llm_backend.engines import (
     ENGINES,
     apply_selection,
     candidate_settings,
+    combo_choices,
     current_engine_id,
     engine_by_id,
+    save_choices,
+    saved_choices,
 )
 from llm_backend.settings_store import set_toml_keys as _real_set_toml_keys
 
@@ -281,9 +284,87 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.dialog.env_bin_warning",
         "backend.dialog.test_ok",
         "backend.dialog.test_fail",
+        "backend.dialog.choice_add",
+        "backend.dialog.choice_add_tip",
+        "backend.dialog.choice_remove",
+        "backend.dialog.choice_remove_tip",
+        "backend.dialog.choice_failed",
         "backend.applied",
         "backend.applied_config_only",
     ]
     for lang, cat in cats.items():
         for k in keys:
             assert k in cat, f"{k} missing from {lang}.toml"
+
+
+# --------------------------------------------------------------------------- #
+# user-editable dropdown choices (models.toml [<key>].{model,provider}_choices) #
+# --------------------------------------------------------------------------- #
+
+_PI = engine_by_id("pi")
+
+
+def test_pi_provider_seed_is_openai_and_local_only():
+    """pi は OpenAI とローカルモデルだけ。他プロバイダは別課金なので出さない。"""
+    assert _PI.provider_suggestions == ("openai-codex", "openai", "llama.cpp")
+
+
+def test_combo_choices_falls_back_to_seed_when_unset(apply_env):
+    assert combo_choices(_PI, "model") == _PI.model_suggestions
+    assert combo_choices(_PI, "provider") == _PI.provider_suggestions
+    assert saved_choices(_PI, "model") is None
+
+
+def test_saved_choices_overrides_seed(apply_env):
+    apply_env.mc.data = {"pi": {"model_choices": ["qwen3-coder", "gpt-5.5"]}}
+    assert combo_choices(_PI, "model") == ("qwen3-coder", "gpt-5.5")
+    # provider untouched → still the seed
+    assert combo_choices(_PI, "provider") == _PI.provider_suggestions
+
+
+def test_empty_saved_list_is_honoured_not_reseeded(apply_env):
+    """[] means 'the user removed everything' and must not resurrect the seed."""
+    apply_env.mc.data = {"pi": {"model_choices": []}}
+    assert saved_choices(_PI, "model") == ()
+    assert combo_choices(_PI, "model") == ()
+
+
+def test_saved_choices_ignores_non_list_and_blank_entries(apply_env):
+    apply_env.mc.data = {"pi": {"model_choices": "not-a-list"}}
+    assert saved_choices(_PI, "model") is None
+    apply_env.mc.data = {"pi": {"model_choices": ["  a  ", "", "a", 7, "b"]}}
+    assert saved_choices(_PI, "model") == ("a", "b")   # trimmed, deduped, ints dropped
+
+
+def test_save_choices_writes_models_toml_and_clears_cache(apply_env):
+    save_choices(_PI, "model", ["gpt-5.6-sol", " gpt-5.5 ", "gpt-5.6-sol", ""])
+    data = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert data["pi"]["model_choices"] == ["gpt-5.6-sol", "gpt-5.5"]
+    assert apply_env.mc.cleared == 1
+
+
+def test_save_choices_provider_uses_its_own_key(apply_env):
+    save_choices(_PI, "provider", ["llama.cpp"])
+    data = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert data["pi"]["provider_choices"] == ["llama.cpp"]
+    assert "model_choices" not in data["pi"]
+
+
+def test_save_choices_preserves_existing_model_key(apply_env):
+    apply_env.mdl_p.write_text('[pi]\nmodel = "gpt-5.5"   # keep\n', encoding="utf-8")
+    save_choices(_PI, "model", ["a"])
+    text = apply_env.mdl_p.read_text(encoding="utf-8")
+    assert "# keep" in text
+    data = tomllib.loads(text)
+    assert data["pi"]["model"] == "gpt-5.5"
+    assert data["pi"]["model_choices"] == ["a"]
+
+
+def test_save_choices_noop_for_engine_without_settings_key(apply_env):
+    save_choices(engine_by_id("mock"), "model", ["x"])
+    assert not apply_env.mdl_p.exists()
+
+
+def test_save_choices_ignores_unknown_field(apply_env):
+    save_choices(_PI, "bogus", ["x"])
+    assert not apply_env.mdl_p.exists()

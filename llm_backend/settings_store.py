@@ -9,8 +9,8 @@ GUI からバックエンド/モデル選択を適用するとき、真実ソー
 ``registry_transaction`` / ``_replace_datasets_block`` / ``_serialize_path_value``
 と同じ house pattern (ロック内で source テキストを行/ブロック単位に編集、値は
 ``json.dumps`` で常に妥当化) に倣う。その代わり「触れる形」を単一行の basic string /
-bool に厳格限定し、範囲外は一切書かず ``RuntimeError`` (fail-closed) とすることで
-silent corruption を構造的に排除する。
+bool / 文字列配列に厳格限定し、範囲外は一切書かず ``RuntimeError`` (fail-closed) と
+することで silent corruption を構造的に排除する。
 """
 
 from __future__ import annotations
@@ -34,10 +34,16 @@ def models_toml_path() -> Path:
     return repo_root() / "models.toml"
 
 
-def _format_value(value: str | bool) -> str:
-    """bool → true/false、str → JSON basic string (常に妥当な TOML を生成)。"""
+def _format_value(value: str | bool | list[str]) -> str:
+    """bool → true/false、str → JSON basic string、list[str] → 単一行配列。
+
+    配列は必ず 1 行で生成する (``["a", "b"]``)。``_apply_one`` の行単位パターンが
+    書き換えられるのも単一行配列だけなので、生成側と書換側の形を揃えている。
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(json.dumps(v, ensure_ascii=False) for v in value) + "]"
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -59,22 +65,31 @@ def _find_section(lines: list[str], section: str) -> tuple[int, int] | None:
     return hdr, end
 
 
-def set_toml_keys(path: Path, changes: dict[str, dict[str, str | bool]]) -> None:
+def set_toml_keys(
+    path: Path, changes: dict[str, dict[str, str | bool | list[str]]]
+) -> None:
     """``changes`` = ``{section: {key: value}}`` の該当キーだけを ``path`` に書く。
 
-    値は str または bool のみ (それ以外 → ``TypeError``)。コメント・整列・改行・末尾改行を
-    保存し、無関係行は verbatim。触れる形は単一行の basic string / bool に厳格限定し、
-    配列・multiline・裸の値・重複アクティブキーは書き換えず ``RuntimeError`` (fail-closed)。
+    値は str / bool / list[str] のみ (それ以外 → ``TypeError``)。コメント・整列・改行・
+    末尾改行を保存し、無関係行は verbatim。触れる形は単一行の basic string / bool /
+    文字列配列に厳格限定し、multiline・裸の値・重複アクティブキーは書き換えず
+    ``RuntimeError`` (fail-closed)。
     書き込み前に ``tomllib.loads`` でラウンドトリップ検証し、失敗ならファイル無変更で
     ``RuntimeError``。既存ファイルが構文破損なら ``.bak`` へ退避して最小再生成する。
     """
     # 値型検証はロック取得前 (ファイルに触れる前) に行う。
     for section, kv in changes.items():
         for key, value in kv.items():
-            if not isinstance(value, (str, bool)):
+            if isinstance(value, list):
+                if not all(isinstance(v, str) for v in value):
+                    raise TypeError(
+                        f"set_toml_keys: value for [{section}].{key} is a list but "
+                        f"contains a non-str element"
+                    )
+            elif not isinstance(value, (str, bool)):
                 raise TypeError(
-                    f"set_toml_keys: value for [{section}].{key} must be str or "
-                    f"bool, got {type(value).__name__}"
+                    f"set_toml_keys: value for [{section}].{key} must be str, bool "
+                    f"or list[str], got {type(value).__name__}"
                 )
 
     path = Path(path)
@@ -136,9 +151,12 @@ def _apply_one(
     lines: list[str], section: str, key: str, new_val: str, path: Path
 ) -> None:
     """1 つの (section, key) を lines に適用 (in-place)。"""
+    # val は「単一行の basic string / bool / 文字列配列」のみ。配列は要素に [ ] を
+    # 含まない単一行のものだけが一致する (multiline 配列は閉じ括弧が同じ行に無いので
+    # 一致せず、下の RuntimeError で fail-closed になる)。
     key_re = re.compile(
         r"^(?P<indent>\s*)" + re.escape(key)
-        + r'(?P<eq>\s*=\s*)(?P<val>"(?:[^"\\]|\\.)*"|true|false)'
+        + r'(?P<eq>\s*=\s*)(?P<val>"(?:[^"\\]|\\.)*"|true|false|\[[^\[\]]*\])'
         + r"(?P<pad>\s*)(?P<cmt>#.*)?$"
     )
     assign_re = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
@@ -169,7 +187,7 @@ def _apply_one(
         if m is None:
             raise RuntimeError(
                 f"set_toml_keys: key {key!r} in [{section}] of {path} is not a "
-                f"single-line string/bool (array/multiline/bare value); refusing "
+                f"single-line string/bool/array (multiline/bare value); refusing "
                 f"to rewrite (file left unchanged)"
             )
         lines[i] = (

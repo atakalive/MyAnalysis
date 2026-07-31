@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from common.i18n import tr
@@ -30,10 +32,12 @@ from llm_backend.engines import (
     ENGINES,
     apply_selection,
     candidate_settings,
+    combo_choices,
     current_engine_id,
     current_model,
     current_provider,
     engine_by_id,
+    save_choices,
 )
 from llm_backend.ping import ping_backend
 
@@ -79,11 +83,17 @@ class BackendSelectorDialog(QDialog):
 
         self._model_combo = QComboBox(self)
         self._model_combo.setEditable(True)
-        self._form.addRow(tr("backend.dialog.model"), self._model_combo)
+        self._model_row, self._model_btns = self._make_choice_row(
+            self._model_combo, "model"
+        )
+        self._form.addRow(tr("backend.dialog.model"), self._model_row)
 
         self._provider_combo = QComboBox(self)
         self._provider_combo.setEditable(True)
-        self._form.addRow(tr("backend.dialog.provider"), self._provider_combo)
+        self._provider_row, self._provider_btns = self._make_choice_row(
+            self._provider_combo, "provider"
+        )
+        self._form.addRow(tr("backend.dialog.provider"), self._provider_row)
 
         self._env_warning = QLabel(tr("backend.dialog.env_warning"), self)
         self._env_warning.setWordWrap(True)
@@ -134,44 +144,109 @@ class BackendSelectorDialog(QDialog):
             return ""
         return self._provider_combo.currentText().strip()
 
+    # ----- choice-list rows (combo + add/remove) -----
+
+    def _make_choice_row(self, combo, field: str) -> tuple[QWidget, list[QPushButton]]:
+        """Wrap ``combo`` with ＋/－ buttons that edit the persisted choice list.
+
+        The row's field widget is the returned container, so row visibility is
+        toggled on *it*; ``_sync_engine_widgets`` additionally sets the combo's own
+        visibility so ``isHidden()`` still reflects the row state.
+        """
+        row = QWidget(self)
+        box = QHBoxLayout(row)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(combo, 1)
+        buttons: list[QPushButton] = []
+        for label_key, tip_key, slot in (
+            ("backend.dialog.choice_add", "backend.dialog.choice_add_tip", True),
+            ("backend.dialog.choice_remove", "backend.dialog.choice_remove_tip", False),
+        ):
+            btn = QPushButton(tr(label_key), row)
+            btn.setToolTip(tr(tip_key))
+            btn.setFixedWidth(28)
+            btn.setAutoDefault(False)   # else Enter in the combo would fire it
+            btn.clicked.connect(
+                lambda _checked=False, f=field, add=slot: self._on_edit_choices(f, add)
+            )
+            box.addWidget(btn)
+            buttons.append(btn)
+        return row, buttons
+
+    def _combo_for(self, field: str):
+        return self._model_combo if field == "model" else self._provider_combo
+
+    def _on_edit_choices(self, field: str, add: bool) -> None:
+        """＋: add the typed value to the list. －: remove it. Persisted at once.
+
+        This edits the *dropdown contents*, which is independent of the selection
+        being applied — so it is saved immediately rather than waiting for 適用.
+        """
+        engine = self._selected_engine()
+        if engine is None or not engine.settings_key:
+            return
+        combo = self._combo_for(field)
+        value = combo.currentText().strip()
+        if not value:
+            return
+        current = list(combo_choices(engine, field))
+        if add:
+            if value in current:
+                return
+            current.append(value)
+        else:
+            if value not in current:
+                return
+            current.remove(value)
+        try:
+            save_choices(engine, field, current)
+        except Exception as e:
+            self._result_label.setText(tr("backend.dialog.choice_failed", error=str(e)))
+            return
+        self._populate_choices(engine, field, keep_text=True)
+
     def _sync_engine_widgets(self) -> None:
         engine = self._selected_engine()
         if engine is None:
             return
-        self._populate_model(engine)
+        self._populate_choices(engine, "model")
         has_provider = "provider" in engine.fields
         if has_provider:
-            self._populate_provider(engine)
-        self._form.setRowVisible(self._provider_combo, has_provider)
+            self._populate_choices(engine, "provider")
+        self._form.setRowVisible(self._provider_row, has_provider)
+        # Keep the combo's own hidden-state in sync with the row it lives in.
+        self._provider_combo.setVisible(has_provider)
+        for btn in self._provider_btns:
+            btn.setVisible(has_provider)
         self._update_warnings(engine)
 
-    def _populate_model(self, engine) -> None:
-        self._model_combo.blockSignals(True)
-        self._model_combo.clear()
-        cur = current_model(engine)
-        items: list[str] = []
-        if cur:
-            items.append(cur)
-        for s in engine.model_suggestions:
+    def _populate_choices(self, engine, field: str, *, keep_text: bool = False) -> None:
+        """Rebuild ``field``'s dropdown from the choice list.
+
+        ``keep_text`` retains what the user typed (used after ＋/－, which must not
+        reset the selection back to the persisted one). It also suppresses the
+        "current value first" rule: right after a －, the removed value is still in
+        the edit box, and listing it would make the removal look like it failed.
+        Opening the dialog does prepend the configured value, so a model that is
+        active but absent from the list is never invisible.
+        """
+        combo = self._combo_for(field)
+        if keep_text:
+            text = combo.currentText().strip()
+            items: list[str] = []
+        else:
+            text = (
+                current_model(engine) if field == "model" else current_provider(engine)
+            )
+            items = [text] if text else []
+        for s in combo_choices(engine, field):
             if s and s not in items:
                 items.append(s)
-        self._model_combo.addItems(items)
-        self._model_combo.setEditText(cur)
-        self._model_combo.blockSignals(False)
-
-    def _populate_provider(self, engine) -> None:
-        self._provider_combo.blockSignals(True)
-        self._provider_combo.clear()
-        cur = current_provider(engine)
-        items: list[str] = []
-        if cur and cur not in items:
-            items.append(cur)
-        for s in engine.provider_suggestions:
-            if s not in items:
-                items.append(s)
-        self._provider_combo.addItems(items)
-        self._provider_combo.setEditText(cur)
-        self._provider_combo.blockSignals(False)
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(items)
+        combo.setEditText(text)
+        combo.blockSignals(False)
 
     def _update_warnings(self, engine=None) -> None:
         if engine is None:
@@ -194,6 +269,8 @@ class BackendSelectorDialog(QDialog):
         self._engine_combo.setEnabled(enabled)
         self._model_combo.setEnabled(enabled)
         self._provider_combo.setEnabled(enabled)
+        for btn in (*self._model_btns, *self._provider_btns):
+            btn.setEnabled(enabled)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
 
     # ----- connectivity check -----

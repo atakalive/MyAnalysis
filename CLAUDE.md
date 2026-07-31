@@ -94,6 +94,15 @@ guards that every prompt still contains it.
   `model`/`provider` keys in `models.toml` (comment-preserving), runs an optional
   connectivity check, then `cache_clear()`s both loaders + reseeds every chat
   session's backend so it applies from the next send — no restart (Issue #94).
+  The model/provider dropdowns are user-editable: ＋/－ next to each combo add or
+  remove the typed value and persist the list to `models.toml` as
+  `[<section>].model_choices` / `provider_choices` (saved immediately, independent
+  of 適用). An absent key falls back to the seed in `engines.py`; `[]` means "no
+  candidates" and is honoured. `merged_settings` overlays only bool/non-blank-str,
+  so these list values never leak into a backend's settings. pi's seed is
+  deliberately OpenAI + local only (`openai-codex` / `openai` / `llama.cpp`) —
+  other providers bill separately through pi. Local models never appear in pi's
+  catalog until llama-server has them loaded, which is why the list is editable.
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`

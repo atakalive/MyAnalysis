@@ -33,7 +33,10 @@ MODELS_SAMPLE = (
 
 
 def _write(p: Path, text: str) -> Path:
-    p.write_text(text, encoding="utf-8")
+    # newline="" is required: Path.write_text defaults to newline=None, which
+    # translates "\n" → os.linesep, so on Windows an "LF fixture" would land on
+    # disk as CRLF and test_lf_preserved would assert against a CRLF input.
+    p.write_text(text, encoding="utf-8", newline="")
     return p
 
 
@@ -140,8 +143,55 @@ def test_replace_value_with_inline_comment_and_hash(tmp_path):
     assert tomllib.loads(text)["s"]["k"] == "a#b"
 
 
-def test_array_value_refused_unchanged(tmp_path):
-    orig = "[s]\nk = [1, 2]\n"
+def test_single_line_array_is_rewritable(tmp_path):
+    """Single-line arrays are a supported shape (the dialog's choice lists)."""
+    p = _write(tmp_path / "c.toml", "[s]\nk = [1, 2]\n")
+    set_toml_keys(p, {"s": {"k": "x"}})
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == "x"
+
+
+def test_write_string_list(tmp_path):
+    p = _write(tmp_path / "c.toml", '[s]\nk = "old"   # note\n')
+    set_toml_keys(p, {"s": {"k": ["a", "b"]}})
+    text = p.read_text(encoding="utf-8")
+    assert "# note" in text                       # inline comment preserved
+    assert 'k = ["a", "b"]' in text               # single line, JSON-quoted
+    assert tomllib.loads(text)["s"]["k"] == ["a", "b"]
+
+
+def test_write_empty_list_is_distinct_from_absent(tmp_path):
+    """An empty list must persist as [] — 'user cleared it' ≠ 'never set'."""
+    p = _write(tmp_path / "c.toml", "[s]\n")
+    set_toml_keys(p, {"s": {"k": []}})
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == []
+
+
+def test_list_round_trip_replaces_existing_list(tmp_path):
+    p = _write(tmp_path / "c.toml", '[s]\nk = ["a", "b"]\n')
+    set_toml_keys(p, {"s": {"k": ["c"]}})
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == ["c"]
+
+
+def test_non_str_list_element_rejected_before_touching_file(tmp_path):
+    orig = '[s]\nk = "a"\n'
+    p = _write(tmp_path / "c.toml", orig)
+    with pytest.raises(TypeError):
+        set_toml_keys(p, {"s": {"k": ["ok", 3]}})
+    assert p.read_text(encoding="utf-8") == orig
+
+
+def test_multiline_array_refused_unchanged(tmp_path):
+    """A multiline array has no closing bracket on the key line → fail-closed."""
+    orig = '[s]\nk = [\n  "a",\n  "b",\n]\n'
+    p = _write(tmp_path / "c.toml", orig)
+    with pytest.raises(RuntimeError):
+        set_toml_keys(p, {"s": {"k": "x"}})
+    assert p.read_text(encoding="utf-8") == orig
+
+
+def test_nested_array_refused_unchanged(tmp_path):
+    """Inner brackets are outside the supported shape → fail-closed."""
+    orig = "[s]\nk = [[1], [2]]\n"
     p = _write(tmp_path / "c.toml", orig)
     with pytest.raises(RuntimeError):
         set_toml_keys(p, {"s": {"k": "x"}})

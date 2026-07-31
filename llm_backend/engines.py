@@ -61,7 +61,21 @@ ENGINES: tuple[Engine, ...] = (
         settings_key="pi",
         config_patch=(),
         fields=("model", "provider"),
-        provider_suggestions=("", "openai-codex"),
+        # OpenAI (Codex サブスク / API キー) とローカルモデルのみ。他プロバイダは pi
+        # 経由だと別課金になるので候補に出さない。"llama.cpp" は pi 側の provider id
+        # そのもの (`/login llama.cpp`, LLAMA_BASE_URL)。
+        provider_suggestions=("openai-codex", "openai", "llama.cpp"),
+        # openai-codex の実在 ID (pi --list-models で確認)。ローカルモデルは
+        # llama-server にロード済みのものしか catalog に出ないため静的な種は持てない
+        # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。
+        model_suggestions=(
+            "gpt-5.6-sol",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+        ),
     ),
     Engine(
         id="openai-http",
@@ -132,6 +146,70 @@ def current_provider(engine: Engine) -> str:
         engine.settings_key, backend_config().get(engine.settings_key, {})
     )
     return merged.get("provider", "") or ""
+
+
+# ----- user-editable dropdown choices (persisted in models.toml) -----
+#
+# ``model_suggestions``/``provider_suggestions`` above are only the *seed*. The
+# dialog lets the user add/remove entries, and the result is persisted to
+# ``models.toml`` as ``[<settings_key>].model_choices`` / ``provider_choices``.
+# Storing them there (rather than a separate file) keeps models.toml the single
+# truth source for model settings; ``merged_settings`` overlays only bool and
+# non-blank str, so a list value is ignored there and never reaches a backend.
+
+_CHOICE_KEY = {"model": "model_choices", "provider": "provider_choices"}
+
+
+def _clean(values) -> list[str]:
+    """Trim, drop blanks, de-duplicate — preserving order."""
+    out: list[str] = []
+    for v in values:
+        v = (v or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def saved_choices(engine: Engine, field: str) -> tuple[str, ...] | None:
+    """Persisted choices for ``field``; ``None`` when never customised.
+
+    ``None`` (key absent) and ``()`` (user removed everything) are deliberately
+    distinct: the former falls back to the seed, the latter is an empty list the
+    user asked for and must not resurrect the seed.
+    """
+    key = _CHOICE_KEY.get(field)
+    if key is None or not engine.settings_key:
+        return None
+    section = model_config().get(engine.settings_key)
+    if not isinstance(section, dict):
+        return None
+    raw = section.get(key)
+    if not isinstance(raw, list):
+        return None
+    return tuple(_clean(v for v in raw if isinstance(v, str)))
+
+
+def seed_choices(engine: Engine, field: str) -> tuple[str, ...]:
+    if field == "model":
+        return engine.model_suggestions
+    if field == "provider":
+        return engine.provider_suggestions
+    return ()
+
+
+def combo_choices(engine: Engine, field: str) -> tuple[str, ...]:
+    """What the dialog dropdown offers (excluding the current value)."""
+    saved = saved_choices(engine, field)
+    return saved if saved is not None else seed_choices(engine, field)
+
+
+def save_choices(engine: Engine, field: str, values) -> None:
+    """Persist ``values`` as the choice list for ``field`` and refresh the cache."""
+    key = _CHOICE_KEY.get(field)
+    if key is None or not engine.settings_key:
+        return
+    set_toml_keys(models_toml_path(), {engine.settings_key: {key: _clean(values)}})
+    model_config.cache_clear()
 
 
 def candidate_settings(

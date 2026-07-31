@@ -169,3 +169,127 @@ def test_apply_io_error_shows_message(monkeypatch, parent_widget):
     dlg._on_apply()
     assert shown.get("called")
     assert dlg.result() != QDialog.DialogCode.Accepted   # stays open
+
+
+# --------------------------------------------------------------------------- #
+# choice-list ＋/－ controls                                                    #
+# --------------------------------------------------------------------------- #
+
+def _patch_choices(monkeypatch, initial=("a", "b")):
+    """Stub combo_choices/save_choices with an in-memory store."""
+    import gui.backend_selector_dialog as mod
+
+    store = {"model": list(initial), "provider": list(initial)}
+    monkeypatch.setattr(mod, "combo_choices", lambda e, f: tuple(store[f]))
+    monkeypatch.setattr(
+        mod, "save_choices", lambda e, f, vals: store.__setitem__(f, list(vals))
+    )
+    return store
+
+
+def test_add_appends_typed_value_and_persists(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    store = _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("qwen3-coder")
+    dlg._on_edit_choices("model", True)
+    assert store["model"] == ["a", "b", "qwen3-coder"]
+    # the typed value survives the repopulate and stays selected
+    assert dlg._model_combo.currentText() == "qwen3-coder"
+
+
+def test_remove_drops_typed_value_and_persists(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    store = _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("b")
+    dlg._on_edit_choices("model", False)
+    assert store["model"] == ["a"]
+
+
+def test_add_is_idempotent_and_blank_is_ignored(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    store = _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("b")          # already present
+    dlg._on_edit_choices("model", True)
+    assert store["model"] == ["a", "b"]
+    dlg._model_combo.setEditText("   ")        # blank → no-op
+    dlg._on_edit_choices("model", True)
+    assert store["model"] == ["a", "b"]
+
+
+def test_remove_unknown_value_is_noop(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    store = _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("never-added")
+    dlg._on_edit_choices("model", False)
+    assert store["model"] == ["a", "b"]
+
+
+def test_provider_choices_are_independent_of_model(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    store = _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._provider_combo.setEditText("llama.cpp")
+    dlg._on_edit_choices("provider", True)
+    assert store["provider"] == ["a", "b", "llama.cpp"]
+    assert store["model"] == ["a", "b"]
+
+
+def test_save_failure_is_surfaced_not_raised(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    _patch_choices(monkeypatch)
+
+    def _boom(e, f, vals):
+        raise RuntimeError("models.toml is read-only")
+
+    monkeypatch.setattr(mod, "save_choices", _boom)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("x")
+    dlg._on_edit_choices("model", True)        # must not propagate
+    assert "read-only" in dlg._result_label.text()
+
+
+def test_choice_buttons_locked_during_ping(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._set_selection_enabled(False)
+    assert all(not b.isEnabled() for b in (*dlg._model_btns, *dlg._provider_btns))
+    dlg._set_selection_enabled(True)
+    assert all(b.isEnabled() for b in (*dlg._model_btns, *dlg._provider_btns))
+
+
+def test_removed_value_leaves_the_dropdown_immediately(monkeypatch, parent_widget):
+    """After －, the removed value must not still be listed (it only stays typed)."""
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    _patch_choices(monkeypatch, initial=("a", "b"))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("b")
+    dlg._on_edit_choices("model", False)
+    items = [dlg._model_combo.itemText(i) for i in range(dlg._model_combo.count())]
+    assert items == ["a"]
+    assert dlg._model_combo.currentText() == "b"   # still in the edit box
+
+
+def test_added_value_is_listed_once(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
+    _patch_choices(monkeypatch, initial=("a", "b"))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("c")
+    dlg._on_edit_choices("model", True)
+    items = [dlg._model_combo.itemText(i) for i in range(dlg._model_combo.count())]
+    assert items == ["a", "b", "c"]
+
+
+def test_configured_value_is_listed_first_on_open(monkeypatch, parent_widget):
+    """A configured model absent from the list must still be visible."""
+    _patch_config(monkeypatch, engine_id="pi", model="not-in-list", provider="")
+    _patch_choices(monkeypatch, initial=("a", "b"))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    items = [dlg._model_combo.itemText(i) for i in range(dlg._model_combo.count())]
+    assert items == ["not-in-list", "a", "b"]

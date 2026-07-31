@@ -20,8 +20,15 @@ effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode 
                       #   (high token use; needs an ultracode-capable model)
 
 [pi]
-provider = "openai-codex"  # --provider
+provider = "openai-codex"  # --provider  (openai-codex | openai | llama.cpp)
 model    = "gpt-5.5"       # --model
+# *_choices は「バックエンド/モデル設定」ダイアログのドロップダウン候補。
+# ダイアログの ＋/－ が書き換えるので手編集は不要 (してもよい)。キー自体が無ければ
+# engines.py の既定の種を出し、[] なら「候補なし」として尊重する。
+# ローカルモデルは llama-server にロード済みのものしか pi の catalog に出ないため、
+# 名前をここに貯めておくのが実質的な使い方。
+# model_choices    = ["gpt-5.6-sol", "gpt-5.5"]
+# provider_choices = ["openai-codex", "llama.cpp"]
 
 [openai-compat]
 model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)
