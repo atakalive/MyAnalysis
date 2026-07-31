@@ -153,6 +153,21 @@ def test_failed_command_renders_error_marker(fake_popen, tmp_path):
     assert f"{TOOL_ERROR_MARKER} exit 2" in text
 
 
+def test_mcp_tool_call_renders_result_line(fake_popen, tmp_path):
+    fake_popen.events = [
+        {"type": "thread.started", "thread_id": "th-1"},
+        {"type": "item.started",
+         "item": {"id": "i1", "type": "mcp_tool_call", "server": "s", "tool": "t"}},
+        {"type": "item.completed",
+         "item": {"id": "i1", "type": "mcp_tool_call", "server": "s", "tool": "t",
+                  "status": "failed", "error": "boom"}},
+        {"type": "turn.completed", "usage": {}},
+    ]
+    text = "".join(e.text for e in _run(_backend(tmp_path)))
+    assert f"{TOOL_CALL_MARKER} s.t" in text
+    assert f"{TOOL_ERROR_MARKER} boom" in text
+
+
 def test_turn_failed_raises(fake_popen, tmp_path):
     fake_popen.events = [
         {"type": "thread.started", "thread_id": "th-1"},

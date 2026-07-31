@@ -242,6 +242,12 @@ class CodexBackend:
                 out = f"exit {code}"
             if out:
                 yield TextDelta(text=f"{TOOL_RESULT_INDENT}{mark} {out}\n")
+        elif itype in ("mcp_tool_call", "web_search"):
+            status = str(item.get("status") or "")
+            failed = status in ("failed", "errored", "error")
+            mark = TOOL_ERROR_MARKER if failed else TOOL_RESULT_MARKER
+            detail = _one_line(item.get("error") or item.get("result") or status or "done")
+            yield TextDelta(text=f"{TOOL_RESULT_INDENT}{mark} {detail}\n")
 
     def _capture_usage(self, usage: dict) -> None:
         in_tok = usage.get("input_tokens") or 0

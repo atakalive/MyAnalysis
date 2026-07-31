@@ -18,7 +18,8 @@ tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
 [codex]
 # OpenAI Codex CLI (npm i -g @openai/codex)。認証は ~/.codex を共有 (codex login)。
 # 1 ターン = 1 `codex exec --json`、2 ターン目以降は `codex exec resume <thread_id>`。
-bin = "codex"        # 実行ファイル(PATH 名 or 絶対パス。env CODEX_BIN でも上書き可)
+bin = ""             # 実行ファイル(空 = env CODEX_BIN → PATH の "codex" の順で解決。
+                     #   非空にするとその値が最優先で CODEX_BIN は無視される)
 # 空(既定) = --dangerously-bypass-approvals-and-sandbox で無人実行。
 #   GUI 駆動 (python -m llm_bridge) とデータセット work_dir への書込を
 #   サンドボックス外で走らせるために必要 (claude の bypassPermissions 相当)。
