@@ -116,9 +116,6 @@ class PiCodingAgentBackend:
             start_new_session=(sys.platform != "win32"),
             **no_window_kwargs(),
         )
-        proc.stdin.write(prompt.encode("utf-8"))
-        proc.stdin.close()
-
         # Drain stderr in a daemon thread to avoid pipe-buffer deadlock.
         threading.Thread(
             target=self._drain_stderr, args=(proc,), daemon=True
@@ -127,6 +124,14 @@ class PiCodingAgentBackend:
         self._proc = proc
         deferred_error = None
         try:
+            # Inside the try: a rejected --session makes pi exit instantly, and
+            # writing to the dead pipe raises BrokenPipeError. Outside, that escaped
+            # before `finally` could reap the child or attach the stderr tail.
+            try:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass    # child already gone — the exit-code check below reports why
             for raw_line in proc.stdout:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:

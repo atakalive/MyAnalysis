@@ -238,6 +238,32 @@ to discover registered dataset names.
 - `session.json` は durable 書込（`common/paths.py` の `durable_write_json` = primary + `.bak` の 2 コピー＋書込後 read-back 検証。同期マウントの 0 バイト truncate 対策）。検証失敗は `save_all` の failed に載り、Tier 3/4 リロード中止・「保存して終了」の close 拒否・close_dataset 中止という既存経路が発火する。読取は `.bak` フォールバック付きで、破損して回復不能なら `no-session` と区別して `unreadable-session:<ds>`（GUI が警告・破損ファイルは上書きしない）。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
 
+#### ネイティブ resume token は同期しない（PC ローカル）
+
+チャット履歴（`messages`）は `<work_dir>/chat_sessions/<id>.json` に同期されるが、
+**ネイティブ resume token（claude `--resume` / pi `--session` / codex `exec resume`）は
+同期してはならない。** 指す先の実体（`~/.claude`, `~/.pi/agent/sessions`, `~/.codex`）が
+PC ローカルだからで、同期すると別 PC で存在しない ID を `--resume` に渡すことになる
+（README 設計原則「ローカルには何も残さない／どの PC でも再開」の帰結）。
+
+- 置き場所は `data/llm_state/backend_sessions.json`（PC ローカル・gitignored）。
+  `recent_datasets.json`（MRU）/ `last_window.json`（workspace）と同じ machine 状態の層。
+  `{session id: {engine, backend, token, updated}}`。`ChatSession.backend_session_id` は
+  `draft` と同じくフィールドだけ残した**非永続**値で、毎ターンここから再充填される。
+- **`engine`（エンジン ID）と `backend`（名前）の両方が一致したときだけ token を使う。**
+  `ClaudeCodeBackend.name` は claude-vscode と claude-cli で同じ `"claude-code"` なので、
+  名前だけでは別エンジンの token を素通ししてしまう。
+- **失敗したターンでは token を捨てる**（`_forget_backend_session`）。バックエンドの
+  `_session_id` は成功イベントでしか代入されないので、失敗後のインスタンスには死んだ token が
+  残っている。これを書き戻すと「死んだ token で `--resume` → 失敗」を永久に繰り返し、しかも
+  `_session_id` が非 None なので `replay=False` になり履歴すら送られず、そのチャットが恒久的に
+  壊れる。ただし **ユーザーの Stop（`turn.stopped`）は例外で token を維持する** — Stop も
+  `_on_failed` に落ちるため、一律破棄にすると中断のたびに全履歴再送になる（replay に上限は無い）。
+- エントリは書込のたびに TTL（90 日）で掃除する。セッション ID 突合では孤児を消せない
+  （閉じているデータセットのチャットは GUI に載らない）ため年齢で切る。セッション削除時は明示的に破棄。
+- テストは `tests/conftest.py` の autouse fixture が `backend_sessions_path` を tmp へ向ける。
+  ここを外すと開発者の実チャットの token をテストが上書きする。
+
 ### Multiple datasets（Issue #51 — ワークスペース）
 
 1 プロセスに複数データセットを同時に開ける。トップの `DatasetSwitcher` で切り替えると、そのデータセットの解析タブ群とチャットセッション群に入れ替わる。

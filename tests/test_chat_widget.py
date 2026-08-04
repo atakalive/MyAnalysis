@@ -1555,3 +1555,110 @@ def test_capture_backend_session_nulls_token_for_tokenless_backend(widget):
     widget._capture_backend_session(_B(), sess)
     assert sess.backend_name == "mock"
     assert sess.backend_session_id is None
+
+
+# ---- resume token: PC ローカル化 + 失敗時の自己修復 ----
+#
+# 元のバグ: _on_failed が成功時と同じ _capture_backend_session を呼ぶため、
+# resume に失敗した死んだ token が書き戻されていた。バックエンドの _session_id は
+# 成功イベントでしか代入されないので、次ターンも同じ死んだ token で --resume →
+# また失敗、を永久に繰り返す。しかも _session_id が非 None だと replay=False に
+# なるので履歴すら送られず、そのチャットは二度と使えなくなっていた。
+
+
+class _TokenBackend:
+    """claude 相当（resume token を持つ）。_engine_id は _build_session_backend が刻む。"""
+    name = "claude-code"
+
+    def __init__(self, token="tok-live", engine="claude-cli"):
+        self._session_id = token
+        self._engine_id = engine
+
+
+def _load_and_peek(widget, sess, backend):
+    """次ターン開始時に backend へ渡る token を見る（None = 履歴再送になる）。"""
+    widget._load_backend_session(backend, sess)
+    return backend._session_id
+
+
+def _failed_turn(widget, sess, backend, *, stopped):
+    from gui.chat import _Turn
+    turn = _Turn(sess, backend, MagicMock(), MagicMock())
+    turn.stopped = stopped
+    widget._turns[sess.id] = turn
+    return turn
+
+
+def test_failed_turn_forgets_token_so_next_turn_replays(widget):
+    """恒久破損の回帰テスト: 失敗ターンは token を捨て、次ターンで履歴再送に戻る。"""
+    sess = _make_session(widget)
+    backend = _TokenBackend(token="dead-token")
+    widget._capture_backend_session(backend, sess)          # 事前に token を持たせる
+    assert _load_and_peek(widget, sess,backend) == "dead-token"
+
+    _failed_turn(widget, sess, backend, stopped=False)
+    widget._on_failed(sess.id, "claude exited with code 1")
+
+    assert sess.backend_session_id is None
+    # 次ターン: token が無い → backend._session_id=None → replay=True で全履歴再送
+    assert _load_and_peek(widget, sess,backend) is None
+
+
+def test_user_stop_keeps_token(widget):
+    """Stop も cancel()→非ゼロ終了→_on_failed に落ちる。ここで token を捨てると
+    中断のたびに全履歴再送になる（replay に上限が無いので実害がある）。"""
+    sess = _make_session(widget)
+    backend = _TokenBackend(token="tok-live")
+    _failed_turn(widget, sess, backend, stopped=True)
+    widget._on_failed(sess.id, "stopped")
+
+    assert sess.backend_session_id == "tok-live"
+    assert _load_and_peek(widget, sess,backend) == "tok-live"
+
+
+def test_token_not_used_when_no_local_record(widget):
+    """別 PC 相当: ローカルレコードが無ければ token は使わない（=履歴再送）。"""
+    sess = _make_session(widget)
+    backend = _TokenBackend(token="stale-from-other-pc")
+    assert _load_and_peek(widget, sess,backend) is None
+
+
+def test_token_not_reused_across_claude_engines(widget):
+    """claude-vscode と claude-cli は backend.name が同じ "claude-code" なので、
+    name だけで判定していた旧実装では別エンジンの token を素通ししていた。"""
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-cli", "claude-cli"), sess)
+
+    vscode = _TokenBackend(token=None, engine="claude-vscode")
+    assert _load_and_peek(widget, sess,vscode) is None      # エンジン違い → 使わない
+
+    cli = _TokenBackend(token=None, engine="claude-cli")
+    assert _load_and_peek(widget, sess,cli) == "tok-cli"    # 同じエンジン → 使う
+
+
+def test_token_not_reused_across_backends(widget):
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-claude", "claude-cli"), sess)
+
+    class _Pi:
+        name = "pi-coding-agent"
+        _session_id = None
+        _engine_id = "pi"
+
+    assert _load_and_peek(widget, sess,_Pi()) is None
+
+
+def test_deleting_session_drops_its_token(widget, monkeypatch):
+    """ストアは side record なので、draft と違ってセッション削除で自動的には消えない。"""
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-1", "claude-cli"), sess)
+    assert read_backend_session(sess.id) is not None
+
+    from gui.chat import QMessageBox
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+    )
+    widget._on_delete_session(_tab_index_for(widget, sess))
+    assert read_backend_session(sess.id) is None

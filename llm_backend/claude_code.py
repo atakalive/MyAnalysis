@@ -259,12 +259,6 @@ class ClaudeCodeBackend:
                 "content": [{"type": "text", "text": prompt}],
             },
         }
-        # Keep stdin OPEN for the whole turn so cancel() can inject an
-        # `interrupt` control_request (VS Code CC's stop mechanism). It is closed
-        # in the finally below (turn end) or by cancel() (stop).
-        proc.stdin.write((json.dumps(user_msg) + "\n").encode("utf-8"))
-        proc.stdin.flush()
-
         # Drain stderr in a daemon thread to avoid pipe-buffer deadlock.
         threading.Thread(
             target=self._drain_stderr, args=(proc,), daemon=True
@@ -273,6 +267,18 @@ class ClaudeCodeBackend:
         self._proc = proc
         deferred_error = None
         try:
+            # Inside the try: a rejected --resume makes claude exit instantly, and
+            # writing to the dead pipe raises BrokenPipeError. Outside, that escaped
+            # before `finally` could reap the child or attach the stderr tail, so the
+            # user saw a bare BrokenPipeError with no clue why. Keep stdin OPEN for
+            # the whole turn so cancel() can inject an `interrupt` control_request
+            # (VS Code CC's stop mechanism); it is closed in the finally (turn end)
+            # or by cancel() (stop).
+            try:
+                proc.stdin.write((json.dumps(user_msg) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass    # child already gone — the exit-code check below reports why
             for raw_line in proc.stdout:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:

@@ -40,6 +40,13 @@ class ChatSession:
     messages: list[Message]
     dataset: str | None
     backend_name: str
+    # Native resume token (claude --resume / pi --session / codex exec resume).
+    # Deliberately NOT persisted here, like `draft` below: the native session it
+    # points at lives on THIS PC (~/.claude, ~/.pi/agent/sessions, ~/.codex), so
+    # syncing it would hand a nonexistent id to --resume on another machine.
+    # Its persistence layer is the PC-local data/llm_state/backend_sessions.json
+    # (llm_bridge.paths.read/write_backend_session); this field is just the
+    # in-process working value, refilled from that store each turn.
     backend_session_id: str | None
     created: float
     updated: float
@@ -91,11 +98,14 @@ def session_to_dict(sess: ChatSession) -> dict:
         "messages": [message_to_dict(m) for m in sess.messages],
         "dataset": sess.dataset,
         "backend_name": sess.backend_name,
-        "backend_session_id": sess.backend_session_id,
+        # backend_session_id is intentionally absent — see the field's comment.
         "created": sess.created,
         "updated": sess.updated,
         "order": sess.order,
-        "tool_display": sess.tool_display,
+        # getattr for every optional field: a hot-reload `patch` leaves live
+        # instances without newly-added attributes, and an AttributeError here
+        # would escape write_session_file (which only catches OSError).
+        "tool_display": getattr(sess, "tool_display", None),
         "archived": bool(getattr(sess, "archived", False)),
     }
 
@@ -121,7 +131,10 @@ def session_from_dict(data: dict) -> ChatSession:
         messages=messages,
         dataset=data.get("dataset"),
         backend_name=data.get("backend_name"),
-        backend_session_id=data.get("backend_session_id"),
+        # Never read back: a token in an old file (or one synced from another PC)
+        # points at a native session that does not exist here. The PC-local store
+        # is the only source; a missing token just means "replay full history".
+        backend_session_id=None,
         created=data.get("created"),
         updated=data.get("updated"),
         order=data.get("order", 0.0),

@@ -650,29 +650,87 @@ class ChatWidget(QWidget):
 
     # ----- backend session swap (duck-typed on _session_id) -----
 
+    @staticmethod
+    def _global_engine_id() -> str | None:
+        """Engine id of the current global selection. never raise (a corrupt
+        config must not break a turn); unknown → None."""
+        try:
+            from llm_backend.engines import current_engine_id
+            return current_engine_id()
+        except Exception:
+            return None
+
+    def _build_session_backend(self, sess: ChatSession) -> LLMBackend:
+        """Build the backend for `sess`. The single construction site.
+
+        Tags the instance with `_engine_id` so _load_backend_session can tell
+        claude-vscode from claude-cli (both report name "claude-code"), and applies
+        the provider-system-prompt toggle. Keeping this in one place is load-bearing:
+        a second path that forgot the toggle would silently flip claude from
+        --append-system-prompt to --system-prompt.
+        """
+        backend = self._backend_factory()
+        backend._engine_id = self._global_engine_id()
+        if hasattr(backend, "set_use_provider_system_prompt"):   # claude のみ
+            backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
+        return backend
+
     def _load_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
         """Point this session's backend at its resume token before a turn starts.
-        Only claude/pi expose _session_id; cross-backend tokens are cleared (None)
-        so a stale token isn't passed to --resume."""
+
+        The token comes from the PC-local store (data/llm_state/backend_sessions.json),
+        never from the synced session file: the native session it names lives on this
+        machine only. It is used solely when BOTH the backend name and the engine id
+        match what minted it — `name` alone cannot separate claude-vscode from
+        claude-cli (ClaudeCodeBackend.name is "claude-code" for both). Any mismatch,
+        or no record at all (a different PC), yields None → full-history replay.
+        """
         if not hasattr(backend, "_session_id"):
             return
-        if sess.backend_name == backend.name:
-            backend._session_id = sess.backend_session_id
-        else:
-            backend._session_id = None
+        from llm_bridge.paths import read_backend_session
+        rec = read_backend_session(sess.id)
+        token = None
+        if rec is not None and rec.get("backend") == backend.name:
+            engine_id = getattr(backend, "_engine_id", None)
+            if rec.get("engine") == engine_id:
+                token = rec.get("token")
+        sess.backend_session_id = token       # in-process mirror of the store
+        backend._session_id = token
 
     def _capture_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
         """After a turn, adopt the backend that actually ran this session's turn.
 
-        Unconditional adoption (name + resume token): the caller always passes the
+        Writes the field AND the PC-local store. The caller always passes the
         session's own backend (turn.backend), so mis-propagation is structurally
-        impossible. A backend with no _session_id (openai/mock) sets the token to
-        None — correct, since the session's history no longer matches the old native
-        session; a later claude turn just replays full history instead of resuming.
-        This also fixes a latent bug where switching claude→openai→claude would
-        silently resume a stale native session with an old token."""
+        impossible. A backend with no _session_id (openai/mock) stores None, which
+        drops the entry — correct, since the session's history no longer matches the
+        old native session; a later claude turn replays full history instead of
+        resuming a stale one.
+
+        NOT called for a genuinely failed turn — see _forget_backend_session.
+        """
+        from llm_bridge.paths import write_backend_session
         sess.backend_name = backend.name
         sess.backend_session_id = getattr(backend, "_session_id", None)
+        write_backend_session(
+            sess.id,
+            getattr(backend, "_engine_id", None),
+            backend.name,
+            sess.backend_session_id,
+        )
+
+    def _forget_backend_session(self, sess: ChatSession) -> None:
+        """Drop this session's resume token so the next turn replays full history.
+
+        Backends only ever ASSIGN _session_id from a success event (and codex keeps
+        the old value explicitly), so after a failed turn the instance still holds a
+        possibly-dead token. Writing it back is what used to wedge a session forever:
+        the dead token was re-sent to --resume every turn, and because it was
+        non-None the prompt carried no history either, so there was no way back.
+        """
+        from llm_bridge.paths import drop_backend_session
+        sess.backend_session_id = None
+        drop_backend_session(sess.id)
 
     # ----- helpers -----
 
@@ -1167,6 +1225,9 @@ class ChatWidget(QWidget):
         self._session_backends.pop(sess.id, None)
         self._turn_notes.pop(sess.id, None)
         self._pending_remote.pop(sess.id, None)
+        # The resume-token store is a side record keyed by session id, so unlike
+        # `draft` (which lives on the session) it is not dropped with the session.
+        self._forget_backend_session(sess)
         self._rebuild_tab_bar()
         self._render_session(self._active)
         self._switch_active_composer(prev_id)
@@ -1339,9 +1400,7 @@ class ChatWidget(QWidget):
             self._append_block("assistant", "")
         backend = self._session_backends.get(sess.id)
         if backend is None:
-            backend = self._backend_factory()
-            if hasattr(backend, "set_use_provider_system_prompt"):   # claude のみ
-                backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
+            backend = self._build_session_backend(sess)
             self._session_backends[sess.id] = backend
         self._load_backend_session(backend, sess)
         kill_timer = QTimer(self)
@@ -1538,7 +1597,17 @@ class ChatWidget(QWidget):
         sess.messages.append(
             Message(role="assistant", content=turn.buffer)
         )
-        self._capture_backend_session(turn.backend, sess)
+        if turn.stopped:
+            # User pressed Stop: cancel() kills the child, so this lands here even
+            # though nothing is wrong. The native session is intact — keep the token,
+            # otherwise every interruption would force a full-history replay next
+            # turn (and replay has no size cap).
+            self._capture_backend_session(turn.backend, sess)
+        else:
+            # Genuine failure (rejected --resume, launch failure, stream break):
+            # drop the token so the next turn replays history and re-establishes a
+            # native session, instead of re-sending a token that just failed.
+            self._forget_backend_session(sess)
         sess.updated = time.time()
         if sess.dataset is not None:
             self._mark_chat_dirty()

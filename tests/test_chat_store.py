@@ -76,7 +76,10 @@ def _sample_session() -> ChatSession:
         ],
         dataset="ds_a",
         backend_name="claude-code",
-        backend_session_id="sess-xyz",
+        # Left None like `draft`: the resume token is no longer persisted (it names
+        # a PC-local native session), so a round-tripped object only compares equal
+        # when it starts out None. Non-persistence has its own tests below.
+        backend_session_id=None,
         created=100.0,
         updated=200.0,
     )
@@ -358,6 +361,40 @@ def test_session_draft_does_not_break_disk_roundtrip(tmp_path):
     write_session_file(tmp_path, sess)
     loaded = read_session_file(tmp_path / "chat_sessions" / f"{sess.id}.json")
     assert loaded.draft == ""
+    assert loaded == _sample_session()
+
+
+# ---- backend_session_id: ネイティブ resume token（in-memory のみ／非永続） ----
+
+
+def test_backend_session_id_not_persisted():
+    """token は PC ローカルのネイティブセッションを指すので同期側に書かない。"""
+    sess = _sample_session()
+    sess.backend_session_id = "sess-xyz"
+    d = session_to_dict(sess)
+    assert "backend_session_id" not in d
+    assert session_from_dict(d).backend_session_id is None
+
+
+def test_backend_session_id_in_old_file_is_ignored_not_fatal():
+    """旧ファイル（token 入り）は読めること。値は無視され None になるだけ。
+
+    別 PC で作られた token をそのまま --resume に渡すのが元のバグなので、
+    「読めるが使わない」が正しい。version は 1 のままなので既存チャットは消えない。
+    """
+    d = session_to_dict(_sample_session())
+    d["backend_session_id"] = "token-from-another-pc"
+    loaded = session_from_dict(d)
+    assert loaded.backend_session_id is None
+    assert loaded == _sample_session()          # 他のフィールドは無傷
+
+
+def test_backend_session_id_does_not_break_disk_roundtrip(tmp_path):
+    sess = _sample_session()
+    sess.backend_session_id = "sess-xyz"
+    write_session_file(tmp_path, sess)
+    loaded = read_session_file(tmp_path / "chat_sessions" / f"{sess.id}.json")
+    assert loaded.backend_session_id is None
     assert loaded == _sample_session()
 
 
