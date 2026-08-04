@@ -104,6 +104,34 @@ guards that every prompt still contains it.
   deliberately OpenAI + local only (`openai-codex` / `openai` / `llama.cpp`) —
   other providers bill separately through pi. Local models never appear in pi's
   catalog until llama-server has them loaded, which is why the list is editable.
+- **Per-chat-session engine override** — the dialog above sets the *global default*;
+  each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
+  layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider`
+  in `chat_sessions/<id>.json`, where `engine` (an `ENGINES` id) is the sentinel —
+  `None` = follow the global. Empty model/provider mean "that engine's configured
+  default", so switching engine alone is expressible. The unit is the whole engine
+  (エンジン=プロバイダ=モデル), so session A can run Claude while B runs pi+llama.cpp.
+  - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps six hooks
+    (`_baseline_engine_id` / `_seed_value` / `_probe_settings` / `_check_busy` /
+    `_do_apply` / `_update_warnings`); the combos, ＋/－ lists and ping shutdown are
+    shared. The ping lock and the「全体設定に従う」checkbox are **separate booleans
+    AND-ed** — merging them would let un-checking mid-ping re-enable the combos and
+    revive the stale-result race. Busy check is per-session (`sess.id in _turns`),
+    not widget-wide.
+  - Backends are built in exactly one place, `ChatWidget._build_session_backend`,
+    via `engines.session_settings()` + `build_backend()`. `session_settings` applies
+    `config_patch` **only when its truthiness disagrees with the base**, matching
+    `current_engine_id`'s own discriminator — `candidate_settings(engine_changed=…)`
+    is wrong here (it either inherits the global's `bin` or clobbers a hand-set one,
+    and makes the same override resolve differently depending on the global).
+  - An engine id that will not resolve degrades to the global default and is **never
+    rewritten** — a session round-tripping through an older build, or opened on a PC
+    lacking that engine, keeps the user's choice. `chat_store` deliberately does not
+    whitelist against `ENGINES` (it must stay importable without `llm_backend`).
+  - The transcript header shows the resolved engine/model plus a 既定/個別 marker,
+    built from the catalog — never by constructing a backend (it runs on every tab
+    switch) and never from `sess.backend_name` (new sessions carry the prototype's
+    name until their first turn).
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`

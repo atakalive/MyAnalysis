@@ -15,6 +15,7 @@ from llm_backend.engines import (
     engine_by_id,
     save_choices,
     saved_choices,
+    session_settings,
 )
 from llm_backend.settings_store import set_toml_keys as _real_set_toml_keys
 
@@ -289,6 +290,8 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.dialog.choice_remove",
         "backend.dialog.choice_remove_tip",
         "backend.dialog.choice_failed",
+        "backend.dialog.session_title",
+        "backend.dialog.follow_default",
         "backend.applied",
         "backend.applied_config_only",
     ]
@@ -368,3 +371,94 @@ def test_save_choices_noop_for_engine_without_settings_key(apply_env):
 def test_save_choices_ignores_unknown_field(apply_env):
     save_choices(_PI, "bogus", ["x"])
     assert not apply_env.mdl_p.exists()
+
+
+# --------------------------------------------------------------------------- #
+# session_settings — セッション個別のエンジン上書き用                          #
+# --------------------------------------------------------------------------- #
+
+def _base(monkeypatch, merged):
+    """そのエンジンの現在設定 (models.toml ⊕ config.toml) を merged に固定する。"""
+    monkeypatch.setattr(engines, "merged_settings", lambda k, b: dict(merged))
+    monkeypatch.setattr(engines, "backend_config", _cfg({}))
+
+
+def test_session_settings_forces_empty_bin_for_vscode(monkeypatch):
+    """全体が claude-cli でも、セッションが vscode 指定なら bin="" を強制する。
+    ここを取り違えると UI は「VS Code 同梱」と言いながら PATH の CLI が走る。"""
+    _base(monkeypatch, {"model": "opus", "bin": "claude"})
+    s = session_settings(engine_by_id("claude-vscode"), "", "")
+    assert s["bin"] == ""
+
+
+def test_session_settings_forces_named_bin_for_cli(monkeypatch):
+    _base(monkeypatch, {"model": "opus", "bin": ""})
+    s = session_settings(engine_by_id("claude-cli"), "", "")
+    assert s["bin"] == "claude"
+
+
+def test_session_settings_preserves_hand_set_absolute_bin(monkeypatch):
+    """手設定の絶対パスは真偽が一致するので温存する（engine_changed=True だと潰れる）。"""
+    _base(monkeypatch, {"model": "opus", "bin": "/custom/claude"})
+    s = session_settings(engine_by_id("claude-cli"), "", "")
+    assert s["bin"] == "/custom/claude"
+
+
+def test_session_settings_leaves_empty_bin_alone_for_vscode(monkeypatch):
+    _base(monkeypatch, {"model": "opus", "bin": ""})
+    s = session_settings(engine_by_id("claude-vscode"), "", "")
+    assert s["bin"] == ""
+
+
+def test_session_settings_is_independent_of_the_global_engine(monkeypatch):
+    """同じ上書きは「全体が何か」に関わらず同じ設定に解決されること（非決定性の回帰）。"""
+    e = engine_by_id("claude-vscode")
+    _base(monkeypatch, {"model": "opus", "bin": "claude"})     # 全体 = cli
+    a = session_settings(e, "sonnet", "")
+    _base(monkeypatch, {"model": "opus", "bin": ""})           # 全体 = vscode
+    b = session_settings(e, "sonnet", "")
+    assert a == b
+
+
+def test_session_settings_keeps_other_knobs(monkeypatch):
+    """thinking/effort 等は全体設定由来のまま残す（落とさない）。"""
+    _base(monkeypatch, {"model": "opus", "thinking": "enabled", "effort": "xhigh"})
+    s = session_settings(engine_by_id("claude-vscode"), "sonnet", "")
+    assert s["thinking"] == "enabled" and s["effort"] == "xhigh"
+    assert s["model"] == "sonnet"
+
+
+def test_session_settings_empty_model_falls_back_to_engine_default(monkeypatch):
+    """「エンジンだけ変えてモデルは既定」が書けること。"""
+    _base(monkeypatch, {"model": "opus"})
+    assert session_settings(engine_by_id("claude-vscode"), "", "")["model"] == "opus"
+    assert session_settings(engine_by_id("claude-vscode"), "   ", "")["model"] == "opus"
+
+
+def test_session_settings_empty_provider_falls_back(monkeypatch):
+    _base(monkeypatch, {"model": "gpt-5.5", "provider": "openai-codex"})
+    s = session_settings(engine_by_id("pi"), "", "")
+    assert s["provider"] == "openai-codex"
+
+
+def test_session_settings_overrides_provider_for_pi(monkeypatch):
+    _base(monkeypatch, {"model": "gpt-5.5", "provider": "openai-codex"})
+    s = session_settings(engine_by_id("pi"), "qwen3-coder", "llama.cpp")
+    assert s["provider"] == "llama.cpp" and s["model"] == "qwen3-coder"
+
+
+def test_session_settings_ignores_provider_for_engines_without_the_field(monkeypatch):
+    _base(monkeypatch, {"model": "opus"})
+    s = session_settings(engine_by_id("claude-vscode"), "", "llama.cpp")
+    assert "provider" not in s
+
+
+def test_session_settings_untouched_for_empty_config_patch(monkeypatch):
+    """非空 config_patch を持つのは claude 2 種だけ。他は bin を生やさない。"""
+    _base(monkeypatch, {"model": "gpt-5.5"})
+    for eid in ("pi", "codex", "openai-http"):
+        assert "bin" not in session_settings(engine_by_id(eid), "", "")
+
+
+def test_session_settings_mock_has_no_settings_key():
+    assert session_settings(engine_by_id("mock"), "m", "") == {"model": "m"}

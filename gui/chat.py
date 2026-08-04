@@ -663,14 +663,39 @@ class ChatWidget(QWidget):
     def _build_session_backend(self, sess: ChatSession) -> LLMBackend:
         """Build the backend for `sess`. The single construction site.
 
-        Tags the instance with `_engine_id` so _load_backend_session can tell
-        claude-vscode from claude-cli (both report name "claude-code"), and applies
-        the provider-system-prompt toggle. Keeping this in one place is load-bearing:
-        a second path that forgot the toggle would silently flip claude from
+        Honours a per-session engine override, else the global selection. Tags the
+        instance with `_engine_id` so _load_backend_session can tell claude-vscode
+        from claude-cli (both report name "claude-code"), and applies the
+        provider-system-prompt toggle. Keeping this in one place is load-bearing: a
+        second path that forgot the toggle would silently flip claude from
         --append-system-prompt to --system-prompt.
+
+        Never raises: _start_turn also runs from a relay-queued Qt slot, where an
+        exception would be an uncaught slot error on the host. A broken override
+        falls back to the global backend with a visible note.
         """
-        backend = self._backend_factory()
-        backend._engine_id = self._global_engine_id()
+        engine = self._effective_engine(sess)
+        engine_id = None
+        backend = None
+        if engine is not None:
+            try:
+                from llm_backend import build_backend
+                from llm_backend.engines import session_settings
+                backend = build_backend(engine.backend_key, session_settings(
+                    engine,
+                    getattr(sess, "engine_model", None) or "",
+                    getattr(sess, "engine_provider", None) or "",
+                ))
+                engine_id = engine.id
+            except Exception as e:      # unknown backend key, bad settings, ...
+                backend = None
+                self._append_system_line(
+                    tr("chat.engine.build_failed", error=str(e))
+                )
+        if backend is None:
+            backend = self._backend_factory()
+            engine_id = self._global_engine_id()
+        backend._engine_id = engine_id
         if hasattr(backend, "set_use_provider_system_prompt"):   # claude のみ
             backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
         return backend
@@ -852,7 +877,78 @@ class ChatWidget(QWidget):
             # preserve the usage/cost line (status-only) across the re-render.
             self._render_active_preserving_status()
 
+    # ----- per-session engine override -----
+
+    @staticmethod
+    def _effective_engine(sess: ChatSession):
+        """This session's engine override, or None to follow the global selection.
+
+        getattr guards a hot-reload `patch`-ed instance missing the field. An id we
+        cannot resolve degrades to the global default instead of raising — and is
+        NEVER rewritten: a session that round-tripped through an older build, or is
+        opened on a PC without that engine, must keep the user's choice intact.
+        """
+        eid = (getattr(sess, "engine", None) or "").strip()
+        if not eid:
+            return None
+        try:
+            from llm_backend.engines import engine_by_id
+            return engine_by_id(eid)
+        except Exception:
+            return None
+
+    def _set_session_engine(
+        self, sess: ChatSession, engine_id: str | None,
+        model: str = "", provider: str = "",
+    ) -> None:
+        """Apply a per-session engine override (engine_id None = follow default)."""
+        sess.engine = (engine_id or "").strip() or None
+        sess.engine_model = (model or "").strip() or None
+        sess.engine_provider = (provider or "").strip() or None
+        # merge_sessions replaces on strict `updated >`, so a change that touches no
+        # message still has to win the merge.
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+        # Only this session rebuilds; the others keep their cached backends.
+        self._session_backends.pop(sess.id, None)
+        # The native session belongs to the old engine — its token is meaningless now.
+        self._forget_backend_session(sess)
+        if sess is self._active:
+            self._render_active_preserving_status()
+
     # ----- transcript render -----
+
+    def _engine_header(self, sess: ChatSession) -> str:
+        """The 'backend: … / model: …' line for `sess`, marked 既定 or 個別.
+
+        Resolved from the catalog, NOT by building a backend: this runs on every tab
+        switch, and build_backend fails loudly for an engine whose dependency is
+        missing. `sess.backend_name` is no good either — new sessions are minted with
+        the prototype's name and only corrected after their first turn, so a
+        brand-new override'd session would render the wrong engine.
+        """
+        engine = self._effective_engine(sess)
+        if engine is None:
+            # No override: the prototype already reflects the global selection, and
+            # for claude its .model is the real one reported by the engine.
+            return (f"backend: {self._backend.name} / model: {self._backend.model}"
+                    f"  [{tr('chat.engine.mark_default')}]")
+        try:
+            from llm_backend.engines import (
+                current_model, current_provider, engine_label,
+            )
+            model = (getattr(sess, "engine_model", None) or "").strip() \
+                or current_model(engine)
+            provider = (getattr(sess, "engine_provider", None) or "").strip() \
+                or current_provider(engine)
+            label = engine_label(engine)
+        except Exception:
+            model = (getattr(sess, "engine_model", None) or "")
+            provider, label = "", engine.id
+        prov = f" / provider: {provider}" if provider else ""
+        return (f"backend: {label}{prov} / model: {model or '-'}"
+                f"  [{tr('chat.engine.mark_override')}]")
 
     def _render_session(self, sess: ChatSession) -> None:
         """Repaint the transcript for `sess`: clear stale usage + log, draw the
@@ -860,9 +956,7 @@ class ChatWidget(QWidget):
         (system / tool / tool-call-only messages are not drawn — matches live)."""
         self._status.setText("")
         self._log.clear()
-        self._append_system_line(
-            f"backend: {self._backend.name} / model: {self._backend.model}"
-        )
+        self._append_system_line(self._engine_header(sess))
         mode = self._effective_tool_display(sess)
         for i, m in enumerate(sess.messages):
             if m.role == "user":
@@ -1098,6 +1192,17 @@ class ChatWidget(QWidget):
         self.set_input_draft(prefill)   # edit は content を prefill、fork は None → 空
         self.focus_input()
 
+    def _open_session_engine_dialog(self, sess: ChatSession) -> None:
+        """タブ右クリック →「このチャットのモデル…」。
+
+        全体設定ダイアログと同じ UI（エンジン/モデル/プロバイダのコンボ、＋/－ の候補編集、
+        疎通確認）を SessionEngineDialog が継承し、適用先だけを TOML から
+        このセッションに差し替える。
+        """
+        from gui.backend_selector_dialog import SessionEngineDialog
+        dlg = SessionEngineDialog(self._window, self, sess, self)
+        dlg.exec()
+
     def _on_tab_context_menu(self, pos) -> None:
         index = self._tab_bar.tabAt(pos)
         if index < 0:
@@ -1108,6 +1213,10 @@ class ChatWidget(QWidget):
         menu = QMenu(self)
         rename_action = menu.addAction(tr("chat.menu.rename"))
         rename_action.triggered.connect(lambda: self._on_rename_session(sess))
+        model_action = menu.addAction(tr("chat.menu.model"))
+        model_action.triggered.connect(
+            lambda _checked=False, s=sess: self._open_session_engine_dialog(s)
+        )
         td_menu = menu.addMenu(tr("chat.menu.tool_display"))
         td_group = QActionGroup(td_menu)
         td_group.setExclusive(True)

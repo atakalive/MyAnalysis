@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from common.i18n import tr
+
 
 class _FakeBackend:
     name = "mock"
@@ -1662,3 +1664,111 @@ def test_deleting_session_drops_its_token(widget, monkeypatch):
     )
     widget._on_delete_session(_tab_index_for(widget, sess))
     assert read_backend_session(sess.id) is None
+
+
+# ---- セッションごとのエンジン切替 ----
+
+
+def _override(widget, sess, engine_id, model="", provider=""):
+    widget._set_session_engine(sess, engine_id, model, provider)
+
+
+def test_no_override_follows_global(widget):
+    sess = _make_session(widget)
+    assert widget._effective_engine(sess) is None
+
+
+def test_override_resolves_to_catalog_engine(widget):
+    sess = _make_session(widget)
+    _override(widget, sess, "pi", "qwen3-coder", "llama.cpp")
+    assert widget._effective_engine(sess).id == "pi"
+    assert (sess.engine_model, sess.engine_provider) == ("qwen3-coder", "llama.cpp")
+
+
+def test_unknown_engine_id_degrades_to_global_but_is_kept(widget):
+    """古いビルドや当該エンジンの無い PC を経由しても、ユーザーの指定は消さない。"""
+    sess = _make_session(widget)
+    sess.engine = "engine-from-a-newer-build"
+    assert widget._effective_engine(sess) is None      # 解決できない → 既定で動く
+    assert sess.engine == "engine-from-a-newer-build"  # が、値は残る
+
+
+def test_override_only_rebuilds_its_own_session(widget):
+    """個別変更が他セッションのバックエンドを巻き込まないこと。"""
+    a, b = _make_session(widget), _make_session(widget)
+    widget._session_backends[a.id] = object()
+    widget._session_backends[b.id] = sentinel = object()
+    _override(widget, b, "pi")
+    assert b.id not in widget._session_backends
+    assert widget._session_backends[a.id] is not None      # A は温存
+    assert widget._session_backends.get(a.id) is not sentinel
+
+
+def test_changing_engine_drops_the_resume_token(widget):
+    """別エンジンのネイティブセッションを指す token は無意味になる。"""
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-1", "claude-cli"), sess)
+    _override(widget, sess, "pi")
+    assert sess.backend_session_id is None
+    assert read_backend_session(sess.id) is None
+
+
+def test_set_engine_bumps_updated_for_merge(widget):
+    """merge_sessions は厳密 `updated >` なので、メッセージを触らない変更でも
+    bump しないと別 PC の古いコピーに負ける。"""
+    sess = _make_session(widget)
+    before = sess.updated
+    _override(widget, sess, "pi")
+    assert sess.updated > before
+
+
+def test_clearing_override_returns_to_default(widget):
+    sess = _make_session(widget)
+    _override(widget, sess, "pi", "qwen3-coder")
+    widget._set_session_engine(sess, None)
+    assert sess.engine is None
+    assert (sess.engine_model, sess.engine_provider) == (None, None)
+    assert widget._effective_engine(sess) is None
+
+
+def test_build_session_backend_falls_back_on_broken_override(widget, monkeypatch):
+    """_start_turn はリレー経由の Qt スロットからも走るので、壊れた上書きで
+    例外を投げてはならない（未捕捉スロット例外になる）。"""
+    import llm_backend
+    sess = _make_session(widget)
+    _override(widget, sess, "pi")
+    monkeypatch.setattr(
+        llm_backend, "build_backend",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unknown backend key")),
+    )
+    backend = widget._build_session_backend(sess)      # must not raise
+    assert backend is not None
+    assert isinstance(widget._log.toPlainText(), str)
+
+
+def test_build_session_backend_tags_engine_id(widget):
+    sess = _make_session(widget)
+    backend = widget._build_session_backend(sess)
+    assert hasattr(backend, "_engine_id")
+
+
+def test_engine_header_marks_default_vs_override(widget):
+    sess = _make_session(widget)
+    assert tr("chat.engine.mark_default") in widget._engine_header(sess)
+    _override(widget, sess, "pi", "qwen3-coder")
+    header = widget._engine_header(sess)
+    assert tr("chat.engine.mark_override") in header
+    assert "qwen3-coder" in header
+
+
+def test_engine_header_does_not_build_a_backend(widget, monkeypatch):
+    """ヘッダはタブ切替のたびに描かれる。依存の無いエンジンで落ちては困る。"""
+    import llm_backend
+    sess = _make_session(widget)
+    _override(widget, sess, "pi", "qwen3-coder")
+    monkeypatch.setattr(
+        llm_backend, "build_backend",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    assert "qwen3-coder" in widget._engine_header(sess)

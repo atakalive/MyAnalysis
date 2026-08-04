@@ -293,3 +293,122 @@ def test_configured_value_is_listed_first_on_open(monkeypatch, parent_widget):
     dlg, _ = _make_dialog(monkeypatch, parent_widget)
     items = [dlg._model_combo.itemText(i) for i in range(dlg._model_combo.count())]
     assert items == ["not-in-list", "a", "b"]
+
+
+# --------------------------------------------------------------------------- #
+# SessionEngineDialog — チャットセッションごとのエンジン上書き                 #
+# --------------------------------------------------------------------------- #
+
+def _session_dlg(monkeypatch, parent_widget, *, engine=None, model=None,
+                 provider=None, busy_ids=()):
+    import gui.backend_selector_dialog as mod
+    from llm_bridge import chat_store
+
+    _patch_config(monkeypatch, engine_id="claude-vscode", model="opus")
+    sess = chat_store.new_session("mock", "sys")
+    sess.engine, sess.engine_model, sess.engine_provider = engine, model, provider
+
+    chat = MagicMock()
+    chat._turns = {i: object() for i in busy_ids}
+    applied = []
+    chat._set_session_engine.side_effect = (
+        lambda *a, **k: applied.append((a, k))
+    )
+    dlg = mod.SessionEngineDialog(MagicMock(), chat, sess, parent_widget)
+    return dlg, sess, chat, applied
+
+
+def test_session_dialog_opens_on_the_session_engine(monkeypatch, parent_widget):
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    assert dlg._engine_combo.currentData() == "pi"
+    assert not dlg._follow_default.isChecked()
+
+
+def test_session_dialog_opens_on_global_when_no_override(monkeypatch, parent_widget):
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget)
+    assert dlg._engine_combo.currentData() == "claude-vscode"
+    assert dlg._follow_default.isChecked()
+
+
+def test_follow_default_disables_inputs_but_not_apply(monkeypatch, parent_widget):
+    from PySide6.QtWidgets import QDialogButtonBox
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget)
+    assert not dlg._engine_combo.isEnabled()
+    # 「既定に従う」を適用（=上書き解除）できないと詰むので OK は生きている
+    assert dlg._buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    dlg._follow_default.setChecked(False)
+    assert dlg._engine_combo.isEnabled()
+
+
+def test_ping_lock_and_follow_default_are_independent(monkeypatch, parent_widget):
+    """一本化すると ping 中にチェックを外した瞬間コンボが再有効化され、
+    ロックが防いでいる stale-result レースが復活する。"""
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    dlg._set_selection_enabled(False)             # ping 中
+    dlg._follow_default.setChecked(True)
+    dlg._follow_default.setChecked(False)         # 外しても ping 中は解錠しない
+    assert not dlg._engine_combo.isEnabled()
+    dlg._set_selection_enabled(True)
+    assert dlg._engine_combo.isEnabled()
+
+
+def test_apply_writes_the_session_not_the_tomls(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    called = []
+    monkeypatch.setattr(mod, "apply_selection",
+                        lambda *a, **k: called.append(a))
+    dlg, sess, chat, applied = _session_dlg(
+        monkeypatch, parent_widget, engine="pi", model="qwen3-coder")
+    dlg._on_apply()
+    assert called == []                            # TOML は書かない
+    assert applied and applied[0][0][1] == "pi"    # セッションへ書く
+
+
+def test_apply_with_follow_default_clears_the_override(monkeypatch, parent_widget):
+    dlg, sess, chat, applied = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    dlg._follow_default.setChecked(True)
+    dlg._on_apply()
+    assert applied and applied[0][0][1] is None
+
+
+def test_only_this_session_being_busy_blocks_apply(monkeypatch, parent_widget):
+    """別タブが応答中というだけで編集不能になってはいけない。"""
+    dlg, sess, _, applied = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    dlg._chat._turns = {"some-other-session": object()}
+    dlg._on_apply()
+    assert applied                                 # 他タブ busy → 適用できる
+
+    dlg2, sess2, _, applied2 = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    dlg2._chat._turns = {sess2.id: object()}
+    dlg2._on_apply()
+    assert not applied2                            # 自分が busy → 拒否
+    assert dlg2._result_label.text()
+
+
+def test_env_backend_warning_hidden_in_session_mode(monkeypatch, parent_widget):
+    """「LLM_BACKEND が優先」はセッション上書きでは嘘（build_backend を直接呼ぶので
+    get_backend の env 優先順位を通らない）。"""
+    monkeypatch.setenv("LLM_BACKEND", "mock")
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    assert dlg._env_warning.isHidden()
+
+
+def test_probe_uses_session_settings(monkeypatch, parent_widget):
+    """疎通確認が実際に走るバイナリと違うものを叩いては意味がない。"""
+    import gui.backend_selector_dialog as mod
+    seen = []
+    monkeypatch.setattr(mod, "session_settings",
+                        lambda e, m, p: seen.append((e.id, m, p)) or {"model": m})
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi")
+    dlg._probe_settings(dlg._selected_engine(), "qwen3-coder", "llama.cpp")
+    assert seen == [("pi", "qwen3-coder", "llama.cpp")]
+
+
+def test_seed_uses_session_value_only_for_its_own_engine(monkeypatch, parent_widget):
+    """別エンジンに切り替えたとき、そのセッションの model を持ち込まない
+    （claude のモデル名が pi のコンボに出てしまう）。"""
+    dlg, _, _, _ = _session_dlg(
+        monkeypatch, parent_widget, engine="pi", model="qwen3-coder")
+    from llm_backend.engines import engine_by_id
+    assert dlg._seed_value(engine_by_id("pi"), "model") == "qwen3-coder"
+    assert dlg._seed_value(engine_by_id("claude-vscode"), "model") == "opus"

@@ -53,6 +53,15 @@ class ChatSession:
     order: float = 0.0  # explicit tab position; persisted, lower = leftmost
     tool_display: str | None = None  # per-session display override; None = follow default
     archived: bool = False
+    # Per-session engine override. `engine` (an engines.ENGINES id) is the sentinel:
+    # None = follow the global backend/model selection, and the other two are then
+    # ignored. Empty model/provider mean "that engine's configured default", so
+    # switching engine alone is expressible. Validated only as str here — the id is
+    # resolved against the catalog at use time so that round-tripping through an
+    # older build (or a PC lacking that engine) cannot silently erase the choice.
+    engine: str | None = None
+    engine_model: str | None = None
+    engine_provider: str | None = None
     # Per-tab unsent composer text. Deliberately NOT persisted: session_to_dict
     # omits it and session_from_dict never reads it, so a draft lives only as
     # long as the process. Kept on the session (not a side dict) so deleting a
@@ -107,6 +116,9 @@ def session_to_dict(sess: ChatSession) -> dict:
         # would escape write_session_file (which only catches OSError).
         "tool_display": getattr(sess, "tool_display", None),
         "archived": bool(getattr(sess, "archived", False)),
+        "engine": getattr(sess, "engine", None),
+        "engine_model": getattr(sess, "engine_model", None),
+        "engine_provider": getattr(sess, "engine_provider", None),
     }
 
 
@@ -125,6 +137,19 @@ def session_from_dict(data: dict) -> ChatSession:
     tool_display = data.get("tool_display")
     if tool_display not in (None, "full", "compact", "hidden"):
         tool_display = None
+
+    def _opt_str(key):
+        """Accept any str; anything else (or missing) → None.
+
+        Deliberately NOT whitelisted against engines.ENGINES: chat_store must stay
+        importable without llm_backend (`python -m llm_bridge` runs without PySide6
+        and shouldn't drag the backend catalog in), and whitelisting here would
+        delete a newer build's engine id whenever the file round-trips through an
+        older one. The id is resolved — and degraded to the global default — at use.
+        """
+        v = data.get(key)
+        return v if isinstance(v, str) and v.strip() else None
+
     return ChatSession(
         id=data.get("id"),
         title=data.get("title", _DEFAULT_TITLE),
@@ -140,6 +165,9 @@ def session_from_dict(data: dict) -> ChatSession:
         order=data.get("order", 0.0),
         tool_display=tool_display,
         archived=bool(data.get("archived", False)),
+        engine=_opt_str("engine"),
+        engine_model=_opt_str("engine_model"),
+        engine_provider=_opt_str("engine_provider"),
     )
 
 
@@ -185,7 +213,11 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
         created=now,
         updated=now,
         order=src.order,          # 暫定。保存時に list 位置から再採番される
-        tool_display=src.tool_display,
+        tool_display=getattr(src, "tool_display", None),
+        # 分岐先も同じエンジンで続けるのが期待値（分岐して既定に戻られると困る）。
+        engine=getattr(src, "engine", None),
+        engine_model=getattr(src, "engine_model", None),
+        engine_provider=getattr(src, "engine_provider", None),
     )
 
 

@@ -523,3 +523,54 @@ def test_merge_older_archived_does_not_replace():
     out = merge_sessions([a], [a_old])
     assert out[0] is a
     assert out[0].archived is False
+
+
+# ---- engine 上書き（セッションごとのエンジン切替） ----
+
+
+def test_engine_override_roundtrip():
+    sess = _sample_session()
+    sess.engine, sess.engine_model = "pi", "qwen3-coder"
+    sess.engine_provider = "llama.cpp"
+    d = session_to_dict(sess)
+    assert session_from_dict(d) == sess
+
+
+def test_engine_override_defaults_none():
+    s = _sample_session()
+    assert (s.engine, s.engine_model, s.engine_provider) == (None, None, None)
+
+
+def test_v1_dict_without_engine_keys_roundtrips():
+    """新キーを持たない既存ファイルが読めること。version を上げると
+    session_from_dict が ValueError → read_session_file が None → タブから全消滅する。"""
+    d = session_to_dict(_sample_session())
+    for k in ("engine", "engine_model", "engine_provider"):
+        del d[k]
+    assert d["version"] == SCHEMA_VERSION == 1
+    assert session_from_dict(d) == _sample_session()
+
+
+def test_engine_id_is_not_whitelisted_against_the_catalog():
+    """未知のエンジン ID を消さない: 古いビルドを経由しただけで意図を壊さないため。
+    妥当性は使用時に解決して既定へ縮退させる（chat_store は llm_backend 非依存）。"""
+    d = session_to_dict(_sample_session())
+    d["engine"] = "engine-from-a-newer-build"
+    assert session_from_dict(d).engine == "engine-from-a-newer-build"
+
+
+def test_engine_override_non_str_degrades_to_none():
+    d = session_to_dict(_sample_session())
+    d["engine"], d["engine_model"], d["engine_provider"] = 7, ["x"], "   "
+    loaded = session_from_dict(d)
+    assert (loaded.engine, loaded.engine_model, loaded.engine_provider) \
+        == (None, None, None)
+
+
+def test_fork_carries_engine_override():
+    """分岐先が既定に戻ってしまうと fork の意味が薄れる。"""
+    src = _sample_session()
+    src.engine, src.engine_model = "codex", "gpt-5.6-sol"
+    new = fork_session(src, cut=2, title="forked")
+    assert (new.engine, new.engine_model) == ("codex", "gpt-5.6-sol")
+    assert new.backend_session_id is None       # resume token だけは引き継がない

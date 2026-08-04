@@ -14,6 +14,7 @@ import os
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -38,6 +39,7 @@ from llm_backend.engines import (
     current_provider,
     engine_by_id,
     save_choices,
+    session_settings,
 )
 from llm_backend.ping import ping_backend
 
@@ -65,9 +67,10 @@ class BackendSelectorDialog(QDialog):
         self._ping_backend = None
         self._ping_timeout: QTimer | None = None
         self._ping_kill: QTimer | None = None
+        self._ping_unlocked = True
 
         # Baseline for engine_changed (used by both ping and apply).
-        self._opened_engine_id = current_engine_id()
+        self._opened_engine_id = self._baseline_engine_id()
 
         layout = QVBoxLayout(self)
         self._form = QFormLayout()
@@ -124,6 +127,40 @@ class BackendSelectorDialog(QDialog):
         self._test_btn.clicked.connect(self._on_test)
         self._buttons.accepted.connect(self._on_apply)
         self._buttons.rejected.connect(self.reject)
+
+    # ----- subclass hooks -----
+    #
+    # SessionEngineDialog (per-chat-session override) reuses this whole dialog —
+    # combos, the ＋/－ choice lists, and the ping worker's cancel→wait→kill
+    # shutdown — and only swaps these six seams. They are overridden, not branched
+    # on a `session=` flag, so each method keeps a single coherent contract.
+
+    def _baseline_engine_id(self) -> str:
+        """Engine the dialog opens on (also the engine_changed baseline)."""
+        return current_engine_id()
+
+    def _seed_value(self, engine, field: str) -> str:
+        """Initial text for `field` — the value this dialog is editing."""
+        return current_model(engine) if field == "model" else current_provider(engine)
+
+    def _probe_settings(self, engine, model: str, provider: str) -> dict:
+        """Settings the connectivity check should build a backend from."""
+        return candidate_settings(
+            engine, model, provider, engine_changed=self._engine_changed()
+        )
+
+    def _check_busy(self) -> bool:
+        """True → refuse to apply (something is mid-turn)."""
+        cw = None
+        if hasattr(self._main_window, "chat_widget"):
+            cw = self._main_window.chat_widget()
+        return cw is not None and cw.is_busy()
+
+    def _do_apply(self, engine, model: str, provider: str) -> None:
+        """Persist the selection. May raise RuntimeError/OSError."""
+        apply_selection(
+            engine, model, provider, engine_changed=self._engine_changed()
+        )
 
     # ----- selection helpers -----
 
@@ -235,9 +272,7 @@ class BackendSelectorDialog(QDialog):
             text = combo.currentText().strip()
             items: list[str] = []
         else:
-            text = (
-                current_model(engine) if field == "model" else current_provider(engine)
-            )
+            text = self._seed_value(engine, field)
             items = [text] if text else []
         for s in combo_choices(engine, field):
             if s and s not in items:
@@ -266,12 +301,29 @@ class BackendSelectorDialog(QDialog):
         """Lock/unlock the selection inputs + Apply while a ping is in flight so a
         connectivity result can never be shown against a *different* selection
         (e.g. a slow claude OK landing after the user switched to mock)."""
-        self._engine_combo.setEnabled(enabled)
-        self._model_combo.setEnabled(enabled)
-        self._provider_combo.setEnabled(enabled)
+        self._ping_unlocked = enabled
+        self._refresh_enabled()
+
+    def _editable_by_mode(self) -> bool:
+        """Second, independent gate on the inputs (SessionEngineDialog's
+        「全体設定に従う」). Kept separate from the ping lock and AND-ed below —
+        collapsing them into one flag would let un-checking the box mid-ping
+        re-enable the combos and reintroduce the stale-result race the lock exists
+        to prevent."""
+        return True
+
+    def _refresh_enabled(self) -> None:
+        on = self._ping_unlocked and self._editable_by_mode()
+        self._engine_combo.setEnabled(on)
+        self._model_combo.setEnabled(on)
+        self._provider_combo.setEnabled(on)
         for btn in (*self._model_btns, *self._provider_btns):
-            btn.setEnabled(enabled)
-        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(enabled)
+            btn.setEnabled(on)
+        # Apply follows the ping lock only: in follow-default mode the inputs are
+        # greyed out but applying (= clearing the override) must stay possible.
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            self._ping_unlocked
+        )
 
     # ----- connectivity check -----
 
@@ -281,9 +333,7 @@ class BackendSelectorDialog(QDialog):
             return
         model = self._current_model_text()
         provider = self._current_provider_text(engine)
-        settings = candidate_settings(
-            engine, model, provider, engine_changed=self._engine_changed()
-        )
+        settings = self._probe_settings(engine, model, provider)
         backend = build_backend(engine.backend_key, settings)
         self._test_btn.setEnabled(False)
         self._set_selection_enabled(False)
@@ -371,10 +421,7 @@ class BackendSelectorDialog(QDialog):
     # ----- lifecycle -----
 
     def _on_apply(self) -> None:
-        cw = None
-        if hasattr(self._main_window, "chat_widget"):
-            cw = self._main_window.chat_widget()
-        if cw is not None and cw.is_busy():
+        if self._check_busy():
             self._result_label.setText(tr("backend.dialog.busy_warning"))
             return
         engine = self._selected_engine()
@@ -383,9 +430,7 @@ class BackendSelectorDialog(QDialog):
         model = self._current_model_text()
         provider = self._current_provider_text(engine)
         try:
-            apply_selection(
-                engine, model, provider, engine_changed=self._engine_changed()
-            )
+            self._do_apply(engine, model, provider)
         except (RuntimeError, OSError) as e:
             # RuntimeError = set_toml_keys validation / rollback double-fault;
             # OSError (incl. PermissionError) = raw IO on either write. Both must
@@ -402,3 +447,102 @@ class BackendSelectorDialog(QDialog):
     def closeEvent(self, event) -> None:
         self._stop_ping_worker()
         super().closeEvent(event)
+
+
+class SessionEngineDialog(BackendSelectorDialog):
+    """Per-chat-session engine override — the same dialog, six seams swapped.
+
+    Subclass rather than a ``session=`` flag: every method whose behaviour differs
+    has a single coherent contract this way, instead of six ``if self._session``
+    branches inside docstrings that assert global semantics. And not a dialog built
+    from scratch, because the ping worker's cancel → wait → kill shutdown is ~70
+    lines that must not be forked.
+
+    Applying writes the ChatSession, not the TOMLs. The ＋/－ dropdown lists still
+    write models.toml — those are shared candidate lists, and sharing them between
+    the global dialog and every session is the point (note they persist immediately,
+    so they survive Cancel; same as the global dialog).
+    """
+
+    def __init__(self, main_window, chat_widget, session, parent=None):
+        self._chat = chat_widget
+        self._session = session
+        super().__init__(main_window, parent)
+        self.setWindowTitle(tr("backend.dialog.session_title"))
+
+        self._follow_default = QCheckBox(tr("backend.dialog.follow_default"), self)
+        self._follow_default.setChecked(
+            not (getattr(session, "engine", None) or "").strip()
+        )
+        self._follow_default.toggled.connect(self._on_follow_toggled)
+        self._form.insertRow(0, "", self._follow_default)
+        self._refresh_enabled()
+
+    # ----- hooks -----
+
+    def _baseline_engine_id(self) -> str:
+        """Open on the session's own engine when it has one, else the global."""
+        eid = (getattr(self._session, "engine", None) or "").strip()
+        return eid if engine_by_id(eid) is not None else current_engine_id()
+
+    def _seed_value(self, engine, field: str) -> str:
+        """Session value if this engine IS the session's, else that engine's default.
+
+        Carrying the session's model over to a different engine would seed e.g.
+        "claude-opus-5" into a pi combo, so it only applies to the matching engine.
+        """
+        if (getattr(self._session, "engine", None) or "").strip() == engine.id:
+            key = "engine_model" if field == "model" else "engine_provider"
+            val = (getattr(self._session, key, None) or "").strip()
+            if val:
+                return val
+        return super()._seed_value(engine, field)
+
+    def _probe_settings(self, engine, model: str, provider: str) -> dict:
+        """Probe exactly what the session will run — engine_changed is meaningless
+        here (see engines.session_settings), and pinging a different binary than the
+        session uses would make the check worthless."""
+        return session_settings(engine, model, provider)
+
+    def _check_busy(self) -> bool:
+        """Only THIS session blocks. The widget-wide is_busy() would refuse to edit
+        tab A's engine merely because tab B is streaming."""
+        turns = getattr(self._chat, "_turns", None)
+        return bool(turns and self._session.id in turns)
+
+    def _do_apply(self, engine, model: str, provider: str) -> None:
+        if self._follow_default.isChecked():
+            self._chat._set_session_engine(self._session, None)
+        else:
+            self._chat._set_session_engine(self._session, engine.id, model, provider)
+
+    def _update_warnings(self, engine=None) -> None:
+        if engine is None:
+            engine = self._selected_engine()
+        # LLM_BACKEND does NOT win for a session override: _build_session_backend
+        # calls build_backend(engine.backend_key, ...) directly, bypassing
+        # get_backend()'s env precedence. Showing that warning here would be a lie.
+        self._env_warning.setVisible(False)
+        # CLAUDE_CODE_BIN, conversely, matters MORE per-session: a session pinned to
+        # claude-vscode gets bin="" and _discover_binary then honours that env var.
+        self._env_bin_warning.setVisible(bool(
+            engine is not None and engine.id == "claude-vscode"
+            and os.environ.get("CLAUDE_CODE_BIN")
+        ))
+
+    # ----- follow-default gate -----
+
+    def _editable_by_mode(self) -> bool:
+        return not self._follow_default.isChecked()
+
+    def _on_follow_toggled(self, _checked: bool = False) -> None:
+        self._refresh_enabled()
+
+    def _sync_engine_widgets(self) -> None:
+        super()._sync_engine_widgets()
+        engine = self._selected_engine()
+        # mock has fields=() — the base only hides the provider row, so without this
+        # the header would advertise a model the engine ignores.
+        self._form.setRowVisible(
+            self._model_row, engine is not None and "model" in engine.fields
+        )

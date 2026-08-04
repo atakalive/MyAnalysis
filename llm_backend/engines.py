@@ -121,6 +121,19 @@ def engine_by_id(engine_id: str) -> Engine | None:
     return None
 
 
+def engine_label(engine: Engine) -> str:
+    """Localised display name for ``engine``.
+
+    Lives here rather than at the call sites because ``label_key`` is an attribute,
+    and ``tests/test_i18n_catalog.py`` forbids non-literal ``tr()`` keys in the GUI
+    files it scans (``gui/chat.py`` etc.). Keeping the lookup next to the catalog
+    that owns the key is also simply where it belongs; the label keys themselves are
+    covered by ``tests/test_engines.py::test_engine_label_keys_and_dialog_keys_resolve``.
+    """
+    from common.i18n import tr
+    return tr(engine.label_key)
+
+
 def _resolved_backend_name() -> str:
     """Backend key with get_backend's precedence (env → config → OPENAI_BASE_URL)."""
     name = os.environ.get("LLM_BACKEND")
@@ -242,10 +255,7 @@ def candidate_settings(
     """
     if not engine.settings_key:
         return {"model": model}
-    base = merged_settings(
-        engine.settings_key, backend_config().get(engine.settings_key, {})
-    )
-    settings = dict(base)
+    settings = _base_settings(engine)
     if engine_changed:
         for key, value in engine.config_patch:
             settings[key] = value
@@ -253,6 +263,45 @@ def candidate_settings(
         settings["model"] = model
     if "provider" in engine.fields:
         settings["provider"] = provider
+    return settings
+
+
+def _base_settings(engine: Engine) -> dict:
+    """models.toml を config.toml セクションに重ねた、そのエンジンの現在の設定一式。"""
+    return dict(merged_settings(
+        engine.settings_key, backend_config().get(engine.settings_key, {})
+    ))
+
+
+def session_settings(engine: Engine, model: str, provider: str) -> dict:
+    """Settings dict for a per-chat-session engine override.
+
+    ``candidate_settings`` の ``engine_changed`` はここでは使えない。``False`` だと base の
+    ``bin`` を引き継ぐので「セッションは claude-vscode 指定なのに全体が claude-cli だから
+    PATH の CLI が走る」になり、``True`` だと手設定の絶対パス ``bin`` を潰す。さらに
+    「全体が今どれか」で同じ上書きの解決結果が変わってしまい非決定的になる。
+
+    代わりに ``config_patch`` を **base と真偽が食い違うときだけ** 当てる。これは
+    ``current_engine_id`` が claude-vscode / claude-cli を判別している基準（``bin`` の真偽）
+    そのものなので、解決側と構築側が構造的に一致する。claude-vscode には ``bin=""`` を強制し、
+    claude-cli には base が空のときだけ ``"claude"`` を入れ、ユーザーの絶対パス ``bin`` は温存する。
+    （``config_patch`` の値が真偽の判別子であることが前提。現行カタログで非空の
+    ``config_patch`` を持つのは claude 2 種だけで、そこで成立している。）
+
+    ``model``/``provider`` が空ならそのエンジンの設定済み既定を使う（base 由来のまま残す）ので、
+    「エンジンだけ変えてモデルは既定」が自然に書ける。
+    """
+    if not engine.settings_key:
+        return {"model": model}
+    base = _base_settings(engine)
+    settings = dict(base)
+    for key, value in engine.config_patch:
+        if bool(str(base.get(key, "") or "").strip()) != bool(value):
+            settings[key] = value
+    if "model" in engine.fields and model.strip():
+        settings["model"] = model.strip()
+    if "provider" in engine.fields and provider.strip():
+        settings["provider"] = provider.strip()
     return settings
 
 
