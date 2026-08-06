@@ -100,10 +100,9 @@ guards that every prompt still contains it.
   `[<section>].model_choices` / `provider_choices` (saved immediately, independent
   of 適用). An absent key falls back to the seed in `engines.py`; `[]` means "no
   candidates" and is honoured. `merged_settings` overlays only bool/non-blank-str,
-  so these list values never leak into a backend's settings. pi's provider seed is
-  `openai-codex` (the default) / `openai` / `anthropic` / `google` / `llama.cpp`,
-  using pi's own provider ids; anything but `openai-codex` bills through that
-  provider. Local models never appear in pi's
+  so these list values never leak into a backend's settings. pi's seed is
+  deliberately OpenAI + local only (`openai-codex` / `openai` / `llama.cpp`) —
+  other providers bill separately through pi. Local models never appear in pi's
   catalog until llama-server has them loaded, which is why the list is editable.
 - **Per-chat-session engine override** — the dialog above sets the *global default*;
   each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
