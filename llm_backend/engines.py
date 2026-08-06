@@ -61,10 +61,17 @@ ENGINES: tuple[Engine, ...] = (
         settings_key="pi",
         config_patch=(),
         fields=("model", "provider"),
-        # OpenAI (Codex サブスク / API キー) とローカルモデルのみ。他プロバイダは pi
-        # 経由だと別課金になるので候補に出さない。"llama.cpp" は pi 側の provider id
-        # そのもの (`/login llama.cpp`, LLAMA_BASE_URL)。
-        provider_suggestions=("openai-codex", "openai", "llama.cpp"),
+        # pi の provider id をそのまま使う (model-resolver.js の defaultModelPerProvider
+        # に実在するもの)。"llama.cpp" はローカルモデル用 (`/login llama.cpp`,
+        # LLAMA_BASE_URL)。既定は openai-codex (ChatGPT サブスク) で、それ以外は
+        # provider 側の課金になる点に注意。ここは種にすぎず ＋/－ で足し引きできる。
+        provider_suggestions=(
+            "openai-codex",
+            "openai",
+            "anthropic",
+            "google",
+            "llama.cpp",
+        ),
         # openai-codex の実在 ID (pi --list-models で確認)。ローカルモデルは
         # llama-server にロード済みのものしか catalog に出ないため静的な種は持てない
         # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。

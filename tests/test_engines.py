@@ -307,9 +307,12 @@ def test_engine_label_keys_and_dialog_keys_resolve():
 _PI = engine_by_id("pi")
 
 
-def test_pi_provider_seed_is_openai_and_local_only():
-    """pi は OpenAI とローカルモデルだけ。他プロバイダは別課金なので出さない。"""
-    assert _PI.provider_suggestions == ("openai-codex", "openai", "llama.cpp")
+def test_pi_provider_seed_lists_the_common_providers():
+    """入力の手間を省くための種。既定 (openai-codex) を先頭に、主要プロバイダと
+    ローカル (llama.cpp) を並べる。ID は pi の provider id そのもの。"""
+    assert _PI.provider_suggestions == (
+        "openai-codex", "openai", "anthropic", "google", "llama.cpp",
+    )
 
 
 def test_combo_choices_falls_back_to_seed_when_unset(apply_env):
