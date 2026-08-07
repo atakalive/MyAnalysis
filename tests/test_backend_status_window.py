@@ -106,18 +106,45 @@ def test_stale_worker_result_is_dropped(no_probe, parent_widget):
 # ---- プロセス起動の形 ----
 
 
-def test_install_wraps_cmd_shims_for_windows(no_probe, parent_widget, monkeypatch):
-    """win32 の npm.cmd は CreateProcess で直接起動できない → cmd.exe /c 経由。"""
+def test_bare_name_is_resolved_before_spawning(no_probe, parent_widget, monkeypatch):
+    """win32 で `npm` は実行ファイルではなく `npm.cmd`。解決しないと WinError 2 で
+    インストール/ログインボタンが必ず失敗する（実際に踏んだ）。"""
     from llm_backend import preflight
     monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(
+        preflight, "_which",
+        lambda n: r"C:\nodejs\npm.cmd" if n == "npm" else None,
+    )
+    assert preflight._wrap(["npm", "i", "-g", "x"]) == [
+        "cmd.exe", "/c", r"C:\nodejs\npm.cmd", "i", "-g", "x",
+    ]
+
+
+def test_already_resolved_cmd_shim_is_still_wrapped(no_probe, parent_widget,
+                                                    monkeypatch):
+    from llm_backend import preflight
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(preflight, "_which", lambda n: n)
     assert preflight._wrap(["npm.cmd", "i"]) == ["cmd.exe", "/c", "npm.cmd", "i"]
-    assert preflight._wrap(["npm", "i"]) == ["npm", "i"]
+
+
+def test_plain_executable_is_not_wrapped(no_probe, parent_widget, monkeypatch):
+    from llm_backend import preflight
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(preflight, "_which", lambda n: r"C:\nodejs\node.exe")
+    assert preflight._wrap(["node", "--version"]) == [r"C:\nodejs\node.exe", "--version"]
 
 
 def test_login_opens_a_new_console_on_windows(no_probe, parent_widget, monkeypatch):
+    """端末を新規コンソールで起こす。argv[0] は解決済みでなければ WinError 2 になる。"""
     import subprocess
+    from llm_backend import preflight
     w = _win(no_probe, parent_widget)
     monkeypatch.setattr(no_probe.sys, "platform", "win32")
+    monkeypatch.setattr(preflight.sys, "platform", "win32")
+    monkeypatch.setattr(
+        preflight, "_which", lambda n: r"C:\npm\pi.cmd" if n == "pi" else None
+    )
     seen = {}
 
     def _popen(cmd, **kw):
@@ -125,7 +152,7 @@ def test_login_opens_a_new_console_on_windows(no_probe, parent_widget, monkeypat
         return MagicMock()
     monkeypatch.setattr(no_probe.subprocess, "Popen", _popen)
     w._launch_login(["pi"])
-    assert seen["cmd"] == ["pi"]
+    assert seen["cmd"] == ["cmd.exe", "/c", r"C:\npm\pi.cmd"]   # 裸の "pi" では起動しない
     assert seen["kw"]["creationflags"] == getattr(
         subprocess, "CREATE_NEW_CONSOLE", 0
     )

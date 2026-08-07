@@ -85,13 +85,24 @@ class EngineStatus:
 
 
 def _wrap(cmd: list[str]) -> list[str]:
-    """win32 の ``.cmd``/``.bat`` シムは CreateProcess で直接起動できないので包む。
+    """実際に起動できる argv へ直す（PATH 解決 → win32 のシム包み）。
 
-    npm が置く shim がまさにこれ（`pi.CMD` 等）。pi.py:104 / codex.py:133 と同じ既知の罠。
+    2 段階どちらも必要:
+
+    1. **裸の名前を解決する。** win32 で ``npm`` は実行ファイルではなく ``npm.cmd`` で、
+       ``Popen(["npm", ...])`` は WinError 2 になる。``pi`` / ``claude`` も同じ。
+    2. **``.cmd``/``.bat`` は ``cmd.exe /c`` で包む。** CreateProcess はシムを直接
+       起動できない（pi.py:104 / codex.py:133 と同じ既知の罠）。
+
+    1 を忘れると「インストール」「ログイン」ボタンが Windows で必ず失敗する。
     """
-    if sys.platform == "win32" and cmd and cmd[0].lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/c"] + cmd
-    return cmd
+    if not cmd:
+        return cmd
+    exe = _which(cmd[0]) or cmd[0]
+    out = [exe] + list(cmd[1:])
+    if sys.platform == "win32" and exe.lower().endswith((".cmd", ".bat")):
+        return ["cmd.exe", "/c"] + out
+    return out
 
 
 def _run(cmd: list[str], timeout: float) -> tuple[int, str] | None:
