@@ -88,7 +88,7 @@ windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui
 | [common/](common/) | 共有ユーティリティ（`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`） |
 | [core/](core/) | 低レベルモジュール（`figures.py` = matplotlib ヘルパ、import 時に Agg 確定） |
 | [gui/](gui/) | PySide6 GUI（`window.py`, `tab.py`, `chat.py`, `panels.py`, `tools.py`） |
-| [llm_backend/](llm_backend/) | LLM バックエンド抽象（claude / openai / pi / mock） |
+| [llm_backend/](llm_backend/) | LLM バックエンド抽象（claude / openai / pi / codex / mock） |
 | [llm_bridge/](llm_bridge/) | GUI↔CLI ブリッジ（ファイルシステム経由・クロスプラットフォーム） |
 | [devtools/](devtools/) | ホットリロード（`hotreload.py`, `qt_integration.py`） |
 | [meeting/](meeting/) | ミーティング共有リレー（ローカル・インメモリ・リレー + cloudflared トンネル） |
@@ -99,7 +99,6 @@ windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui
 | [export/](export/) | ヘッドレス PNG エクスポート driver |
 | [tests/](tests/) | pytest テスト群 |
 | `data/` | gitignore のローカル作業領域（出力・キャッシュ）。中身はコミットしない |
-| `docs/` | ドキュメント（現状ほぼ空） |
 
 解析モジュールはリポジトリには**ありません** — 各解析はデータと一緒に同期ドライブ上の `<dataset_dir>/analyses/<name>/analysis.py` に置かれます（後述「解析モジュールの追加と export」参照）。
 
@@ -222,21 +221,23 @@ python -m export <dataset> <name>
 
 ## LLM チャット & バックエンド
 
-チャットドックの LLM アクセスは [llm_backend/](llm_backend/) を通ります。4 種類ありますが、**実運用は `claude` バックエンド**です:
+チャットドックの LLM アクセスは [llm_backend/](llm_backend/) を通ります。エンジンは 6 種類ありますが、**実運用は Claude（VS Code 同梱エンジン）**です。設定値（環境変数 `LLM_BACKEND` / `config.toml` の `[backend].name`）に入るのは**バックエンド名**（表の 2 列目）で、Claude の 2 経路は `[claude_code].bin` が空かどうかで切り替わります（空 = 同梱バイナリを自動検出、非空 = そのパスの CLI）:
 
-| バックエンド | 説明 |
-|---|---|
-| `claude` | **実運用の既定。** VS Code Claude Code 拡張の同梱エンジン（stream-json モード）と VS Code のログインを再利用 |
-| `openai` | OpenAI 互換 HTTP（Ollama 等のローカルエンドポイント含む） |
-| `pi` | pi-coding-agent サブプロセス |
-| `mock` | オフラインのスモークテスト用（LLM 不要） |
+| エンジン（GUI 表記） | `[backend].name` | 説明 |
+|---|---|---|
+| Claude（VS Code 同梱エンジン） | `claude`（`bin` 空） | **実運用の既定。** VS Code Claude Code 拡張の同梱エンジン（stream-json モード）と VS Code のログインを再利用 |
+| Claude（PATH の CLI） | `claude`（`bin` 指定） | PATH 等にある `claude` CLI を使う別経路 |
+| pi コーディングエージェント | `pi` | pi-coding-agent サブプロセス |
+| Codex CLI（OpenAI） | `codex` | OpenAI Codex CLI サブプロセス |
+| OpenAI 互換 HTTP | `openai` | OpenAI 互換 HTTP（Ollama 等のローカルエンドポイント含む） |
+| モック（動作確認） | `mock` | オフラインのスモークテスト用（LLM 不要） |
 
 ### `claude` バックエンドの設定（推奨）
 
 1. **VS Code Claude Code 拡張をインストールしてサインイン** — 同梱エンジンと `~/.claude` のログインを再利用するので、`.env` に API キーを置く必要はありません。
 2. `llm_backend/config.toml` で `[backend].name = "claude"`（`bin` は空にすると同梱バイナリを自動検出。`permission_mode = "bypassPermissions"` が既定で、これによりエージェントが無人で GUI を駆動できます）。
 3. `models.toml` の `[claude_code]` を設定 — 例 `model = "claude-opus-4-8"`, `thinking = "enabled"`, `effort = "xhigh"`。
-4. **アプリを再起動** — `config.toml` と `models.toml` は起動時に一度だけ読まれます。
+4. 反映 — ファイルを手で編集した場合は**アプリを再起動**します（起動時に一度だけ読まれるため）。GUI の **設定 → バックエンド/モデル設定…** から変更した場合は再起動不要で、適用すると全チャットセッションに次の送信から反映されます。
 
 > 同梱の `llm_backend/config.example.toml` は `[backend].name` の既定が `pi`（開発用プレースホルダ）です。通常利用では `claude` に書き換えてください。
 
@@ -244,7 +245,21 @@ python -m export <dataset> <name>
 
 - `openai` — `.env` の `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` を任意の OpenAI 互換エンドポイント（例: ローカル Ollama）に向ける。
 - `pi` — `npm i -g @earendil-works/pi-coding-agent`（旧名 `@mariozechner/…` は deprecated）。運用設定は `config.toml`、秘密は `.env`。Windows では **Windows 側にインストール**すること（WSL 側だけのインストールは参照できない）。
+- `codex` — `npm i -g @openai/codex`、ログインは `codex login`。モデル設定は `models.toml` の `[codex]`。
 - `mock` — オフライン・設定不要。GUI のスモークテストに便利。
+
+### バックエンドの状況ウィンドウ
+
+**設定 → バックエンドの状況…** で、対応ドライバ全部の導入状況を一覧できます（現在どのエンジンを選択しているかとは無関係の棚卸しです）。非モーダルなので、npm インストールの進行中も本体を操作できます。CLI 同等品は `python -m llm_bridge engines`。
+
+- **表示** — 1 行 = 1 エンジン。列は ドライバ / 前提（node+npm）/ 導入（バージョン）/ 認証（ログイン済みプロバイダ）。記号は ✓ = OK、✗ = 無い、? = 確認できなかった、— = 対象外。`?` は「入っていない」ではありません（タイムアウト等で判定できなかっただけの状態に、再インストールを勧めない設計です）。
+- **インストール / 更新** — どちらも同じ `npm i -g <パッケージ>` を実行します。未導入の行では「インストール」、導入済みの行では「更新」と表示されるだけの違いです。前提が欠けている行と `?` の行にはボタンが出ません。Claude（VS Code 同梱）は拡張のアップデートが入手経路なのでボタンがありません。
+- **ログイン** — 認証済みでも表示されます（アカウント切替・再ログイン用）。Windows では新しいコンソールを開いて対話ログインします。それ以外の OS では実行すべきコマンドをログ欄に表示するだけなので、手元の端末に貼り付けてください。
+- **疎通確認** — 実際にバックエンドへ 1 ターン投げる、このウィンドウで**唯一課金される操作**です（押したときだけ実行）。ウィンドウを開く・「再確認」を押すのはローカル判定だけで課金されません。自動更新タイマーは意図的にありません。CLI の `engines` に疎通確認はないので完全に無課金です。
+- **安全性** — 判定に使うのは auth ファイルを変更しない読み取り専用のコマンド（`--version` / `codex login status` / `pi --list-models`）だけです。状況を見たことが原因で他 PC・他 CLI のログインが失効することはありません。
+- **注意** — インストール完了後も ✗ のままの場合は GUI を再起動してください（PATH は起動時のスナップショットのため、npm の global bin が後から PATH に載る構成では検出されません）。
+
+**バックエンド/モデル設定ダイアログ**（設定 → バックエンド/モデル設定…）では、エンジン・モデル・プロバイダを選んで適用できます。モデル/プロバイダの候補リストはコンボ横の ＋/− で編集でき（`models.toml` に保存）、適用前に任意の疎通チェックも実行できます。チャットタブを右クリック → **このチャットのモデル…** で、そのセッションだけ別エンジンに切り替えることもできます（未設定のセッションは全体設定に追従します）。
 
 **選択順**: 環境変数 `LLM_BACKEND` → `llm_backend/config.toml` の `[backend].name` → `OPENAI_BASE_URL` 後方互換。
 
@@ -253,7 +268,7 @@ python -m export <dataset> <name>
 - `llm_backend/config.toml` — バックエンド選択と運用設定（bin / cwd / tools 等）。
 - `models.toml` — モデル knob（`model` / `thinking` / `effort` / `provider`）。
 
-`config.toml` と `models.toml` は一度だけ読み込まれます — 編集の反映には再起動を。
+`config.toml` と `models.toml` は起動時に読み込まれます — 手編集の反映は再起動、GUI の設定ダイアログ経由なら即時反映です。
 
 ---
 
