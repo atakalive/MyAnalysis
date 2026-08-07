@@ -37,6 +37,14 @@ class Engine:
     provider_suggestions: tuple[str, ...] = ()
 
 
+# pi から使うことを想定している provider。**これが単一の真実ソース**で、
+# ドロップダウンの種と、バックエンド状況ウィンドウの表示フィルタの両方が参照する
+# （別々に持つと必ずズレる）。pi の auth.json / --list-models には anthropic 等も
+# 現れ得るが、並べると「そこからも使える」と誤認させる—— 別課金なので金額に直結する。
+# なお `openai`（API キー）は実質 `openai-codex`（ChatGPT サブスク）と同じ用途なので並べない。
+PI_PROVIDERS: tuple[str, ...] = ("openai-codex", "github-copilot", "llama.cpp")
+
+
 ENGINES: tuple[Engine, ...] = (
     Engine(
         id="claude-vscode",
@@ -64,7 +72,8 @@ ENGINES: tuple[Engine, ...] = (
         # OpenAI (Codex サブスク / API キー) とローカルモデルのみ。他プロバイダは pi
         # 経由だと別課金になるので候補に出さない。"llama.cpp" は pi 側の provider id
         # そのもの (`/login llama.cpp`, LLAMA_BASE_URL)。
-        provider_suggestions=("openai-codex", "openai", "llama.cpp"),
+        # 上の PI_PROVIDERS を使う（表示フィルタと共通）。
+        provider_suggestions=PI_PROVIDERS,
         # openai-codex の実在 ID (pi --list-models で確認)。ローカルモデルは
         # llama-server にロード済みのものしか catalog に出ないため静的な種は持てない
         # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。

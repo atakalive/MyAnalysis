@@ -327,9 +327,12 @@ def test_engine_label_keys_and_dialog_keys_resolve():
 _PI = engine_by_id("pi")
 
 
-def test_pi_provider_seed_is_openai_and_local_only():
-    """pi は OpenAI とローカルモデルだけ。他プロバイダは別課金なので出さない。"""
-    assert _PI.provider_suggestions == ("openai-codex", "openai", "llama.cpp")
+def test_pi_provider_seed_matches_the_single_source(_unused=None):
+    """pi から使う想定の provider だけ。他は別課金なので種にも表示にも出さない。
+    素の `openai` は `openai-codex` と同じ用途なので並べない。"""
+    from llm_backend.engines import PI_PROVIDERS
+    assert _PI.provider_suggestions == PI_PROVIDERS
+    assert PI_PROVIDERS == ("openai-codex", "github-copilot", "llama.cpp")
 
 
 def test_combo_choices_falls_back_to_seed_when_unset(apply_env):

@@ -41,6 +41,18 @@ _PI_MIN_NODE = (22, 19)
 
 _NPM = "npm"
 
+# pi から使うことを想定している provider だけを表示する。
+# pi の auth.json / --list-models には他の provider（anthropic 等）も現れ得るが、
+# それを並べると「そこからも使える」と誤認させる。実際には別課金になるので
+# 取り違えると金額に直結する—— 嬉しくないミスなので白名単で落とす。
+def _pi_visible_providers() -> tuple[str, ...]:
+    """engines.PI_PROVIDERS を単一の真実ソースとして使う（遅延 import: 循環回避）。"""
+    try:
+        from llm_backend.engines import PI_PROVIDERS
+        return PI_PROVIDERS
+    except Exception:
+        return ("openai-codex", "github-copilot", "llama.cpp")
+
 
 @dataclass(frozen=True)
 class EngineStatus:
@@ -99,8 +111,8 @@ def _wrap(cmd: list[str]) -> list[str]:
 
     1 を忘れると「インストール」「ログイン」ボタンが Windows で必ず失敗する。
     """
-    if not cmd:
-        return cmd
+    if not cmd or not isinstance(cmd[0], str) or not cmd[0]:
+        return list(cmd)                 # 壊れた argv でも raise しない（_run が起動失敗として拾う）
     exe = _which(cmd[0]) or cmd[0]
     out = [exe] + list(cmd[1:])
     if sys.platform == "win32" and exe.lower().endswith((".cmd", ".bat")):
@@ -128,8 +140,10 @@ def _run(cmd: list[str], timeout: float) -> tuple[int, str] | None:
             errors="replace",
             **no_window_kwargs(),
         )
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         # FileNotFoundError（実体なし）も TimeoutExpired もここ。区別せず「不明」。
+        # TypeError は argv に None が混じった場合（subprocess が list2cmdline で投げる）。
+        # このモジュールの契約は never raise なので、握って「判定不能」に倒す。
         return None
     return p.returncode, (p.stdout or "")
 
@@ -153,8 +167,14 @@ def _parse_version(text: str | None) -> str | None:
     return m.group(0) if m else first[:60]
 
 
-def _which(name: str) -> str | None:
-    """PATH 解決。win32 では npm の実行不能な拡張子なし shim を避ける。"""
+def _which(name) -> str | None:
+    """PATH 解決。win32 では npm の実行不能な拡張子なし shim を避ける。
+
+    None / 非 str を受けても落ちないこと。このモジュールの契約は never raise で、
+    呼び出し側は「見つからなかった」を None で受け取る想定。
+    """
+    if not isinstance(name, str) or not name:
+        return None
     if sys.platform == "win32":
         for cand in (name + ".exe", name + ".cmd", name + ".bat"):
             found = shutil.which(cand)
@@ -244,6 +264,8 @@ def _pi_providers_from_list_models(pi_bin: str) -> tuple[str, ...] | None:
     auth.json にトークンが残っていても失効していれば出てこない（実測で
     google-gemini-cli がそうだった）。
     """
+    if not pi_bin:
+        return None
     r = _run([pi_bin, "--list-models"], _PROBE_TIMEOUT)
     if r is None or r[0] != 0:
         return None
@@ -270,6 +292,12 @@ def _pi_providers_from_authfile() -> tuple[str, ...] | None:
     if not isinstance(data, dict):
         return None
     return tuple(k for k in data if isinstance(k, str))
+
+
+def _visible_pi(providers) -> tuple[str, ...]:
+    """pi で想定している provider だけに絞る（順番は白名単側に揃える）。"""
+    got = set(providers)
+    return tuple(p for p in _pi_visible_providers() if p in got)
 
 
 def _codex_auth(codex_bin: str) -> tuple[str, str]:
@@ -388,14 +416,18 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 ver = _parse_version(r[1])
             live = _pi_providers_from_list_models(path)
             if live is not None:
-                providers, auth_state = live, "ok"
+                providers, auth_state = _visible_pi(live), "ok"
             else:
                 cached = _pi_providers_from_authfile()
                 if cached:
-                    providers, auth_state = cached, "unknown"
+                    providers, auth_state = _visible_pi(cached), "unknown"
                     notes = notes + (("backend.status.note.offline_auth", {}),)
                 else:
                     auth_state = "missing"
+            # 想定外の provider しか無いなら「使える認証が無い」として扱う。
+            # ✓ なのに一覧が空、は意味が分からない。
+            if auth_state != "missing" and not providers:
+                auth_state = "missing"
         return EngineStatus(
             engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
             binary_state=state, binary=path, version=ver,

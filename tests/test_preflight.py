@@ -164,9 +164,8 @@ def test_pi_providers_enumerated_from_list_models(monkeypatch):
 
     s = check_engine("pi")
     assert s.auth_state == "ok"
-    assert s.authed_providers == (
-        "anthropic", "github-copilot", "openai-codex",     # 重複なし・ヘッダ除去
-    )
+    # ヘッダ除去・重複なし。anthropic は「使う想定外」なので落ちる（順は白名単側）。
+    assert s.authed_providers == ("openai-codex", "github-copilot")
 
 
 def test_pi_falls_back_to_authfile_when_offline(monkeypatch):
@@ -333,3 +332,73 @@ def test_installed_engine_still_offers_the_command_for_updating(monkeypatch):
     s = check_engine("pi")
     assert s.binary_state == "ok"
     assert s.install == ("npm", "i", "-g", "@earendil-works/pi-coding-agent")
+
+
+# ---- pi の provider は「使う想定のもの」だけ見せる ----
+
+
+def _pi_with_providers(monkeypatch, listing_providers):
+    _tools(monkeypatch, present=("node", "npm", "pi"))
+    rows = "provider  model  ctx\n" + "".join(
+        f"{p}  m  1M\n" for p in listing_providers
+    )
+
+    def _run(cmd, timeout):
+        base = cmd[0].rsplit("/", 1)[-1]
+        if base == "node":
+            return (0, "v24.18.0")
+        if base == "npm":
+            return (0, "11.16.0")
+        if "--list-models" in cmd:
+            return (0, rows)
+        if "--version" in cmd:
+            return (0, "0.83.0")
+        return None
+    monkeypatch.setattr(preflight, "_run", _run)
+    return check_engine("pi")
+
+
+def test_out_of_scope_providers_are_not_shown(monkeypatch):
+    """anthropic 等を並べると「そこからも使える」と誤認させる（別課金）。"""
+    s = _pi_with_providers(
+        monkeypatch, ["anthropic", "openai-codex", "github-copilot", "google"]
+    )
+    assert s.authed_providers == ("openai-codex", "github-copilot")
+    assert "anthropic" not in s.authed_providers
+
+
+def test_only_out_of_scope_providers_counts_as_no_usable_auth(monkeypatch):
+    """✓ なのに一覧が空、では意味が分からない。使える認証が無い扱いにする。"""
+    s = _pi_with_providers(monkeypatch, ["anthropic", "google"])
+    assert s.authed_providers == ()
+    assert s.auth_state == "missing"
+
+
+def test_visible_providers_match_the_dropdown_seed():
+    """表示フィルタとドロップダウンの種は同じ定義を参照すること（別々だと必ずズレる）。"""
+    from llm_backend.engines import PI_PROVIDERS, engine_by_id
+    assert engine_by_id("pi").provider_suggestions == PI_PROVIDERS
+    assert preflight._pi_visible_providers() == PI_PROVIDERS
+
+
+def test_openai_is_not_listed_separately_from_openai_codex():
+    """素の `openai` は `openai-codex` と同じ用途なので並べない。"""
+    from llm_backend.engines import PI_PROVIDERS
+    assert "openai" not in PI_PROVIDERS
+    assert "openai-codex" in PI_PROVIDERS
+
+
+# ---- never raise: 壊れた argv でも落ちない ----
+
+
+def test_degenerate_argv_never_raises():
+    """契約は never raise。_run は subprocess の TypeError まで握る必要がある
+    （argv に None が混じると list2cmdline が投げる）。"""
+    assert preflight._which(None) is None
+    assert preflight._which("") is None
+    assert preflight._which(123) is None
+    assert preflight._wrap([]) == []
+    assert preflight._wrap([None]) == [None]
+    assert preflight._run([None], 1.0) is None
+    assert preflight._run([], 1.0) is None
+    assert preflight._pi_providers_from_list_models(None) is None

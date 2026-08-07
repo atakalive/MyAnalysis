@@ -100,10 +100,15 @@ guards that every prompt still contains it.
   `[<section>].model_choices` / `provider_choices` (saved immediately, independent
   of 適用). An absent key falls back to the seed in `engines.py`; `[]` means "no
   candidates" and is honoured. `merged_settings` overlays only bool/non-blank-str,
-  so these list values never leak into a backend's settings. pi's seed is
-  deliberately OpenAI + local only (`openai-codex` / `openai` / `llama.cpp`) —
-  other providers bill separately through pi. Local models never appear in pi's
-  catalog until llama-server has them loaded, which is why the list is editable.
+  so these list values never leak into a backend's settings. **`engines.PI_PROVIDERS`
+  (`openai-codex` / `github-copilot` / `llama.cpp`) is the single source of truth for
+  which providers pi is meant to be used with** — it seeds the dropdown *and* filters
+  what the backend-status window reports. Keep them from diverging: pi's `auth.json`
+  and `--list-models` can surface others (anthropic, google, …), and listing those
+  implies "you can use these too" when they actually bill separately. Plain `openai`
+  is not listed because it serves the same purpose as `openai-codex`. Local models
+  never appear in pi's
+catalog until llama-server has them loaded, which is why the list is editable.
 - **Backend status window** (設定 → バックエンドの状況…) — an inventory of every supported
   driver, **independent of which engine is currently selected**. Detection lives in
   Qt-free [preflight.py](llm_backend/preflight.py) (`check_all()`), also exposed as
