@@ -855,18 +855,18 @@ class ChatWidget(QWidget):
     def apply_backend_change(self) -> bool:
         """Adopt a just-applied backend/model selection across all sessions.
 
-        Returns False (no change) if a turn is streaming — same UX as reload-busy;
-        the selection is already on disk, so the next fresh backend build picks it
-        up regardless. Otherwise drop the per-session backend cache so the next
-        _start_turn rebuilds from the new config, refresh the display prototype, and
-        repaint the header. Existing sessions get the new backend lazily on their
-        next send (resume-token invalidation is handled by _load_backend_session)."""
-        if self.is_busy():
-            return False
+        Always applies — a streaming turn is no reason to refuse: the turn holds
+        its own backend reference (turn.backend / the worker), so clearing the
+        per-session cache never touches an in-flight stream. That turn finishes on
+        the old backend and the session rebuilds from the new config on its next
+        send (resume-token invalidation is handled by _load_backend_session).
+        Returns False when a turn was streaming, so the caller can word its status
+        message accordingly ("applies from the next send")."""
+        was_busy = self.is_busy()
         self._session_backends.clear()
         self._backend = self._backend_factory()
         self._render_session(self._active)
-        return True
+        return not was_busy
 
     def _set_session_tool_display(self, sess: ChatSession, value: str | None) -> None:
         sess.tool_display = value
@@ -913,9 +913,23 @@ class ChatWidget(QWidget):
         # Only this session rebuilds; the others keep their cached backends.
         self._session_backends.pop(sess.id, None)
         # The native session belongs to the old engine — its token is meaningless now.
+        # (A streaming turn's end will write the old token back via
+        # _capture_backend_session — harmless: _load_backend_session's engine-id
+        # match drops it on mismatch, and keeps native resume for a same-engine
+        # model change, which is what we want.)
         self._forget_backend_session(sess)
         if sess is self._active:
             self._render_active_preserving_status()
+        if sess.id in self._turns:
+            # Mid-turn apply: the running response finishes on the old engine and
+            # the override takes effect from the next send. Say so via the status
+            # bar — NOT the transcript: _flush_live_markdown replaces everything
+            # from turn.anchor to the end of the document, so an appended system
+            # line would be wiped (and would break the in-flight-block-is-last
+            # invariant it documents).
+            w = self._window
+            if w is not None and hasattr(w, "statusBar"):
+                w.statusBar().showMessage(tr("chat.engine.applied_next_send"), 5000)
 
     # ----- transcript render -----
 

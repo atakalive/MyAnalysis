@@ -132,7 +132,7 @@ class BackendSelectorDialog(QDialog):
     #
     # SessionEngineDialog (per-chat-session override) reuses this whole dialog —
     # combos, the ＋/－ choice lists, and the ping worker's cancel→wait→kill
-    # shutdown — and only swaps these six seams. They are overridden, not branched
+    # shutdown — and only swaps these five seams. They are overridden, not branched
     # on a `session=` flag, so each method keeps a single coherent contract.
 
     def _baseline_engine_id(self) -> str:
@@ -148,13 +148,6 @@ class BackendSelectorDialog(QDialog):
         return candidate_settings(
             engine, model, provider, engine_changed=self._engine_changed()
         )
-
-    def _check_busy(self) -> bool:
-        """True → refuse to apply (something is mid-turn)."""
-        cw = None
-        if hasattr(self._main_window, "chat_widget"):
-            cw = self._main_window.chat_widget()
-        return cw is not None and cw.is_busy()
 
     def _do_apply(self, engine, model: str, provider: str) -> None:
         """Persist the selection. May raise RuntimeError/OSError."""
@@ -421,9 +414,6 @@ class BackendSelectorDialog(QDialog):
     # ----- lifecycle -----
 
     def _on_apply(self) -> None:
-        if self._check_busy():
-            self._result_label.setText(tr("backend.dialog.busy_warning"))
-            return
         engine = self._selected_engine()
         if engine is None:
             return
@@ -450,10 +440,10 @@ class BackendSelectorDialog(QDialog):
 
 
 class SessionEngineDialog(BackendSelectorDialog):
-    """Per-chat-session engine override — the same dialog, six seams swapped.
+    """Per-chat-session engine override — the same dialog, five seams swapped.
 
     Subclass rather than a ``session=`` flag: every method whose behaviour differs
-    has a single coherent contract this way, instead of six ``if self._session``
+    has a single coherent contract this way, instead of five ``if self._session``
     branches inside docstrings that assert global semantics. And not a dialog built
     from scratch, because the ping worker's cancel → wait → kill shutdown is ~70
     lines that must not be forked.
@@ -503,12 +493,6 @@ class SessionEngineDialog(BackendSelectorDialog):
         here (see engines.session_settings), and pinging a different binary than the
         session uses would make the check worthless."""
         return session_settings(engine, model, provider)
-
-    def _check_busy(self) -> bool:
-        """Only THIS session blocks. The widget-wide is_busy() would refuse to edit
-        tab A's engine merely because tab B is streaming."""
-        turns = getattr(self._chat, "_turns", None)
-        return bool(turns and self._session.id in turns)
 
     def _do_apply(self, engine, model: str, provider: str) -> None:
         if self._follow_default.isChecked():

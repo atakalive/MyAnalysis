@@ -280,7 +280,6 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.dialog.apply",
         "backend.dialog.test",
         "backend.dialog.testing",
-        "backend.dialog.busy_warning",
         "backend.dialog.env_warning",
         "backend.dialog.env_bin_warning",
         "backend.dialog.test_ok",
@@ -313,7 +312,7 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.status.ping_fail",
         "backend.status.note.vscode_ext",
         "backend.applied",
-        "backend.applied_config_only",
+        "backend.applied_busy",
     ]
     for lang, cat in cats.items():
         for k in keys:

@@ -86,7 +86,9 @@ def test_apply_engine_changed_true(monkeypatch, parent_widget):
     assert spy.call_args.kwargs["engine_changed"] is True
 
 
-def test_apply_blocked_when_busy(monkeypatch, parent_widget):
+def test_apply_proceeds_while_busy(monkeypatch, parent_widget):
+    """応答中でも適用は拒否しない（regression guard）: 進行中ターンは自分の
+    backend 参照で完走し、新設定は次の送信から効く。"""
     import gui.backend_selector_dialog as mod
 
     _patch_config(monkeypatch)
@@ -94,10 +96,10 @@ def test_apply_blocked_when_busy(monkeypatch, parent_widget):
     monkeypatch.setattr(mod, "apply_selection", spy)
     dlg, _ = _make_dialog(monkeypatch, parent_widget, busy=True)
     dlg._on_apply()
-    spy.assert_not_called()
+    spy.assert_called_once()
     from PySide6.QtWidgets import QDialog
 
-    assert dlg.result() != QDialog.DialogCode.Accepted   # stays open
+    assert dlg.result() == QDialog.DialogCode.Accepted
 
 
 def test_ping_result_updates_label(monkeypatch, parent_widget):
@@ -371,8 +373,9 @@ def test_apply_with_follow_default_clears_the_override(monkeypatch, parent_widge
     assert applied and applied[0][0][1] is None
 
 
-def test_only_this_session_being_busy_blocks_apply(monkeypatch, parent_widget):
-    """別タブが応答中というだけで編集不能になってはいけない。"""
+def test_busy_never_blocks_session_apply(monkeypatch, parent_widget):
+    """応答中を理由に適用を拒否しない: 他タブ busy でも自タブ busy でも通る
+    （自タブの進行中応答は旧エンジンで完走し、次の送信から新設定）。"""
     dlg, sess, _, applied = _session_dlg(monkeypatch, parent_widget, engine="pi")
     dlg._chat._turns = {"some-other-session": object()}
     dlg._on_apply()
@@ -381,8 +384,7 @@ def test_only_this_session_being_busy_blocks_apply(monkeypatch, parent_widget):
     dlg2, sess2, _, applied2 = _session_dlg(monkeypatch, parent_widget, engine="pi")
     dlg2._chat._turns = {sess2.id: object()}
     dlg2._on_apply()
-    assert not applied2                            # 自分が busy → 拒否
-    assert dlg2._result_label.text()
+    assert applied2                                # 自分が busy でも適用できる
 
 
 def test_env_backend_warning_hidden_in_session_mode(monkeypatch, parent_widget):

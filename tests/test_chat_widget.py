@@ -1516,11 +1516,15 @@ def test_create_remote_session_does_not_mark_dirty(widget):
 
 # ----- backend apply + capture (Issue #94) -----
 
-def test_apply_backend_change_busy_returns_false(widget):
+def test_apply_backend_change_busy_still_applies(widget):
+    """busy でも適用は行われる（進行中ターンは turn.backend の自参照で完走する）。
+    戻り値 False は呼び出し側の「次の送信から反映」表示用。"""
     widget._turns["t"] = object()             # simulate an in-flight turn
     widget._session_backends["s"] = _FakeBackend()
+    old = widget._backend
     assert widget.apply_backend_change() is False
-    assert "s" in widget._session_backends    # untouched while busy
+    assert widget._session_backends == {}     # busy でもキャッシュは落ちる
+    assert widget._backend is not old         # プロトタイプも新設定で再構築
 
 
 def test_apply_backend_change_clears_and_rebuilds(widget):
@@ -1730,6 +1734,19 @@ def test_clearing_override_returns_to_default(widget):
     assert sess.engine is None
     assert (sess.engine_model, sess.engine_provider) == (None, None)
     assert widget._effective_engine(sess) is None
+
+
+def test_mid_turn_engine_change_notifies_via_status_bar(widget):
+    """応答中の適用は transcript ではなくステータスバーで通知する
+    （_flush_live_markdown が anchor→文書末尾を全置換するため、transcript への
+    追記は次の描画で消える）。非応答時は何も出さない。"""
+    sess = _make_session(widget)
+    _override(widget, sess, "pi")
+    widget._window.statusBar.assert_not_called()
+
+    widget._turns[sess.id] = object()          # simulate an in-flight turn
+    _override(widget, sess, None)
+    widget._window.statusBar().showMessage.assert_called_once()
 
 
 def test_build_session_backend_falls_back_on_broken_override(widget, monkeypatch):

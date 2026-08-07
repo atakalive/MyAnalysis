@@ -383,7 +383,7 @@ class ToolWindow(QMainWindow):
         if applied:
             self.statusBar().showMessage(tr("backend.applied"), 5000)
         else:
-            self.statusBar().showMessage(tr("backend.applied_config_only"), 5000)
+            self.statusBar().showMessage(tr("backend.applied_busy"), 5000)
 
     # ------------------------------------------------------------------ #
     # Dataset groups (top-level "open datasets" layer)                   #

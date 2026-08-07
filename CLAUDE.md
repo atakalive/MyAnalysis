@@ -143,13 +143,16 @@ catalog until llama-server has them loaded, which is why the list is editable.
   `None` = follow the global. Empty model/provider mean "that engine's configured
   default", so switching engine alone is expressible. The unit is the whole engine
   (エンジン=プロバイダ=モデル), so session A can run Claude while B runs pi+llama.cpp.
-  - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps six hooks
-    (`_baseline_engine_id` / `_seed_value` / `_probe_settings` / `_check_busy` /
+  - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps five hooks
+    (`_baseline_engine_id` / `_seed_value` / `_probe_settings` /
     `_do_apply` / `_update_warnings`); the combos, ＋/－ lists and ping shutdown are
     shared. The ping lock and the「全体設定に従う」checkbox are **separate booleans
     AND-ed** — merging them would let un-checking mid-ping re-enable the combos and
-    revive the stale-result race. Busy check is per-session (`sess.id in _turns`),
-    not widget-wide.
+    revive the stale-result race. **適用は応答中でもブロックしない**: 進行中ターンは
+    自参照の backend（`turn.backend`）で完走し、次の送信から新設定が使われる（resume
+    token は `_load_backend_session` の engine-id 突合で自然無効化）。応答中の適用は
+    ステータスバーで「次の送信から反映」を通知する — transcript への追記は
+    `_flush_live_markdown` の anchor→末尾全置換に消されるため不可。
   - Backends are built in exactly one place, `ChatWidget._build_session_backend`,
     via `engines.session_settings()` + `build_backend()`. `session_settings` applies
     `config_patch` **only when its truthiness disagrees with the base**, matching
