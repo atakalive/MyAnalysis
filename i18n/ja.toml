@@ -48,6 +48,7 @@
 "backend.status.col.action"       = "操作"
 "backend.status.refresh"          = "再確認"
 "backend.status.btn.install"      = "インストール"
+"backend.status.btn.update"             = "更新"
 "backend.status.btn.login"        = "ログイン"
 "backend.status.btn.ping"         = "疎通確認"
 "backend.status.install_done"     = "インストール終了（終了コード {code}）"

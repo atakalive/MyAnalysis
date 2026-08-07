@@ -314,3 +314,22 @@ def test_note_keys_exist_in_every_catalog():
         with open(path, "rb") as f:
             cat = tomllib.load(f)
         assert used <= set(cat), (path.name, used - set(cat))
+
+
+def test_installed_engine_still_offers_the_command_for_updating(monkeypatch):
+    """導入済みでも npm コマンドは返す（GUI が「更新」ラベルで使う）。"""
+    _tools(monkeypatch, present=("node", "npm", "pi"))
+
+    def _run(cmd, timeout):
+        base = cmd[0].rsplit("/", 1)[-1]
+        if base == "node":
+            return (0, "v24.18.0")
+        if base == "npm":
+            return (0, "11.16.0")
+        if "--version" in cmd:
+            return (0, "0.83.0")
+        return None
+    monkeypatch.setattr(preflight, "_run", _run)
+    s = check_engine("pi")
+    assert s.binary_state == "ok"
+    assert s.install == ("npm", "i", "-g", "@earendil-works/pi-coding-agent")

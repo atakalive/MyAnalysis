@@ -52,13 +52,45 @@ def test_one_row_per_catalog_engine(no_probe, parent_widget):
     assert set(w._rows) == {e.id for e in ENGINES}
 
 
-def test_install_button_only_when_binary_is_missing(no_probe, parent_widget):
+def test_install_label_when_missing(no_probe, parent_widget):
     w = _win(no_probe, parent_widget)
     w._paint(_st("pi", prereq_state="ok", binary_state="missing",
                  install=("npm", "i", "-g", "x")))
     act = w._rows["pi"]["action"]
     assert not act.isHidden()
     assert act.text() == no_probe.tr("backend.status.btn.install")
+
+
+def test_update_label_when_already_installed(no_probe, parent_widget):
+    """入っている行はボタンが消えるのではなく「更新」になる（同じ npm i -g）。"""
+    w = _win(no_probe, parent_widget)
+    w._paint(_st("pi", prereq_state="ok", binary_state="ok", version="0.83.0",
+                 install=("npm", "i", "-g", "x")))
+    act = w._rows["pi"]["action"]
+    assert not act.isHidden()
+    assert act.text() == no_probe.tr("backend.status.btn.update")
+
+
+def test_update_and_install_run_the_same_command(no_probe, parent_widget,
+                                                 monkeypatch):
+    w = _win(no_probe, parent_widget)
+    seen = []
+    monkeypatch.setattr(w, "_run_install", lambda cmd: seen.append(list(cmd)))
+    for state in ("missing", "ok"):
+        w._paint(_st("pi", prereq_state="ok", binary_state=state,
+                     install=("npm", "i", "-g", "x")))
+        w._on_action("pi")
+    assert seen == [["npm", "i", "-g", "x"], ["npm", "i", "-g", "x"]]
+
+
+def test_login_is_a_separate_button_and_shows_even_when_authed(no_probe,
+                                                               parent_widget):
+    """アカウント切替・再ログインは認証済みでも正当な操作。"""
+    w = _win(no_probe, parent_widget)
+    w._paint(_st("pi", binary_state="ok", auth_state="ok", login=("pi",)))
+    assert not w._rows["pi"]["login"].isHidden()
+    w._paint(_st("pi", binary_state="missing", login=None))
+    assert w._rows["pi"]["login"].isHidden()
 
 
 def test_no_install_button_when_prereq_blocks(no_probe, parent_widget):

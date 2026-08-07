@@ -48,6 +48,7 @@
 "backend.status.col.action"       = "Action"
 "backend.status.refresh"          = "Re-check"
 "backend.status.btn.install"      = "Install"
+"backend.status.btn.update"             = "Update"
 "backend.status.btn.login"        = "Log in"
 "backend.status.btn.ping"         = "Connectivity check"
 "backend.status.install_done"     = "Install finished (exit code {code})"

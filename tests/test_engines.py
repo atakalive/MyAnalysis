@@ -302,6 +302,7 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.status.col.action",
         "backend.status.refresh",
         "backend.status.btn.install",
+        "backend.status.btn.update",
         "backend.status.btn.login",
         "backend.status.btn.ping",
         "backend.status.install_done",

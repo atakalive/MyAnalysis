@@ -166,6 +166,9 @@ class BackendStatusWindow(QWidget):
         act = QPushButton("", self)
         act.setVisible(False)
         act.clicked.connect(lambda _c=False, eid=engine_id: self._on_action(eid))
+        login = QPushButton(tr("backend.status.btn.login"), self)
+        login.setVisible(False)
+        login.clicked.connect(lambda _c=False, eid=engine_id: self._on_login(eid))
         ping = QPushButton(tr("backend.status.btn.ping"), self)
         ping.setVisible(False)
         ping.clicked.connect(lambda _c=False, eid=engine_id: self._on_ping(eid))
@@ -175,11 +178,12 @@ class BackendStatusWindow(QWidget):
         for col, w in enumerate((name, prereq, install, auth)):
             self._grid.addWidget(w, r, col)
         self._grid.addWidget(act, r, 4)
-        self._grid.addWidget(ping, r, 5)
-        self._grid.addWidget(note, r, 6)
+        self._grid.addWidget(login, r, 5)
+        self._grid.addWidget(ping, r, 6)
+        self._grid.addWidget(note, r, 7)
         self._rows[engine_id] = {
             "prereq": prereq, "install": install, "auth": auth,
-            "action": act, "ping": ping, "note": note,
+            "action": act, "login": login, "ping": ping, "note": note,
         }
 
     @staticmethod
@@ -203,20 +207,19 @@ class BackendStatusWindow(QWidget):
         row["note"].setText(notes)
         row["note"].setToolTip(notes)
 
-        # 詰まっている最初の段のボタンだけ出す。node が無いのにインストールを押させない。
-        stage = s.blocking_stage
+        # インストール/更新は同じ `npm i -g <pkg>`。ラベルだけ状態で変える。
+        # preflight 側が unknown / 前提不足のとき install を None にしているので、
+        # 「node が無いのにインストールを押せる」「遅いだけなのに再インストールを勧める」
+        # は構造的に起きない。
         act = row["action"]
-        if stage == "binary" and s.install:
-            act.setText(tr("backend.status.btn.install"))
-            act.setVisible(True)
-        elif stage == "auth" and s.login:
-            act.setText(tr("backend.status.btn.login"))
-            act.setVisible(True)
-        elif stage is None and s.login:
-            act.setText(tr("backend.status.btn.login"))
+        if s.install:
+            act.setText(tr("backend.status.btn.install") if s.binary_state == "missing"
+                        else tr("backend.status.btn.update"))
             act.setVisible(True)
         else:
             act.setVisible(False)
+        # ログインは認証済みでも出す（アカウント切替・再ログインは正当な操作）。
+        row["login"].setVisible(bool(s.login))
         # 疎通確認は「入っている」行にだけ。押したときだけ課金される。
         row["ping"].setVisible(s.binary_state in ("ok", "n/a"))
 
@@ -251,12 +254,14 @@ class BackendStatusWindow(QWidget):
     # ----- actions -----
 
     def _on_action(self, engine_id: str) -> None:
+        """インストール / 更新。コマンドはどちらも同じ ``npm i -g <pkg>``。"""
         s = self._status.get(engine_id)
-        if s is None:
-            return
-        if s.blocking_stage == "binary" and s.install:
+        if s is not None and s.install:
             self._run_install(list(s.install))
-        elif s.login:
+
+    def _on_login(self, engine_id: str) -> None:
+        s = self._status.get(engine_id)
+        if s is not None and s.login:
             self._launch_login(list(s.login))
 
     def _run_install(self, cmd: list[str]) -> None:
@@ -410,6 +415,7 @@ class BackendStatusWindow(QWidget):
         self._refresh_btn.setText(tr("backend.status.refresh"))
         for eid, row in self._rows.items():
             row["ping"].setText(tr("backend.status.btn.ping"))
+            row["login"].setText(tr("backend.status.btn.login"))
             s = self._status.get(eid)
             if s is not None:
                 self._paint(s)

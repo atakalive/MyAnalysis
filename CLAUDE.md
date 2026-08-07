@@ -117,9 +117,17 @@ guards that every prompt still contains it.
     minutes, and when the same refresh token is shared across pi(WSL)/pi(Windows)/codex
     it logs the others out. Measured-safe probes: `--version`, `codex login status`,
     `pi --list-models` (all leave the auth files byte-identical).
+  - `install` doubles as the **update** command (`npm i -g <pkg>` is the same either
+    way); the row labels it インストール when missing and 更新 when present, so an
+    installed driver still has an upgrade path. ログイン is a separate button and stays
+    available even when authenticated (account switching is legitimate).
   - `unknown` ≠ `missing`: a timeout must not offer a re-install of something already
     installed. Note that `ClaudeCodeBackend._resolve_bin` returns the bare name when PATH
     lookup fails, so preflight verifies the path actually resolves.
+  - Spawned argv must go through `preflight._wrap`, which **resolves the bare name
+    first** (win32 `npm` is `npm.cmd`; `Popen(["npm", ...])` is WinError 2) and then
+    wraps shims in `cmd.exe /c`. Skipping step one makes every install/login button
+    fail on Windows — argument-shape tests do not catch it, only running the process does.
   - **preflight returns no localised prose** — it feeds both CLI and GUI, so `*_detail`
     holds neutral facts (versions, provider names, tool output) and explanations are
     `(i18n key, params)` pairs in `notes`, translated by the caller.

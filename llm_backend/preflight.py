@@ -60,7 +60,10 @@ class EngineStatus:
     auth_state: str = "n/a"         # 2 段目: 認証
     auth_detail: str = ""
     authed_providers: tuple[str, ...] = ()
-    install: tuple[str, ...] | None = None   # npm コマンド（不可/不要なら None）
+    # npm コマンド。未導入なら「インストール」、導入済みなら「更新」として使う
+    # （`npm i -g <pkg>` はどちらも同じ）。**unknown のときは None** — 判定できていない
+    # だけなのに再インストールを勧めないため。
+    install: tuple[str, ...] | None = None
     login: tuple[str, ...] | None = None     # 端末で起こすコマンド（不可/不要なら None）
     # 人間向けの文は **ここで作らない**。このモジュールは Qt だけでなく i18n も知らない
     # （CLI と GUI の両方から使うので、日本語を埋め込むと en 表示に混ざる）。
@@ -366,7 +369,7 @@ def _check_engine(engine_id: str) -> EngineStatus:
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail, notes=notes,
             install=(_NPM, "i", "-g", "@anthropic-ai/claude-code")
-            if state == "missing" and pre_state == "ok" else None,
+            if state in ("missing", "ok") and pre_state == "ok" else None,
             login=("claude",) if state == "ok" else None,
         )
 
@@ -399,7 +402,7 @@ def _check_engine(engine_id: str) -> EngineStatus:
             auth_state=auth_state, auth_detail=auth_detail, authed_providers=providers,
             notes=notes,
             install=(_NPM, "i", "-g", "@earendil-works/pi-coding-agent")
-            if state == "missing" and pre_state == "ok" else None,
+            if state in ("missing", "ok") and pre_state == "ok" else None,
             # pi の /login は対話 TUI。端末を起こしてユーザーに操作してもらうしかない。
             login=("pi",) if state == "ok" else None,
         )
@@ -422,7 +425,7 @@ def _check_engine(engine_id: str) -> EngineStatus:
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail, notes=notes,
             install=(_NPM, "i", "-g", "@openai/codex")
-            if state == "missing" and pre_state == "ok" else None,
+            if state in ("missing", "ok") and pre_state == "ok" else None,
             login=(path or "codex", "login") if state == "ok" else None,
         )
 
