@@ -69,7 +69,8 @@ def test_settings_menu_holds_the_preference_items(qapp):
     for act in (win._language_menu.menuAction(),
                 win._tool_display_menu.menuAction(),
                 win._provider_prompt_action,
-                win._backend_selector_action):
+                win._backend_selector_action,
+                win._backend_status_action):
         assert act in settings
 
 

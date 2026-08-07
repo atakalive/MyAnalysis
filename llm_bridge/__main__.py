@@ -165,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     # PreToolUse hook から呼ばれる内部 verb（人が直接使うものではないので help を出さない）
     sub.add_parser("guard-write")
 
+    sub.add_parser(
+        "engines", help="対応 LLM ドライバの導入状況を一覧（GUI の「バックエンドの状況」と同じ）")
     p_doc = sub.add_parser(
         "doctor", help="同期マウント上のデータ健全性をチェック（Issue #96）")
     p_doc.add_argument("--dataset", default=None)
@@ -311,6 +313,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "guard-write":
         from llm_bridge import guard_write
         return guard_write.main()
+
+    if args.cmd == "engines":
+        from llm_backend import preflight
+        for st in preflight.check_all():
+            mark = {"ok": "OK", "missing": "--", "unknown": "??", "n/a": "  "}
+            auth = ", ".join(st.authed_providers) or st.auth_detail
+            print(f"{st.engine_id:14s} "
+                  f"prereq={mark.get(st.prereq_state, '')} "
+                  f"install={mark.get(st.binary_state, '')} {st.version or '':10s} "
+                  f"auth={mark.get(st.auth_state, '')} {auth}")
+            if st.install:
+                print(f"{'':14s}   install: {' '.join(st.install)}")
+            # preflight は i18n を知らないので、文の組み立てはここで行う。
+            from common.i18n import tr
+            for key, params in st.notes:
+                print(f"{'':14s}   {tr(key, **params)}")
+            if st.note_key:
+                print(f"{'':14s}   {tr(st.note_key)}")
+        return 0
 
     if args.cmd == "doctor":
         import config

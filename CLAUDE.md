@@ -104,6 +104,25 @@ guards that every prompt still contains it.
   deliberately OpenAI + local only (`openai-codex` / `openai` / `llama.cpp`) —
   other providers bill separately through pi. Local models never appear in pi's
   catalog until llama-server has them loaded, which is why the list is editable.
+- **Backend status window** (設定 → バックエンドの状況…) — an inventory of every supported
+  driver, **independent of which engine is currently selected**. Detection lives in
+  Qt-free [preflight.py](llm_backend/preflight.py) (`check_all()`), also exposed as
+  `python -m llm_bridge engines`. Stages are **0. prereq (node+npm) → 1. installed →
+  2. auth**, and only the first blocking stage's button is shown — offering "install"
+  when npm is missing would just fail.
+  - **Nothing here bills.** No LLM turn runs on open/re-check; the per-row 疎通確認
+    button (`ping.ping_backend`) is the only paid path and only fires on click. There is
+    deliberately no refresh timer (each probe spawns processes).
+  - **Never call `pi auth print-bearer-token`**: it refreshes tokens expiring within 30
+    minutes, and when the same refresh token is shared across pi(WSL)/pi(Windows)/codex
+    it logs the others out. Measured-safe probes: `--version`, `codex login status`,
+    `pi --list-models` (all leave the auth files byte-identical).
+  - `unknown` ≠ `missing`: a timeout must not offer a re-install of something already
+    installed. Note that `ClaudeCodeBackend._resolve_bin` returns the bare name when PATH
+    lookup fails, so preflight verifies the path actually resolves.
+  - **preflight returns no localised prose** — it feeds both CLI and GUI, so `*_detail`
+    holds neutral facts (versions, provider names, tool output) and explanations are
+    `(i18n key, params)` pairs in `notes`, translated by the caller.
 - **Per-chat-session engine override** — the dialog above sets the *global default*;
   each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
   layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider`

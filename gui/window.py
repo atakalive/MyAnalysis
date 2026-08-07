@@ -272,6 +272,11 @@ class ToolWindow(QMainWindow):
         )
         self._backend_selector_action.triggered.connect(self._open_backend_selector)
 
+        self._backend_status_action = self._settings_menu.addAction(
+            tr("menu.settings.backend_status")
+        )
+        self._backend_status_action.triggered.connect(self._open_backend_status)
+
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
         self._about_action = self._help_menu.addAction(tr("menu.help.about"))
         self._about_action.triggered.connect(
@@ -297,6 +302,7 @@ class ToolWindow(QMainWindow):
         self._tool_display_actions["hidden"].setText(tr("menu.settings.tool_display.hidden"))
         self._provider_prompt_action.setText(tr("menu.settings.provider_prompt"))
         self._backend_selector_action.setText(tr("menu.settings.backend_selector"))
+        self._backend_status_action.setText(tr("menu.settings.backend_status"))
         self._help_menu.setTitle(tr("menu.help"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
@@ -334,6 +340,23 @@ class ToolWindow(QMainWindow):
             from gui.meeting_share import MeetingShareWindow
             win = MeetingShareWindow(self, relay)
             self._meeting_share_window = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _open_backend_status(self) -> None:
+        """Open the non-modal backend-status window.
+
+        Non-modal on purpose: an npm install takes ~20s and the login flow happens in
+        a separate terminal, so the window has to stay usable throughout.
+        """
+        win = getattr(self, "_backend_status_window", None)
+        if win is None:
+            from gui.backend_status_window import BackendStatusWindow
+            win = BackendStatusWindow(self)
+            self._backend_status_window = win
+        else:
+            win.refresh()
         win.show()
         win.raise_()
         win.activateWindow()
