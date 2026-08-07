@@ -30,6 +30,8 @@ def _patch_config(monkeypatch, *, engine_id="claude-vscode", model="opus", provi
 
 
 def _make_dialog(monkeypatch, parent_widget, *, busy=False):
+    """busy はチャット応答中の状況を模す（ダイアログはもう busy を見ないので、
+    test_apply_proceeds_while_busy の regression guard としてのみ意味を持つ）。"""
     import gui.backend_selector_dialog as mod
 
     main_window = MagicMock()

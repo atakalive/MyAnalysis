@@ -1736,6 +1736,22 @@ def test_clearing_override_returns_to_default(widget):
     assert widget._effective_engine(sess) is None
 
 
+def test_apply_backend_change_reanchors_active_streaming_turn(widget):
+    """安全性主張の核心を実経路で通す: ACTIVE セッションがストリーミング中に適用
+    しても、_render_session が turn を再 anchor し部分応答が描き直されること。
+    （fake turn を active に紐づけない他テストではこの経路が走らない。）"""
+    from types import SimpleNamespace
+
+    sess = _make_session(widget)
+    widget._active = sess
+    turn = SimpleNamespace(buffer="部分応答", anchor=None, rendered="", session=sess)
+    widget._turns[sess.id] = turn
+    assert widget.apply_backend_change() is False
+    assert turn.anchor is not None                 # 再 anchor された
+    assert turn.rendered == "部分応答"             # 部分バッファが描画基準に再設定
+    assert "部分応答" in widget._log.toPlainText() # 実際に描き直されている
+
+
 def test_mid_turn_engine_change_notifies_via_status_bar(widget):
     """応答中の適用は transcript ではなくステータスバーで通知する
     （_flush_live_markdown が anchor→文書末尾を全置換するため、transcript への
