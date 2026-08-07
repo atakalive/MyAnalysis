@@ -30,6 +30,8 @@ import http.server
 import json
 import re
 import secrets
+import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -746,6 +748,27 @@ class LocalRelayServer:
             self._httpd.server_close()
 
 
+class _ExclusiveAddrHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer whose fixed-port collision raises on Windows too.
+
+    socketserver's default ``allow_reuse_address`` sets SO_REUSEADDR, which on
+    Windows lets bind() *succeed* on a port another socket is actively
+    listening on (port hijack) — a fixed-port collision would silently coexist
+    instead of raising OSError. Windows re-binds a closed port without
+    SO_REUSEADDR (TIME_WAIT included), so drop it there and instead claim the
+    port exclusively (SO_EXCLUSIVEADDRUSE) so other processes' SO_REUSEADDR
+    can't hijack ours. POSIX keeps SO_REUSEADDR — needed for TIME_WAIT re-bind,
+    and there a live-port collision already raises EADDRINUSE.
+    """
+
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def start_server(admin_key: str, *, html_path: "Path | None" = None,
                  bind_host: str = "127.0.0.1", port: int = 0) -> LocalRelayServer:
     state = RelayState(admin_key, html_path=html_path)
@@ -782,11 +805,11 @@ def start_server(admin_key: str, *, html_path: "Path | None" = None,
         do_DELETE = _dispatch
         do_OPTIONS = _dispatch
 
-    # ThreadingHTTPServer eager-binds the socket in its constructor, so a
-    # fixed `port` already in use raises OSError HERE — deliberately NOT caught:
-    # a silent ephemeral fallback would move an announced URL / Firewall rule out
-    # from under guests. `port == 0` lets the OS pick a free port (no collision).
-    httpd = http.server.ThreadingHTTPServer((bind_host, port), Handler)
+    # The server eager-binds the socket in its constructor, so a fixed `port`
+    # already in use raises OSError HERE — deliberately NOT caught: a silent
+    # ephemeral fallback would move an announced URL / Firewall rule out from
+    # under guests. `port == 0` lets the OS pick a free port (no collision).
+    httpd = _ExclusiveAddrHTTPServer((bind_host, port), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return LocalRelayServer(httpd, state, thread)
