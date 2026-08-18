@@ -42,10 +42,14 @@ from llm_bridge.personas import (
     upsert_persona,
 )
 
-# 全カタログの「（なし）」ラベル。ペルソナ名として許すと combo 上で予約 item0 と
+# 全カタログの「なし」ラベル。ペルソナ名として許すと combo 上で予約 item0 と
 # 区別できなくなるため追加時に拒否する（全カタログ網羅は test_persona_dialog の
-# reserved-names テストが i18n/*.toml を舐めて担保する）。
-_RESERVED_NAMES = frozenset({"（なし）", "(none)"})
+# reserved-names テストが i18n/*.toml を舐めて担保する）。旧ラベルも紛らわしいので
+# 予約に残す。
+_RESERVED_NAMES = frozenset({
+    "無し（お客様対応窓口）", "(none — customer-service tone)",
+    "（なし）", "(none)",
+})
 
 
 class PersonaDialog(QDialog):

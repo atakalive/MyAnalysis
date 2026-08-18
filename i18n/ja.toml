@@ -178,7 +178,7 @@
 "persona.dialog.title"            = "AIペルソナ"
 "persona.dialog.persona"          = "ペルソナ"
 "persona.dialog.body"             = "本文"
-"persona.dialog.none"             = "（なし）"
+"persona.dialog.none"             = "無し（お客様対応窓口）"
 "persona.dialog.add"              = "追加…"
 "persona.dialog.delete"           = "削除"
 "persona.dialog.apply"            = "適用"

@@ -178,7 +178,7 @@
 "persona.dialog.title"            = "AI persona"
 "persona.dialog.persona"          = "Persona"
 "persona.dialog.body"             = "Body"
-"persona.dialog.none"             = "(none)"
+"persona.dialog.none"             = "(none — customer-service tone)"
 "persona.dialog.add"              = "Add…"
 "persona.dialog.delete"           = "Delete"
 "persona.dialog.apply"            = "Apply"
