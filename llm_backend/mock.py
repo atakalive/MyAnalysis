@@ -28,6 +28,12 @@ class MockBackend:
     def __init__(self, *, model: str):
         self.model = model
 
+    def set_persona(self, value: str) -> None:
+        """不活性: mock は定型文しか返さないのでペルソナは無視する。
+
+        ChatWidget の duck-typed 注入（hasattr(backend, "set_persona")）が
+        どのバックエンドでも同じ経路を通るための対称性のみ。"""
+
     def stream(
         self, messages: list[Message], tools: list | None = None
     ) -> Iterator[TextDelta | ToolCallRequest]:

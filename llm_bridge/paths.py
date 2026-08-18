@@ -260,3 +260,13 @@ def drop_backend_session(session_id: str) -> None:
     消せば一緒に消える」保証が無い。削除経路から明示的に呼ぶこと。
     """
     write_backend_session(session_id, None, None, None)
+
+
+def personas_path() -> Path:
+    """Return data/llm_state/personas.json (file may not exist yet).
+
+    チャットのペルソナ定義ストア (GUI 管理・シード同梱)。recent_datasets.json /
+    backend_sessions.json と同じ PC ローカル層で、config_share.PORTABLE_FILES には
+    意図的に入れない。読み書きは llm_bridge/personas.py 経由。
+    """
+    return global_state_dir() / "personas.json"

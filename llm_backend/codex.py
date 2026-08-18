@@ -39,7 +39,7 @@ from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
-    build_prompt_with_history,
+    build_prompt_with_history, compose_system_prompt,
 )
 
 # Injected via AGENTS.md in the agent's cwd (codex auto-discovers it there).
@@ -94,6 +94,11 @@ class CodexBackend:
         self._stderr_buf: collections.deque[str] = collections.deque(maxlen=50)
         # Token telemetry from the latest turn.completed (read by the GUI).
         self.last_usage: dict | None = None
+        # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
+        self._persona = ""
+
+    def set_persona(self, value: str) -> None:
+        self._persona = str(value or "")
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -316,7 +321,14 @@ class CodexBackend:
         kept separate from claude's agent_home so neither engine picks up the
         other's instruction file. The AGENTS.md here is auto-generated and
         overwritten whenever the prompt changes (local disk — the mount write
-        discipline does not apply).
+        discipline does not apply). The desired content includes the session's
+        persona (composed at read time), so a persona change takes effect on the
+        next turn without touching the resumable thread.
+
+        Known limitation (v1): AGENTS.md is ONE shared file across all codex
+        sessions (single codex_home), so concurrent codex turns with different
+        personas are last-writer-wins in the rewrite→spawn→read window — the
+        impact is tone only, never operational rules.
         """
         cwd = self._config.get("cwd")
         home = Path(cwd) if cwd else Path.home() / ".myanalysis" / "codex_home"
@@ -326,8 +338,12 @@ class CodexBackend:
             current = agents.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError):
             current = None
-        if current != _SYSTEM_PROMPT_CODEX:
-            agents.write_text(_SYSTEM_PROMPT_CODEX, encoding="utf-8")
+        # desired が内容と比較キーを兼ねる: ペルソナを外せば素の定数に戻り書き換わる。
+        desired = compose_system_prompt(
+            _SYSTEM_PROMPT_CODEX, getattr(self, "_persona", "")
+        )
+        if current != desired:
+            agents.write_text(desired, encoding="utf-8")
         return home
 
     def _build_env(self) -> dict:

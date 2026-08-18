@@ -23,6 +23,12 @@ class _FakeBackend:
     name = "mock"
     model = "fake-model"
 
+    def __init__(self):
+        self.persona_calls: list[str] = []   # set_persona で渡された実効テキスト
+
+    def set_persona(self, value: str) -> None:
+        self.persona_calls.append(str(value or ""))
+
 
 @pytest.fixture()
 def qapp(monkeypatch):
@@ -1805,3 +1811,145 @@ def test_engine_header_does_not_build_a_backend(widget, monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not build")),
     )
     assert "qwen3-coder" in widget._engine_header(sess)
+
+
+# ---- セッションごとのペルソナ（応答口調）----
+#
+# 定義ストア（personas.json）と ui_prefs は conftest の autouse fixture で tmp へ
+# 隔離済み — upsert_persona はテスト専用ファイルに書く。
+
+
+def test_effective_persona_name_three_states(widget):
+    """None=全体既定に従う / ""=明示的になし / 非空=その名前。"""
+    sess = _make_session(widget)
+    widget._persona_default = "全体P"
+    assert widget._effective_persona_name(sess) == "全体P"     # None → 全体
+    sess.persona = ""
+    assert widget._effective_persona_name(sess) == ""          # 明示的になし
+    sess.persona = "個別P"
+    assert widget._effective_persona_name(sess) == "個別P"     # 個別名
+
+
+def test_unresolved_persona_degrades_to_none_without_rewrite(widget):
+    """未解決名は「なし」（""）に degrade するが、フィールドは書き換えない
+    （定義の無い別 PC を経由してもユーザーの選択は保持される）。"""
+    sess = _make_session(widget)
+    sess.persona = "存在しないペルソナ"
+    assert widget._effective_persona_text(sess) == ""
+    assert sess.persona == "存在しないペルソナ"       # never-rewrite
+
+
+def test_build_session_backend_passes_effective_persona_text(widget):
+    from llm_bridge.personas import upsert_persona
+    assert upsert_persona("P1", "口調テキスト")
+    sess = _make_session(widget)
+    sess.persona = "P1"
+    backend = widget._build_session_backend(sess)
+    assert backend.persona_calls == ["口調テキスト"]
+
+
+def test_build_session_backend_passes_empty_without_persona(widget):
+    """既定（ペルソナなし）でも set_persona("") は呼ばれ、compose 側の identity
+    経路に乗る。"""
+    sess = _make_session(widget)
+    backend = widget._build_session_backend(sess)
+    assert backend.persona_calls == [""]
+
+
+def test_set_session_persona_bumps_updated_and_marks_dirty(widget):
+    sess = _make_session(widget, dataset="ds")
+    before = sess.updated
+    widget._set_session_persona(sess, "P1")
+    assert sess.persona == "P1"
+    assert sess.updated > before
+    assert widget._window.mark_chat_dirty.call_count == 1
+
+
+def test_set_session_persona_scratch_no_dirty(widget):
+    sess = _make_session(widget, dataset=None)
+    widget._set_session_persona(sess, "P1")
+    assert widget._window.mark_chat_dirty.call_count == 0
+
+
+def test_set_session_persona_pops_only_its_backend(widget):
+    a, b = _make_session(widget), _make_session(widget)
+    widget._session_backends[a.id] = keep = object()
+    widget._session_backends[b.id] = object()
+    widget._set_session_persona(b, "P1")
+    assert b.id not in widget._session_backends
+    assert widget._session_backends[a.id] is keep      # A は温存
+
+
+def test_set_session_persona_keeps_resume_token(widget):
+    """engine 変更との意図的差分: 全バックエンドが system プロンプトを毎ターン
+    再供給するので、ペルソナ変更で token を捨てる理由がない（捨てると全履歴
+    replay のコストだけ払う）。"""
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-1", "claude-cli"), sess)
+    widget._set_session_persona(sess, "P1")
+    assert sess.backend_session_id == "tok-1"
+    rec = read_backend_session(sess.id)
+    assert rec is not None and rec.get("token") == "tok-1"
+
+
+def test_mid_turn_persona_change_notifies_via_status_bar(widget):
+    """応答中の適用は transcript ではなくステータスバーで通知する（engine と同じ
+    理由: _flush_live_markdown が anchor→文書末尾を全置換する）。非応答時は出さない。"""
+    sess = _make_session(widget)
+    widget._set_session_persona(sess, "P1")
+    widget._window.statusBar.assert_not_called()
+
+    widget._turns[sess.id] = object()          # simulate an in-flight turn
+    widget._set_session_persona(sess, None)
+    widget._window.statusBar().showMessage.assert_called_once()
+    msg = widget._window.statusBar().showMessage.call_args.args[0]
+    assert msg == tr("chat.persona.applied_next_send")
+    del widget._turns[sess.id]
+
+
+def test_set_session_persona_refreshes_active_header(widget):
+    """アクティブセッションへの適用は即時に transcript ヘッダへ反映される
+    （タブ切替を待たない）。"""
+    from llm_bridge.personas import upsert_persona
+    assert upsert_persona("P1", "t")
+    sess = _make_session(widget)
+    widget._active = sess
+    widget._set_session_persona(sess, "P1")
+    text = widget._log.toPlainText()
+    assert "persona: P1" in text
+    assert tr("chat.engine.mark_override") in text
+
+
+def test_apply_persona_change_clears_cache_and_refreshes_header(widget):
+    from llm_bridge.personas import upsert_persona
+    assert upsert_persona("P1", "t")
+    widget._session_backends["s"] = object()
+    old_backend = widget._backend
+    widget._persona_default = "P1"             # dialog が保存した新しい全体既定を模す
+    assert widget.apply_persona_change() is True
+    assert widget._session_backends == {}
+    assert widget._backend is old_backend      # プロトタイプは再構築しない
+    text = widget._log.toPlainText()
+    assert "persona: P1" in text               # アクティブヘッダが即時更新
+    assert tr("chat.engine.mark_default") in text
+
+
+def test_apply_persona_change_busy_returns_false_but_applies(widget):
+    """busy でも適用は行われる（進行中ターンは turn.backend の自参照で完走）。
+    戻り値 False は呼び出し側の「次の送信から反映」表示用。"""
+    widget._turns["t"] = object()
+    widget._session_backends["s"] = object()
+    assert widget.apply_persona_change() is False
+    assert widget._session_backends == {}      # busy でもキャッシュは落ちる
+    del widget._turns["t"]
+
+
+def test_set_persona_default_persists_to_ui_prefs(widget):
+    """全体既定の保存は ui_prefs（conftest で tmp へ隔離済み）に永続化される。"""
+    from llm_bridge.paths import read_ui_pref
+    from gui.chat import _load_persona_default
+    assert widget.set_persona_default("P1") is True
+    assert widget.persona_default() == "P1"
+    assert read_ui_pref("chat_persona") == "P1"
+    assert _load_persona_default() == "P1"

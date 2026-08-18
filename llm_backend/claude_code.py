@@ -40,7 +40,7 @@ from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
-    build_prompt_with_history,
+    build_prompt_with_history, compose_system_prompt,
 )
 
 # Mandatory rules + minimal llm_bridge contract, injected on every turn via
@@ -173,10 +173,15 @@ def _settings_payload(config: dict) -> dict:
     return payload
 
 
-def _system_prompt_args(use_provider_default: bool) -> list[str]:
-    """True=CC 既定に追記（現状）／False=CC 既定を置換し MyAnalysis のみ残す。"""
+def _system_prompt_args(use_provider_default: bool, persona: str = "") -> list[str]:
+    """True=CC 既定に追記（現状）／False=CC 既定を置換し MyAnalysis のみ残す。
+
+    persona 空なら compose は _SYSTEM_PROMPT を同一オブジェクトで返す（既定は
+    従来プロンプトとバイト同一）。system プロンプトは --resume ターンでも毎回
+    argv で供給されるので、ペルソナ変更は次ターンから token 破棄なしで効く。
+    """
     flag = "--append-system-prompt" if use_provider_default else "--system-prompt"
-    return [flag, _SYSTEM_PROMPT]
+    return [flag, compose_system_prompt(_SYSTEM_PROMPT, persona)]
 
 
 class ClaudeCodeBackend:
@@ -193,9 +198,14 @@ class ClaudeCodeBackend:
         self.last_usage: dict | None = None
         self.total_cost: float = 0.0
         self._use_provider_system_prompt = bool(self._config.get("use_provider_system_prompt", True))
+        # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
+        self._persona = ""
 
     def set_use_provider_system_prompt(self, value: bool) -> None:
         self._use_provider_system_prompt = bool(value)
+
+    def set_persona(self, value: str) -> None:
+        self._persona = str(value or "")
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -218,7 +228,10 @@ class ClaudeCodeBackend:
             # is not framed as a developer of it (see _agent_home).
             "--add-dir", str(repo_root()),
         ]
-        cmd += _system_prompt_args(self._use_provider_system_prompt)
+        # getattr: ホットリロードで旧インスタンスに _persona が無いケースのガード。
+        cmd += _system_prompt_args(
+            self._use_provider_system_prompt, getattr(self, "_persona", "")
+        )
         perm = config.get("permission_mode") or _DEFAULT_PERMISSION_MODE
         if perm:
             cmd += ["--permission-mode", perm]

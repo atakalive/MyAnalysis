@@ -122,6 +122,20 @@ def _save_tool_display(mode: str) -> None:
     update_ui_pref("tool_display", mode)
 
 
+def _load_persona_default() -> str:
+    """Read the persisted global persona selection (""=なし). Must never raise."""
+    from llm_bridge.paths import read_ui_pref
+    v = read_ui_pref("chat_persona", "")
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _save_persona_default(name: str) -> None:
+    """Persist the global persona selection into ui_prefs.json, preserving
+    sibling keys (atomic, best-effort)."""
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_persona", name)
+
+
 def _load_use_provider_prompt() -> bool | None:  # None=未設定
     from llm_bridge.paths import read_ui_pref
     v = read_ui_pref("claude_use_provider_system_prompt", None)
@@ -402,6 +416,7 @@ class ChatWidget(QWidget):
         # FIFO per session id and drained on turn completion (_on_done/_on_failed).
         self._pending_remote: dict[str, list] = {}
         self._tool_display_default = _load_tool_display()
+        self._persona_default = _load_persona_default()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -698,6 +713,8 @@ class ChatWidget(QWidget):
         backend._engine_id = engine_id
         if hasattr(backend, "set_use_provider_system_prompt"):   # claude のみ
             backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
+        if hasattr(backend, "set_persona"):   # 応答口調（全バックエンド duck-typed）
+            backend.set_persona(self._effective_persona_text(sess))
         return backend
 
     def _load_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
@@ -877,6 +894,34 @@ class ChatWidget(QWidget):
             # preserve the usage/cost line (status-only) across the re-render.
             self._render_active_preserving_status()
 
+    # ----- persona（応答口調・全体既定） -----
+
+    def persona_default(self) -> str:
+        return self._persona_default
+
+    def set_persona_default(self, name: str) -> bool:
+        """全体既定のペルソナ名を保存して適用する（""=なし）。戻り値は
+        apply_persona_change のもの（False = 応答中で次送信から反映）。"""
+        self._persona_default = (name or "").strip()
+        _save_persona_default(self._persona_default)
+        return self.apply_persona_change()
+
+    def apply_persona_change(self) -> bool:
+        """Adopt a persona selection / definition edit across all sessions.
+
+        apply_backend_change のミラーだが self._backend は再構築しない（プロトタイプ
+        は stream せず、name/model 表示にペルソナは無関係）。再レンダリングは必須:
+        transcript にペルソナヘッダ行を足す以上、呼ばないと適用直後にアクティブタブ
+        のヘッダが古いまま残る（全体に従うセッションの [既定] 表示が実害）。
+        mid-stream でも安全 — _render_session が in-flight turn を re-anchor する。
+        Returns False when a turn was streaming（進行中ターンは turn.backend の
+        自参照で完走し、次の送信から新設定が使われる）。"""
+        was_busy = self.is_busy()
+        self._session_backends.clear()
+        # preserve the usage/cost line (status-only) across the re-render.
+        self._render_active_preserving_status()
+        return not was_busy
+
     # ----- per-session engine override -----
 
     @staticmethod
@@ -896,6 +941,35 @@ class ChatWidget(QWidget):
             return engine_by_id(eid)
         except Exception:
             return None
+
+    def _effective_persona_name(self, sess: ChatSession) -> str:
+        """This session's effective persona NAME (may be unresolvable).
+
+        3 状態: None=全体既定に従う / ""=明示的になし / 非空=ペルソナ名。
+        getattr guards a hot-reload `patch`-ed instance missing the field
+        (_effective_engine と同じ理由)。"""
+        ov = getattr(sess, "persona", None)
+        if not isinstance(ov, str):
+            return self._persona_default
+        return ov.strip()
+
+    def _effective_persona_text(self, sess: ChatSession) -> str:
+        """This session's effective persona BODY text ("" = no persona).
+
+        名前はストア（llm_bridge.personas）で使用時に解決する。未解決名は「なし」
+        に degrade し、sess.persona は書き換えない — ストアは PC ローカルなので、
+        定義の無い別 PC を経由してもユーザーの選択を保持する（engine が全体設定へ
+        degrade するのとは意図的に非対称: persona は「全体と違える」意思表示なので
+        別ペルソナへの勝手な差替えはしない）。Never raises."""
+        name = self._effective_persona_name(sess)
+        if not name:
+            return ""
+        try:
+            from llm_bridge.personas import get_persona
+            p = get_persona(name)
+        except Exception:
+            return ""
+        return p.text if p is not None else ""
 
     def _set_session_engine(
         self, sess: ChatSession, engine_id: str | None,
@@ -931,6 +1005,29 @@ class ChatWidget(QWidget):
             if w is not None and hasattr(w, "statusBar"):
                 w.statusBar().showMessage(tr("chat.engine.applied_next_send"), 5000)
 
+    def _set_session_persona(self, sess: ChatSession, value: str | None) -> None:
+        """Apply a per-session persona override (None=全体既定 / ""=明示的になし)."""
+        sess.persona = value.strip() if isinstance(value, str) else None
+        # merge_sessions replaces on strict `updated >`, so a change that touches no
+        # message still has to win the merge.
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+        # Only this session rebuilds; the others keep their cached backends.
+        self._session_backends.pop(sess.id, None)
+        # resume token は破棄しない（_set_session_engine との意図的差分）: 全バック
+        # エンドが system プロンプトを毎ターン再供給するので、ネイティブセッションは
+        # そのまま有効 — 破棄すると全履歴 replay のコストだけ払って得るものがない。
+        if sess is self._active:
+            self._render_active_preserving_status()
+        if sess.id in self._turns:
+            # Mid-turn apply: status bar, NOT the transcript — _flush_live_markdown
+            # replaces everything from turn.anchor to the end of the document
+            # (_set_session_engine と同じ理由)。
+            w = self._window
+            if w is not None and hasattr(w, "statusBar"):
+                w.statusBar().showMessage(tr("chat.persona.applied_next_send"), 5000)
+
     # ----- transcript render -----
 
     def _engine_header(self, sess: ChatSession) -> str:
@@ -964,6 +1061,28 @@ class ChatWidget(QWidget):
         return (f"backend: {label}{prov} / model: {model or '-'}"
                 f"  [{tr('chat.engine.mark_override')}]")
 
+    def _persona_header(self, sess: ChatSession) -> str | None:
+        """The 'persona: …' line for `sess`, or None to draw nothing.
+
+        ペルソナが実効（名前あり）かつストアで解決できる時だけ 1 行出す。なし／
+        明示的になし／未解決名は None — 既定状態の transcript はペルソナ機能導入前
+        とバイト同一に保つ。mark は engine ヘッダの 既定/個別 リテラルを再利用。"""
+        name = self._effective_persona_name(sess)
+        if not name:
+            return None
+        try:
+            from llm_bridge.personas import get_persona
+            if get_persona(name) is None:
+                return None                      # 未解決名 → 行を出さない
+        except Exception:
+            return None
+        # 既定/個別 の判別は _effective_persona_name と同じ discriminator（非 str
+        # → 全体既定由来）に揃える。
+        mark = tr("chat.engine.mark_default") \
+            if not isinstance(getattr(sess, "persona", None), str) \
+            else tr("chat.engine.mark_override")
+        return f"persona: {name}  [{mark}]"
+
     def _render_session(self, sess: ChatSession) -> None:
         """Repaint the transcript for `sess`: clear stale usage + log, draw the
         backend/model system line, then replay user / non-empty assistant blocks
@@ -971,6 +1090,9 @@ class ChatWidget(QWidget):
         self._status.setText("")
         self._log.clear()
         self._append_system_line(self._engine_header(sess))
+        persona_line = self._persona_header(sess)
+        if persona_line is not None:
+            self._append_system_line(persona_line)
         mode = self._effective_tool_display(sess)
         for i, m in enumerate(sess.messages):
             if m.role == "user":
@@ -1217,6 +1339,16 @@ class ChatWidget(QWidget):
         dlg = SessionEngineDialog(self._window, self, sess, self)
         dlg.exec()
 
+    def _open_session_persona_dialog(self, sess: ChatSession) -> None:
+        """タブ右クリック →「このチャットのペルソナ…」。
+
+        選択のみ（本文編集は載せない — 定義の作成・編集は 設定 → AIペルソナ… へ
+        誘導）。SessionEngineDialog と同じく適用先はこのセッションだけ。
+        """
+        from gui.persona_dialog import SessionPersonaDialog
+        dlg = SessionPersonaDialog(self._window, self, sess, self)
+        dlg.exec()
+
     def _on_tab_context_menu(self, pos) -> None:
         index = self._tab_bar.tabAt(pos)
         if index < 0:
@@ -1230,6 +1362,10 @@ class ChatWidget(QWidget):
         model_action = menu.addAction(tr("chat.menu.model"))
         model_action.triggered.connect(
             lambda _checked=False, s=sess: self._open_session_engine_dialog(s)
+        )
+        persona_action = menu.addAction(tr("chat.menu.persona"))
+        persona_action.triggered.connect(
+            lambda _checked=False, s=sess: self._open_session_persona_dialog(s)
         )
         td_menu = menu.addMenu(tr("chat.menu.tool_display"))
         td_group = QActionGroup(td_menu)

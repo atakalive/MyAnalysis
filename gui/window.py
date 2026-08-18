@@ -267,6 +267,11 @@ class ToolWindow(QMainWindow):
             lambda checked=False: self._set_use_provider_prompt(checked)
         )
 
+        self._persona_settings_action = self._settings_menu.addAction(
+            tr("menu.settings.persona")
+        )
+        self._persona_settings_action.triggered.connect(self._open_persona_settings)
+
         self._backend_selector_action = self._settings_menu.addAction(
             tr("menu.settings.backend_selector")
         )
@@ -301,6 +306,7 @@ class ToolWindow(QMainWindow):
         self._tool_display_actions["compact"].setText(tr("menu.settings.tool_display.compact"))
         self._tool_display_actions["hidden"].setText(tr("menu.settings.tool_display.hidden"))
         self._provider_prompt_action.setText(tr("menu.settings.provider_prompt"))
+        self._persona_settings_action.setText(tr("menu.settings.persona"))
         self._backend_selector_action.setText(tr("menu.settings.backend_selector"))
         self._backend_status_action.setText(tr("menu.settings.backend_status"))
         self._help_menu.setTitle(tr("menu.help"))
@@ -384,6 +390,44 @@ class ToolWindow(QMainWindow):
             self.statusBar().showMessage(tr("backend.applied"), 5000)
         else:
             self.statusBar().showMessage(tr("backend.applied_busy"), 5000)
+
+    def _persona_default(self) -> str:
+        """chat widget の全体ペルソナ既定名（widget/メソッド不在は「なし」扱い）。"""
+        if self._chat_widget is not None \
+                and hasattr(self._chat_widget, "persona_default"):
+            return self._chat_widget.persona_default()
+        return ""
+
+    def _set_persona_default(self, name: str) -> bool:
+        """全体ペルソナ既定を chat widget へ転送する。
+
+        widget/メソッド不在時は True を返す — falsy を「busy」と誤読して
+        applied_busy を表示しないため（busy=False は chat widget の実応答だけ）。
+        """
+        if self._chat_widget is not None \
+                and hasattr(self._chat_widget, "set_persona_default"):
+            return self._chat_widget.set_persona_default(name)
+        return True
+
+    def _open_persona_settings(self) -> None:
+        from gui.persona_dialog import PersonaDialog
+        dlg = PersonaDialog(self, self)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        w = self.chat_widget()
+        if w is None:
+            return
+        if accepted:
+            applied = not dlg.apply_was_busy
+        elif dlg.definitions_changed:
+            # Cancel でも保存済みの定義編集は残っている — キャッシュ済みバックエンド
+            # へ反映しないと、編集前の本文で次ターンが走る。
+            applied = w.apply_persona_change()
+        else:
+            return
+        if applied:
+            self.statusBar().showMessage(tr("persona.applied"), 5000)
+        else:
+            self.statusBar().showMessage(tr("persona.applied_busy"), 5000)
 
     # ------------------------------------------------------------------ #
     # Dataset groups (top-level "open datasets" layer)                   #

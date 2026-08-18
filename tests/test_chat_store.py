@@ -574,3 +574,54 @@ def test_fork_carries_engine_override():
     new = fork_session(src, cut=2, title="forked")
     assert (new.engine, new.engine_model) == ("codex", "gpt-5.6-sol")
     assert new.backend_session_id is None       # resume token だけは引き継がない
+
+
+# ---- persona 上書き（セッションごとの AI ペルソナ） ----
+
+
+def test_persona_roundtrip():
+    sess = _sample_session()
+    sess.persona = "インテリDQN"
+    d = session_to_dict(sess)
+    assert d["persona"] == "インテリDQN"
+    assert session_from_dict(d) == sess
+
+
+def test_persona_empty_string_survives_roundtrip():
+    """`""` は「明示的にペルソナなし」のセンチネル。_opt_str に通すと blank→None
+    に潰れて「全体設定に従う」へ化け、タブ単位の上書き解除が消える。"""
+    sess = _sample_session()
+    sess.persona = ""
+    d = session_to_dict(sess)
+    assert d["persona"] == ""
+    assert session_from_dict(d).persona == ""
+
+
+def test_persona_defaults_none():
+    sess = _sample_session()
+    assert sess.persona is None
+    d = session_to_dict(sess)
+    assert d["persona"] is None
+    assert session_from_dict(d).persona is None
+
+
+def test_v1_dict_without_persona_key_roundtrips():
+    """persona キーを持たない既存ファイルが読めること（None=全体設定に従う）。"""
+    d = session_to_dict(_sample_session())
+    del d["persona"]
+    assert d["version"] == SCHEMA_VERSION == 1
+    assert session_from_dict(d) == _sample_session()
+
+
+def test_persona_non_str_degrades_to_none():
+    d = session_to_dict(_sample_session())
+    d["persona"] = 7
+    assert session_from_dict(d).persona is None
+
+
+def test_fork_carries_persona():
+    """分岐先も同じ口調で続けるのが期待値。"""
+    src = _sample_session()
+    src.persona = "インテリDQN"
+    new = fork_session(src, cut=2, title="forked")
+    assert new.persona == "インテリDQN"

@@ -69,9 +69,30 @@ def test_settings_menu_holds_the_preference_items(qapp):
     for act in (win._language_menu.menuAction(),
                 win._tool_display_menu.menuAction(),
                 win._provider_prompt_action,
+                win._persona_settings_action,
                 win._backend_selector_action,
                 win._backend_status_action):
         assert act in settings
+
+
+def test_persona_settings_action_retranslates(qapp):
+    """設定 → AIペルソナ… も言語切替の retranslate() で追随する。"""
+    import common.i18n as i18n
+    i18n._load_catalogs()  # use the real i18n/ catalogs
+
+    from gui.window import ToolWindow
+
+    i18n.set_language("en")
+    win = ToolWindow()
+    win.retranslate()
+    en_text = win._persona_settings_action.text()
+    assert en_text == i18n._catalogs["en"]["menu.settings.persona"]
+
+    i18n.set_language("ja")
+    win.retranslate()
+    assert win._persona_settings_action.text() \
+        == i18n._catalogs["ja"]["menu.settings.persona"]
+    assert win._persona_settings_action.text() != en_text
 
 
 def test_retranslate_hooks_fire_and_never_raise(qapp):
@@ -109,6 +130,10 @@ def test_language_survives_app_rebuild(qapp, tmp_path, monkeypatch):
     # ui_prefs_path() resolves under global_state_dir(), so this redirect makes
     # the whole read/write path hermetic (no touch of the real repo tree).
     monkeypatch.setattr(paths, "global_state_dir", _fake_global_state_dir)
+    # conftest's autouse isolation patches ui_prefs_path directly, which would
+    # bypass the redirect above — re-patch the same attribute (later patch wins)
+    # so the pre-written language pref below stays visible.
+    monkeypatch.setattr(paths, "ui_prefs_path", lambda: llm_state / "ui_prefs.json")
     llm_state.mkdir(parents=True, exist_ok=True)
     (llm_state / "ui_prefs.json").write_text(
         json.dumps({"language": "ja"}), encoding="utf-8"

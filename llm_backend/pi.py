@@ -24,7 +24,7 @@ from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
-    build_prompt_with_history,
+    build_prompt_with_history, compose_system_prompt,
 )
 
 # Mandatory rules + minimal llm_bridge contract injected on every turn via
@@ -61,6 +61,11 @@ class PiCodingAgentBackend:
         self._session_id: str | None = None
         self._proc: subprocess.Popen | None = None
         self._stderr_buf: collections.deque[str] = collections.deque(maxlen=50)
+        # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
+        self._persona = ""
+
+    def set_persona(self, value: str) -> None:
+        self._persona = str(value or "")
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -79,7 +84,10 @@ class PiCodingAgentBackend:
             )
 
         cmd = [pi_bin, "--mode", "json"]
-        cmd += ["--append-system-prompt", _SYSTEM_PROMPT_PI]
+        # persona 空なら compose は _SYSTEM_PROMPT_PI を同一オブジェクトで返す（既定は
+        # 従来とバイト同一）。getattr はホットリロード後の旧インスタンス対策。
+        cmd += ["--append-system-prompt",
+                compose_system_prompt(_SYSTEM_PROMPT_PI, getattr(self, "_persona", ""))]
         if self._session_id:
             cmd += ["--session", self._session_id]
         skill_path = repo_root() / ".pi" / "skills" / "myanalysis-bridge"

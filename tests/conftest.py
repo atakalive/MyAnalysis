@@ -10,6 +10,12 @@ picker の MRU が空/テスト用データセット名で破壊される。auto
 backend_sessions.json（ネイティブ resume token の PC ローカルストア）も同様。
 _capture_backend_session がターン毎に書くので、隔離しないと開発者の実チャットの
 token をテストが上書きするうえ、残留エントリで後続テストが順序依存になる。
+
+ui_prefs.json（言語・tool_display・全体ペルソナ等の UI 設定）と personas.json
+（ペルソナ定義ストア）も同じ層: update_ui_pref / personas の save 経路を素通し
+すると、スイートを走らせるたびに開発者の実設定・実定義が書き換わる。
+global_state_dir 経由で ui_prefs を解決するテストは、同一属性 ui_prefs_path を
+自前で patch し直すこと（後勝ちで autouse に勝つ）。
 """
 
 import pytest
@@ -28,4 +34,10 @@ def _isolate_pc_local_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         lb_paths, "backend_sessions_path",
         lambda: tmp_path / "backend_sessions.json",
+    )
+    monkeypatch.setattr(
+        lb_paths, "ui_prefs_path", lambda: tmp_path / "ui_prefs.json"
+    )
+    monkeypatch.setattr(
+        lb_paths, "personas_path", lambda: tmp_path / "personas.json"
     )
