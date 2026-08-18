@@ -49,17 +49,19 @@ def test_get_unknown_or_blank_name_returns_none():
 
 # ---- 初回書込の実体化 ----
 
-def test_first_upsert_materialises_seed_plus_edit():
+def test_first_upsert_materialises_seeds_plus_edit():
     assert upsert_persona("新入り", "テキスト") is True
     raw = _read_raw()
     assert raw["version"] == SCHEMA_VERSION
-    assert [p["name"] for p in raw["personas"]] == [SEED_NAME, "新入り"]
-    assert list_personas() == [SEED_PERSONAS[0], Persona("新入り", "テキスト")]
+    assert [p["name"] for p in raw["personas"]] == \
+        [p.name for p in SEED_PERSONAS] + ["新入り"]
+    assert list_personas() == list(SEED_PERSONAS) + [Persona("新入り", "テキスト")]
 
 
 def test_editing_seeded_persona_persists():
     assert upsert_persona(SEED_NAME, "改稿した本文") is True
-    assert list_personas() == [Persona(SEED_NAME, "改稿した本文")]
+    assert list_personas() == \
+        [Persona(SEED_NAME, "改稿した本文")] + list(SEED_PERSONAS[1:])
     assert get_persona(SEED_NAME).text == "改稿した本文"
 
 
@@ -77,11 +79,20 @@ def test_upsert_strips_name():
 
 # ---- 削除・復活なし ----
 
-def test_delete_seeded_then_reload_gives_empty_no_resurrection():
+def test_delete_seeded_then_reload_no_resurrection():
     assert delete_persona(SEED_NAME) is True
-    assert list_personas() == []                 # 再読込でもシードは復活しない
-    assert _read_raw()["personas"] == []
+    # 再読込でも削除したシードは復活しない（残りのシードはそのまま）。
+    assert list_personas() == list(SEED_PERSONAS[1:])
+    assert [p["name"] for p in _read_raw()["personas"]] == \
+        [p.name for p in SEED_PERSONAS[1:]]
     assert get_persona(SEED_NAME) is None
+
+
+def test_delete_all_seeds_gives_empty_no_resurrection():
+    for p in SEED_PERSONAS:
+        assert delete_persona(p.name) is True
+    assert list_personas() == []                 # 空リストでもシードは復活しない
+    assert _read_raw()["personas"] == []
 
 
 def test_delete_missing_name_is_noop_success():
