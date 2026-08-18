@@ -35,7 +35,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from common.paths import pycache_prefix, repo_root
-from common.proc import no_window_kwargs
+from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
@@ -134,8 +134,14 @@ class CodexBackend:
             cmd = [codex_bin, "exec", *flags, "--cd", str(cwd), "-"]
 
         # Windows: CreateProcess can't run .cmd/.bat shims with shell=False.
+        # codex の prompt は stdin 経由（"-"）で改行事故は起きないが、cmd.exe の
+        # 引数再解釈は quoting が脆いので claude/pi と同じくシムは実体に解決する。
         if sys.platform == "win32" and codex_bin.lower().endswith((".cmd", ".bat")):
-            cmd = ["cmd.exe", "/c"] + cmd
+            resolved = resolve_cmd_shim(codex_bin)
+            if resolved:
+                cmd = resolved + cmd[1:]
+            else:
+                cmd = ["cmd.exe", "/c"] + cmd
 
         proc = subprocess.Popen(
             cmd,

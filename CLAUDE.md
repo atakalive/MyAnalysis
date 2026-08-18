@@ -189,6 +189,14 @@ catalog until llama-server has them loaded, which is why the list is editable.
   既知の制約: codex の AGENTS.md は全セッション共有の 1 ファイルなので、ペルソナの
   異なる codex ターンが並走すると last-writer-wins（影響は口調のみ）。CLI からの
   ペルソナ操作 verb は非目標。
+- **Windows の npm シム spawn（claude/pi/codex 共通）** — バックエンドの子プロセスを
+  `.cmd` シムのまま `cmd.exe /c` でラップしてはならない。cmd.exe は**引数中の最初の
+  改行で残り全部を切断**する（実測: 5603 文字の複数行 system プロンプトが 372 文字に
+  切れ、後続の `--resume` 等のフラグごと消えた）。[common/proc.py](common/proc.py) の
+  `resolve_cmd_shim` が npm シムの 2 形式（exe 直接型 = claude、node+JS 型 = pi/codex）
+  を実体 argv に解決して直接 spawn し、解決不能な自作シムのみ従来ラップに
+  フォールバックする。preflight の `_wrap`（インストール/ログイン等の単一行コマンド）は
+  この制約の対象外。
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`

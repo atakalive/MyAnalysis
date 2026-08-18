@@ -21,7 +21,7 @@ import threading
 from collections.abc import Iterator
 
 from common.paths import pycache_prefix, repo_root
-from common.proc import no_window_kwargs
+from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     build_prompt_with_history, compose_system_prompt,
@@ -109,8 +109,15 @@ class PiCodingAgentBackend:
         # empty string = all tools enabled (pi default) → omit flag
 
         # Windows: CreateProcess can't run .cmd/.bat shims with shell=False.
+        # cmd.exe は複数行引数を最初の改行で切断する（--append-system-prompt の
+        # 2 行目以降と後続の --session/--skill 等が消える）ため、npm シムは
+        # 実体（node + cli.js）に解決して直接 spawn する。
         if sys.platform == "win32" and pi_bin.lower().endswith((".cmd", ".bat")):
-            cmd = ["cmd.exe", "/c"] + cmd
+            resolved = resolve_cmd_shim(pi_bin)
+            if resolved:
+                cmd = resolved + cmd[1:]
+            else:
+                cmd = ["cmd.exe", "/c"] + cmd
 
         child_env = self._build_env()
 
