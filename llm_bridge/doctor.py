@@ -38,6 +38,14 @@ _DEFAULT_CACHE = Path(r"X:\remote\vfs\remote")
 # durable_write_json で 2 コピー管理しているファイル（乖離チェックの対象）
 _DURABLE_NAMES = ("meta.json", "session.json", "annotations.json")
 
+# data/llm_state 直下で検査する PC ローカル状態。**明示列挙する** — os.walk にすると
+# commands/ のキュー（正常に空のことがある）や mkstemp の残骸まで拾って誤検出になる。
+_LOCAL_STATE_NAMES = (
+    "active.json", "backend_sessions.json", "last_window.json",
+    "recent_datasets.json", "ui_prefs.json",
+)
+_LOCAL_DURABLE_NAMES = ("personas.json",)    # primary + .bak の 2 コピー
+
 
 def _iter_datasets(only: str | None):
     names = [only] if only else sorted(config.DATASETS)
@@ -62,6 +70,60 @@ def find_zero_byte_files(root: Path) -> list[Path]:
             except OSError:
                 pass
     return out
+
+
+def check_local_state(*, repair: bool = False) -> tuple[list[str], list[str]]:
+    """``data/llm_state`` の PC ローカル JSON を検査する。``(issues, notes)`` を返す。
+
+    ここは同期マウントではなくローカル FS（実測で ``fs_kind.is_fragile`` は False）だが、
+    0 バイト化は現に起きた: ``backend_sessions.json`` が 0 バイトのまま固着し、
+    ``read_json_classified`` の 'unreadable' 判定と噛み合って書込が恒久 skip され、
+    resume token が全エンジンで一度も保存されていなかった。writer 側は
+    ``llm_bridge.paths._preserve_unreadable`` で自己修復するようになったが、
+    「そもそも 0 バイトが在る」ことを見せる経路は要る。
+
+    中身は再計算可能な PC ローカル状態なので ``--repair`` は削除でよい（次回起動で
+    作り直される）。同期マウントのキャッシュ復旧用の ``--rescue`` は対象外。
+    """
+    from common.paths import bak_path, durable_read_json, read_json_classified
+    from llm_bridge.paths import global_state_dir
+
+    issues: list[str] = []
+    notes: list[str] = []
+    root = global_state_dir()
+    plain = [root / n for n in _LOCAL_STATE_NAMES]
+    durable_primaries = [root / n for n in _LOCAL_DURABLE_NAMES]
+    targets = plain + durable_primaries + [bak_path(p) for p in durable_primaries]
+
+    for p in targets:
+        try:
+            size = p.stat().st_size
+        except FileNotFoundError:
+            continue                          # 未作成は正常（初回起動前など）
+        except OSError as e:
+            issues.append(f"{p.name}: stat できない — {e}")
+            continue
+        if size == 0:
+            if not repair:
+                issues.append(f"{p.name}: 0 バイト（--repair で削除して作り直す）")
+                continue
+            try:
+                p.unlink()
+                notes.append(f"{p.name}: 0 バイト -> 削除（次回書込で作り直される）")
+            except OSError as e:
+                issues.append(f"{p.name}: 0 バイト・削除できない — {e}")
+            continue
+        if p in durable_primaries:
+            st, _ = durable_read_json(p)
+            if st == "recovered":
+                notes.append(f"{p.name}: primary より .bak が新しい（読取は .bak を採用）")
+            elif st not in ("ok", "absent"):
+                issues.append(f"{p.name}: primary/.bak とも JSON として読めない")
+        elif p in plain:
+            st, _ = read_json_classified(p)
+            if st == "unreadable":
+                issues.append(f"{p.name}: JSON として読めない")
+    return issues, notes
 
 
 def find_divergent_pairs(root: Path) -> list[tuple[Path, str, bool]]:
@@ -231,6 +293,16 @@ def run(dataset: str | None = None, *, repair: bool = False, rescue: bool = Fals
             problems += len(issues)
         else:
             print(f"  [{name}] ok")
+
+    print("\n=== PC ローカル状態 (data/llm_state) ===")
+    ls_issues, ls_notes = check_local_state(repair=repair)
+    for n in ls_notes:
+        print(f"  - {n}")
+    for i in ls_issues:
+        print(f"  ! {i}")
+    if not ls_issues and not ls_notes:
+        print("  ok")
+    problems += len(ls_issues)
 
     print("\n=== rclone cache / log ===")
     orphans = find_orphan_tmps(cache)

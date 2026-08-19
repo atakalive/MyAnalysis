@@ -171,3 +171,47 @@ def test_multiline_japanese_roundtrip_human_readable():
     assert get_persona("多行") == Persona("多行", text)
     # ensure_ascii=False — 実ファイルが人間可読 (\uXXXX に潰れない)
     assert "多行" in personas_path().read_text(encoding="utf-8")
+
+
+# ---- durable 書込 (primary + .bak) ----
+#
+# personas.json はユーザーが手で書いた定義で再計算できず、config_share の
+# PORTABLE_FILES にも不参加なので他にコピーが無い。CLAUDE.md の「非再計算の JSON は
+# durable」規律どおり 2 コピーで持つ。同じ data/llm_state でも ui_prefs /
+# recent_datasets / backend_sessions は再計算可能なので 1 コピーでよい。
+
+def _bak():
+    from common.paths import bak_path
+    return bak_path(personas_path())
+
+
+def test_save_writes_primary_and_bak():
+    assert save_personas([Persona("甲", "text")]) is True
+    assert personas_path().exists() and _bak().exists()
+    assert json.loads(_bak().read_text(encoding="utf-8"))["personas"] == [
+        {"name": "甲", "text": "text"}
+    ]
+
+
+def test_load_recovers_when_primary_zeroed():
+    """primary の書込だけがサイレントに失敗しても .bak から読める（newest-wins）。"""
+    assert save_personas([Persona("甲", "text")]) is True
+    personas_path().write_bytes(b"")
+    assert list_personas() == [Persona("甲", "text")]
+
+
+def test_both_copies_zero_byte_are_rewritten():
+    """2 コピーとも 0 バイト＝守る中身が無い → 書き直す（恒久固着させない）。"""
+    assert save_personas([Persona("甲", "text")]) is True
+    personas_path().write_bytes(b"")
+    _bak().write_bytes(b"")
+    assert save_personas([Persona("乙", "new")]) is True
+    assert list_personas() == [Persona("乙", "new")]
+
+
+def test_zero_byte_primary_with_good_bak_is_not_treated_as_empty():
+    """片方だけ 0 バイトなら中身は生きている。空編集で潰さない挙動は保つ。"""
+    assert save_personas([Persona("甲", "text")]) is True
+    personas_path().write_bytes(b"")
+    assert delete_persona("甲") is True          # .bak 由来の内容に対して編集できる
+    assert list_personas() == []

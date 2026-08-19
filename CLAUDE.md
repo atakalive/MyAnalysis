@@ -271,6 +271,17 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   書込を中止する（`patch_description` / `patch_completed` が status を捨てて `{}` から
   書き直していたため、meta.json が 15 キー → 2 キーに縮退する事故が起きた）。
   `myanalysis.toml` も 0 バイトは「設定なし」ではなく破損として `ConfigUnreadableError`。
+- **ただし 0 バイトは「守るべき破損」ではなく「守る中身が無い」。** `unreadable` を一律 skip に
+  すると、一度 0 バイト化したファイルには二度と書けなくなる — 実測で
+  `data/llm_state/backend_sessions.json` が 0 バイトのまま固着し、resume token が全エンジンで
+  一度も保存されていなかった（`--resume` が使われず毎回全履歴 replay）。判定は
+  `llm_bridge/paths.py` の `_preserve_unreadable`（サイズ 0 なら書き直す・stat 不能なら守る側）。
+- **PC ローカルの `data/llm_state` も chokepoint の例外ではない。** 同期マウントではないが 0 バイト化は
+  現に起きた。`update_ui_pref` / `note_recent_dataset` / `_write_backend_sessions` は
+  `atomic_write_text`（再計算可能なので 1 コピー）、`personas.json` は再生成できずコピーも無いので
+  `durable_write_json`。旧実装は 4 writer が固定 tmp 名 `<name>.json.tmp` を共有しており、GUI 二重起動や
+  Tier 4 restart で「A が tmp を truncate → B が replace」の競合が起き得た（mkstemp で構造的に解消）。
+  検出は `python -m llm_bridge doctor`（`check_local_state`。`--repair` は削除＝次回書込で再生成）。
 - ロックファイルはマウント外（`data/locks/`）へ自動マッピングされる（`common/filelock.py`）。
   マウント上では排他が効いている保証がなく、同期チャーンも生むため。PC 間排他は元々成立しない。
 - バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と両バックエンドが設定）。

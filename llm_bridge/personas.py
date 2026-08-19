@@ -7,9 +7,16 @@ SEED_PERSONAS を提示し、初回書込で「シード＋編集」を実体化
 
 unreadable (破損・version≠1・形式不正) は読み ``[]``・書き拒否 —
 update_ui_pref の兄弟キー保護と同じ理由で、空編集が破損ファイルを黙って潰さない。
+ただし primary/.bak がどちらも 0 バイトなら守る中身が無いので書き直す。
 API はすべて never-raise で bool が成功を表す。キャッシュは持たない
 (極小ファイルで backend build 時と dialog でしか読まない)。
 ``personas_path`` は conftest の monkeypatch を効かせるため関数内 late import。
+
+書込は ``common.paths.durable_write_json`` (primary + ``.bak`` の 2 コピー・単調 ``_seq``・
+読取は newest-wins)。CLAUDE.md の「**非再計算の JSON は durable**」規律に該当する —
+ユーザーが手で書いた定義で再生成できず、``config_share.PORTABLE_FILES`` にも不参加なので
+他にコピーが無い。同じ ``data/llm_state`` でも ui_prefs / recent_datasets /
+backend_sessions は再計算可能なので ``atomic_write_text`` の 1 コピーで足りる。
 
 ファイル形式: ``{"version": 1, "personas": [{"name": ..., "text": ...}]}``
 (リスト＝表示順保持)。名前は strip 後非空を強制 — ``""`` は「明示的にペルソナ
@@ -17,7 +24,6 @@ API はすべて never-raise で bool が成功を表す。キャッシュは持
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 SCHEMA_VERSION = 1
@@ -64,16 +70,18 @@ def _load() -> tuple[str, list[Persona]]:
     """3 状態で読む: ("seed", シード) / ("ok", ファイル内容) / ("unreadable", []).
 
     absent はシード提示 (書込可)、unreadable は読み []・書き拒否。
+    ``durable_read_json`` は primary と ``.bak`` の**両方**を読んで新しい方を返すので、
+    primary の書込だけが失敗しても ``.bak`` から復旧できる ('recovered' も ok 扱い)。
     """
-    from common.paths import read_json_classified
+    from common.paths import durable_read_json
     from llm_bridge.paths import personas_path
     try:
-        status, data = read_json_classified(personas_path())
+        status, data = durable_read_json(personas_path())
     except (OSError, ValueError, TypeError):
         return ("unreadable", [])
     if status == "absent":
         return ("seed", list(SEED_PERSONAS))
-    if status != "ok":
+    if status not in ("ok", "recovered"):
         return ("unreadable", [])
     version = data.get("version")
     # bool は int のサブクラス (True == 1) なので明示的に弾く。
@@ -104,28 +112,44 @@ def get_persona(name: str) -> Persona | None:
     return None
 
 
-def save_personas(personas) -> bool:
-    """全定義を正規化して書込む (tmp+replace、update_ui_pref と同機構)。
+def _has_content(path) -> bool:
+    """primary か ``.bak`` のどちらかに中身があるか。両方 0 バイトなら守るものが無い。
 
-    unreadable なファイルは潰さない (bool=False)。空リストもそのまま書く —
-    シードは復活しない。never raise。
+    サイズが取れない（不在以外の OSError）ときは判定不能なので守る側に倒す。
     """
+    from pathlib import Path
+    from common.paths import bak_path
+    for p in (Path(path), bak_path(path)):
+        try:
+            if p.stat().st_size > 0:
+                return True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+    return False
+
+
+def save_personas(personas) -> bool:
+    """全定義を正規化して durable 書込 (primary + ``.bak``)。
+
+    unreadable なファイルは潰さない (bool=False)。ただし 2 コピーとも 0 バイトなら
+    守る中身が無いので書き直す。空リストもそのまま書く — シードは復活しない。never raise。
+    """
+    from common.paths import durable_write_json
     from llm_bridge.paths import personas_path
     try:
-        if _load()[0] == "unreadable":
+        path = personas_path()
+        if _load()[0] == "unreadable" and _has_content(path):
             return False                     # 破損/version 不一致 → 空編集で潰さない
         payload = {
             "version": SCHEMA_VERSION,
             "personas": [{"name": p.name, "text": p.text}
                          for p in _dedupe(personas)],
         }
-        path = personas_path()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        tmp.replace(path)
+        durable_write_json(path, payload)
         return True
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError):   # MountWriteError は OSError のサブクラス
         return False
 
 
