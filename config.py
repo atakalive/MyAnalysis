@@ -25,9 +25,18 @@ _install_mount_compat()  # PIL/matplotlib の realpath(→WinError 1005) をマ�
 _HOST_RE = re.compile(r"^[^\W_][\w.\-]*$")
 
 DATASETS: dict[str, dict[str, str]] = {
-    "dataset_a": {
-        "HOST_A": r"G:\測定\000000\example",
-        "HOST_B": r"H:\同期\測定\000000\example",
+    "dataset_e": {
+        "HOST_A": r"D:/measure/dataset_e",
+    },
+    "dataset_d": {
+        "HOST_A": r"G:/測定/dataset_l/dataset_d",
+        "HOST_B": r"H:\同期\測定\dataset_l\dataset_d",
+    },
+    "dataset_f": {
+        "HOST_A": r"G:\測定\dataset_f",
+    },
+    "analysis_c": {
+        "HOST_A": r"<repo>/data/analyses/dataset_c2",
     },
     "dataset_b": {
         "HOST_A": r"G:\測定\000000",
@@ -37,21 +46,30 @@ DATASETS: dict[str, dict[str, str]] = {
         "HOST_A": r"G:\測定\dataset_l\dataset_c3",
         "HOST_B": r"H:\同期\測定\dataset_l\dataset_c3",
     },
-    "analysis_c": {
-        "HOST_A": r"<repo>/data/analyses/dataset_c2",
-    },
-    "dataset_d": {
-        "HOST_A": r"G:/測定/dataset_l/dataset_d",
-        "HOST_B": r"H:\同期\測定\dataset_l\dataset_d",
-    },
-    "dataset_e": {
-        "HOST_A": r"D:/measure/dataset_e",
-    },
-    "dataset_f": {
-        "HOST_A": r"G:\測定\dataset_f",
-    },
     "dataset_g": {
         "HOST_A": r"G:\測定\dataset_g",
+    },
+    "dataset_a": {
+        "HOST_A": r"G:\測定\000000\example",
+        "HOST_B": r"H:\同期\測定\000000\example",
+    },
+    "dataset_h": {
+        "HOST_A": r"G:/測定/dataset_h",
+    },
+    "neuron_morph_demo": {
+        "HOST_A": r"G:/測定/neuron_morph_demo",
+    },
+    "test": {
+        "HOST_A": r"D:/work/run_1",
+    },
+    "dataset_j1": {
+        "HOST_A": r"G:/測定/dataset_i1",
+    },
+    "dataset_j2": {
+        "HOST_A": r"G:/測定/dataset_i2",
+    },
+    "dataset_j3": {
+        "HOST_A": r"G:/測定/dataset_i3",
     },
 }
 
