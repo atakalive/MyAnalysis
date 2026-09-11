@@ -80,3 +80,89 @@ def test_set_active_tab_selects_dataset(qapp):
     assert win.current_dataset == "ds_y"
     win.notify_chat_dataset()  # チャット push のみ、current は変えない
     assert win.current_dataset == "ds_y"
+
+
+# --------------------------------------------------------------------------- #
+# File → データセットを新規登録 — 実ストレージ（tmp の JSON）を通す（Issue #95）
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def register_stubs(monkeypatch, tmp_path):
+    """入力ダイアログ・ディレクトリ選択・完了通知を stub 化して返す。"""
+    import json
+
+    import config
+    import dataset_registry
+    from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+
+    reg = tmp_path / "datasets.local.json"
+    monkeypatch.setattr(dataset_registry, "registry_path", lambda: reg)
+
+    ds_dir = tmp_path / "sample_dataset"
+    ds_dir.mkdir()
+
+    shown = {"info": 0, "critical": 0}
+    monkeypatch.setattr(
+        QInputDialog, "getText",
+        staticmethod(lambda *a, **k: ("sample_dataset", True)),
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        staticmethod(lambda *a, **k: str(ds_dir)),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda *a, **k: shown.__setitem__("info", shown["info"] + 1)),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        staticmethod(lambda *a, **k: shown.__setitem__("critical", shown["critical"] + 1)),
+    )
+
+    class S:
+        pass
+
+    s = S()
+    s.reg = reg
+    s.ds_dir = ds_dir
+    s.shown = shown
+    s.read = lambda: json.loads(reg.read_text(encoding="utf-8-sig"))
+    s.config = config
+    return s
+
+
+def test_gui_register_writes_json_and_memory(qapp, register_stubs):
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    win._register_dataset()
+
+    assert register_stubs.read() == {
+        "sample_dataset": {
+            __import__("socket").gethostname().upper(): str(register_stubs.ds_dir)
+        }
+    }
+    assert "sample_dataset" in register_stubs.config.DATASETS
+    assert win.current_dataset == "sample_dataset"
+    assert register_stubs.shown["info"] == 1
+    assert register_stubs.shown["critical"] == 0
+
+
+def test_gui_register_failure_updates_nothing(qapp, register_stubs, monkeypatch):
+    import config
+    from gui.window import ToolWindow
+
+    def boom(*a, **k):
+        raise config.RegistryError("nope")
+
+    monkeypatch.setattr(config, "register_dataset", boom)
+
+    win = ToolWindow()
+    before = dict(config.DATASETS)
+    before_current = win.current_dataset
+    win._register_dataset()
+
+    assert config.DATASETS == before
+    assert win.current_dataset == before_current
+    assert not register_stubs.reg.exists()
+    assert register_stubs.shown["critical"] == 1
+    assert register_stubs.shown["info"] == 0

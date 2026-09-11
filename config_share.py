@@ -1,7 +1,7 @@
 """Cloudflare R2 経由で repo 側 config を push/pull する（任意・best-effort）。
 
-R2 が運ぶのは「同期ドライブに乗らない repo 側 config」だけ＝ DATASETS（config.py）
-＋ gitignore な repo 直下の portable files（models.toml / llm_backend/config.toml）と
+R2 が運ぶのは「同期ドライブに乗らない repo 側 config」だけ＝ dataset 登録簿
+（`datasets.local.json`）＋ gitignore な repo 直下の portable files（models.toml / llm_backend/config.toml）と
 （任意）.env。データセット側の analysis.py / _work / state / batch / myanalysis.toml は
 同期ドライブで sync 済みなので bundle に含めない。
 
@@ -199,10 +199,7 @@ def make_bundle(*, config_path: Path | None = None, include_env: bool = False,
                 warnings: list | None = None) -> dict:
     """ローカルの寄与を bundle dict にする（remote とは未マージ）。"""
     warnings = [] if warnings is None else warnings
-    if config_path is None:
-        config_path = Path(config.__file__)      # 既定経路＝実 config.py を読む（明示正規化）
-
-    datasets = config._parse_registry(config_path)[1]
+    datasets = config.read_registry(config_path)
 
     state = _local_state()
     entry_meta = {}

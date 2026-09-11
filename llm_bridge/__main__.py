@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     p_lds.add_argument("--json", action="store_true", dest="json_out", default=False,
                         help="Output as JSON with format and path info")
 
-    p_reg = sub.add_parser("register-dataset", help="Register a dataset in config.py")
+    p_reg = sub.add_parser("register-dataset", help="Register a dataset in datasets.local.json")
     p_reg.add_argument("name", help="Dataset name (identifier format)")
     p_reg.add_argument("path", help="Absolute path to dataset directory")
     p_reg.add_argument("--host", default=None, help="Hostname (default: current host)")

@@ -8,7 +8,9 @@ Experimental measurement data analysis project (Python). Data lives **outside th
 
 ## Data access — always go through `config.py`
 
-Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. `DATASETS` in [config.py](config.py) maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Host keys are uppercase; lookup normalises via `.upper()`.
+Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. The registry maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Host keys are uppercase; lookup normalises via `.upper()`.
+
+The registration data itself is **not in code**: it lives in `datasets.local.json` at the repo root (Git-ignored; storage implemented by [dataset_registry.py](dataset_registry.py)), and [config.py](config.py) is the access API (`DATASETS`, `get_dataset_dir`, `register_dataset`, `reload_datasets`). A fresh checkout has no registry file and starts empty.
 
 **Never hardcode `G:\...` or any absolute data path in analysis code.** Always:
 
@@ -17,13 +19,15 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods rewrite `config.py` in place (ast-based, atomic). CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Manual editing of `DATASETS` in config.py is also supported but inline comments inside `DATASETS` will be lost on the next automated registration. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at config.py.
+When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods write `datasets.local.json` under a lock (verified `atomic_write_text`). **Never edit `config.py` to register a dataset.** CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録はアクティブデータセットを更新するがセッション復元はしない（File → データセットを開く… で明示的に復元）。 Hand-editing `datasets.local.json` is also supported (plain UTF-8 JSON, `{dataset: {HOST: path}}`); JSON has no comments, and key order is not a contract. A corrupt registry raises `RegistryError` instead of degrading to an empty config. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at the register CLI / `datasets.local.json`.
+
+旧構成（`config.py` 内の `DATASETS` リテラル）からの移行は `python -m devtools.migrate_dataset_registry --source <旧 config.py> [--output <registry.json>] [--dry-run]`（旧ファイルを実行せず `ast.literal_eval` で読む。既存の異なる登録簿は上書きしない）。
 
 Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
 ### Per-dataset settings — `myanalysis.toml`
 
-Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in `config.py`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
+Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in the registry `datasets.local.json`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
 
 ### 解析ファイルはデータセット側に置く（Issue #37）
 

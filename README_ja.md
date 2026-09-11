@@ -83,7 +83,9 @@ windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui
 |---|---|
 | [tool.py](tool.py) | GUI エントリポイント（`QApplication` + `ToolWindow` 起動） |
 | [run.bat](run.bat) | Windows 用ランチャ（`.venv` activate → windowless `pythonw tool.py`） |
-| [config.py](config.py) | データセット登録簿。`DATASETS`（dataset 名 → {ホスト名: フルパス}） |
+| [config.py](config.py) | データセット登録簿への **アクセス API**。`DATASETS`（dataset 名 → {ホスト名: フルパス}）/ `get_dataset_dir()` |
+| [dataset_registry.py](dataset_registry.py) | 登録簿の **保存処理**。`datasets.local.json`（Git 管理外）の読み書き |
+| `datasets.local.json` | 利用者の登録データ（リポジトリ直下・Git 管理外・コミットしない） |
 | [dataset_config.py](dataset_config.py) | データセット個別設定（`myanalysis.toml`）の読み書き |
 | [common/](common/) | 共有ユーティリティ（`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`） |
 | [core/](core/) | 低レベルモジュール（`figures.py` = matplotlib ヘルパ、import 時に Agg 確定） |
@@ -93,7 +95,7 @@ windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui
 | [devtools/](devtools/) | ホットリロード（`hotreload.py`, `qt_integration.py`） |
 | [meeting/](meeting/) | ミーティング共有リレー（ローカル・インメモリ・リレー + cloudflared トンネル） |
 | [relay-worker/](relay-worker/) | ミーティング共有のゲストページ（`chatdock.html`。GitLab Pages に配信）＋ セットアップ README |
-| [config_share.py](config_share.py) | `config.py` の Cloudflare R2 同期（push / pull / sync・任意） |
+| [config_share.py](config_share.py) | 登録簿と portable files の Cloudflare R2 同期（push / pull / sync・任意） |
 | [i18n/](i18n/) | UI 文言カタログ（`en.toml` / `ja.toml`） |
 | [newanalysis/](newanalysis/) | 解析モジュールの雛形生成器 |
 | [export/](export/) | ヘッドレス PNG エクスポート driver |
@@ -106,17 +108,18 @@ windowless（`run.bat` / pythonw）起動時の未捕捉例外は `data/logs/gui
 
 ## データアクセス
 
-計測データはリポジトリの外、同期ドライブ上にあり、**マウント先のドライブレターは PC ごとに異なります**。この差を吸収するため、[config.py](config.py) の `DATASETS` が各データセットを「ホスト名 → その PC でのフルパス」で持ちます。
+計測データはリポジトリの外、同期ドライブ上にあり、**マウント先のドライブレターは PC ごとに異なります**。この差を吸収するため、登録簿が各データセットを「ホスト名 → その PC でのフルパス」で持ちます。実体はリポジトリ直下の `datasets.local.json`（Git 管理外なのでパスがコミットされません）で、読み書きは [config.py](config.py) 経由（保存処理は [dataset_registry.py](dataset_registry.py)）です。
 
-```python
-DATASETS = {
-    "dataset_a": {
-        "HOST_A": r"G:\同期\測定\000000\example",
-        "HOST_B": r"H:\同期\測定\000000\example",
-    },
-    ...
+```json
+{
+  "sample_dataset": {
+    "HOST_A": "C:/example-data/sample",
+    "HOST_B": "/example-data/sample"
+  }
 }
 ```
+
+新規 checkout には `datasets.local.json` はありません。登録簿が空のまま起動でき、最初の登録時にファイルが作られます。
 
 **解析コードに `G:\...` 等の絶対パスをハードコードしてはいけません。** 必ず次を経由します:
 
@@ -125,16 +128,43 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")  # 現在のホスト名で解決
 ```
 
-未知のデータセット名・未登録ホストは、`config.py` を指し示す説明的なエラーになります。新しい PC で使う時は、各データセットにそのホスト名（大文字）のエントリを追加してください。
+未知のデータセット名・未登録ホストは、登録コマンドを案内する説明的なエラーになります。新しい PC で使う時は、各データセットにそのホスト名（大文字）のエントリを追加してください。
 
 ### データセットの登録
 
 ```bash
-# CLI（config.py を ast ベースで原子的に書き換える。GUI 起動中なら自動で開く）
+# CLI（ロックを取って datasets.local.json を書く。GUI 起動中なら自動で開く）
 python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 
 # GUI: ファイル → データセットを新規登録
 ```
+
+`datasets.local.json` の手編集も可能です（UTF-8・LF の素の JSON）。破損した登録簿が黙って
+空の設定に置き換わることはありません（読み取りは失敗し、同期も push / 上書きを中止します）。
+復旧は手修正するか、Git 管理外の退避名（例 `datasets.local.json.corrupt`。これも除外対象）へ
+移してから `python -m llm_bridge config-pull`（R2 同期利用時）を実行してください。
+
+**R2 同期を使わない複数端末利用の注意**: `datasets.local.json` は Git 管理外なので、
+`git pull` では登録が端末間に伝播しません。R2 同期を設定するか、ファイルを手でコピーしてください。
+
+#### 旧（コード内）登録簿からの移行
+
+以前は `DATASETS` が `config.py` 内のリテラルでした。既存環境は次の手順で移行します。
+
+1. 旧 GUI を終了し、登録・同期を実行中の CLI がない状態にする。
+2. 更新前の `config.py` を Git 管理外の場所（例 `data/legacy_registry/config.py.legacy`）へ退避する。退避済みファイルを上書きしない。
+3. コード更新後、新しいアプリを起動する**前に**変換する:
+
+   ```bash
+   python -m devtools.migrate_dataset_registry --source <退避した config.py> [--output <registry.json>] [--dry-run]
+   ```
+
+   旧ファイルは import / exec せず `ast.literal_eval` だけで読み、ネットワークにも接続しません。
+   既存の異なる登録簿は上書きしません。一致確認は「同じコマンドをもう一度実行し、2 回目が
+   同内容 no-op で終了コード 0 になること」で行います（終了コード 1 は不一致・破損なので手で解消）。
+4. 既存の同期データから復元する場合は、正常なローカル登録簿または未作成の状態で
+   `python -m llm_bridge config-pull` を実行します（認証設定の方法は変更なし）。
+5. 新コードで再起動し、登録一覧と現在のホストでのパス解決を確認します。ネットワークを使わない移行も完了できます。
 
 ### セッションフォルダ命名規則
 
@@ -142,7 +172,7 @@ python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 
 ### データセット個別設定 — `myanalysis.toml`
 
-データセット固有の設定は、`config.py` ではなく**そのデータセットディレクトリ直下の `myanalysis.toml`**（[dataset_config.py](dataset_config.py) が管理）に置きます。データと一緒に同期ドライブで運ばれるためです。
+データセット固有の設定は、登録簿（`datasets.local.json`）ではなく**そのデータセットディレクトリ直下の `myanalysis.toml`**（[dataset_config.py](dataset_config.py) が管理）に置きます。データと一緒に同期ドライブで運ばれるためです。
 
 - `work_dir`（既定 `_work`）— 解析出力の保存先。相対パスはデータセットディレクトリ基準。
 - `format`（既定 `csv_per_subdir`）— 読み込み形式。`csv_per_subdir` または `custom`。

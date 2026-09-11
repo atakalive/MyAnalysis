@@ -1,6 +1,7 @@
 """Per-dataset settings: <dataset_dir>/myanalysis.toml.
 
-config.py holds the dataset *registry* (which dataset lives where, per host).
+The dataset *registry* (which dataset lives where, per host) is `datasets.local.json`
+at the repo root, accessed through config.py.
 This module holds *per-dataset* settings that travel with the data on the synced
 drive. Today the only setting is the output location (`work_dir`, default
 `_work`); the file is a sidecar the tools write mechanically.

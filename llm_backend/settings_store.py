@@ -5,10 +5,9 @@ GUI からバックエンド/モデル選択を適用するとき、真実ソー
 コメント・整列パディング・無関係行・改行スタイル (CRLF/LF) を保存する。
 
 設計判断: ``tomlkit``/``tomli_w`` 等の構造保持ライブラリは repo に未導入
-(依存方針は PySide6/pyqtgraph/numpy のみ)。依存を増やさず、ルート ``config.py`` の
-``registry_transaction`` / ``_replace_datasets_block`` / ``_serialize_path_value``
-と同じ house pattern (ロック内で source テキストを行/ブロック単位に編集、値は
-``json.dumps`` で常に妥当化) に倣う。その代わり「触れる形」を単一行の basic string /
+(依存方針は PySide6/pyqtgraph/numpy のみ)。依存を増やさず、このモジュール自身が
+ロック内で TOML の source テキストを行/ブロック単位に編集し、値は ``json.dumps`` で
+常に妥当化する。その代わり「触れる形」を単一行の basic string /
 bool / 文字列配列に厳格限定し、範囲外は一切書かず ``RuntimeError`` (fail-closed) と
 することで silent corruption を構造的に排除する。
 """

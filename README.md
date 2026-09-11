@@ -83,7 +83,9 @@ When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are writte
 |---|---|
 | [tool.py](tool.py) | GUI entry point (`QApplication` + `ToolWindow`) |
 | [run.bat](run.bat) | Windows launcher (activate `.venv` → windowless `pythonw tool.py`) |
-| [config.py](config.py) | Dataset registry: `DATASETS` (dataset name → {hostname: full path}) |
+| [config.py](config.py) | Dataset registry **API**: `DATASETS` (dataset name → {hostname: full path}), `get_dataset_dir()` |
+| [dataset_registry.py](dataset_registry.py) | Registry **storage**: reads/writes `datasets.local.json` (Git-ignored) |
+| `datasets.local.json` | Your registration data (repo root, Git-ignored, never committed) |
 | [dataset_config.py](dataset_config.py) | Reads/writes per-dataset settings (`myanalysis.toml`) |
 | [common/](common/) | Shared utilities (`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`) |
 | [core/](core/) | Low-level modules (`figures.py` = matplotlib helpers; forces the Agg backend on import) |
@@ -93,7 +95,7 @@ When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are writte
 | [devtools/](devtools/) | Hot reload (`hotreload.py`, `qt_integration.py`) |
 | [meeting/](meeting/) | Meeting-share relay (local in-memory relay + cloudflared tunnel) |
 | [relay-worker/](relay-worker/) | Meeting-share guest page (`chatdock.html`, published to GitLab Pages) + its setup README |
-| [config_share.py](config_share.py) | Optional Cloudflare R2 sync for `config.py` (push / pull / sync) |
+| [config_share.py](config_share.py) | Optional Cloudflare R2 sync for the registry + portable files (push / pull / sync) |
 | [i18n/](i18n/) | UI text catalogs (`en.toml` / `ja.toml`) |
 | [newanalysis/](newanalysis/) | Analysis-module scaffold generator |
 | [export/](export/) | Headless PNG export driver |
@@ -106,17 +108,18 @@ Analysis modules are **not** in the repository — each analysis lives with its 
 
 ## Data access
 
-Measurement data lives outside the repository on a synced drive, and **the mount-point drive letter differs per PC**. To absorb that difference, `DATASETS` in [config.py](config.py) maps each dataset to "hostname → full path on that PC":
+Measurement data lives outside the repository on a synced drive, and **the mount-point drive letter differs per PC**. To absorb that difference, the registry maps each dataset to "hostname → full path on that PC". It lives in `datasets.local.json` at the repo root (Git-ignored, so your paths are never committed) and is read through [config.py](config.py) ([dataset_registry.py](dataset_registry.py) does the storage):
 
-```python
-DATASETS = {
-    "dataset_a": {
-        "HOST_A": r"G:\同期\測定\000000\example",
-        "HOST_B": r"H:\同期\測定\000000\example",
-    },
-    ...
+```json
+{
+  "sample_dataset": {
+    "HOST_A": "C:/example-data/sample",
+    "HOST_B": "/example-data/sample"
+  }
 }
 ```
+
+A fresh checkout has no `datasets.local.json` — the app starts with an empty registry and the file is created on the first registration.
 
 **Never hardcode absolute paths like `G:\...` in analysis code.** Always go through:
 
@@ -125,16 +128,49 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")  # resolved by current hostname
 ```
 
-Unknown dataset names and unregistered hosts raise descriptive errors pointing at `config.py`. When using a new PC, add an entry for that hostname (uppercase) to each dataset you'll use.
+Unknown dataset names and unregistered hosts raise descriptive errors telling you to register the dataset. When using a new PC, add an entry for that hostname (uppercase) to each dataset you'll use.
 
 ### Registering a dataset
 
 ```bash
-# CLI (rewrites config.py atomically via AST; auto-opens if the GUI is running)
+# CLI (writes datasets.local.json under a lock; auto-opens if the GUI is running)
 python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 
 # GUI: File → データセットを新規登録 (New dataset)
 ```
+
+Hand-editing `datasets.local.json` is fine too (plain UTF-8 JSON, LF). A corrupt
+registry is never silently replaced with an empty one: reads fail loudly, and sync
+refuses to push or overwrite. Restore by fixing the JSON by hand, or by moving it
+aside (e.g. `datasets.local.json.corrupt`, also Git-ignored) and running
+`python -m llm_bridge config-pull` if you use R2 sync.
+
+**Multiple PCs without R2 sync**: `datasets.local.json` is untracked, so `git pull`
+no longer carries registrations between machines. Either set up the optional R2
+config sync, or copy the file across by hand.
+
+#### Migrating from the old in-code registry
+
+Older versions kept `DATASETS` as a literal inside `config.py`. To move an existing
+setup over:
+
+1. Quit the GUI and make sure no CLI is registering or syncing.
+2. Copy the old `config.py` somewhere Git-ignored (e.g. `data/legacy_registry/config.py.legacy`). Do not overwrite an existing copy.
+3. After updating the code, and **before** starting the new app, convert it:
+
+   ```bash
+   python -m devtools.migrate_dataset_registry --source <saved config.py> [--output <registry.json>] [--dry-run]
+   ```
+
+   The tool never imports or executes the old file (`ast.literal_eval` only), never
+   touches the network, and never overwrites an existing, different registry. To
+   confirm the result, run the exact same command a second time: a successful
+   migration then exits 0 as an "already up to date" no-op. Exit code 1 means the
+   destination differs or is unreadable — resolve that by hand.
+4. To restore from R2 sync instead, run `python -m llm_bridge config-pull` with a
+   valid or absent local registry. Credentials are configured as before.
+5. Restart on the new code and check the dataset list and path resolution on this host.
+   Migration works fully offline.
 
 ### Session folder naming
 
@@ -142,7 +178,7 @@ Inside a dataset directory, sessions are folders named `session_<yyyymmdd>_<hhmm
 
 ### Per-dataset settings — `myanalysis.toml`
 
-Settings specific to one dataset live not in `config.py` but in a **`myanalysis.toml` at the top of that dataset's directory** (managed by [dataset_config.py](dataset_config.py)), so they travel with the data on the synced drive.
+Settings specific to one dataset live not in the registry (`datasets.local.json`) but in a **`myanalysis.toml` at the top of that dataset's directory** (managed by [dataset_config.py](dataset_config.py)), so they travel with the data on the synced drive.
 
 - `work_dir` (default `_work`) — where analysis output is saved. Relative paths resolve under the dataset directory.
 - `format` (default `csv_per_subdir`) — load format: `csv_per_subdir` or `custom`.

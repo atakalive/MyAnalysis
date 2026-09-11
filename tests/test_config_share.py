@@ -1,13 +1,12 @@
 """Offline / hermetic tests for config_share (R2 config push/pull).
 
 No network: config_share._client is monkeypatched to a FakeS3 (never imports
-boto3). The real config.py and real ~/.myanalysis are never touched: sidecar
-state, repo_root, and config_path are all redirected under tmp_path.
+boto3). The real datasets.local.json and real ~/.myanalysis are never touched:
+sidecar state, repo_root, and config_path are all redirected under tmp_path.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 import socket
 
@@ -67,38 +66,16 @@ class FakeS3:
         return {"ETag": self.etag}
 
 
-_CONFIG_TEMPLATE = '''\
-"""doc"""
-import socket
-from pathlib import Path
-
-DATASETS: dict[str, dict[str, str]] = {
-%s
-}
-'''
-
-
 def _write_config(path, datasets: dict) -> None:
-    lines = []
-    for ds, per_host in datasets.items():
-        lines.append(f"    {json.dumps(ds)}: {{")
-        for host, p in per_host.items():
-            lines.append(f"        {json.dumps(host)}: {json.dumps(p)},")
-        lines.append("    },")
-    path.write_text(_CONFIG_TEMPLATE % "\n".join(lines), encoding="utf-8", newline="\n")
+    """登録簿 JSON を書く（旧 config.py テンプレートの置き換え）。"""
+    path.write_text(
+        json.dumps(datasets, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8", newline="\n",
+    )
 
 
 def _datasets_from(path) -> dict:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    for stmt in tree.body:
-        if isinstance(stmt, ast.AnnAssign) and getattr(stmt.target, "id", None) == "DATASETS":
-            return ast.literal_eval(ast.get_source_segment(source, stmt.value))
-        if isinstance(stmt, ast.Assign) and any(
-            getattr(t, "id", None) == "DATASETS" for t in stmt.targets
-        ):
-            return ast.literal_eval(ast.get_source_segment(source, stmt.value))
-    raise AssertionError("DATASETS not found")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 @pytest.fixture()
@@ -118,7 +95,7 @@ def env(tmp_path, monkeypatch):
     # load_env() must not read the real repo .env
     monkeypatch.setattr(config_share, "load_env", lambda *a, **k: None)
 
-    cfg = tmp_path / "config.py"
+    cfg = tmp_path / "datasets.local.json"
     _write_config(cfg, {"ds_local": {"SELF": "/local/p"}})
 
     class Env:
@@ -140,28 +117,25 @@ def _sync(env, **kw):
 # 1. write_registry
 # --------------------------------------------------------------------------- #
 def test_write_registry_roundtrip(tmp_path):
-    cfg = tmp_path / "config.py"
+    cfg = tmp_path / "datasets.local.json"
     _write_config(cfg, {"a": {"H1": r"G:\a\b"}})
-    before = cfg.read_text(encoding="utf-8").splitlines()
     config.write_registry(
         {"a": {"H1": r"G:\a\b"}, "b": {"H2": "/x/y"}}, config_path=cfg
     )
     data = _datasets_from(cfg)
     assert data == {"a": {"H1": r"G:\a\b"}, "b": {"H2": "/x/y"}}
-    # raw-string fallback preserved for backslash path
-    assert r'r"G:\a\b"' in cfg.read_text(encoding="utf-8")
-    after = cfg.read_text(encoding="utf-8").splitlines()
-    assert before[:5] == after[:5]   # docstring + imports unchanged
+    # JSON escapes backslashes; the value roundtrips unchanged.
+    assert r'"G:\\a\\b"' in cfg.read_text(encoding="utf-8")
 
 
-def test_write_registry_crlf_preserved(tmp_path):
-    cfg = tmp_path / "config.py"
+def test_write_registry_output_format(tmp_path):
+    cfg = tmp_path / "datasets.local.json"
     _write_config(cfg, {"a": {"H1": "/p"}})
-    cfg.write_bytes(cfg.read_bytes().replace(b"\n", b"\r\n"))
     config.write_registry({"a": {"H1": "/p"}, "b": {"H2": "/q"}}, config_path=cfg)
     raw = cfg.read_bytes()
-    assert b"\r\n" in raw
-    assert b"\n" not in raw.replace(b"\r\n", b"")
+    assert b"\r\n" not in raw                       # LF only
+    assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
+    assert not raw.startswith(b"\xef\xbb\xbf")      # no BOM
 
 
 # --------------------------------------------------------------------------- #
@@ -541,10 +515,12 @@ def test_no_null_in_meta(env):
 
 
 # --------------------------------------------------------------------------- #
-# 18. None default wiring (config.__file__ redirected, real config.py untouched)
+# 18. None default wiring (registry_path redirected, real registry untouched)
 # --------------------------------------------------------------------------- #
-def test_none_default_uses_config_file(env, monkeypatch):
-    monkeypatch.setattr(config, "__file__", str(env.cfg))
+def test_none_default_uses_registry_path(env, monkeypatch):
+    import dataset_registry
+
+    monkeypatch.setattr(dataset_registry, "registry_path", lambda: env.cfg)
     b = config_share.make_bundle()              # no config_path
     assert b["datasets"] == {"ds_local": {"SELF": "/local/p"}}
     r = config_share.sync()                     # no config_path
@@ -726,3 +702,70 @@ def test_missing_remote_only_created(env):
     })
     config_share.sync(direction="pull", config_path=env.cfg)
     assert (env.tmp / "llm_backend" / "config.toml").read_text(encoding="utf-8") == "remote"
+
+
+# --------------------------------------------------------------------------- #
+# 25. registry JSON 化に伴う追加ケース（Issue #95）
+# --------------------------------------------------------------------------- #
+def test_pull_creates_absent_local_registry(env):
+    """ローカル未作成でも既存 schema の bundle から復元し、JSON を作る。"""
+    env.cfg.unlink()
+    env.fake.seed({
+        "schema_version": 1,
+        "updated_by": "OTHER", "updated_at": "2026-01-01T00:00:00+00:00",
+        "datasets": {"ds_remote": {"OTHER": "/r/p"}},
+        "entry_meta": {"ds_remote/OTHER": "2026-01-01T00:00:00+00:00"},
+        "files": {}, "file_meta": {},
+    })
+    config_share.sync(direction="pull", config_path=env.cfg)
+    assert env.cfg.exists()
+    assert _datasets_from(env.cfg) == {"ds_remote": {"OTHER": "/r/p"}}
+    config.reload_datasets(config_path=env.cfg)
+    assert "ds_remote" in config.DATASETS
+
+
+def test_empty_both_sides_creates_nothing(env):
+    env.cfg.unlink()
+    env.fake.seed({
+        "schema_version": 1, "datasets": {}, "entry_meta": {},
+        "files": {}, "file_meta": {},
+        "updated_by": "OTHER", "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    config_share.sync(direction="pull", config_path=env.cfg)
+    assert not env.cfg.exists()
+
+
+def test_corrupt_local_registry_blocks_sync(env):
+    """ローカル破損時は同期を失敗させ、remote 上書き・空 push・ローカル上書きをしない。"""
+    env.cfg.write_text("{broken", encoding="utf-8")
+    env.fake.seed({
+        "schema_version": 1, "datasets": {"ds_remote": {"OTHER": "/r/p"}},
+        "entry_meta": {}, "files": {}, "file_meta": {},
+        "updated_by": "OTHER", "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    remote_before = env.fake.stored()
+    with pytest.raises(config.RegistryError):
+        config_share.sync(direction="both", config_path=env.cfg)
+    assert env.cfg.read_text(encoding="utf-8") == "{broken"
+    assert env.fake.stored() == remote_before
+
+
+def test_corrupt_local_registry_try_sync_swallows(env):
+    env.cfg.write_text("{broken", encoding="utf-8")
+    assert config_share.try_sync(config_path=env.cfg) is None
+
+
+def test_dry_run_leaves_registry_state_and_remote_untouched(env):
+    before = env.cfg.read_bytes()
+    env.fake.seed({
+        "schema_version": 1, "datasets": {"ds_remote": {"OTHER": "/r/p"}},
+        "entry_meta": {}, "files": {}, "file_meta": {},
+        "updated_by": "OTHER", "updated_at": "2026-01-01T00:00:00+00:00",
+    })
+    remote_before = env.fake.stored()
+    state_path = env.tmp / "state.json"
+    state_before = state_path.read_bytes() if state_path.exists() else None
+    config_share.sync(apply=False, config_path=env.cfg)
+    assert env.cfg.read_bytes() == before
+    assert env.fake.stored() == remote_before
+    assert (state_path.read_bytes() if state_path.exists() else None) == state_before

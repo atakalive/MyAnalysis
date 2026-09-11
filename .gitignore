@@ -30,6 +30,11 @@ node_modules/
 
 data/
 
+# Dataset registry (Issue #95) — user's registration data, never tracked.
+# 2 行目は .lock / mkstemp の *.tmp / 退避の .bak / .corrupt をまとめて除外する。
+/datasets.local.json
+/datasets.local.json.*
+
 # LLM backend config (copy from config.example.toml)
 llm_backend/config.toml
 llm_backend/config.toml.lock

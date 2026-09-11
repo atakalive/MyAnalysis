@@ -514,3 +514,52 @@ def test_all_completed_auto_expands(qapp, patch_picker):
     assert dlg._completed_toggle.isChecked() is True
     assert dlg._active_view is dlg._completed_view
     assert dlg._current_meta() is not None
+
+
+# --------------------------------------------------------------------------- #
+# 実ストレージ（tmp の登録簿 JSON）越しの reload（Issue #95）
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def real_registry(monkeypatch, tmp_path):
+    """既定登録簿を tmp の JSON へ向け、メタ走査は stub に限定する。"""
+    import json
+
+    import dataset_registry
+    from gui import open_dataset_dialog as mod
+
+    reg = tmp_path / "datasets.local.json"
+    monkeypatch.setattr(dataset_registry, "registry_path", lambda: reg)
+    monkeypatch.setattr(mod.dataset_meta, "load_for_picker",
+                        lambda ns: [_meta(n) for n in ns])
+
+    class R:
+        pass
+
+    r = R()
+    r.path = reg
+    r.write = lambda data: reg.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return r
+
+
+def test_picker_reload_picks_up_externally_registered_dataset(qapp, real_registry):
+    import config
+
+    real_registry.write({"ds_new": {"H": "/p"}})
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._proxy.rowCount() == 1
+    assert config.DATASETS == {"ds_new": {"H": "/p"}}
+
+
+def test_picker_keeps_loaded_registry_when_json_is_corrupt(qapp, real_registry):
+    import config
+
+    real_registry.write({"ds_known": {"H": "/p"}})
+    config.reload_datasets()
+    real_registry.path.write_text("{broken", encoding="utf-8")
+
+    dlg, _m, _h = _make_dialog(qapp)
+    # reload 失敗は握って既存の DATASETS で続行する。
+    assert config.DATASETS == {"ds_known": {"H": "/p"}}
+    assert dlg._proxy.rowCount() == 1

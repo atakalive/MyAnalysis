@@ -112,8 +112,8 @@ The primary analysis workflow is code execution, not GUI driving.
 
 1. **Discover**: `python -m llm_bridge list-datasets` → dataset names.
    Names shown are from the global registry. If the current host has no path
-   registered for a dataset, `load_dataset` raises `RuntimeError` with a
-   message pointing at `config.py`.
+   registered for a dataset, `load_dataset` raises `RuntimeError` telling you to
+   register it (`python -m llm_bridge register-dataset ...`).
 2. **Inspect**: `from common.explore import dataset_summary; dataset_summary("<name>")` → real subdirs + sample csv columns/rows. There is no default load pattern — look before you load.
 3. **Load**: `from common.explore import load_dataset; sessions = load_dataset("<name>", subdir_pattern="<real folder pattern>", csv_name="<real>.csv")` — use the folder pattern and csv filename you saw in step 2.
 4. **Compute**: arbitrary Python on the loaded DataFrames.
@@ -191,7 +191,9 @@ from config import get_dataset_dir
 path = get_dataset_dir("dataset_a")
 ```
 
-`DATASETS` in `config.py` maps names → per-host full paths (`{hostname: full_path}`).
+The registry `datasets.local.json` (repo root, Git-ignored; read via `config.py`) maps
+names → per-host full paths (`{hostname: full_path}`). Register with
+`python -m llm_bridge register-dataset <name> <path> [--host H]` — never edit code for this.
 Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-datasets`
 shows the full registry; datasets without a path entry for the current host will
 raise `RuntimeError` on `load_dataset()`.
