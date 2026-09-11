@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 
 import pytest
 
@@ -164,7 +165,7 @@ def test_output_format_lf_single_trailing_newline_no_bom(reg):
 
 
 @pytest.mark.parametrize("path_value", [
-    r"G:\測定\000000\example",
+    r"D:\サンプル\データ\sub",
     "/example-data/sample",
     "C:/example-data/sample",
     "G:\\a\\b\\",                                   # 末尾バックスラッシュ
@@ -204,10 +205,12 @@ def test_write_failure_propagates_and_releases_lock(reg, monkeypatch):
     def boom(*a, **k):
         raise OSError("write failed")
 
-    monkeypatch.setattr(dataset_registry, "atomic_write_text", boom)
-    with pytest.raises(OSError):
-        dr.write_registry({"a": {"H": "/p"}}, config_path=reg)
-    monkeypatch.undo()
+    # 局所パッチは context() で解除する。monkeypatch.undo() は conftest の autouse 隔離
+    # （FS_OVERRIDE・既定 registry 差し替え等）まで巻き戻してしまうため使わない。
+    with monkeypatch.context() as m:
+        m.setattr(dataset_registry, "atomic_write_text", boom)
+        with pytest.raises(OSError):
+            dr.write_registry({"a": {"H": "/p"}}, config_path=reg)
     # ロックが解放されていれば次の書き込みが（ブロックせず）成功する。
     dr.write_registry({"a": {"H": "/p"}}, config_path=reg)
     assert dr.read_registry(reg) == {"a": {"H": "/p"}}
@@ -255,6 +258,23 @@ def test_lone_surrogate_rejected_before_write(reg, bad, monkeypatch):
         dr.write_registry(bad, config_path=reg)
 
 
+def test_write_error_names_the_target_file(reg, monkeypatch):
+    """writer 境界の RegistryError は対象登録簿ファイル名を含む（§2.2 契約）。
+
+    純粋関数 serialize_registry 自体はファイル名を知らないので、writer が target.name を
+    付けて包む。ヘルパー（atomic_write_text）未到達も併せて確認する。
+    """
+    import dataset_registry
+
+    def boom(*a, **k):
+        pytest.fail("atomic_write_text must not be reached")
+
+    monkeypatch.setattr(dataset_registry, "atomic_write_text", boom)
+    with pytest.raises(dr.RegistryError) as ei:
+        dr.write_registry({1: {}}, config_path=reg)      # 非 str の外側キー
+    assert "datasets.local.json" in str(ei.value)
+
+
 def test_encode_failure_leaves_existing_bytes_intact_inplace(reg, monkeypatch):
     """in-place 経路（truncate 先行）でも原本が空にならないこと。
 
@@ -272,8 +292,8 @@ def test_encode_failure_leaves_existing_bytes_intact_inplace(reg, monkeypatch):
 
 def test_non_ascii_roundtrips_in_inplace_mode(reg, monkeypatch):
     monkeypatch.setenv("MYANALYSIS_WRITE_STRATEGY", "inplace")
-    dr.write_registry({"データ": {"ホスト": r"G:\測定"}}, config_path=reg)
-    assert dr.read_registry(reg) == {"データ": {"ホスト": r"G:\測定"}}
+    dr.write_registry({"日本語データ": {"ホスト名": r"D:\サンプル\データ"}}, config_path=reg)
+    assert dr.read_registry(reg) == {"日本語データ": {"ホスト名": r"D:\サンプル\データ"}}
 
 
 def test_serialize_registry_has_no_side_effects(reg):
@@ -290,29 +310,30 @@ def test_force_fragile_lock_stays_in_tmp(tmp_path, reg, monkeypatch):
     from common import fs_kind
     from common import paths as common_paths
 
-    real_locks = repo_root() / "data" / "locks"
-    before = set(os.listdir(real_locks)) if real_locks.is_dir() else set()
-
-    monkeypatch.setattr(common_paths, "repo_root", lambda: tmp_path)
-    monkeypatch.setenv("MYANALYSIS_FORCE_FRAGILE", "1")
-    fs_kind.cache_clear()
-    try:
-        dr.write_registry({"a": {"H": "/p"}}, config_path=reg)
-    finally:
-        monkeypatch.undo()
+    # repo_root を tmp に固定するので、force-fragile でも lock_file_for の退避先は
+    # tmp/data/locks に構造的に限定される（実作業コピーの data/locks は触れない）。
+    # 局所パッチは context() で解除し、conftest の autouse 隔離は巻き戻さない。
+    # 実 repo ディレクトリは走査しない（他プロセスのロック生成と競合し env 依存になるため）。
+    with monkeypatch.context() as m:
+        m.setattr(common_paths, "repo_root", lambda: tmp_path)
+        m.setenv("MYANALYSIS_FORCE_FRAGILE", "1")
         fs_kind.cache_clear()
+        try:
+            dr.write_registry({"a": {"H": "/p"}}, config_path=reg)
+        finally:
+            fs_kind.cache_clear()
 
+    locks_dir = tmp_path / "data" / "locks"
+    assert locks_dir.is_dir()
+    assert any(locks_dir.iterdir())        # ロック実体が tmp 内に作られた（退避先が tmp に限定された証拠）
     assert dr.read_registry(reg) == {"a": {"H": "/p"}}
-    assert (tmp_path / "data" / "locks").is_dir()
-    after = set(os.listdir(real_locks)) if real_locks.is_dir() else set()
-    assert after == before
 
 
 # --------------------------------------------------------------------------- #
 # 排他（2 プロセス）
 # --------------------------------------------------------------------------- #
 _CHILD = textwrap.dedent("""
-    import sys, time
+    import sys
     sys.path.insert(0, {repo!r})
     from pathlib import Path
     import dataset_registry as dr
@@ -320,6 +341,7 @@ _CHILD = textwrap.dedent("""
     reg = Path({reg!r})
     name = sys.argv[1]
     hold = sys.argv[2] == "hold"
+    print("TRYING", flush=True)            # ロック取得を試みる直前の合図
     with dr.registry_transaction(config_path=reg) as (fresh, writer):
         if hold:
             print("ACQUIRED", flush=True)
@@ -328,6 +350,21 @@ _CHILD = textwrap.dedent("""
         writer(fresh)
     print("DONE", flush=True)
 """)
+
+
+def _readline(proc, timeout):
+    """proc.stdout から 1 行を timeout 秒以内に読む（超過は AssertionError）。
+
+    holder が合図前に死んでもスイートが無期限にブロックしないための期限付き読み取り。
+    """
+    out = []
+    t = threading.Thread(target=lambda: out.append(proc.stdout.readline()))
+    t.daemon = True
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise AssertionError(f"no line from child within {timeout}s")
+    return out[0].strip()
 
 
 def _spawn(tmp_path, reg, name, mode):
@@ -345,21 +382,28 @@ def _spawn(tmp_path, reg, name, mode):
 def test_concurrent_transactions_do_not_lose_entries(tmp_path, reg):
     reg.write_text("{}\n", encoding="utf-8")
     holder = _spawn(tmp_path, reg, "first", "hold")
+    waiter = None
     try:
-        assert holder.stdout.readline().strip() == "ACQUIRED"
+        assert _readline(holder, 10) == "TRYING"
+        assert _readline(holder, 10) == "ACQUIRED"      # holder がロックを保持した
         waiter = _spawn(tmp_path, reg, "second", "now")
-        try:
-            # waiter はロック待ちで進めない。
-            with pytest.raises(subprocess.TimeoutExpired):
-                waiter.wait(timeout=1.5)
-            holder.stdin.write("go\n")
-            holder.stdin.flush()
-            assert holder.wait(timeout=30) == 0
-            assert waiter.wait(timeout=30) == 0
-        finally:
-            waiter.kill()
+        assert _readline(waiter, 10) == "TRYING"         # waiter が取得を試みる地点に到達
+        # holder 保持中は waiter がロック取得で進めない（起動の遅さではなく実際の排他の証拠）。
+        with pytest.raises(subprocess.TimeoutExpired):
+            waiter.wait(timeout=1.5)
+        holder.stdin.write("go\n")
+        holder.stdin.flush()
+        assert holder.wait(timeout=30) == 0
+        assert waiter.wait(timeout=30) == 0
     finally:
-        holder.kill()
+        for p in (waiter, holder):
+            if p is None:
+                continue
+            p.kill()
+            try:
+                p.wait(timeout=10)            # kill 後に回収して子プロセスを残さない
+            except subprocess.TimeoutExpired:
+                pass
 
     data = dr.read_registry(reg)
     assert data == {"first": {"H": "/p/first"}, "second": {"H": "/p/second"}}

@@ -146,7 +146,11 @@ def registry_transaction(*, config_path: Path | None = None):
         registry = read_registry(target)
 
         def writer(new_registry: Registry) -> None:
-            text = serialize_registry(new_registry)
+            try:
+                text = serialize_registry(new_registry)
+            except RegistryError as e:
+                # §2.2 のエラー契約: どの登録簿かを示すためファイル名を付ける。
+                raise RegistryError(f"{target.name}: {e}") from e
             atomic_write_text(target, text, encoding="utf-8", newline="\n")
 
         yield registry, writer

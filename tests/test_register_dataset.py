@@ -17,9 +17,9 @@ import config
 
 
 _SEED = {
-    "dataset_a": {
-        "HOST_A": r"G:\同期\測定\000000\example",
-        "HOST_B": r"H:\同期\測定\000000\example",
+    "sample_dataset": {
+        "HOST_A": "C:/example-data/sample",
+        "HOST_B": "/example-data/sample",
     },
 }
 
@@ -51,21 +51,21 @@ def test_new_dataset_created(cfg):
 
 def test_merge_host_into_existing(cfg):
     result = config.register_dataset(
-        "dataset_a", r"J:\foo", host="newhost", config_path=cfg
+        "sample_dataset", r"J:\foo", host="newhost", config_path=cfg
     )
     assert result["created"] is False
     data = _datasets_from(cfg)
-    assert data["dataset_a"]["NEWHOST"] == r"J:\foo"
-    assert "HOST_A" in data["dataset_a"]
+    assert data["sample_dataset"]["NEWHOST"] == r"J:\foo"
+    assert "HOST_A" in data["sample_dataset"]
 
 
 def test_overwrite_existing_host_path(cfg):
     result = config.register_dataset(
-        "dataset_a", r"Z:\override", host="HOST_A", config_path=cfg
+        "sample_dataset", r"Z:\override", host="HOST_A", config_path=cfg
     )
     assert result["created"] is False
     data = _datasets_from(cfg)
-    assert data["dataset_a"]["HOST_A"] == r"Z:\override"
+    assert data["sample_dataset"]["HOST_A"] == r"Z:\override"
 
 
 def test_host_uppercased(cfg):
@@ -108,7 +108,7 @@ def test_control_char_path_roundtrips(cfg):
 def test_existing_entries_preserved(cfg):
     config.register_dataset("foo", r"G:\foo", host="H1", config_path=cfg)
     data = _datasets_from(cfg)
-    assert data["dataset_a"] == _SEED["dataset_a"]
+    assert data["sample_dataset"] == _SEED["sample_dataset"]
     assert data["foo"] == {"H1": r"G:\foo"}
 
 

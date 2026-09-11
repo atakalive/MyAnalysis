@@ -128,6 +128,31 @@ def test_rejected_sources(tmp_path, out, body):
     assert not out.exists()
 
 
+def test_invalid_utf8_source_is_rejected(tmp_path, out):
+    """不正 UTF-8 のソースは RegistryError へ変換され、例外を漏らさず 1 を返す。"""
+    src = tmp_path / "legacy.py"
+    src.write_bytes(b"DATASETS = {}\n\xff\xfe not utf-8")
+    assert _run(src, out) == 1                       # 例外を漏らさない
+    assert not out.exists()
+    assert _run(src, out, "--dry-run") == 1
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("body", [
+    # DATASETS がタプル分割代入で束縛される（後続の再束縛を静かに無視させない）。
+    'DATASETS, OTHER = {"a": {"H": "/p"}}, None\n',
+    # 正常代入の後に分割代入で再束縛（旧コードは前者を成功扱いにしていた）。
+    'DATASETS = {"a": {"H": "/p"}}\nDATASETS, OTHER = {"b": {"H": "/q"}}, None\n',
+    '[DATASETS, OTHER] = [{"a": {"H": "/p"}}, None]\n',   # List ターゲット
+    '*DATASETS, OTHER = {"a": {"H": "/p"}}, None\n',      # Starred ターゲット
+])
+def test_unpacking_assignment_is_rejected(tmp_path, out, body):
+    src = tmp_path / "legacy.py"
+    src.write_text(body, encoding="utf-8")
+    assert _run(src, out) == 1
+    assert not out.exists()
+
+
 def test_missing_source_file(tmp_path, out):
     assert _run(tmp_path / "nope.py", out) == 1
     assert not out.exists()

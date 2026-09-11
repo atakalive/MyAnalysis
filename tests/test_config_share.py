@@ -720,8 +720,9 @@ def test_pull_creates_absent_local_registry(env):
     config_share.sync(direction="pull", config_path=env.cfg)
     assert env.cfg.exists()
     assert _datasets_from(env.cfg) == {"ds_remote": {"OTHER": "/r/p"}}
-    config.reload_datasets(config_path=env.cfg)
-    assert "ds_remote" in config.DATASETS
+    # sync 自身が書き込み成功後に reload_datasets する。テスト側で追加 reload せずに
+    # メモリを確認する（sync 側の reload が欠落しても通ってしまう空振りを防ぐ）。
+    assert config.DATASETS.get("ds_remote") == {"OTHER": "/r/p"}
 
 
 def test_empty_both_sides_creates_nothing(env):

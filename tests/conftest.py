@@ -63,6 +63,7 @@ def _isolate_dataset_registry(monkeypatch, tmp_path):
     lazy ロードが `repo_root()/i18n` を見るため。
     """
     import config
+    import config_share
     import dataset_registry
 
     monkeypatch.delenv("MYANALYSIS_FORCE_FRAGILE", raising=False)
@@ -70,6 +71,21 @@ def _isolate_dataset_registry(monkeypatch, tmp_path):
     monkeypatch.setenv("MYANALYSIS_FS_OVERRIDE", f"{tmp_path}=local")
     from common import fs_kind
     fs_kind.cache_clear()
+
+    # 同期（config_share）の実接続・実状態ファイル・実 .env を遮断する（設計 §6.1）。
+    # register-dataset CLI 等は main の try_sync まで到達するため、共通 autouse で塞ぐ。
+    # 同期専用の env fixture のみが後勝ちで FakeS3 等へ上書きする。
+    monkeypatch.setenv("R2_AUTOSYNC", "0")
+    monkeypatch.setattr(config_share, "load_env", lambda *a, **k: None)
+    monkeypatch.setattr(
+        config_share, "_state_path",
+        lambda: tmp_path / "config_share_state.json",
+    )
+
+    def _no_client(_creds):
+        raise RuntimeError("network disabled in tests (config_share._client stub)")
+
+    monkeypatch.setattr(config_share, "_client", _no_client)
 
     monkeypatch.setattr(
         dataset_registry, "registry_path",

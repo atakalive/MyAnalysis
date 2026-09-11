@@ -22,10 +22,25 @@ from pathlib import Path
 import dataset_registry
 
 
+def _binds_datasets(target) -> bool:
+    """代入ターゲット（Name/Starred/Tuple/List のネスト）が `DATASETS` を束縛するか。"""
+    if isinstance(target, ast.Name):
+        return target.id == "DATASETS"
+    if isinstance(target, ast.Starred):
+        return _binds_datasets(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_datasets(el) for el in target.elts)
+    return False
+
+
 def _load_legacy_datasets(source_path: Path) -> dict:
     """旧ソースから `DATASETS` の値だけを安全に取り出す（実行しない）。"""
     try:
         source = source_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise dataset_registry.RegistryError(
+            f"source is not valid UTF-8: {e}"
+        ) from e
     except OSError as e:
         raise dataset_registry.RegistryError(f"cannot read source: {e}") from e
 
@@ -41,11 +56,22 @@ def _load_legacy_datasets(source_path: Path) -> dict:
                 nodes.append(stmt)
         elif isinstance(stmt, ast.Assign):
             targets = stmt.targets
-            if any(isinstance(t, ast.Name) and t.id == "DATASETS" for t in targets):
-                if len(targets) != 1:
-                    raise dataset_registry.RegistryError(
-                        "DATASETS is part of a multi-target assignment"
-                    )
+            direct = [
+                t for t in targets if isinstance(t, ast.Name) and t.id == "DATASETS"
+            ]
+            # DATASETS が分割代入（Tuple/List/Starred）で束縛される場合
+            # （例: `DATASETS, OTHER = {...}, None`）は、後続の再束縛を静かに
+            # 無視して古い辞書を成功扱いにしないよう、明示的に拒否する。
+            unpacked = any(
+                not (isinstance(t, ast.Name) and t.id == "DATASETS")
+                and _binds_datasets(t)
+                for t in targets
+            )
+            if unpacked or (direct and len(targets) != 1):
+                raise dataset_registry.RegistryError(
+                    "DATASETS is part of an unpacking or multi-target assignment"
+                )
+            if direct:
                 nodes.append(stmt)
     if not nodes:
         raise dataset_registry.RegistryError(

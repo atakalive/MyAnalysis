@@ -144,6 +144,8 @@ def test_real_register_writes_json_and_lists(tmp_path, monkeypatch, capsys):
         ["list-datasets"], tmp_path, monkeypatch, capsys,
     )
     assert rc2 == 0
+    # 出力に登録名が現れることまで確認する（何も列挙しない実装で空振りしないため）。
+    assert "sample_dataset" in out2
 
 
 def test_real_register_auto_open_submits(tmp_path, monkeypatch, capsys):
