@@ -74,6 +74,9 @@ DATASETS: dict[str, dict[str, str]] = {
     "dataset_j4": {
         "HOST_A": r"G:/測定/dataset_i4",
     },
+    "dataset_k": {
+        "HOST_A": r"//fileserver.example/Public/share/measure/dataset_k",
+    },
 }
 
 
