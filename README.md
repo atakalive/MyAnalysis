@@ -297,6 +297,8 @@ The chat dock talks to an LLM backend through [llm_backend/](llm_backend/). Six 
 
 The **Backend / model settings dialog** (Settings → Backend / model settings…) is where you pick the engine / model / provider and apply it globally. The model/provider candidate lists are editable via the ＋/− next to each combo (persisted to `models.toml`), and an optional connectivity check runs before applying. Right-click a chat tab → **Model for this chat…** to switch just that session to a different engine (sessions without an override follow the global setting).
 
+**AI persona** (Settings → AI persona…) picks a response style appended to the chat agent's system prompt — e.g. blunt and critical instead of the default polite tone. Personas (name + free-text body) are created, edited and deleted in the same dialog; definitions are PC-local (`data/llm_state/personas.json`) and do not sync between machines. Right-click a chat tab → **Persona for this chat…** to override per session — including "no persona" for one chat while a global persona is active. A persona only shapes tone and style; operational rules always win. The default is no persona, which leaves the prompt exactly as before.
+
 **Selection order**: env `LLM_BACKEND` → `[backend].name` in `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
 
 **Where settings live**:

@@ -34,6 +34,45 @@ def ui_prefs_path() -> Path:
     return global_state_dir() / "ui_prefs.json"
 
 
+def _preserve_unreadable(path: Path, status: str) -> bool:
+    """``unreadable`` な既存ファイルを守るべきか（守るなら書込を skip する）。
+
+    ``read_json_classified`` の 'unreadable' は「壊れているかもしれないので既定値で
+    上書きするな」の合図だが、**0 バイトのファイルには守るべき中身が無い**。区別せずに
+    skip すると、一度 0 バイト化したファイルには二度と書けなくなる — 実測で
+    ``backend_sessions.json`` が 0 バイトのまま固着し、resume token が全エンジンで
+    一度も保存されていなかった（``--resume`` が一度も使われないまま毎回全履歴 replay）。
+    サイズが取れないときは「判定不能」なので守る側に倒す。
+    """
+    if status != "unreadable":
+        return False
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return True
+
+
+def _write_state_json(path: Path, data) -> bool:
+    """``data/llm_state`` の JSON を ``common.paths`` の chokepoint 経由で書く。
+
+    never raise（GUI スレッドから呼ばれる）。成功なら True。
+
+    生の tmp+replace をやめる理由は 2 つある。(1) ``atomic_write_text`` は書込後に
+    read-back で検証し、駄目なら ``MountWriteError`` を送出する — 送出前に
+    ``common.paths._report_failure`` が GUI の書込失敗シンク（``gui/window.py`` の
+    ``_install_write_failure_sink``）へ通知するので、ここで例外を握り潰しても失敗は
+    黙殺されない。(2) 旧実装は 4 つの writer が固定 tmp 名 ``<name>.json.tmp`` を
+    共有していたため、GUI 二重起動や Tier 4 restart で「A が tmp を truncate →
+    B が replace」の競合が起き得た。``atomic_write_text`` は mkstemp なので構造的に塞がる。
+    """
+    from common.paths import atomic_write_text
+    try:
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+        return True
+    except (OSError, ValueError, TypeError):   # MountWriteError は OSError のサブクラス
+        return False
+
+
 def read_ui_pref(key: str, default=None):
     """ui_prefs.json から key を読む。欠損/破損/型不一致/非 dict は default。never raise。"""
     try:
@@ -49,20 +88,20 @@ def update_ui_pref(key: str, value) -> None:
     """ui_prefs.json の key を value に更新。兄弟キー保持・atomic(temp+replace)・never raise。
 
     破損/transient で読めない（unreadable）ときは書込を skip する: 兄弟キーを巻き添えで
-    失わないため（absent なら新規 {} から書いてよい）。"""
+    失わないため（absent なら新規 {} から書いてよい）。ただし 0 バイトは守る中身が無いので
+    書き直す（`_preserve_unreadable`）。"""
     from common.paths import read_json_classified
     try:
         path = ui_prefs_path()
         status, data = read_json_classified(path)
-        if status == "unreadable":
+        if _preserve_unreadable(path, status):
             return                                 # 破損/transient → 兄弟キーを潰さない
-        data = data if status == "ok" else {}      # absent → 新規
+        data = data if status == "ok" else {}      # absent / 0 バイト → 新規
         data[key] = value
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-    except (OSError, ValueError, TypeError):        # 非 JSON-serializable value の TypeError も吸収（never-raise 厳守）
-        pass
+    except (OSError, ValueError, TypeError):        # never-raise 厳守
+        return
+    # 非 JSON-serializable value の TypeError もここで吸収される。
+    _write_state_json(path, data)
 
 
 def recent_datasets_path() -> Path:
@@ -104,20 +143,18 @@ def note_recent_dataset(name: str) -> None:
     try:
         path = recent_datasets_path()
         status, raw = read_json_classified(path)
-        if status == "unreadable":
+        if _preserve_unreadable(path, status):
             return                                 # 破損/transient → MRU を巻き添えで潰さない
-        raw = raw if status == "ok" else {}
+        raw = raw if status == "ok" else {}         # absent / 0 バイト → 新規
         data = {                                   # read_recent_datasets と同じ型正規化
             k: v for k, v in raw.items()
             if isinstance(k, str) and isinstance(v, (int, float))
             and not isinstance(v, bool)
         }
         data[name] = time.time()
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
     except (OSError, ValueError, TypeError):
-        pass
+        return
+    _write_state_json(path, data)
 
 
 def last_window_path() -> Path:
@@ -191,18 +228,21 @@ def _read_backend_sessions() -> dict:
 
 
 def _write_backend_sessions(data: dict) -> None:
-    """atomic(temp+replace)・never raise。破損時は書込 skip (兄弟エントリを守る)。"""
+    """検証付き atomic 書込・never raise。破損時は書込 skip (兄弟エントリを守る)。
+
+    0 バイトは「破損」ではなく「守る中身が無い」ので書き直す — ここを区別していなかった
+    せいで、一度 0 バイト化したストアが恒久固着し、resume token が全エンジンで一度も
+    保存されていなかった（`_preserve_unreadable` 参照）。
+    """
     from common.paths import read_json_classified
     try:
         path = backend_sessions_path()
         status, _ = read_json_classified(path)
-        if status == "unreadable":
+        if _preserve_unreadable(path, status):
             return                                 # 破損/transient → 巻き添えで潰さない
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
     except (OSError, ValueError, TypeError):
-        pass
+        return
+    _write_state_json(path, data)
 
 
 def read_backend_session(session_id: str) -> dict | None:
@@ -260,3 +300,13 @@ def drop_backend_session(session_id: str) -> None:
     消せば一緒に消える」保証が無い。削除経路から明示的に呼ぶこと。
     """
     write_backend_session(session_id, None, None, None)
+
+
+def personas_path() -> Path:
+    """Return data/llm_state/personas.json (file may not exist yet).
+
+    チャットのペルソナ定義ストア (GUI 管理・シード同梱)。recent_datasets.json /
+    backend_sessions.json と同じ PC ローカル層で、config_share.PORTABLE_FILES には
+    意図的に入れない。読み書きは llm_bridge/personas.py 経由。
+    """
+    return global_state_dir() / "personas.json"

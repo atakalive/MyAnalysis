@@ -171,6 +171,36 @@ catalog until llama-server has them loaded, which is why the list is editable.
     built from the catalog — never by constructing a backend (it runs on every tab
     switch) and never from `sess.backend_name` (new sessions carry the prototype's
     name until their first turn).
+- **AI ペルソナ（応答スタイル）** — 設定 → AIペルソナ… で全体既定の選択と定義の
+  作成・編集・削除、タブ右クリック →「このチャットのペルソナ…」でセッション単位の
+  上書き。定義（名前＋本文）は `data/llm_state/personas.json`
+  （[llm_bridge/personas.py](llm_bridge/personas.py)。PC ローカル・GUI 管理。ファイル
+  不在の間だけ `SEED_PERSONAS` を提示し、初回書込で実体化 — 空リストでもシードは
+  復活しない。**`config_share.PORTABLE_FILES` には意図的に入れない**ので別 PC には
+  自動では渡らない）。全体選択は ui_prefs `"chat_persona"`、セッション上書きは
+  `ChatSession.persona` の 3 値センチネル（`None`=全体に従う / `""`=明示的になし /
+  非空=ペルソナ名）。engine と違い**未解決名は「なし」へ degrade**（全体設定へは
+  戻さない — 上書きは「全体と違える」意思表示なので別ペルソナへの勝手な差替えを
+  しない）し、フィールドは never-rewrite（同期される `chat_sessions/<id>.json` を
+  定義のない PC で開いても選択は保持され、定義を再作成すれば復活する）。注入は
+  `base.py` の `compose_system_prompt`（persona 空なら base と**同一オブジェクト**を
+  返す＝既定はバイト同一で、pinned プロンプトテスト群がそのまま回帰ガード）＋
+  各バックエンドの duck-typed `set_persona`（唯一の構築点
+  `_build_session_backend` で実効テキストを設定）。ペルソナが変えるのは
+  **口調・文体のみ**で運用ルールが常に優先（`PERSONA_HEADER` ブロックの契約）。
+  resume token はペルソナ変更で破棄しない（全バックエンドが毎ターン system
+  プロンプトを再供給する — `use_provider_system_prompt` トグルと同じ前提）。
+  既知の制約: codex の AGENTS.md は全セッション共有の 1 ファイルなので、ペルソナの
+  異なる codex ターンが並走すると last-writer-wins（影響は口調のみ）。CLI からの
+  ペルソナ操作 verb は非目標。
+- **Windows の npm シム spawn（claude/pi/codex 共通）** — バックエンドの子プロセスを
+  `.cmd` シムのまま `cmd.exe /c` でラップしてはならない。cmd.exe は**引数中の最初の
+  改行で残り全部を切断**する（実測: 5603 文字の複数行 system プロンプトが 372 文字に
+  切れ、後続の `--resume` 等のフラグごと消えた）。[common/proc.py](common/proc.py) の
+  `resolve_cmd_shim` が npm シムの 2 形式（exe 直接型 = claude、node+JS 型 = pi/codex）
+  を実体 argv に解決して直接 spawn し、解決不能な自作シムのみ従来ラップに
+  フォールバックする。preflight の `_wrap`（インストール/ログイン等の単一行コマンド）は
+  この制約の対象外。
 - **claude backend** ([claude_code.py](llm_backend/claude_code.py)) reuses the
   **VS Code Claude Code extension's own bundled engine** — the `claude` binary
   at `~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/`
@@ -245,6 +275,17 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   書込を中止する（`patch_description` / `patch_completed` が status を捨てて `{}` から
   書き直していたため、meta.json が 15 キー → 2 キーに縮退する事故が起きた）。
   `myanalysis.toml` も 0 バイトは「設定なし」ではなく破損として `ConfigUnreadableError`。
+- **ただし 0 バイトは「守るべき破損」ではなく「守る中身が無い」。** `unreadable` を一律 skip に
+  すると、一度 0 バイト化したファイルには二度と書けなくなる — 実測で
+  `data/llm_state/backend_sessions.json` が 0 バイトのまま固着し、resume token が全エンジンで
+  一度も保存されていなかった（`--resume` が使われず毎回全履歴 replay）。判定は
+  `llm_bridge/paths.py` の `_preserve_unreadable`（サイズ 0 なら書き直す・stat 不能なら守る側）。
+- **PC ローカルの `data/llm_state` も chokepoint の例外ではない。** 同期マウントではないが 0 バイト化は
+  現に起きた。`update_ui_pref` / `note_recent_dataset` / `_write_backend_sessions` は
+  `atomic_write_text`（再計算可能なので 1 コピー）、`personas.json` は再生成できずコピーも無いので
+  `durable_write_json`。旧実装は 4 writer が固定 tmp 名 `<name>.json.tmp` を共有しており、GUI 二重起動や
+  Tier 4 restart で「A が tmp を truncate → B が replace」の競合が起き得た（mkstemp で構造的に解消）。
+  検出は `python -m llm_bridge doctor`（`check_local_state`。`--repair` は削除＝次回書込で再生成）。
 - ロックファイルはマウント外（`data/locks/`）へ自動マッピングされる（`common/filelock.py`）。
   マウント上では排他が効いている保証がなく、同期チャーンも生むため。PC 間排他は元々成立しない。
 - バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と両バックエンドが設定）。

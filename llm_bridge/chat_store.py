@@ -62,6 +62,10 @@ class ChatSession:
     engine: str | None = None
     engine_model: str | None = None
     engine_provider: str | None = None
+    # 3 状態: None=全体設定に従う / ""=明示的にペルソナなし / 非空=ペルソナ名。
+    # engine 同様 str 検証のみ・解決は使用時。未解決名は「なし」に degrade し
+    # フィールドは書き換えない（ストアは PC ローカル、別 PC でも選択を保持）。
+    persona: str | None = None
     # Per-tab unsent composer text. Deliberately NOT persisted: session_to_dict
     # omits it and session_from_dict never reads it, so a draft lives only as
     # long as the process. Kept on the session (not a side dict) so deleting a
@@ -119,6 +123,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "engine": getattr(sess, "engine", None),
         "engine_model": getattr(sess, "engine_model", None),
         "engine_provider": getattr(sess, "engine_provider", None),
+        "persona": getattr(sess, "persona", None),
     }
 
 
@@ -137,6 +142,10 @@ def session_from_dict(data: dict) -> ChatSession:
     tool_display = data.get("tool_display")
     if tool_display not in (None, "full", "compact", "hidden"):
         tool_display = None
+    # persona は 3 状態のため _opt_str を通さない: blank を None に潰すと
+    # 「明示的にペルソナなし」("") が「全体設定に従う」(None) に化ける。
+    raw = data.get("persona")
+    persona = raw.strip() if isinstance(raw, str) else None
 
     def _opt_str(key):
         """Accept any str; anything else (or missing) → None.
@@ -168,6 +177,7 @@ def session_from_dict(data: dict) -> ChatSession:
         engine=_opt_str("engine"),
         engine_model=_opt_str("engine_model"),
         engine_provider=_opt_str("engine_provider"),
+        persona=persona,
     )
 
 
@@ -218,6 +228,8 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
         engine=getattr(src, "engine", None),
         engine_model=getattr(src, "engine_model", None),
         engine_provider=getattr(src, "engine_provider", None),
+        # 口調（ペルソナ）も同様に引き継ぐ。
+        persona=getattr(src, "persona", None),
     )
 
 
