@@ -825,3 +825,303 @@ def test_open_dataset_legacy_entries_no_layout(ds_env):
     assert imgs[0][1]["panel"] == "left"
     adds = [c for c in win.calls if c[0] == "add-tab"]
     assert len(adds) == 1
+
+
+# ---- Issue #97: nested panes (Qt-free) ----
+
+def _panes_session(entry):
+    session.write_session("ds_a", {
+        "version": 1, "dataset": "ds_a", "active_tab": None, "tabs": [entry],
+    })
+
+
+def test_open_dataset_panes_dispatch_in_order(ds_env):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    for n in ("a.png", "b.png", "c.tif"):
+        _write_bytes(wd / n)
+    _panes_session({
+        "name": "q", "kind": "figure", "figure": "a.png",
+        "panes": [
+            {"slot": "top/left", "kind": "figure", "path": "a.png"},
+            {"slot": "top/right", "kind": "figure", "path": "b.png"},
+            {"slot": "bottom", "kind": "image", "path": "c.tif"},
+        ],
+    })
+    win = _RecordingDispatchWindow()
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    calls = [(v, kw["slot"], Path(kw["path"]).name) for v, kw in win.calls]
+    assert calls == [
+        ("show", "top/left", "a.png"),
+        ("show", "top/right", "b.png"),
+        ("show-image", "bottom", "c.tif"),
+    ]
+    assert all(kw["dataset"] == "ds_a" and kw["name"] == "q" for _v, kw in win.calls)
+
+
+def test_open_dataset_panes_invalid_excluded(ds_env):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    _write_bytes(wd / "b.png")
+    _panes_session({
+        "name": "q", "kind": "figure", "figure": "a.png",
+        "panes": [
+            {"slot": "left", "kind": "figure", "path": "a.png"},
+            {"slot": "left/top", "kind": "figure", "path": "b.png"},    # conflict
+            {"slot": "right/top", "kind": "figure", "path": "gone.png"},  # missing
+            {"slot": None, "kind": "figure", "path": "b.png"},
+            {"slot": "", "kind": "figure", "path": "b.png"},
+            {"slot": "   ", "kind": "figure", "path": "b.png"},
+            {"slot": 3, "kind": "figure", "path": "b.png"},
+            {"slot": "right/top", "kind": "figure", "path": 5},
+            {"slot": "right/top", "kind": "movie", "path": "b.png"},
+            {"slot": "center", "kind": "figure", "path": "b.png"},
+            "not-a-dict",
+            {"slot": "right/bottom", "kind": "figure", "path": "b.png"},
+        ],
+    })
+    win = _RecordingDispatchWindow()
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    assert [kw["slot"] for _v, kw in win.calls] == ["left", "right/bottom"]
+
+
+def test_open_dataset_panes_all_fail_not_restored(ds_env):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    _panes_session({
+        "name": "q", "kind": "figure", "figure": "a.png",
+        "panes": [{"slot": "left", "kind": "figure", "path": "gone.png"}],
+    })
+    win = _RecordingDispatchWindow()
+    assert session.open_dataset(win, "ds_a") == "restored:0"
+    assert win.calls == []
+
+    _panes_session({
+        "name": "q", "kind": "figure", "figure": "a.png",
+        "panes": [{"slot": "left", "kind": "figure", "path": "a.png"}],
+    })
+
+    class _Raising(_RecordingDispatchWindow):
+        def dispatch_command(self, verb, **kwargs):
+            super().dispatch_command(verb, **kwargs)
+            raise RuntimeError("boom")
+
+    win2 = _Raising()
+    assert session.open_dataset(win2, "ds_a") == "restored:0"
+    assert len(win2.calls) == 1
+
+
+def test_legacy_expressible_table():
+    f = session._legacy_expressible
+    assert f([("left", "figure", "a")])
+    assert f([("top", "figure", "a")])
+    assert f([("left", "figure", "a"), ("right", "figure", "b")])
+    assert f([("top", "figure", "a"), ("bottom", "figure", "b")])
+    assert not f([("right", "figure", "a")])
+    assert f([("left", "image", "a")])
+    assert f([("right", "image", "a")])
+    assert not f([("top", "image", "a")])
+    assert not f([("bottom", "image", "a")])
+    assert f([("top", "image", "a"), ("bottom", "image", "b")])
+    assert not f([("left", "figure", "a"), ("right", "image", "b")])
+    assert not f([("top/left", "figure", "a")])
+    assert not f([])
+
+
+def test_legacy_panes_table(ds_env):
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    _write_bytes(wd / "b.png")
+    lp = session._legacy_panes
+
+    def rows(entry):
+        out = lp(entry, wd)
+        return None if out is None else [
+            (r["slot"], r["kind"], Path(r["path"]).name, r["reuse_key"]) for r in out
+        ]
+
+    h = {"orientation": "horizontal"}
+    v = {"orientation": "vertical"}
+    assert rows({"kind": "figure", "figure": "a.png", "figure2": "b.png", "layout": h}) == [
+        ("left", "figure", "a.png", "figure"), ("right", "figure", "b.png", "figure-2")]
+    assert rows({"kind": "figure", "figure": "a.png", "figure2": "b.png", "layout": v}) == [
+        ("top", "figure", "a.png", "figure"), ("bottom", "figure", "b.png", "figure-2")]
+    assert rows({"kind": "figure", "figure": "a.png", "layout": h}) == [
+        ("left", "figure", "a.png", "figure")]
+    assert rows({"kind": "figure", "figure": "a.png", "figure2": "gone.png"}) == [
+        ("left", "figure", "a.png", "figure")]
+    assert rows({"kind": "image", "image": "a.png", "image2": "b.png", "layout": h}) == [
+        ("left", "image", "a.png", "viewer"), ("right", "image", "b.png", "viewer-2")]
+    assert rows({"kind": "image", "image": "a.png",
+                 "layout": {**h, "left_hidden": True}}) == [
+        ("right", "image", "a.png", "viewer")]
+    assert rows({"kind": "image", "image": "a.png", "layout": h}) == [
+        ("left", "image", "a.png", "viewer")]
+    # image2 field present but file missing + left_hidden → single on the right.
+    assert rows({"kind": "image", "image": "a.png", "image2": "gone.png",
+                 "layout": {**h, "left_hidden": True}}) == [
+        ("right", "image", "a.png", "viewer")]
+    assert rows({"kind": "image", "image": "gone.png", "layout": h}) is None
+    assert rows({"kind": "figure", "figure": "gone.png"}) is None
+
+
+class _HostTab:
+    """Fake viewer host tab recording the restore hooks."""
+
+    def __init__(self, name, dataset, kind="figure"):
+        self.name = name
+        self.viewer_host = True
+        self.session_spec = {"kind": kind, "name": name, "dataset": dataset}
+        self.log: list = []
+
+    def prune_panes(self, keep):
+        self.log.append(("prune", set(keep)))
+
+    def apply_layout(self, layout):
+        self.log.append(("apply_layout", dict(layout)))
+
+    def tidy(self):
+        self.log.append(("tidy",))
+
+
+def _place_recorder(monkeypatch):
+    import llm_bridge
+    calls = []
+
+    def rec(tab, slot, kind, abs_path, *, reuse_key=None, claimed=frozenset()):
+        calls.append({"slot": slot, "kind": kind, "path": Path(abs_path).name,
+                      "reuse_key": reuse_key, "claimed": set(claimed)})
+        return f"K{len(calls)}", object()
+
+    monkeypatch.setattr(llm_bridge, "_place_viewer", rec)
+    return calls
+
+
+def test_route_legacy_existing_host_uses_place_viewer(ds_env, monkeypatch):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    _write_bytes(wd / "b.png")
+    calls = _place_recorder(monkeypatch)
+    _panes_session({
+        "name": "v", "kind": "image", "image": "a.png", "image2": "b.png",
+        "layout": {"orientation": "vertical", "sizes": [1, 1],
+                   "left_hidden": False, "right_hidden": False},
+    })
+    win = _RecordingDispatchWindow()
+    t0 = _HostTab("v", "ds_a", kind="image")
+    win._tabs = [t0]
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    assert win.calls == []
+    assert [(c["slot"], c["path"], c["reuse_key"]) for c in calls] == [
+        ("top", "a.png", "viewer"), ("bottom", "b.png", "viewer-2")]
+    assert calls[0]["claimed"] == set()
+    assert calls[1]["claimed"] == {"K1"}
+    assert t0.log[0] == ("prune", {"top", "bottom"})
+    applied = t0.log[1][1]
+    assert "left_hidden" not in applied and "right_hidden" not in applied
+    assert applied["orientation"] == "vertical"
+    assert t0.log[2] == ("tidy",)
+
+
+def test_route_legacy_minimal_existing_host_plain_dispatch(ds_env, monkeypatch):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    calls = _place_recorder(monkeypatch)
+    _panes_session({"name": "v", "kind": "figure", "figure": "a.png"})
+    win = _RecordingDispatchWindow()
+    t0 = _HostTab("v", "ds_a")
+    win._tabs = [t0]
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    assert len(win.calls) == 1 and "slot" not in win.calls[0][1]
+    assert calls == []
+    assert t0.log == []
+
+
+def test_route_legacy_new_tab_plain_dispatch(ds_env, monkeypatch):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    _write_bytes(wd / "b.png")
+    calls = _place_recorder(monkeypatch)
+    _panes_session({
+        "name": "v", "kind": "figure", "figure": "a.png", "figure2": "b.png",
+        "layout": {"orientation": "horizontal", "sizes": [1, 1],
+                   "left_hidden": False, "right_hidden": False},
+    })
+    win = _RecordingDispatchWindow()
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    assert [kw.get("slot") for _v, kw in win.calls] == [None, "right"]
+    assert calls == []
+
+
+def test_route_panes_existing_host_ignores_reuse_key(ds_env, monkeypatch):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    calls = _place_recorder(monkeypatch)
+    _panes_session({
+        "name": "v", "kind": "figure", "figure": "a.png",
+        "panes": [{"slot": "top/left", "kind": "figure", "path": "a.png",
+                   "reuse_key": "figure"}],
+    })
+    win = _RecordingDispatchWindow()
+    t0 = _HostTab("v", "ds_a")
+    win._tabs = [t0]
+    assert session.open_dataset(win, "ds_a") == "restored:1"
+    assert calls[0]["slot"] == "top/left"
+    assert calls[0]["reuse_key"] is None
+    assert t0.log[0] == ("prune", {"top/left"})
+
+
+def test_route_existing_analysis_tab_not_clobbered(ds_env, monkeypatch):
+    session._touched.clear()
+    wd = dataset_config.get_work_dir("ds_a")
+    _write_bytes(wd / "a.png")
+    calls = _place_recorder(monkeypatch)
+    _panes_session({
+        "name": "v", "kind": "figure", "figure": "a.png",
+        "panes": [{"slot": "left", "kind": "figure", "path": "a.png"}],
+    })
+    win = _RecordingDispatchWindow()
+    t0 = _FakeTab("v", {"kind": "analysis", "name": "v", "dataset": "ds_a"})
+    win._tabs = [t0]
+    assert session.open_dataset(win, "ds_a") == "restored:0"
+    assert calls == [] and win.calls == []
+
+
+def test_tree_to_entry_panes_format(tmp_path):
+    class _T:
+        def pane_contents(self):
+            return [("top/left", "figure", str(tmp_path / "a.png")),
+                    ("bottom", "image", str(tmp_path / "b.tif"))]
+
+        def capture_layout(self):
+            return {"orientation": "vertical", "sizes": [1, 1],
+                    "left_hidden": True, "right_hidden": False,
+                    "splits": {"top": [1, 1]}}
+
+    spec = {"kind": "figure", "name": "q", "dataset": "d", "figure": "x"}
+    entry = session._spec_to_tab(spec, tmp_path, _T())
+    assert entry["kind"] == "figure" and entry["figure"] == "a.png"
+    assert entry["panes"] == [
+        {"slot": "top/left", "kind": "figure", "path": "a.png"},
+        {"slot": "bottom", "kind": "image", "path": "b.tif"},
+    ]
+    assert entry["layout"]["left_hidden"] is False
+    assert entry["layout"]["splits"] == {"top": [1, 1]}
+
+
+def test_tree_to_entry_empty_not_saved(tmp_path):
+    class _T:
+        def pane_contents(self):
+            return []
+
+        def capture_layout(self):
+            return {}
+
+    spec = {"kind": "image", "name": "q", "dataset": "d", "image": "x"}
+    assert session._spec_to_tab(spec, tmp_path, _T()) is None

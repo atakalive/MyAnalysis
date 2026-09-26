@@ -28,6 +28,7 @@ from common.paths import (
     safe_resolve,
     strip_seq,
 )
+from common.slots import conflicts, format_slot, parse_slot
 from llm_bridge import chat_store
 
 _log = logging.getLogger(__name__)
@@ -92,8 +93,13 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
       - ``layout`` (all kinds): tab.capture_layout() if callable.
       - ``figure2`` (kind=="figure" only): work_dir-relative path of the split
         second figure, from tab._panels["figure-2"]._path if present.
+
+    A live viewer tab exposing ``pane_contents()`` (gui AnalysisTab, Issue #97)
+    is serialised from its split tree instead — see _tree_to_entry.
     """
     kind = spec.get("kind")
+    if kind in ("figure", "image") and callable(getattr(tab, "pane_contents", None)):
+        return _tree_to_entry(spec, work_dir, tab)
     if kind == "figure":
         fig = spec.get("figure")
         try:
@@ -157,6 +163,219 @@ def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
             # 両可視+image2 なしは復元時に自動で単一へ畳まれる → 保存側正規化は不要
             # （図と非対称。図は apply_layout が layout を忠実再現するため両側が必要）。
     return entry
+
+
+def _rel(p, work_dir: Path):
+    """work_dir 相対（'/' 区切り）へ。相対化できなければ str(p)。
+
+    as_posix: session.json は PC 間を渡る同期資産なので相対パスは常に '/' 区切り。
+    """
+    try:
+        return Path(p).relative_to(work_dir).as_posix()
+    except (ValueError, TypeError):
+        return str(p)
+
+
+def _legacy_expressible(panes) -> bool:
+    """(slot, kind, path) の列が旧フィールド（figure/figure2・image/image2）で
+    表現でき、旧経路の復元で同じ配置に戻るか（Qt 非依存）。"""
+    if not panes:
+        return False
+    kinds = {k for _s, k, _p in panes}
+    if len(kinds) != 1:
+        return False
+    kind = kinds.pop()
+    steps = [parse_slot(s) for s, _k, _p in panes]
+    if any(len(st) != 1 for st in steps):
+        return False
+    idxs = {st[0][1] for st in steps}
+    if len(idxs) != len(steps):
+        return False
+    if kind == "figure":
+        return idxs in ({0}, {0, 1})
+    if kind == "image":
+        if idxs == {0, 1}:
+            return True
+        # 旧経路の単一画像復元は panel=left|right で向きを適用しないので横のみ。
+        return steps[0][0][0] == "h"
+    return False
+
+
+def _tree_to_entry(spec: dict, work_dir: Path, tab) -> dict | None:
+    """ライブ viewer タブの分割木から session エントリを導出する（Issue #97）。
+
+    旧フィールドで表現できる配置は従来形式（``panes`` 無し）で書き、それ以外は
+    ``panes``（slot/kind/path の列）で書く。旧ビルドは ``panes`` を知らず先頭 1 枚
+    （``figure``/``image`` フィールド）で縮退表示する。可視ペインが無ければ None。
+    """
+    panes = [(s, k, p) for (s, k, p) in tab.pane_contents() if p is not None]
+    if not panes:
+        return None
+    capture = getattr(tab, "capture_layout", None)
+    layout = capture() if callable(capture) else None
+    name = spec.get("name")
+    if _legacy_expressible(panes):
+        kind = panes[0][1]
+        by_idx = {parse_slot(s)[0][1]: p for s, _k, p in panes}
+        if kind == "figure":
+            entry: dict = {"name": name, "kind": "figure",
+                           "figure": _rel(by_idx[0], work_dir)}
+            if 1 in by_idx:
+                entry["figure2"] = _rel(by_idx[1], work_dir)
+            if layout is not None:
+                entry["layout"] = layout
+                if "figure2" not in entry:
+                    entry["layout"] = {**layout, "right_hidden": True}
+        else:
+            primary = by_idx[0] if 0 in by_idx else by_idx[1]
+            entry = {"name": name, "kind": "image",
+                     "image": _rel(primary, work_dir)}
+            if 0 in by_idx and 1 in by_idx:
+                entry["image2"] = _rel(by_idx[1], work_dir)
+            if layout is not None:
+                entry["layout"] = layout
+        return entry
+    first_kind = panes[0][1]
+    entry = {
+        "name": name,
+        "kind": first_kind,
+        first_kind: _rel(panes[0][2], work_dir),
+        "panes": [
+            {"slot": s, "kind": k, "path": _rel(p, work_dir)} for s, k, p in panes
+        ],
+    }
+    if layout is not None:
+        # 旧ビルドが先頭 1 枚を左に出せるように left_hidden を False に固定する
+        # （新ビルドの panes 復元は hidden フラグを使わない）。
+        entry["layout"] = {**layout, "left_hidden": False}
+    return entry
+
+
+def _abs_under(p, work_dir: Path) -> Path:
+    fp = Path(p)
+    return fp if fp.is_absolute() else work_dir / fp
+
+
+def _legacy_panes(entry: dict, work_dir: Path) -> list[dict] | None:
+    """旧形式エントリを明示 slot＋reuse_key 付きのペイン列へ変換（Qt 非依存）。
+
+    primary のファイルが無ければ None（エントリ skip）。2 枚目は「フィールドが
+    あり、かつファイルが存在する」ときだけ split 扱い（旧 will_split と同じ判定）。
+    """
+    layout = entry.get("layout") or {}
+    first, second = (
+        ("top", "bottom") if layout.get("orientation") == "vertical"
+        else ("left", "right")
+    )
+    kind = entry.get("kind")
+    if kind == "figure":
+        k1, k2, base = "figure", "figure2", "figure"
+    elif kind == "image":
+        k1, k2, base = "image", "image2", "viewer"
+    else:
+        return None
+    prim = entry.get(k1)
+    if not prim:
+        return None
+    abs1 = _abs_under(prim, work_dir)
+    if not abs1.is_file():
+        return None
+    sec = entry.get(k2)
+    abs2 = _abs_under(sec, work_dir) if sec else None
+    if abs2 is not None and abs2.is_file():
+        return [
+            {"slot": first, "kind": kind, "path": str(abs1), "reuse_key": base},
+            {"slot": second, "kind": kind, "path": str(abs2),
+             "reuse_key": f"{base}-2"},
+        ]
+    if kind == "figure":
+        return [{"slot": first, "kind": kind, "path": str(abs1), "reuse_key": base}]
+    side = second if layout.get("left_hidden") else first
+    return [{"slot": side, "kind": kind, "path": str(abs1), "reuse_key": base}]
+
+
+def _find_ds_tab(window, name, dataset):
+    return next(
+        (t for t in window.tabs()
+         if t.name == name
+         and (getattr(t, "session_spec", None) or {}).get("dataset") == dataset),
+        None,
+    )
+
+
+def _restore_panes(window, entry, candidates, work_dir, dataset, t0) -> bool:
+    """ペイン列を差分適用で復元する。True なら restored += 1。
+
+    置換範囲の契約: 成功 ≥ 1 件 → タブの bridge ペインは成功したペインちょうど
+    （prune_panes）。成功 0 件 → 既存タブは無変更。
+    """
+    name = entry.get("name")
+    adopted: list[tuple] = []
+    for pane in candidates:
+        try:
+            if not isinstance(pane, dict):
+                raise ValueError(f"pane is not an object: {pane!r}")
+            slot = pane.get("slot")
+            if not isinstance(slot, str) or not slot.strip():
+                raise ValueError(f"bad slot: {slot!r}")
+            steps = parse_slot(slot)
+            if not steps:
+                raise ValueError(f"bad slot: {slot!r}")
+            kind = pane.get("kind")
+            if kind not in ("figure", "image"):
+                raise ValueError(f"bad kind: {kind!r}")
+            path = pane.get("path")
+            if not isinstance(path, str) or not path:
+                raise ValueError(f"bad path: {path!r}")
+            abs_path = _abs_under(path, work_dir)
+            if not abs_path.is_file():
+                raise FileNotFoundError(str(abs_path))
+            if any(conflicts(steps, a[4]) for a in adopted):
+                raise ValueError(f"slot {slot!r} conflicts with an earlier pane")
+            adopted.append((slot, kind, abs_path, pane.get("reuse_key"), steps))
+        except Exception:
+            _log.warning(
+                "open_dataset: skipping pane %r (tab %r)", pane, name, exc_info=True
+            )
+    if not adopted:
+        return False
+    ok: set[str] = set()
+    claimed: set[str] = set()
+    for slot, kind, abs_path, reuse_key, steps in adopted:
+        try:
+            if t0 is None:
+                window.dispatch_command(
+                    "show" if kind == "figure" else "show-image",
+                    path=str(abs_path), name=name, slot=slot, dataset=dataset,
+                )
+            else:
+                from llm_bridge import _place_viewer
+                key, _w = _place_viewer(
+                    t0, slot, kind, abs_path,
+                    reuse_key=reuse_key, claimed=frozenset(claimed),
+                )
+                claimed.add(key)
+            ok.add(format_slot(steps))
+        except Exception:
+            _log.warning(
+                "open_dataset: failed to restore pane %r (tab %r)", slot, name,
+                exc_info=True,
+            )
+    if not ok:
+        return False
+    t = _find_ds_tab(window, name, dataset)
+    if t is not None:
+        if hasattr(t, "prune_panes"):
+            t.prune_panes(ok)
+        layout = entry.get("layout")
+        if isinstance(layout, dict) and hasattr(t, "apply_layout"):
+            t.apply_layout({
+                k: v for k, v in layout.items()
+                if k not in ("left_hidden", "right_hidden")
+            })
+        if hasattr(t, "tidy"):
+            t.tidy()
+    return True
 
 
 def _resolve_work_dir_readonly(dataset: str) -> Path:
@@ -524,6 +743,45 @@ def open_dataset(window, dataset: str) -> str:
                     fig2_shown = False
                     img2_shown = False
                     kind = entry.get("kind")
+                    if kind in ("figure", "image"):
+                        name = entry.get("name")
+                        t0 = _find_ds_tab(window, name, dataset)
+                        if t0 is not None:
+                            from llm_bridge import _is_viewer_host
+                            if not _is_viewer_host(t0):
+                                # 同名の解析タブを潰さない。
+                                _log.warning(
+                                    "open_dataset: tab %r exists but is not a "
+                                    "viewer tab; skipped", name,
+                                )
+                                continue
+                        panes = entry.get("panes")
+                        cands = None
+                        if isinstance(panes, list):
+                            # reuse_key は _legacy_panes 由来のときだけ有効（session.json
+                            # に書かれていても無視する）。
+                            cands = [
+                                {k: v for k, v in pn.items() if k != "reuse_key"}
+                                if isinstance(pn, dict) else pn
+                                for pn in panes
+                            ]
+                        elif t0 is not None and (
+                            entry.get("layout")
+                            or entry.get("figure2" if kind == "figure" else "image2")
+                        ):
+                            cands = _legacy_panes(entry, work_dir)
+                            if cands is None:
+                                _log.warning(
+                                    "open_dataset: missing %s for tab %r",
+                                    kind, name,
+                                )
+                                continue
+                        if cands is not None:
+                            if _restore_panes(
+                                window, entry, cands, work_dir, dataset, t0
+                            ):
+                                restored += 1
+                            continue
                     if kind == "figure":
                         fig = entry.get("figure")
                         fp = Path(fig)
@@ -629,8 +887,8 @@ def open_dataset(window, dataset: str) -> str:
                         if layout and t is not None and hasattr(t, "apply_layout"):
                             if kind == "figure" and not fig2_shown:
                                 # 2枚目を出せなかった図タブ（figure2 欠落 null／ファイル
-                                # 欠損の双方）は右ペイン（=図タブでは figure-2 専用。
-                                # _SLOT_MAP は向きに依らず figure-2→right）を必ず畳む。
+                                # 欠損の双方）は右ペイン（slot=right/bottom の 2 枚目は
+                                # 向きに依らず root 第 2 子）を必ず畳む。
                                 # これが無いと「両可視 layout + figure2 なし」の desync
                                 # session がそのまま空の分割ペインで復元される（観測症状）。
                                 # primary 欠損が continue でエントリ全体を捨てるのと対称に、

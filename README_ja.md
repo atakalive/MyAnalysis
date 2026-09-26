@@ -323,7 +323,7 @@ python -m llm_bridge <verb> ...
 | `active` | アクティブタブ・アクティブデータセット・`open_datasets` |
 | `state [name]` | 解析の `state.json`（省略時はアクティブタブ） |
 | `window <verb> [k=v] [--wait]` | ウィンドウ操作（`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload` 等） |
-| `tab <target> <verb> [k=v]` | タブ操作（`set-split` / `snapshot` / `refresh-state` 等） |
+| `tab <target> <verb> [k=v]` | タブ操作（`set-split [slot=]` / `close-pane slot=` / `list-panes` / `snapshot` / `refresh-state` 等）。viewer タブは `show`/`show-image slot=<パス>` で入れ子分割（例: 2×2 は `top/left` 等） |
 | `annotate` / `clear-annotations` | 注釈（marker / note）の追加・削除 |
 | `meeting-start [lan=true]` / `meeting-lan-link` | ミーティング共有を開始 / LAN リンクを取得（「ミーティング共有（ホスト側セットアップ）」参照） |
 

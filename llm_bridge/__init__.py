@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 import dataset_config
 from common.paths import safe_resolve, bak_path, backup_text_if_changed
+from common.slots import parse_slot
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
@@ -326,24 +327,188 @@ def _sync_new_tab_state(tab, mod, dataset, name: str, captured_state: dict) -> b
     return True
 
 
-# slot → (panel key, container position, split orientation or None).
-# None (no slot) = primary pane, single full-width pane (no split axis).
-_SLOT_MAP = {
-    None: ("figure", "left", None),
-    "left": ("figure", "left", "horizontal"),
-    "top": ("figure", "left", "vertical"),
-    "right": ("figure-2", "right", "horizontal"),
-    "bottom": ("figure-2", "right", "vertical"),
-}
+def _is_viewer_host(tab) -> bool:
+    """bridge が作った viewer タブ（図/画像どちらの verb も受ける）か。"""
+    if getattr(tab, "viewer_host", False):
+        return True
+    return (getattr(tab, "session_spec", None) or {}).get("kind") in ("figure", "image")
 
-# show-image 版: slot=None は単一 primary（viewer, panel= で左右指定可）、
-# slot=right/bottom で 2枚目 viewer-2 を反対ペインへ並置し水平/垂直分割。
-# _SLOT_MAP（図）と違い left/top は無い（画像 primary の側は panel= で指定）。
-_IMG_SLOT_MAP = {
-    None: ("viewer", "left", None),
-    "right": ("viewer-2", "right", "horizontal"),
-    "bottom": ("viewer-2", "right", "vertical"),
-}
+
+def _alloc_key(tab, base: str, steps) -> str:
+    """パネル key を割り当てる（base = "figure" / "viewer"。key は位置を表さない）。"""
+    cand = base if (not steps or steps[0][1] == 0) else f"{base}-2"
+    if cand not in tab._panels:
+        return cand
+    n = 2
+    while f"{base}-{n}" in tab._panels:
+        n += 1
+    return f"{base}-{n}"
+
+
+def _new_viewer_panel(kind: str, path):
+    """FigurePanel / ImageViewerPanel を生成して読み込む（タブには未接触）。
+
+    読み込みが raise したら生成物を deleteLater して re-raise する。
+    """
+    if kind == "figure":
+        from gui.panels import FigurePanel  # 関数内 import（CLI に PySide6 を引き込まない）
+        w = FigurePanel()
+        load = w.set_path
+    else:
+        from gui.imageviewer import ImageViewerPanel
+        w = ImageViewerPanel()
+        load = w.set_image
+    try:
+        load(path)
+    except Exception:
+        w.deleteLater()
+        raise
+    return w
+
+
+def _load_into(panel, kind: str, path) -> None:
+    if kind == "figure":
+        panel.set_path(path)
+    else:
+        panel.set_image(path)
+
+
+def _leaf_holding(tab, slot: str, panel) -> bool:
+    """panel が slot の葉に居るか（厳密照合。向き不一致＝居ない）。"""
+    try:
+        leaf = tab.node_at(slot)
+    except ValueError:
+        return False
+    hit = tab.bridge_panel_in(leaf)
+    return hit is not None and hit[1] is panel
+
+
+def _place_viewer(
+    tab,
+    slot: str,
+    kind: str,
+    path,
+    *,
+    reuse_key: str | None = None,
+    claimed: frozenset[str] = frozenset(),
+):
+    """slot（非空）に図/画像を置く（ホストタブ専用）。戻り値は (key, widget)。
+
+    所有権の事前検査と読み込みが先で、失敗時はタブ・パネル内容・path とも
+    無変更。reuse_key/claimed は session 復元専用（公開 verb には出さない）。
+    """
+    tab.ensure_pane(slot, dry_run=True)
+    bp = getattr(tab, "_bridge_panes", {})   # Tier 1 hot reload 前からの旧タブ
+    if (
+        reuse_key is not None
+        and reuse_key in bp
+        and bp[reuse_key].get("kind") == kind
+        and reuse_key not in claimed
+    ):
+        panel = tab.panel(reuse_key)
+        if _leaf_holding(tab, slot, panel):
+            _load_into(panel, kind, path)
+            bp[reuse_key]["path"] = str(path)
+            tab.ensure_pane(slot)
+            tab.tidy()
+            return reuse_key, panel
+        _load_into(panel, kind, path)
+        tab.relocate_bridge_panel(reuse_key, slot)
+        bp[reuse_key]["path"] = str(path)
+        tab.tidy()
+        return reuse_key, panel
+    # in-place: 厳密パスの葉に同 kind の bridge パネル。
+    try:
+        leaf = tab.node_at(slot)
+    except ValueError:
+        leaf = None
+    hit = tab.bridge_panel_in(leaf) if leaf is not None else None
+    if hit is not None and bp[hit[0]].get("kind") == kind:
+        key, panel = hit
+        _load_into(panel, kind, path)
+        bp[key]["path"] = str(path)
+        tab.ensure_pane(slot)
+        tab.tidy()
+        return key, panel
+    w = _new_viewer_panel(kind, path)
+    try:
+        leaf = tab.ensure_pane(slot)
+    except Exception:
+        w.deleteLater()
+        raise
+    old = tab.bridge_panel_in(leaf)
+    if old is not None:
+        tab.remove_panel(old[0])
+    key = _alloc_key(tab, "figure" if kind == "figure" else "viewer", parse_slot(slot))
+    tab.add_bridge_panel(key, w, leaf, kind, str(path))
+    tab.tidy()
+    if kind == "image":
+        from gui.imageviewer import _register_viewer_verbs
+        _register_viewer_verbs(tab, w, only_missing=True)
+    return key, w
+
+
+def _register_layout_verbs(tab, on_change: Callable[[], None] | None) -> None:
+    """set-split / close-pane / list-panes をタブへ登録（viewer・解析タブ共通）。"""
+
+    def _pick(a, b, na: str, nb: str):
+        if (a is None) == (b is None):
+            raise ValueError(f"give exactly one of {na}= / {nb}=")
+        return a if a is not None else b
+
+    def _set_split(left=None, right=None, top=None, bottom=None, slot=None):
+        first = _pick(left, top, "left", "top")
+        second = _pick(right, bottom, "right", "bottom")
+        tab.set_split_ratio(float(first), float(second), slot=slot)
+        if on_change is not None:
+            on_change()   # 成功後のみ（set_split_ratio は ValueError を投げ得る）
+
+    def _close_pane(slot):
+        tab.close_pane(slot)
+        if on_change is not None:
+            on_change()
+        return f"closed:{slot}"
+
+    tab.register_command("set-split", _set_split)
+    tab.register_command("close-pane", _close_pane)
+    tab.register_command("list-panes", lambda: tab.panels_by_slot())
+
+
+def _viewer_spec(kind: str, name: str, dataset, p) -> dict | None:
+    """dataset（明示 or 推定）が解決すれば session_spec を返す（note_dataset 込み）。"""
+    ds = str(dataset) if dataset is not None else session.infer_dataset(str(p))
+    if ds is None:
+        return None
+    session.note_dataset(ds)
+    return {"kind": kind, "name": name, "dataset": ds, kind: str(p)}
+
+
+def _finish_existing(window, tab, name: str) -> str:
+    # Activate now — spec is final, so this focus surfaces the right dataset
+    # group + chat. Pass the resolved dataset so a same-named tab in another
+    # dataset is never focused instead.
+    _set_active_tab(
+        window, name,
+        dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+    )
+    # Backstop when the tab was already current (no currentChanged fired).
+    getattr(window, "notify_chat_dataset", lambda: None)()
+    return f"updated:{name}"
+
+
+def _finish_new(window, tab, name: str, spec: dict | None) -> str:
+    _register_layout_verbs(tab, window.mark_session_dirty)
+    tab.register_command("snapshot", lambda: None)
+    # Assign session_spec BEFORE add_tab so the currentChanged that
+    # add_tab/set_active_tab fires sees the final spec.
+    if spec is not None:
+        tab.session_spec = spec
+    window.add_tab(tab)
+    _set_active_tab(
+        window, name,
+        dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
+    )
+    return f"shown:{name}"
 
 
 def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
@@ -353,16 +518,16 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
     no analysis module required. The intended flow: Claude saves a figure
     via `common.explore.save_fig` (→ absolute path) then `show`s that path.
 
-    Default (no `slot`) = single full-width pane. Passing
-    `slot=left|right|top|bottom` places a second figure in the opposite pane and
-    splits horizontally (left/right) or vertically (top/bottom). Re-showing
-    without `slot` collapses any existing split back to a single full-width pane.
+    Default (no `slot`) = single full-width pane (collapses every bridge pane).
+    `slot` is a split path (`left|right|top|bottom` joined by `/`, e.g.
+    `top/left`); placing re-orients that level to the written side, splits an
+    occupied pane (the old content goes to the opposite side) and re-showing the
+    same slot updates in place. See common/slots.py for the grammar.
 
-    Existing-tab handling is structure-based, not provenance-based: a tab is
-    treated as a show-viewer if it has a `FigurePanel` under key "figure" or
-    "figure-2". Any such tab (even a normal analysis tab) is updated in place; a
-    tab with neither key (or a non-FigurePanel under them) raises LookupError
-    rather than being silently destroyed.
+    Viewer host tabs (created by show/show-image) accept both figures and raw
+    images. A non-host tab holding a `FigurePanel` under "figure" is updated in
+    place for a slot-less show only; anything else raises LookupError rather
+    than being silently destroyed.
     """
 
     def _show(
@@ -374,9 +539,7 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         p = safe_resolve(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
-        if slot not in _SLOT_MAP:
-            raise ValueError(f"invalid slot: {slot!r}")
-        panel_key, container_position, orientation = _SLOT_MAP[slot]
+        steps = parse_slot(slot)
         from gui.panels import (
             FigurePanel,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
@@ -390,116 +553,63 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         existing = _find_in_dataset(window, name, dataset)
         if existing is not None:
             tab = existing
-            is_viewer = any(
-                isinstance(tab._panels.get(k), FigurePanel)
-                for k in ("figure", "figure-2")
-            )
-            if not is_viewer:
-                raise LookupError(
-                    f"tab {name!r} exists but is not a show-viewer tab"
-                )
-            pane_restored = False
-            new_panel_added = False
-            if panel_key in tab._panels:
-                fig = tab.panel(panel_key)
-                if not isinstance(fig, FigurePanel):
+            if not _is_viewer_host(tab):
+                fig = tab._panels.get("figure")
+                if steps or not isinstance(fig, FigurePanel):
                     raise LookupError(
                         f"tab {name!r} exists but is not a show-viewer tab"
                     )
-                fig.set_path(p)
-                if orientation is not None:
-                    container = (
-                        tab._left_container
-                        if container_position == "left"
-                        else tab._right_container
-                    )
-                    if container.isHidden():
-                        tab.set_pane_visible(container_position, True)
-                        pane_restored = True
+                fig.set_path(p)   # 手組みタブ: in-place 更新のみ（レイアウト・spec は触らない）
+                return _finish_existing(window, tab, name)
+            if steps:
+                _place_viewer(tab, slot, "figure", p)
             else:
-                panel = FigurePanel()
-                tab.add_panel(panel_key, panel, container_position, stretch=1)
-                panel.set_path(p)
-                tab.set_pane_visible(container_position, True)
-                new_panel_added = True
-            if orientation is not None:
-                tab.set_split_orientation(orientation)
-            both_visible = (
-                not tab._left_container.isHidden()
-                and not tab._right_container.isHidden()
-            )
-            if orientation is not None and both_visible and (
-                new_panel_added or pane_restored
-            ):
-                tab.set_split_ratio(1, 1)
-            if orientation is None:
-                tab.set_pane_visible("right", False)
-            # session_spec is only touched for the primary pane ("figure").
-            # figure-2 (slot=right/bottom) must NOT overwrite the primary spec.
-            if panel_key == "figure":
-                if dataset is not None:
-                    ds = str(dataset)
-                    tab.session_spec = {"kind": "figure", "name": name, "dataset": ds, "figure": str(p)}
-                    session.note_dataset(ds)
-                    window.mark_session_dirty()
+                tab.check_bridge_only()
+                first = tab.root_pane(0)
+                hit = tab.bridge_panel_in(first)
+                if hit is not None and tab._bridge_panes[hit[0]].get("kind") == "figure":
+                    key, panel = hit
+                    panel.set_path(p)
+                    tab._bridge_panes[key]["path"] = str(p)
+                    for k in list(tab._bridge_panes):
+                        if k != key:
+                            tab.remove_panel(k)
+                    tab.set_pane_visible("left", True)
+                    tab.tidy()
                 else:
-                    inferred = session.infer_dataset(str(p))
-                    if inferred is not None:
-                        tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
-                        session.note_dataset(inferred)
-                        window.mark_session_dirty()
-            elif (getattr(tab, "session_spec", None) or {}).get("dataset"):
-                # figure-2（slot=right/bottom）追加/更新は session_spec を触らないが、
-                # 分割の合成/幾何は保存時にライブタブから導出される（figure2 パス +
-                # capture_layout）。上の figure 分岐だけでは復元/保存後に足した分割が
-                # dirty にならず closeEvent で保存されない。永続化可能な viewer なら dirty。
+                    w = _new_viewer_panel("figure", p)
+                    tab.clear_panes()
+                    tab.add_bridge_panel("figure", w, tab.root_pane(0), "figure", str(p))
+                    tab.set_pane_visible("left", True)
+                    tab.tidy()
+                spec = _viewer_spec("figure", name, dataset, p)
+                if spec is not None:
+                    tab.session_spec = spec
+            if (getattr(tab, "session_spec", None) or {}).get("dataset"):
+                # 配置/更新は保存時にライブタブから導出される（pane_contents +
+                # capture_layout）ので、永続化可能な viewer なら毎回 dirty。
                 window.mark_session_dirty()
-            # Activate now — spec is final, so this focus surfaces the right
-            # dataset group + chat. Pass the resolved dataset so a same-named tab
-            # in another dataset is never focused instead.
-            _set_active_tab(
-                window, name,
-                dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
-            )
-            # Backstop when the tab was already current (no currentChanged fired).
-            getattr(window, "notify_chat_dataset", lambda: None)()
-            return f"updated:{name}"
+            return _finish_existing(window, tab, name)
         from gui.tab import (
             AnalysisTab,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
         tab = AnalysisTab(name)
+        tab.viewer_host = True
         tab.set_pane_visible("left", False)
         tab.set_pane_visible("right", False)
-        panel = FigurePanel()
-        tab.add_panel(panel_key, panel, container_position, stretch=1)
-        tab.set_pane_visible(container_position, True)
-        if orientation is not None:
-            tab.set_split_orientation(orientation)
-        def _set_split(left, right):
-            tab.set_split_ratio(float(left), float(right))
-            window.mark_session_dirty()   # 成功後のみ（set_split_ratio は ValueError を投げ得る）
-        tab.register_command("set-split", _set_split)
-        tab.register_command("snapshot", lambda: None)
-        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
-        # that add_tab/set_active_tab fires sees the final spec.
-        if panel_key == "figure":
-            if dataset is not None:
-                ds = str(dataset)
-                tab.session_spec = {"kind": "figure", "name": name, "dataset": ds, "figure": str(p)}
-                session.note_dataset(ds)
+        try:
+            if steps:
+                _place_viewer(tab, slot, "figure", p)
             else:
-                inferred = session.infer_dataset(str(p))
-                if inferred is not None:
-                    tab.session_spec = {"kind": "figure", "name": name, "dataset": inferred, "figure": str(p)}
-                    session.note_dataset(inferred)
-        window.add_tab(tab)
-        _set_active_tab(
-            window, name,
-            dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
-        )
-        panel.set_path(p)
-        return f"shown:{name}"
+                w = _new_viewer_panel("figure", p)
+                tab.add_bridge_panel("figure", w, tab.root_pane(0), "figure", str(p))
+                tab.set_pane_visible("left", True)
+                tab.tidy()
+        except Exception:
+            tab.deleteLater()
+            raise
+        return _finish_new(window, tab, name, _viewer_spec("figure", name, dataset, p))
 
     return _show
 
@@ -509,13 +619,14 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
 
     Opens a raw/source image (TIFF/16bit/stack/multi-channel) in an interactive
     ImageViewerPanel tab — the ImageJ-style onramp (Issue #60). Mirrors
-    `_make_show_handler` (see its docstring) but targets ImageViewerPanel under
-    key "viewer"; the primary pane defaults to "left".
+    `_make_show_handler` (see its docstring; same `slot` path grammar, and figures
+    and raw images may be mixed per pane in a viewer host tab). Without `slot`,
+    the first bridge image pane (tree order) is updated in place keeping the
+    split; with none, the tab collapses to a single pane. A new tab puts the
+    image on the `panel=left|right` side.
 
-    Existing-tab handling is structure-based: a tab is a viewer iff it holds an
-    ImageViewerPanel under key "viewer". A name collision with a non-viewer tab
-    raises LookupError rather than clobbering it (static `show`/FigurePanel path
-    is preserved without regression).
+    A name collision with a non-host tab raises LookupError unless it holds an
+    ImageViewerPanel under key "viewer" (then a slot-less in-place update only).
     """
 
     def _show_image(
@@ -527,101 +638,72 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
     ) -> str:
         if panel not in ("left", "right"):
             raise ValueError(f"panel must be 'left' or 'right', got {panel!r}")
-        if slot not in _IMG_SLOT_MAP:
-            raise ValueError(f"invalid slot: {slot!r} (use right/bottom to split)")
-        panel_key, _container_position, orientation = _IMG_SLOT_MAP[slot]
-        # slot 指定時は 2枚目(viewer-2)が対象・primary は左固定・panel は無視（決定的）。
-        primary_side = "left" if slot is not None else panel
+        steps = parse_slot(slot)
         p = safe_resolve(path)
         if not p.is_file():
             raise LookupError(f"not a file: {path}")
         from gui.imageviewer import (
             ImageViewerPanel,
-            attach_image_viewer,
+            _register_viewer_verbs,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
         existing = _find_in_dataset(window, name, dataset)
         if existing is not None:
             tab = existing
-            if not isinstance(tab._panels.get("viewer"), ImageViewerPanel):
-                raise LookupError(
-                    f"tab {name!r} is not an image-viewer tab"
-                )
-            if panel_key == "viewer":
-                tab.panel("viewer").set_image(p)
-                # session_spec / note_dataset / dirty only when a dataset resolves.
-                if dataset is not None:
-                    ds = str(dataset)
-                    tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
-                    session.note_dataset(ds)
-                    window.mark_session_dirty()
-                else:
-                    inferred = session.infer_dataset(str(p))
-                    if inferred is not None:
-                        tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
-                        session.note_dataset(inferred)
-                        window.mark_session_dirty()
+            if not _is_viewer_host(tab):
+                v = tab._panels.get("viewer")
+                if steps or not isinstance(v, ImageViewerPanel):
+                    raise LookupError(
+                        f"tab {name!r} is not an image-viewer tab"
+                    )
+                v.set_image(p)   # 手組みタブ: in-place 更新のみ（spec は触らない）
+                return _finish_existing(window, tab, name)
+            if steps:
+                _place_viewer(tab, slot, "image", p)
             else:
-                # 2枚目(viewer-2)を並置。primary の session_spec は触らない（figure-2 と
-                # 対称）。attach_image_viewer は使わない: _register_viewer_verbs が
-                # set-lut 等をタブ単位で再登録し 1枚目の verb ルーティングを clobber する。
-                new_v2 = not isinstance(tab._panels.get("viewer-2"), ImageViewerPanel)
-                if new_v2:
-                    p2 = ImageViewerPanel()
-                    tab.add_panel("viewer-2", p2, "right", stretch=1)
-                    p2.set_image(p)
+                imgs = tab.bridge_panels("image")
+                if imgs:
+                    s0, key, v = imgs[0]
+                    tab.check_bridge_only(s0)
+                    v.set_image(p)
+                    tab._bridge_panes[key]["path"] = str(p)
                 else:
-                    tab.panel("viewer-2").set_image(p)
-                tab.set_split_orientation(orientation)
-                tab.set_pane_visible("right", True)
-                if new_v2 and (
-                    not tab._left_container.isHidden()
-                    and not tab._right_container.isHidden()
-                ):
-                    tab.set_split_ratio(1, 1)
-                if (getattr(tab, "session_spec", None) or {}).get("dataset"):
-                    window.mark_session_dirty()
-            _set_active_tab(
-                window, name,
-                dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
-            )
-            getattr(window, "notify_chat_dataset", lambda: None)()
-            return f"updated:{name}"
+                    tab.check_bridge_only()
+                    w = _new_viewer_panel("image", p)
+                    tab.clear_panes()
+                    tab.add_bridge_panel("viewer", w, tab.root_pane(0), "image", str(p))
+                    tab.set_pane_visible("left", True)
+                    tab.tidy()
+                    _register_viewer_verbs(tab, w, only_missing=True)
+                spec = _viewer_spec("image", name, dataset, p)
+                if spec is not None:
+                    tab.session_spec = spec
+            if (getattr(tab, "session_spec", None) or {}).get("dataset"):
+                window.mark_session_dirty()
+            return _finish_existing(window, tab, name)
 
         from gui.tab import (
             AnalysisTab,
         )  # 関数内 import（CLI に PySide6 を引き込まない）
 
         tab = AnalysisTab(name)
+        tab.viewer_host = True
         tab.set_pane_visible("left", False)
         tab.set_pane_visible("right", False)
-        # 新規タブは primary のみ（primary 無しに 2枚目は作れない）。slot 指定時は
-        # primary_side=left。まず primary を show してから slot で 2枚目を並置する。
-        attach_image_viewer(tab, p, panel=primary_side)
-        tab.set_pane_visible(primary_side, True)
-        def _set_split(left, right):
-            tab.set_split_ratio(float(left), float(right))
-            window.mark_session_dirty()   # 成功後のみ（set_split_ratio は ValueError を投げ得る）
-        tab.register_command("set-split", _set_split)
-        tab.register_command("snapshot", lambda: None)
-        # Assign session_spec/note_dataset BEFORE add_tab so the currentChanged
-        # that add_tab/set_active_tab fires sees the final spec. ds None → no
-        # session_spec (volatile tab), same as `show`.
-        if dataset is not None:
-            ds = str(dataset)
-            tab.session_spec = {"kind": "image", "name": name, "dataset": ds, "image": str(p)}
-            session.note_dataset(ds)
-        else:
-            inferred = session.infer_dataset(str(p))
-            if inferred is not None:
-                tab.session_spec = {"kind": "image", "name": name, "dataset": inferred, "image": str(p)}
-                session.note_dataset(inferred)
-        window.add_tab(tab)
-        _set_active_tab(
-            window, name,
-            dataset=(getattr(tab, "session_spec", None) or {}).get("dataset"),
-        )
-        return f"shown:{name}"
+        try:
+            if steps:
+                _place_viewer(tab, slot, "image", p)
+            else:
+                w = _new_viewer_panel("image", p)
+                leaf = tab.ensure_pane(panel)
+                tab.add_bridge_panel("viewer", w, leaf, "image", str(p))
+                tab.tidy()
+                _register_viewer_verbs(tab, w, only_missing=True)
+        except Exception:
+            tab.deleteLater()
+            raise
+        # ds None → no session_spec (volatile tab), same as `show`.
+        return _finish_new(window, tab, name, _viewer_spec("image", name, dataset, p))
 
     return _show_image
 
@@ -792,9 +874,7 @@ def attach_tab(tab, state_provider: Callable[[], dict]) -> list[object]:
         # 永続化対象が無いので no-op で配線し、watcher は張らない。
         tab.dataset = None
         tab.connect_snapshot_writer(lambda _tab: None)
-        tab.register_command(
-            "set-split", lambda left, right: tab.set_split_ratio(float(left), float(right))
-        )
+        _register_layout_verbs(tab, None)
         tab.register_command("snapshot", lambda: tab.take_snapshot())  # no-op writer
         tab.register_command("refresh-state", lambda: None)
         return []
@@ -810,9 +890,7 @@ def attach_tab(tab, state_provider: Callable[[], dict]) -> list[object]:
     # If gui starts consuming `_state_provider` later, revisit this.
 
     # Built-in tab verbs
-    tab.register_command(
-        "set-split", lambda left, right: tab.set_split_ratio(float(left), float(right))
-    )
+    _register_layout_verbs(tab, None)
     tab.register_command("snapshot", lambda: tab.take_snapshot())
     tab.register_command("refresh-state", lambda: state_w(state_provider()))
 

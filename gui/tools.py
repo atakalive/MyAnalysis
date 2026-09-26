@@ -13,6 +13,23 @@ _DATASET_PROP = {
     "more than one open dataset. Omit to use the active dataset.",
 }
 
+# Pane slot path grammar shared by show / show_image (Issue #97).
+_SLOT_DOC = (
+    "slot is a '/'-separated path of sides — left|right split that level "
+    "horizontally, top|bottom vertically (max 6 levels). Placing re-orients that "
+    "level to the side you write; an occupied pane on the way is split (its content "
+    "moves to the opposite side); re-showing the same slot updates in place. "
+    "2x2 grid: slot=top/left, top/right, bottom/left, bottom/right (any order). "
+    "Figures (show) and raw images (show_image) can be mixed per pane in one tab. "
+    "Re-orienting renames other panes' slots — check with list_panes."
+)
+
+# Optional `slot` targeting one image pane for the image-viewer verbs.
+_IMG_SLOT_PROP = {
+    "type": "string",
+    "description": "Image pane path (e.g. bottom/right). Omit for the first image pane.",
+}
+
 TOOLS = [
     {
         "type": "function",
@@ -123,8 +140,7 @@ TOOLS = [
             "ImageJ-style interactive viewing, use show_image instead. "
             "Default (no slot) is full-width single pane; re-showing without slot "
             "collapses any existing split back to single pane. "
-            "Use slot to place a second image alongside "
-            "(left/right for horizontal, top/bottom for vertical split).",
+            "Use slot to place images side by side: " + _SLOT_DOC,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -132,8 +148,8 @@ TOOLS = [
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "slot": {
                         "type": "string",
-                        "enum": ["left", "right", "top", "bottom"],
-                        "description": "Pane position. Omit for default (primary/full-width).",
+                        "description": "Pane path (e.g. right, top/left). Omit for "
+                        "default (single full-width pane).",
                     },
                     "dataset": _DATASET_PROP,
                 },
@@ -149,16 +165,55 @@ TOOLS = [
             "(including viewer tabs). "
             "Values are relative weights (e.g. left=3, right=7 gives "
             "30%/70%). The ratio left:(left+right) determines the split. "
-            "Both must be positive.",
+            "Both must be positive. `left` is the 1st child (top of a vertical "
+            "split), `right` the 2nd. `slot` targets a nested split region "
+            "(e.g. top); omit for the outermost split.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
                     "left": {"type": "number"},
                     "right": {"type": "number"},
+                    "slot": {"type": "string", "description": "Split region path; omit for the outermost split."},
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "left", "right"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_pane",
+            "description": "Close one pane (or a split region) of a viewer tab by "
+            "slot path. Other panes keep their slots; the closed side becomes empty "
+            "and hidden. Closing the last visible pane is refused (use close_tab).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "slot": {"type": "string", "description": "Pane path, e.g. bottom/right"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name", "slot"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_panes",
+            "description": "List the visible panes of a tab in tree order as "
+            "[{slot, key, kind, path}]. Use it to check current slots (they change "
+            "when a placement re-orients a split). `key` is an identifier only — "
+            "it does not encode the position; always address panes by slot.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "dataset": _DATASET_PROP,
+                },
+                "required": ["name"],
             },
         },
     },
@@ -171,10 +226,10 @@ TOOLS = [
             "LUT / composite). Use this ONLY when the user explicitly asks to view "
             "a raw image / TIFF, or says 'open in ImageJ'. Do NOT open one on your "
             "own initiative. For a generated result figure (PNG) use `show`. "
-            "Use slot=right|bottom to place a SECOND image alongside "
-            "(right=horizontal, bottom=vertical split); slot targets the 2nd pane "
-            "and panel is ignored when slot is set. The 2nd image is view-only for "
-            "LUT/range verbs (those address the 1st pane).",
+            "Without slot, updates the first image pane in place (keeping any "
+            "split). Use slot to place images side by side: " + _SLOT_DOC + " "
+            "panel is ignored when slot is set. LUT/range verbs take the same "
+            "slot to address a specific image pane (default: the first one).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -187,8 +242,8 @@ TOOLS = [
                     },
                     "slot": {
                         "type": "string",
-                        "enum": ["right", "bottom"],
-                        "description": "Place a 2nd image alongside: right=horizontal, bottom=vertical split.",
+                        "description": "Pane path (e.g. right, bottom/left). Omit to "
+                        "update the first image pane.",
                     },
                     "dataset": _DATASET_PROP,
                 },
@@ -211,6 +266,7 @@ TOOLS = [
                     "lut": {"type": "string"},
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
                     "invert": {"type": "boolean"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "lut"],
@@ -230,6 +286,7 @@ TOOLS = [
                     "min": {"type": "number"},
                     "max": {"type": "number"},
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "min", "max"],
@@ -247,6 +304,7 @@ TOOLS = [
                 "properties": {
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "mode": {"type": "string", "enum": ["single", "composite"]},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "mode"],
@@ -263,6 +321,7 @@ TOOLS = [
                 "properties": {
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "index": {"type": "integer", "description": "0-based channel index"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "index"],
@@ -281,6 +340,7 @@ TOOLS = [
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "channel": {"type": "integer", "description": "0-based channel index"},
                     "visible": {"type": "boolean"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "channel", "visible"],
@@ -297,6 +357,7 @@ TOOLS = [
                 "properties": {
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "index": {"type": "integer", "description": "0-based Z index"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "index"],
@@ -313,6 +374,7 @@ TOOLS = [
                 "properties": {
                     "name": {"type": "string", "description": "Tab name (default: viewer)"},
                     "index": {"type": "integer", "description": "0-based T index"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name", "index"],
@@ -332,6 +394,7 @@ TOOLS = [
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
                     "low": {"type": "number"},
                     "high": {"type": "number"},
+                    "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
                 },
                 "required": ["name"],
@@ -460,10 +523,19 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         )
     if name == "set_split":
         targs = {"left": args["left"], "right": args["right"]}
+        if "slot" in args:
+            targs["slot"] = args["slot"]
         if "dataset" in args:
             targs["dataset"] = args["dataset"]
         return _via_bridge(
             "tab", args["name"], "set-split", targs, cancelled=cancelled
+        )
+    if name in ("close_pane", "list_panes"):
+        targs = {"slot": args["slot"]} if name == "close_pane" else {}
+        if "dataset" in args:
+            targs["dataset"] = args["dataset"]
+        return _via_bridge(
+            "tab", args["name"], name.replace("_", "-"), targs, cancelled=cancelled
         )
     if name == "get_state":
         tab_name = args["name"]

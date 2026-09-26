@@ -393,3 +393,73 @@ class TestViaBridgeCancel:
         )
         assert result["status"] == "ok"
         assert result["result"] == ["_demo"]
+
+
+# ---------------------------------------------------------------------------
+# Nested panel split tools (Issue #97)
+# ---------------------------------------------------------------------------
+
+
+class TestPaneTools:
+    def _record(self, monkeypatch):
+        calls = []
+
+        def fake(tier, target, verb, args, timeout=10.0, cancelled=None):
+            calls.append((tier, target, verb, dict(args)))
+            return json.dumps({"status": "ok"})
+
+        monkeypatch.setattr("gui.tools._via_bridge", fake)
+        return calls
+
+    def test_set_split_forwards_slot(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "set_split", {"name": "q", "left": 1, "right": 2, "slot": "top"})
+        assert calls == [("tab", "q", "set-split", {"left": 1, "right": 2, "slot": "top"})]
+
+    def test_set_split_without_slot_unchanged(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "set_split", {"name": "q", "left": 1, "right": 2})
+        assert calls == [("tab", "q", "set-split", {"left": 1, "right": 2})]
+
+    def test_close_pane_dispatch(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "close_pane", {"name": "q", "slot": "bottom/right", "dataset": "d"})
+        assert calls == [
+            ("tab", "q", "close-pane", {"slot": "bottom/right", "dataset": "d"})
+        ]
+
+    def test_list_panes_dispatch(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "list_panes", {"name": "q"})
+        assert calls == [("tab", "q", "list-panes", {})]
+
+    def test_image_verb_forwards_slot(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "set_lut", {"name": "q", "lut": "Fire", "slot": "bottom/right"})
+        assert calls == [
+            ("tab", "q", "set-lut", {"lut": "Fire", "slot": "bottom/right"})
+        ]
+
+    def test_schemas(self):
+        from gui.tools import TOOLS
+
+        by = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}
+        assert "slot" in by["set_split"]["properties"]
+        assert by["set_split"]["required"] == ["name", "left", "right"]
+        assert by["close_pane"]["required"] == ["name", "slot"]
+        assert by["list_panes"]["required"] == ["name"]
+        assert "enum" not in by["show"]["properties"]["slot"]
+        assert "enum" not in by["show_image"]["properties"]["slot"]
+        for t in ("set_lut", "set_range", "set_mode", "set_channel", "set_visible",
+                  "set_z", "set_t", "auto_contrast"):
+            assert "slot" in by[t]["properties"], t

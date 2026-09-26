@@ -236,10 +236,10 @@ class FigurePanel(QGraphicsView):
     def set_path(self, path: str | Path) -> None:
         """図をこのパネルへ読み込む。
 
-        副作用: 読込成否に関わらず self._path にソースパスを記録する。この _path は
-        session.json への figure2 永続で _spec_to_tab（llm_bridge/session.py）が
-        分割 2 枚目の図の元パスとして参照する（読込失敗でもパスは残るので次回保存で
-        欠落しない）。
+        副作用: 読込成否に関わらず self._path にソースパスを記録する（情報用）。
+        session 保存には使われない — session.json へは bridge が置いたペインの
+        path（AnalysisTab._bridge_panes。_spec_to_tab が pane_contents() で読む）が
+        書かれる。
         """
         self._path = Path(path)
         self._half = False  # 新規読込・再読込は通常（フィット）状態から

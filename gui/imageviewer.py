@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -197,7 +198,9 @@ class ImageViewerPanel(QWidget):
         # State attributes initialised before any signal wiring.
         self._arr: np.ndarray | None = None
         self._meta: ImageMeta | None = None
-        self._path: Path | None = None   # 元ファイルパス（session の image2 用。array 由来は None）
+        # 元ファイルパス（情報用。array 由来は None）。session 保存には使われない —
+        # 保存は bridge の AnalysisTab._bridge_panes の path を使う。
+        self._path: Path | None = None
         self._axes = ""
         self.nY = self.nX = 1
         self.nC = self.nZ = self.nT = 1
@@ -282,7 +285,7 @@ class ImageViewerPanel(QWidget):
         image; otherwise reinitialise all channels and clamp position.
         """
         arr, meta = self._resolve_image(image)
-        # 元パスを保持（session の image2 に使う。ndarray/(arr,meta) 由来は None）。
+        # 元パスを保持（情報用・session 保存には使われない。ndarray/(arr,meta) 由来は None）。
         self._path = Path(image) if isinstance(image, (str, Path)) else None
         # Same-identity reload keeps per-channel state only when shape, axes AND
         # colour kind match — a same-shape RGB <-> 3ch-fluorescence swap must
@@ -729,62 +732,107 @@ def attach_image_viewer(
     return p
 
 
-def _register_viewer_verbs(tab: AnalysisTab, panel: ImageViewerPanel) -> None:
+def _register_viewer_verbs(
+    tab: AnalysisTab, panel: ImageViewerPanel, *, only_missing: bool = False
+) -> None:
     """Register composite-aware viewer verbs on `tab`.
 
-    HARD RULE: never (re)register the `set-split`/`snapshot`/`refresh-state`
-    verbs that `attach_tab` wires — `tab.register_command` overwrites by key, so
-    doing so would clobber existing behaviour. The viewer verb key-set is
-    disjoint from those three, so call order relative to attach_tab is
-    irrelevant.
+    HARD RULE: never (re)register the `set-split`/`close-pane`/`list-panes`/
+    `snapshot`/`refresh-state` verbs that `attach_tab` / the bridge wire —
+    `tab.register_command` overwrites by key, so doing so would clobber existing
+    behaviour. The viewer verb key-set is disjoint from those, so call order
+    relative to attach_tab is irrelevant.
+
+    `only_missing=True` skips verbs the tab already has (the bridge uses it when
+    it places another image pane, so existing routing is not clobbered).
+
+    Every verb accepts an optional `slot=` (split path, strict match). The target
+    panel is resolved per call: the ImageViewerPanel in that slot's pane; else
+    (slot omitted) the first visible bridge image pane in tree order; else the
+    panel given here while it is still registered on the tab.
     """
 
-    def _set_lut(lut, channel=None, invert=False):
-        c = panel.resolve_channel(channel)
-        panel.set_channel_lut(c, str(lut), _as_bool(invert))
+    def _target(slot=None) -> ImageViewerPanel:
+        if slot is not None and str(slot).strip():
+            leaf = tab.node_at(slot)
+            if isinstance(leaf, QSplitter):
+                raise ValueError(f"slot {slot!r} is a split, not a pane")
+            lay = leaf.layout()
+            for i in range(lay.count() if lay is not None else 0):
+                w = lay.itemAt(i).widget()
+                if isinstance(w, ImageViewerPanel):
+                    return w
+            raise ValueError(f"no image viewer in pane {slot!r}")
+        finder = getattr(tab, "bridge_panels", None)
+        if callable(finder):
+            imgs = finder("image")
+            if imgs:
+                return imgs[0][2]
+        if any(v is panel for v in tab._panels.values()):
+            return panel
+        raise LookupError("no image viewer in this tab")
+
+    def _set_lut(lut, channel=None, invert=False, slot=None):
+        pn = _target(slot)
+        c = pn.resolve_channel(channel)
+        pn.set_channel_lut(c, str(lut), _as_bool(invert))
         return f"lut:{c}:{lut}"
 
-    def _set_range(min, max, channel=None):
-        c = panel.resolve_channel(channel)
-        panel.set_channel_range(c, float(min), float(max))
+    def _set_range(min, max, channel=None, slot=None):
+        pn = _target(slot)
+        c = pn.resolve_channel(channel)
+        pn.set_channel_range(c, float(min), float(max))
         return f"range:{c}"
 
-    def _auto_contrast(channel=None, low=_AUTO_LOW, high=_AUTO_HIGH):
-        c = panel.resolve_channel(channel)
-        panel.auto_contrast_channel(c, float(low), float(high))
+    def _auto_contrast(channel=None, low=_AUTO_LOW, high=_AUTO_HIGH, slot=None):
+        pn = _target(slot)
+        c = pn.resolve_channel(channel)
+        pn.auto_contrast_channel(c, float(low), float(high))
         return f"auto:{c}"
 
-    def _set_channel(index):
-        panel.set_active_channel(int(index))
-        return f"channel:{panel.active_channel}"
+    def _set_channel(index, slot=None):
+        pn = _target(slot)
+        pn.set_active_channel(int(index))
+        return f"channel:{pn.active_channel}"
 
-    def _set_mode(mode):
-        panel.set_mode(str(mode))
-        return f"mode:{panel.mode}"
+    def _set_mode(mode, slot=None):
+        pn = _target(slot)
+        pn.set_mode(str(mode))
+        return f"mode:{pn.mode}"
 
-    def _set_z(index):
-        panel.set_z(int(index))
-        return f"z:{panel.z_idx}"
+    def _set_z(index, slot=None):
+        pn = _target(slot)
+        pn.set_z(int(index))
+        return f"z:{pn.z_idx}"
 
-    def _set_t(index):
-        panel.set_t(int(index))
-        return f"t:{panel.t_idx}"
+    def _set_t(index, slot=None):
+        pn = _target(slot)
+        pn.set_t(int(index))
+        return f"t:{pn.t_idx}"
 
-    def _set_visible(channel, visible):
-        c = _clamp(channel, panel.nC)
-        panel.set_channel_visible(c, _as_bool(visible))
-        return f"visible:{c}:{panel.channels[c]['visible']}"
+    def _set_visible(channel, visible, slot=None):
+        pn = _target(slot)
+        c = _clamp(channel, pn.nC)
+        pn.set_channel_visible(c, _as_bool(visible))
+        return f"visible:{c}:{pn.channels[c]['visible']}"
 
-    def _load_image(path):
-        panel.set_image(path)
+    def _load_image(path, slot=None):
+        # 揮発: bridge の _bridge_panes（session に保存される path）は更新しない。
+        _target(slot).set_image(path)
         return f"loaded:{path}"
 
-    tab.register_command("set-lut", _set_lut)
-    tab.register_command("set-range", _set_range)
-    tab.register_command("auto-contrast", _auto_contrast)
-    tab.register_command("set-channel", _set_channel)
-    tab.register_command("set-mode", _set_mode)
-    tab.register_command("set-z", _set_z)
-    tab.register_command("set-t", _set_t)
-    tab.register_command("set-visible", _set_visible)
-    tab.register_command("load-image", _load_image)
+    verbs = {
+        "set-lut": _set_lut,
+        "set-range": _set_range,
+        "auto-contrast": _auto_contrast,
+        "set-channel": _set_channel,
+        "set-mode": _set_mode,
+        "set-z": _set_z,
+        "set-t": _set_t,
+        "set-visible": _set_visible,
+        "load-image": _load_image,
+    }
+    for verb, handler in verbs.items():
+        if only_missing and tab.has_command(verb):
+            continue
+        tab.register_command(verb, handler)

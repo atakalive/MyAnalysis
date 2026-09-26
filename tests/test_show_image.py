@@ -186,7 +186,7 @@ def test_show_image_split_adds_viewer2(win, tif_path, tif_path2):
 
 def test_show_image_split_preserves_primary_verbs(win, tif_path, tif_path2):
     """clobber 回帰: 2枚目追加後も set-channel 等の verb は 1枚目に効く
-    （viewer-2 は _register_viewer_verbs を通さないので verb を上書きしない）。"""
+    （viewer-2 配置時は only_missing=True で既存 verb を clobber しない）。"""
     win.dispatch_command("show-image", path=str(tif_path), name="v")     # nC=3
     win.dispatch_command("show-image", path=str(tif_path2), name="v", slot="right")  # nC=2
     tab = win.active_tab()
@@ -209,7 +209,7 @@ def test_show_image_panel_slot_conflict(win, tif_path, tif_path2):
 
 def test_show_image_invalid_slot(win, tif_path):
     with pytest.raises(ValueError, match="invalid slot"):
-        win.dispatch_command("show-image", path=str(tif_path), slot="left")
+        win.dispatch_command("show-image", path=str(tif_path), slot="center")
 
 
 def _img_split_env(monkeypatch, tmp_path):

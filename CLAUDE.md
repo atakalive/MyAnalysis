@@ -346,6 +346,13 @@ to discover registered dataset names.
 - `session.json` は durable 書込（`common/paths.py` の `durable_write_json` = primary + `.bak` の 2 コピー＋書込後 read-back 検証。同期マウントの 0 バイト truncate 対策）。検証失敗は `save_all` の failed に載り、Tier 3/4 リロード中止・「保存して終了」の close 拒否・close_dataset 中止という既存経路が発火する。読取は `.bak` フォールバック付きで、破損して回復不能なら `no-session` と区別して `unreadable-session:<ds>`（GUI が警告・破損ファイルは上書きしない）。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
 
+### 入れ子パネル分割（Issue #97）
+
+- `AnalysisTab`（[gui/tab.py](gui/tab.py)）の splitter 部は**分割木**: root `_splitter` は常に 2 子、子は葉（QWidget+QVBoxLayout）か入れ子 QSplitter（常に 2 子）。slot は `left|right|top|bottom` を `/` で繋いだパス（[common/slots.py](common/slots.py)、Qt 非依存・深さ 6 まで）。配置（`show`/`show-image slot=`）だけが向きを変え、読み取り系（`close-pane`/`set-split slot=`/画像 verb の `slot=`）は厳密照合。
+- **bridge 所有ペイン**: `show`/`show-image` が置いたパネルだけが `tab._bridge_panes`（key → kind/path）に載り、移動・破棄・永続化の対象になる。解析が `add_panel` したパネルを含む葉/領域への分割・畳み込み・close は LookupError（事前検査で無変更）。パネル key（`figure`/`figure-2`/`viewer-2`…）は構築順の識別子で位置を表さない。
+- session: 旧フィールド（`figure`/`figure2`・`image`/`image2`）で表現できる配置は従来形式、それ以外（深さ 2 以上・図と画像の混在・単一画像の top/bottom 等）は `panes: [{slot, kind, path}]` 形式で保存する（`layout.splits` に入れ子の sizes）。**旧ビルドは `panes` を知らず先頭 1 枚で縮退表示し、次の保存で他ペインを落とす**（既知の制約）。復元は事前クリアせず差分適用＋`prune_panes`（成功 0 件なら既存タブ無変更）。
+- Tier 1 hot reload 前から生き残っている旧 viewer タブ（`viewer_host` 属性が無く、dataset 未解決で spec も無いもの）はホスト扱いされず、slot 付き `show`/`show-image` は LookupError になる（安全側の縮退）。`reload scope=restart` かタブを開き直せば解消。
+
 #### ネイティブ resume token は同期しない（PC ローカル）
 
 チャット履歴（`messages`）は `<work_dir>/chat_sessions/<id>.json` に同期されるが、

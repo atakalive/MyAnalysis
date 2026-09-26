@@ -68,7 +68,9 @@ asynchronously.
   Window verbs: `add-tab name=<analysis> [dataset=<ds>]`,
   `close-tab name=<tab> [dataset=<ds>]`,
   `set-active-tab name=<tab> [dataset=<ds>]`,
-  `show path=<abs> [name=<tab>] [slot=left|right|top|bottom] [dataset=<ds>]`,
+  `show path=<abs> [name=<tab>] [slot=<path>] [dataset=<ds>]` (result figure),
+  `show-image path=<abs> [name=<tab>] [panel=left|right] [slot=<path>] [dataset=<ds>]`
+  (raw TIFF/stack, interactive LUT/range — only when the user asks for it),
   `toggle-chat-float`,
   `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions;
   adds it to the workspace — other open datasets stay open),
@@ -77,16 +79,49 @@ asynchronously.
   session.json, then drops its group; `closed:<ds>:<n>` on success, `error:<ds>`
   if the flush failed). The optional `dataset=` on tab-addressing verbs resolves a
   same-named tab that exists in more than one open dataset.
-  `show` default is a full-width single pane. `slot` splits automatically by
-  axis: `left|right` → horizontal, `top|bottom` → vertical, placing a second
-  figure in the opposite pane. `slot=left|top` keeps the split while updating
-  the primary figure; `show` without `slot` collapses back to a single
-  full-width pane.
+  `show` default is a full-width single pane; `show` without `slot` collapses
+  back to a single full-width pane. `show-image` without `slot` updates the first
+  image pane in place (keeping the split).
+
+  **Slot = split path.** `slot` is a `/`-separated list of sides: `left|right`
+  split that level horizontally, `top|bottom` vertically (`left`≡`top` = 1st
+  child, `right`≡`bottom` = 2nd), up to 6 levels. Rules:
+  - Placing re-orients that level to the side you wrote (`slot=bottom` makes the
+    split vertical). **Re-orienting renames other panes' slots** (`top/left` →
+    `left/top` …), so check with `tab <name> list-panes`.
+  - Re-showing the same slot updates that pane in place.
+  - A slot that passes through an occupied pane splits it; the old content moves
+    to the opposite side (`right` holds Q → `slot=right/bottom` gives Q on top,
+    new below). Unused sibling panes stay empty and hidden.
+  - Naming a split region (e.g. `top` when it holds `top/left`+`top/right`)
+    collapses it to one pane.
+  - Figures (`show`) and raw images (`show-image`) can be mixed per pane.
+  - Panel keys (`figure`, `figure-2`, `viewer-2`, …) are identifiers decided by
+    build order — they do NOT encode the position. Always address panes by slot
+    and read the current slots with `list-panes`.
+
+  2×2 recipe (any order; one may be a `show-image` TIFF):
+
+  ```
+  python -m llm_bridge window show path=<a.png> name=q slot=top/left --wait
+  python -m llm_bridge window show path=<b.png> name=q slot=top/right --wait
+  python -m llm_bridge window show path=<c.png> name=q slot=bottom/left --wait
+  python -m llm_bridge window show-image path=<d.tif> name=q slot=bottom/right --wait
+  python -m llm_bridge tab q list-panes --wait
+  ```
 - `python -m llm_bridge tab <name> <verb> [k=v ...] [--wait]`
-  Built-in tab verbs: `set-split left=<n> right=<n>`, `snapshot`,
-  `refresh-state`. These work on any open tab, including viewer tabs (e.g.
-  `tab viewer set-split left=3 right=1`). Analyses may register
-  analysis-specific verbs at runtime — see the analysis source.
+  Built-in tab verbs: `set-split left=<n> right=<n> [slot=<region>]` (`top=`/
+  `bottom=` are aliases; slot omitted = outermost split), `close-pane slot=<path>`
+  (closes a pane/region; other panes keep their slots; the last visible pane
+  cannot be closed — use `close-tab`), `list-panes` (→ `[{slot, key, kind,
+  path}]` in tree order), `snapshot`, `refresh-state`. These work on any open
+  tab, including viewer tabs (e.g. `tab viewer set-split left=3 right=1`).
+  Image-viewer verbs (`set-lut`, `set-range`, `auto-contrast`, `set-channel`,
+  `set-mode`, `set-z`, `set-t`, `set-visible`, `load-image`) take an optional
+  `slot=<path>`; omitted = the first image pane. Slot lookups for these verbs
+  never re-orient — a side that does not match the actual split is an error
+  listing the current slots. Analyses may register analysis-specific verbs at
+  runtime — see the analysis source.
 
 `k=v` values are coerced int → float → str.
 
@@ -129,8 +164,9 @@ The primary analysis workflow is code execution, not GUI driving.
      vision が機能していないので Human-view に切り替える。
    - **Human-view（フォールバック）**: vision 未設定または Self-view 失敗時は
      `python -m llm_bridge window show path=<絶対パス> --wait` で GUI に表示し、
-     ユーザーに見てもらい判断を仰ぐ。2 枚を並べて見せたいときは
-     `slot=left|right|top|bottom` を付けると自動で split される。
+     ユーザーに見てもらい判断を仰ぐ。複数枚を並べて見せたいときは
+     `slot=left|right|top|bottom`（`top/left` のような `/` 区切りで入れ子・2×2 も可）を
+     付けると自動で split される。
    - **数値ダブルチェック**: vision による図の解釈はハルシネーションのリスクがある。
      重要な判断には Compute ステップで統計量（最大値、最小値、平均値等）を数値出力し、
      視覚的解釈と突合すること。

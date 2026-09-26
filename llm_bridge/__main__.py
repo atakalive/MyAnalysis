@@ -431,17 +431,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.name is None:
             print("window verbs (built-in by llm_bridge):")
             for v in ("add-tab", "close-tab", "open-dataset", "set-active-tab",
-                      "show", "toggle-chat-float", "reload"):
+                      "show", "show-image", "toggle-chat-float", "reload"):
                 print(f"  {v}")
             return 0
         _check_tab_name(args.name)
         print("tab verbs (built-in by llm_bridge):")
-        for v in ("set-split", "snapshot", "refresh-state"):
+        for v in ("set-split", "close-pane", "list-panes", "snapshot",
+                  "refresh-state"):
             print(f"  {v}")
         print("(analysis-specific verbs also registered at runtime — "
               "see analysis source)")
-        print("Viewer tabs: use `show slot=left|right|top|bottom` for "
-              "side-by-side layout.")
+        print("Viewer tabs: `show`/`show-image slot=<path>` where <path> is "
+              "left|right|top|bottom joined by '/' (e.g. top/left for a 2x2 grid); "
+              "check current slots with `list-panes`.")
         return 0
 
     if args.cmd == "window":

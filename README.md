@@ -329,7 +329,7 @@ Key verbs:
 | `active` | Active tab, active dataset, and `open_datasets` |
 | `state [name]` | An analysis's `state.json` (active tab if omitted) |
 | `window <verb> [k=v] [--wait]` | Window ops (`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload`, etc.) |
-| `tab <target> <verb> [k=v]` | Tab ops (`set-split` / `snapshot` / `refresh-state`, etc.) |
+| `tab <target> <verb> [k=v]` | Tab ops (`set-split [slot=]` / `close-pane slot=` / `list-panes` / `snapshot` / `refresh-state`, etc.). Viewer tabs take nested splits via `show`/`show-image slot=<path>` (e.g. `top/left` for a 2×2 grid) |
 | `annotate` / `clear-annotations` | Add/clear annotations (marker / note) |
 | `meeting-start [lan=true]` / `meeting-lan-link` | Start a meeting share / get the in-facility LAN link (see "Meeting share (hosting)") |
 
