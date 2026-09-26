@@ -486,6 +486,82 @@ def test_session_grid_mixed_roundtrip(qapp, win, pngs, tifs):
     assert t.node_at("top").orientation() == Qt.Orientation.Horizontal
 
 
+def _ratio(node):
+    a, b = node.sizes()
+    return a / (a + b)
+
+
+def test_session_nested_split_ratios_restored(qapp, win, pngs):
+    """入れ子ノードの比率（capture の splits → apply_layout）が復元される。
+
+    top=3:1 / bottom=1:2 の異なる非対称比率で、復元直後と、窓を表示して
+    レイアウトが確定した後の両方で確認する（splits 適用を消すと両方 1:1 に落ちる）。
+    """
+    _grid(win, pngs, dataset="myds")
+    tab = win.active_tab()
+    tab.set_split_ratio(3, 1, slot="top")
+    tab.set_split_ratio(1, 2, slot="bottom")
+    entry = _save_and_entry(win)[0]
+    assert set(entry["layout"]["splits"]) == {"top", "bottom"}
+    w2, t = _restore_new(qapp, "q")
+    assert _ratio(t.node_at("top")) == pytest.approx(0.75, abs=0.02)
+    assert _ratio(t.node_at("bottom")) == pytest.approx(1 / 3, abs=0.02)
+    w2.resize(800, 600)
+    w2.show()
+    qapp.processEvents()
+    assert _ratio(t.node_at("top")) == pytest.approx(0.75, abs=0.05)
+    assert _ratio(t.node_at("bottom")) == pytest.approx(1 / 3, abs=0.05)
+
+
+@pytest.mark.parametrize("shown", [True, False])
+def test_new_panel_visible_without_event_processing(qapp, win, pngs, tifs, shown):
+    """配置直後の可視状態はイベント処理を待たずに確定している（reviewer code R1 P1）。
+
+    表示中の葉へ addWidget した子は Qt がキュー経由で show するため、明示表示
+    しないと processEvents まで isHidden()==True のまま bridge_panels/保存から漏れ、
+    続く slot 省略 show-image が「画像ペイン無し」と誤判定して単一へ畳んでしまう。
+    """
+    if shown:
+        win.show()
+        qapp.processEvents()
+    win.dispatch_command("show", path=str(pngs[0]), name="q", dataset="myds")
+    qapp.processEvents()
+    # ここから先はイベント処理を挟まない。
+    win.dispatch_command("show-image", path=str(tifs[0]), name="q", slot="right")
+    tab = win.active_tab()
+    assert not tab.panel("viewer-2").isHidden()
+    assert [(s, k) for s, k, _ in tab.pane_contents()] == [
+        ("left", "figure"), ("right", "image")]
+    assert [(d["slot"], d["key"]) for d in tab.panels_by_slot()] == [
+        ("left", "figure"), ("right", "viewer-2")]
+    entry = _save_and_entry(win)[0]
+    assert [(p["slot"], p["kind"]) for p in entry["panes"]] == [
+        ("left", "figure"), ("right", "image")]
+    win.dispatch_command("show-image", path=str(tifs[1]), name="q")
+    assert [(s, k, _name(p)) for s, k, p in tab.pane_contents()] == [
+        ("left", "figure", "f0.png"), ("right", "image", "i2.tif")]
+    _assert_tree_invariants(tab)
+
+
+def test_move_panel_keeps_visibility_synchronously(qapp):
+    """move_panel の付け替え後も可視状態は同期的に確定（明示 hide は保つ）。"""
+    from PySide6.QtWidgets import QLabel
+    from gui.tab import AnalysisTab
+    t = AnalysisTab("t")
+    t.show()
+    qapp.processEvents()
+    a, b = QLabel("a"), QLabel("b")
+    t.add_panel("a", a, "left")
+    t.add_panel("b", b, "left")
+    qapp.processEvents()
+    b.setVisible(False)
+    t.move_panel("a", "right")
+    t.move_panel("b", "right")
+    assert t._right_container.isAncestorOf(a) and not a.isHidden()
+    assert t._right_container.isAncestorOf(b) and b.isHidden()
+    t.close()
+
+
 def test_session_flat_two_uses_legacy_fields(win, pngs):
     win.dispatch_command("show", path=str(pngs[0]), name="q", dataset="myds")
     win.dispatch_command("show", path=str(pngs[1]), name="q", slot="right")

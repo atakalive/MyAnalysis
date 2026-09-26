@@ -319,10 +319,19 @@ class AnalysisTab(QWidget):
     def add_bridge_panel(
         self, key: str, widget: QWidget, leaf: QWidget, kind: str, path: str | None
     ) -> None:
-        """bridge パネルを葉へ登録（表示はしない＝呼び出し側が経路表示する）。"""
+        """bridge パネルを葉へ登録する。
+
+        葉/経路の表示はしない（呼び出し側が ensure_pane の経路表示か
+        set_pane_visible で行う）。ただしパネル自身は addWidget 直後に明示
+        setVisible(True) する: 表示中の葉へ addWidget した子は Qt がキュー経由で
+        show するため、イベント処理まで isHidden()==True のままになり、直後の
+        bridge_panels/pane_contents/保存から漏れる（葉が隠れていれば明示 show
+        しても isVisible() は False のまま＝葉の可視性には影響しない）。
+        """
         if key in self._panels:
             raise KeyError(f"panel key {key!r} already registered")
         leaf.layout().addWidget(widget, stretch=1)
+        widget.setVisible(True)
         self._panels[key] = widget
         if not hasattr(self, "_bridge_panes"):   # Tier 1 hot reload 前からの旧タブ
             self._bridge_panes = {}
@@ -521,10 +530,17 @@ class AnalysisTab(QWidget):
                 raise ValueError(
                     f"{position!r} pane already holds bridge panel {other[0]!r}"
                 )
+        # 付け替えで Qt は子を hide し表示をキュー経由に回す（イベント処理まで
+        # isHidden()==True）。移動前の「明示的に隠されていたか」を控えて同期的に
+        # 戻す（明示 hide 済みなら隠したまま・それ以外は表示）。
+        explicit_hidden = widget.isHidden() and widget.testAttribute(
+            Qt.WidgetAttribute.WA_WState_ExplicitShowHide
+        )
         old = widget.parentWidget()
         if old is not None and old.layout() is not None:
             old.layout().removeWidget(widget)
         target_layout.addWidget(widget, stretch=1)
+        widget.setVisible(not explicit_hidden)
 
     def panel(self, key: str) -> QWidget:
         return self._panels[key]
