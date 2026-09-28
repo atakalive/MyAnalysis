@@ -52,7 +52,7 @@
 - [開発者向け情報](#開発者向け情報)
 - [ライセンス](#ライセンス)
 
-各節は **オプション（必須ではない）** より前だけ読めば使える。
+各節の後半にある「〜するときは」の項目は、そのときだけ読めばよい。
 
 ---
 
@@ -62,13 +62,11 @@
 - この README の `python` コマンドは、venv を有効にしたターミナルで、リポジトリ直下から実行する。
 - 更新するときは `git pull` して再起動する。データセットには影響しない。
 
-**オプション（必須ではない）**
-
-- macOS / Linux（動作は未検証）: `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install PySide6 pyqtgraph pandas matplotlib` → `python tool.py`。
-- PowerShell で `activate` が失敗する場合は、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を実行するか、コマンドプロンプトを使う。
-- `pip install tifffile`: 画像ビューアで TIFF を開くときに使う。
-- 依存パッケージのバージョンは固定していない。動かないときは動作確認済みの版に合わせる: Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2。
-- `python tool.py --demo`: 合成データのデモタブ付きで起動する（データなしで画面を試せる）。
+- PowerShell で `activate` が失敗するときは、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を実行するか、コマンドプロンプトを使う。
+- TIFF 画像を開くときは `pip install tifffile` も入れる。
+- パッケージの版は固定していないので、動かないときは動作確認済みの版に合わせる（Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2）。
+- データなしで画面を試すときは `python tool.py --demo`。
+- macOS / Linux で使うときは `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install PySide6 pyqtgraph pandas matplotlib` → `python tool.py`（動作は未検証）。
 
 ---
 
@@ -78,14 +76,7 @@
 - 推奨は Claude（動作確認が最も多い。金額を表示できるのは Claude だけ）。
 - 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi だけ。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
 
-**オプション（必須ではない）** — [docs/engines_ja.md](docs/engines_ja.md): 他のエンジンの導入（下表）、チャットごとのエンジン・モデル、AI ペルソナ（口調）、設定ファイルの手書き、使用量の表示、トークン消費が増える条件
-
-| エンジン | 必要なもの |
-|---|---|
-| Claude（PATH の CLI） | Claude Code の CLI（`npm i -g @anthropic-ai/claude-code` など）→ `claude` でログイン |
-| Codex CLI（OpenAI） | Node.js、`npm i -g @openai/codex` → `codex login` |
-| pi コーディングエージェント | Node.js 22.19 以上、`npm i -g @earendil-works/pi-coding-agent` → `pi` を起動して `/login`。Windows では Git Bash |
-| OpenAI 互換 HTTP | `.env` の `OPENAI_BASE_URL`（Ollama などのローカル LLM も可） |
+Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
 
 ---
 
@@ -98,7 +89,7 @@
 - **アプリがフォルダに作るもの**: `myanalysis.toml`（設定）、`meta.json`（一覧表示用）、`analyses/`（解析モジュール）、`_work/`（出力・チャット履歴・タブ構成）。フォルダへの書き込み権限が要る。アプリ本体は計測ファイルを書き換えない。エージェントには書き換えないよう指示しているが、機械的な制限ではない。
 - **同期ドライブに置いて複数の PC で使う場合**: 各 PC で同じ名前で登録する。**同じデータセットを 2 台で同時に開かない**（PC 間の排他制御は無く、後から保存した方が勝つ）。別の PC で最初に送信すると、チャットの全履歴を送り直す（トークン消費が大きい）。
 
-**オプション（必須ではない）** — [docs/usage_ja.md](docs/usage_ja.md#データセット): 登録の削除（**ファイル → データセットを開く…** の **登録を削除**。フォルダのファイルは消えない）、CLI での登録、`myanalysis.toml` の設定項目、フォルダ構成
+登録を消すときは、**ファイル → データセットを開く…** で選んで **登録を削除** を押す（フォルダのファイルは消えない）。CLI で登録するとき、出力先や読み込み形式（`myanalysis.toml`）を変えるときは [docs/usage_ja.md](docs/usage_ja.md#データセット) を読む。
 
 ---
 
@@ -115,7 +106,7 @@
 - エージェントは `.venv` の Python を使い、足りないパッケージ（scipy など）を `.venv` に pip install することがある。
 - チャットタブの右クリック → **閉じる** は、チャットの**削除**。残したいなら **アーカイブ**。
 
-**オプション（必須ではない）** — [docs/usage_ja.md](docs/usage_ja.md#gui-の機能): 画像ビューア（16bit・多次元 TIFF。エージェントには案内されていないので CLI から開く）、メニュー一覧、タブの切り離し、ツール呼び出しの表示切替、✎ 編集 / ⑂ 分岐
+顕微鏡画像などを ImageJ のように見るとき（16bit・多次元 TIFF、LUT、チャンネル合成）は、画像ビューアを CLI で開く。Claude などのエージェントはこの機能を知らないので、手順は [docs/usage_ja.md](docs/usage_ja.md#図ビューアと画像ビューア) を読む。
 
 ---
 
@@ -126,7 +117,7 @@
 - 再開するには **ファイル → データセットを開く…**（そのデータセットのタブとチャットを復元する）か、**ファイル → 前回のセッションを復元**（最後に保存したときに開いていたデータセットをまとめて開く）。
 - 同期ドライブでは、チャットの書き込みに失敗しても終了は止まらない。**保存して終了** の前に **セッションを保存** して、ステータスバーにエラーが出ないことを確かめる。
 
-**オプション（必須ではない）** — [docs/usage_ja.md](docs/usage_ja.md#保存データと再開): 保存されるファイルの一覧、復元されないもの、バックアップすべきもの
+バックアップを取るときは、何がどのファイルに保存されるかを [docs/usage_ja.md](docs/usage_ja.md#保存データと再開) で確かめる。
 
 ---
 
@@ -137,7 +128,7 @@
 - **データセットを開くと、保存されていた解析コード（`analyses/*/analysis.py`）が実行される。** 共有フォルダに書き込める人は、それを開いた人の PC でコードを実行できる。信頼できないデータセットは、開く前に `analyses/` を確かめる。
 - `.env` とシェルの環境変数（API キーなど）は、エージェントから読める。
 
-**オプション（必須ではない）** — [docs/security_ja.md](docs/security_ja.md): 権限を絞る設定（絞ると GUI 操作や解析が動かなくなる）、チャット履歴の保存先と公開範囲、ミーティング共有・R2 同期の権限
+エージェントの権限を絞るとき（絞ると GUI 操作や解析が動かなくなる）と、データセットのフォルダを他人と共有するときは [docs/security_ja.md](docs/security_ja.md) を読む。
 
 ---
 
@@ -171,7 +162,7 @@
 1. アプリのフォルダ（リポジトリ）と `%USERPROFILE%\.myanalysis`（macOS / Linux は `~/.myanalysis`）を削除する。
 2. データセットのフォルダを元に戻すなら、`myanalysis.toml`・`meta.json*`・`analyses/`・`_work/` を削除する。`analyses/` には解析モジュールが、`_work/` にはチャット履歴と出力がある。
 
-**オプション（必須ではない）** — [docs/usage_ja.md](docs/usage_ja.md#アンインストールの詳細): エンジンの会話記録・CLI・R2・Cloudflare の後始末
+エンジン側の会話記録や、R2・Cloudflare の設定まで消すときは [docs/usage_ja.md](docs/usage_ja.md#アンインストールの詳細) を読む。
 
 ---
 
