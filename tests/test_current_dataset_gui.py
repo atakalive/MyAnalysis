@@ -101,14 +101,22 @@ def register_stubs(monkeypatch, tmp_path):
     ds_dir.mkdir()
 
     shown = {"info": 0, "critical": 0}
-    monkeypatch.setattr(
-        QInputDialog, "getText",
-        staticmethod(lambda *a, **k: ("sample_dataset", True)),
-    )
-    monkeypatch.setattr(
-        QFileDialog, "getExistingDirectory",
-        staticmethod(lambda *a, **k: str(ds_dir)),
-    )
+    calls: list[str] = []
+    defaults: list[str] = []
+    # 名前入力への返答。空なら既定値（= フォルダ名）をそのまま受け入れる。
+    answers: list[tuple[str, bool]] = []
+
+    def get_text(*a, **k):
+        calls.append("name")
+        defaults.append(k.get("text", ""))
+        return answers.pop(0) if answers else (k.get("text", ""), True)
+
+    def get_dir(*a, **k):
+        calls.append("dir")
+        return str(ds_dir)
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(get_text))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(get_dir))
     monkeypatch.setattr(
         QMessageBox, "information",
         staticmethod(lambda *a, **k: shown.__setitem__("info", shown["info"] + 1)),
@@ -125,6 +133,9 @@ def register_stubs(monkeypatch, tmp_path):
     s.reg = reg
     s.ds_dir = ds_dir
     s.shown = shown
+    s.calls = calls
+    s.defaults = defaults
+    s.answers = answers
     s.read = lambda: json.loads(reg.read_text(encoding="utf-8-sig"))
     s.config = config
     return s
@@ -145,6 +156,44 @@ def test_gui_register_writes_json_and_memory(qapp, register_stubs):
     assert win.current_dataset == "sample_dataset"
     assert register_stubs.shown["info"] == 1
     assert register_stubs.shown["critical"] == 0
+    # フォルダ選択が先、名前の既定値はフォルダ名
+    assert register_stubs.calls == ["dir", "name"]
+    assert register_stubs.defaults == ["sample_dataset"]
+
+
+def test_gui_register_dir_cancel_asks_nothing(qapp, register_stubs, monkeypatch):
+    import config
+    from PySide6.QtWidgets import QFileDialog
+    from gui.window import ToolWindow
+
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "")
+    )
+
+    win = ToolWindow()
+    before = dict(config.DATASETS)
+    win._register_dataset()
+
+    assert register_stubs.calls == []  # 名前入力は出ない
+    assert config.DATASETS == before
+    assert not register_stubs.reg.exists()
+
+
+def test_gui_register_invalid_name_reprompts(qapp, register_stubs):
+    from gui.window import ToolWindow
+
+    register_stubs.answers[:] = [("bad name", True), ("good_name", True)]
+
+    win = ToolWindow()
+    win._register_dataset()
+
+    # 無効名はエラー表示後、フォルダを選び直させず入力値を残して再入力
+    assert register_stubs.calls == ["dir", "name", "name"]
+    assert register_stubs.defaults == ["sample_dataset", "bad name"]
+    assert register_stubs.shown["critical"] == 1
+    assert register_stubs.shown["info"] == 1
+    assert list(register_stubs.read()) == ["good_name"]
+    assert win.current_dataset == "good_name"
 
 
 def test_gui_register_failure_updates_nothing(qapp, register_stubs, monkeypatch):

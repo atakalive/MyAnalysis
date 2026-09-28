@@ -2,7 +2,8 @@
 # a fixed public URL, so guests open one bookmarked page and only the per-meeting
 # token is distributed. chatdock.html is a secret-free static client; it talks to
 # the host relay via the base_url embedded in the token (Pages is not in the data
-# path). Repo stays Private; Pages visibility is set to public separately.
+# path). This Pages copy is optional: the host relay serves the same guest page
+# itself at https://<hostname>/, so guests can use the share link without it.
 pages:
   stage: deploy
   image: alpine:latest

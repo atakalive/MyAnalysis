@@ -563,3 +563,166 @@ def test_picker_keeps_loaded_registry_when_json_is_corrupt(qapp, real_registry):
     # reload 失敗は握って既存の DATASETS で続行する。
     assert config.DATASETS == {"ds_known": {"H": "/p"}}
     assert dlg._proxy.rowCount() == 1
+
+
+# --------------------------------------------------------------------------- #
+# 登録を削除（登録簿からのみ外す・フォルダは残す）
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def delete_stubs(monkeypatch):
+    """確認ダイアログの返答と config.unregister_dataset を stub 化して記録する。"""
+    import config
+    from gui import open_dataset_dialog as mod
+    from PySide6.QtWidgets import QMessageBox
+
+    rec = {"calls": [], "answer": QMessageBox.StandardButton.Yes, "warned": 0}
+
+    def unregister(name, **k):
+        rec["calls"].append(("unregister", name))
+        return {}
+
+    monkeypatch.setattr(config, "unregister_dataset", unregister)
+    monkeypatch.setattr(mod.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: rec["answer"]))
+    monkeypatch.setattr(
+        mod.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: rec.__setitem__("warned", rec["warned"] + 1)))
+    return rec
+
+
+class _FakeMainOpen(_FakeMain):
+    def __init__(self, open_names, close_result=0, rec=None):
+        super().__init__()
+        self._open = list(open_names)
+        self._close_result = close_result
+        self._rec = rec
+
+    def open_dataset_names(self):
+        return list(self._open)
+
+    def close_dataset(self, name):
+        self._rec["calls"].append(("close", name))
+        return self._close_result
+
+
+def test_delete_enabled_for_unavailable_row(qapp, patch_picker):
+    patch_picker([_meta("bad", available=False, unavailable_reason="no-host")])
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._delete_btn.isEnabled() is True
+
+
+def test_delete_declined_does_nothing(qapp, patch_picker, delete_stubs):
+    from PySide6.QtWidgets import QMessageBox
+    import config
+    patch_picker([_meta("a"), _meta("b")])
+    delete_stubs["answer"] = QMessageBox.StandardButton.No
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(0)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == []
+    assert dlg._proxy.rowCount() == 2
+    assert "a" in config.DATASETS
+
+
+def test_delete_removes_row_and_selects_next(qapp, patch_picker, delete_stubs):
+    import config
+    patch_picker([_meta("a"), _meta("b"), _meta("c")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(1)                            # "b"
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("unregister", "b")]
+    assert "b" not in config.DATASETS
+    assert dlg._proxy.rowCount() == 2
+    assert dlg._current_meta().name == "c"            # 同じ位置の次の行
+
+
+def test_delete_last_row_selects_previous(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a"), _meta("b")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(1)
+    dlg._on_delete()
+    assert dlg._current_meta().name == "a"
+
+
+def test_delete_only_row_disables_buttons(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("only")])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._on_delete()
+    assert dlg._current_meta() is None
+    assert dlg._delete_btn.isEnabled() is False
+    assert dlg._open_btn.isEnabled() is False
+
+
+def test_delete_last_completed_falls_back_to_top(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a"), _meta("done", completed=True)])
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._completed_toggle.setChecked(True)
+    dlg._completed_view.selectRow(0)
+    dlg._on_delete()
+    assert dlg._completed_proxy.rowCount() == 0
+    assert dlg._active_view is dlg._view
+    assert dlg._current_meta().name == "a"
+
+
+def test_delete_open_dataset_closes_first(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a"), _meta("b")])
+    main = _FakeMainOpen(["a"], close_result=2, rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, "a"))
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("close", "a"), ("unregister", "a")]
+    assert "a" not in dlg._open_names
+
+
+def test_delete_aborts_when_close_fails(qapp, patch_picker, delete_stubs):
+    import config
+    patch_picker([_meta("a")])
+    main = _FakeMainOpen(["a"], close_result=-1, rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("close", "a")]  # unregister しない
+    assert "a" in config.DATASETS
+    assert dlg._proxy.rowCount() == 1
+
+
+def test_delete_not_open_does_not_close(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a")])
+    main = _FakeMainOpen([], rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("unregister", "a")]
+
+
+def test_delete_failure_warns_and_keeps_row(qapp, patch_picker, delete_stubs, monkeypatch):
+    import config
+    patch_picker([_meta("a")])
+
+    def boom(name, **k):
+        raise config.RegistryError("nope")
+
+    monkeypatch.setattr(config, "unregister_dataset", boom)
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._on_delete()
+    assert delete_stubs["warned"] == 1
+    assert "a" in config.DATASETS
+    assert dlg._proxy.rowCount() == 1
+
+
+def test_delete_through_real_registry(qapp, real_registry, monkeypatch):
+    """実ストレージ越し: JSON からエントリが消え、tombstone が記録される。"""
+    import json
+
+    import config
+    import config_share
+    from gui import open_dataset_dialog as mod
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(mod.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    real_registry.write({"keep": {"H": "/k"}, "drop": {"H": "/d"}})
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, "drop"))
+    dlg._on_delete()
+    assert json.loads(real_registry.path.read_text(encoding="utf-8")) == {"keep": {"H": "/k"}}
+    assert config.DATASETS == {"keep": {"H": "/k"}}
+    assert "drop/H" in config_share._local_state()["deleted"]

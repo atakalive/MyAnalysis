@@ -6,7 +6,7 @@
 登録データは **このファイルではなく** リポジトリ直下の `datasets.local.json`
 （Git 管理外・保存処理は [dataset_registry.py](dataset_registry.py)）にある。
 このモジュールはその登録簿へのアクセス API（`DATASETS` / `get_dataset_dir` /
-`register_dataset` / `reload_datasets`）を提供する。
+`register_dataset` / `unregister_dataset` / `reload_datasets`）を提供する。
 
 新しい dataset → `python -m llm_bridge register-dataset <name> <path> [--host H]`
 （または GUI の File → データセットを新規登録、あるいは `datasets.local.json` を直接編集）。
@@ -98,13 +98,39 @@ def register_dataset(
     if not (PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()):
         raise ValueError(f"path must be absolute: {path!r}")
 
+    import config_share  # lazy: config_share imports config
+
     created = False
     with registry_transaction(config_path=config_path) as (registry, writer):
         created = name not in registry
         registry.setdefault(name, {})[host] = path
+        # R2 同期用に登録時刻を記録（他 PC の削除 tombstone より新しい再登録を残すため）。
+        config_share.note_registered(name, host)
         writer(registry)
 
     return {"name": name, "host": host, "path": path, "created": created}
+
+
+def unregister_dataset(name: str, *, config_path: Path | None = None) -> dict[str, str]:
+    """Remove *name*'s registration (every host) from the registry.
+
+    File write only, no in-memory mutation (like register_dataset). Only the
+    registry entry goes — the dataset directory and everything in it stay on
+    disk, so re-registering the same folder restores it. R2-sync tombstones are
+    recorded under the registry lock *before* the write, so the deletion
+    propagates instead of the remote copy resurrecting it (a failed write leaves
+    the entry live locally, which the sync treats as a re-add and drops the
+    tombstone). Returns the removed {HOST: path}; KeyError if not registered.
+    """
+    import config_share  # lazy: config_share imports config
+
+    with registry_transaction(config_path=config_path) as (registry, writer):
+        if name not in registry:
+            raise KeyError(f"Unknown dataset {name!r}")
+        removed = registry.pop(name)
+        config_share.note_deleted(name, removed)
+        writer(registry)
+    return dict(removed)
 
 
 reload_datasets()   # 初回 import で登録簿を読み込む（破損は RegistryError で fail-fast）

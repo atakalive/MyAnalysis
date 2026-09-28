@@ -9,6 +9,11 @@ best-effort 原則: 自動経路（try_sync）はクレデンシャル未設定�
 バケットエラー・remote 破損のいずれでも例外で起動を止めず、長時間ブロックもしない
 （boto3 は short timeout＋リトライ無効）。明示 CLI（sync/push/pull）はエラーを表に出す。
 
+登録簿のマージは union・非破壊で、remote が消えてもローカルは消えない。削除は
+`config.unregister_dataset` が記録する明示的な tombstone（`deleted`: "ds/HOST" → 削除時刻）
+だけが伝播させる（schema 2。tombstone を知らない旧コードは schema 2 を read-only 扱いにし、
+削除済みエントリを push し返さない）。
+
 boto3 はモジュール先頭では import せず _client() で遅延 import する。
 """
 import json
@@ -22,7 +27,7 @@ import config
 from common.env import load_env
 from common.paths import repo_root
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2                 # 2: 登録削除の tombstone（deleted）を追加
 DEFAULT_PREFIX = "config/"
 BUNDLE_NAME = "bundle.json"        # key = prefix + BUNDLE_NAME
 PORTABLE_FILES = ["models.toml", "llm_backend/config.toml"]  # repo_root() 基準。.env は既定で含めない。
@@ -54,6 +59,20 @@ def _iso_from_mtime(mtime: float) -> str:
 def _log_debug(msg: str) -> None:
     if os.environ.get("R2_DEBUG"):
         print(f"[config_share] {msg}", file=sys.stderr)
+
+
+def _newer(a: str | None, b: str | None) -> bool:
+    """a が b より新しいと言えるときだけ True（どちらかが不明なら False）。"""
+    pa, pb = _parse_iso(a), _parse_iso(b)
+    return pa is not None and pb is not None and pa > pb
+
+
+def _valid_tombs(tombs) -> dict:
+    """時刻を解釈できる tombstone だけ残す（不正な削除記録でエントリを消さない）。"""
+    if not isinstance(tombs, dict):
+        return {}
+    return {k: v for k, v in tombs.items()
+            if isinstance(k, str) and isinstance(v, str) and _parse_iso(v) is not None}
 
 
 def _tie_break(a: str, b: str) -> bool:
@@ -179,11 +198,12 @@ def _local_state() -> dict:
     try:
         data = json.loads(_state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"entry_meta": {}, "etag": None}
+        return {"entry_meta": {}, "etag": None, "deleted": {}}
     if not isinstance(data, dict):
-        return {"entry_meta": {}, "etag": None}
+        return {"entry_meta": {}, "etag": None, "deleted": {}}
     data.setdefault("entry_meta", {})
     data.setdefault("etag", None)
+    data["deleted"] = _valid_tombs(data.get("deleted"))
     return data
 
 
@@ -193,6 +213,47 @@ def _save_local_state(state: dict) -> None:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(p)
+
+
+def _update_local_state(config_path: Path | None, update) -> None:
+    """登録簿ロック下で状態を読み直し、update(state) を適用して保存する（RMW）。
+
+    note_deleted / note_registered は同じロック内で書くので、読み直しから保存までの間に
+    割り込まれて失われることはない。ロックは非再入 — registry_transaction の中から呼ばないこと。
+    """
+    with config.registry_transaction(config_path=config_path):
+        state = _local_state()
+        update(state)
+        _save_local_state(state)
+
+
+def note_deleted(name: str, hosts) -> None:
+    """登録解除した (name, HOST) を tombstone として記録する（次回 sync で remote/他 PC へ伝播）。
+
+    `config.unregister_dataset` が登録簿ロック内から呼ぶ（sync はこのロック内で tombstone を
+    読むので直列化される）。R2 未設定でも記録する — 後から設定したとき remote に残る古い
+    登録で復活させないため。
+    """
+    state = _local_state()
+    now = _now_iso()
+    for host in hosts:
+        key = f"{name}/{host}"
+        state["deleted"][key] = now
+        state["entry_meta"].pop(key, None)
+    _save_local_state(state)
+
+
+def note_registered(name: str, host: str) -> None:
+    """登録（上書き含む）した時刻を entry_meta に記録し、同キーのローカル tombstone を消す。
+
+    `config.register_dataset` が登録簿ロック内から呼ぶ。この時刻が無いと、他 PC の削除後に
+    （まだ sync していない PC で）登録し直したエントリが tombstone より古く見えて消される。
+    """
+    state = _local_state()
+    key = f"{name}/{host}"
+    state["entry_meta"][key] = _now_iso()
+    state["deleted"].pop(key, None)
+    _save_local_state(state)
 
 
 def make_bundle(*, config_path: Path | None = None, include_env: bool = False,
@@ -239,7 +300,7 @@ def _validate_bundle(bundle) -> bool:
         for host, path in per_host.items():
             if not isinstance(host, str) or not isinstance(path, str):
                 return False
-    for opt in ("entry_meta", "files", "file_meta"):
+    for opt in ("entry_meta", "files", "file_meta", "deleted"):
         val = bundle.get(opt)
         if val is None:
             continue
@@ -297,13 +358,15 @@ def _safe_target(rel: str, root: Path) -> Path | None:
     return target
 
 
-def _expand_remote(remote: dict | None, warnings: list) -> tuple[dict, dict, dict, dict, list]:
-    """remote（None=空 remote）を (datasets, entry_meta, files, file_meta, dropped) に展開。
-    files/file_meta は _ALLOWED_FILES の whitelist 内のみ採用し、許可外キーは dropped に集め
-    warning する。"""
+def _expand_remote(remote: dict | None,
+                   warnings: list) -> tuple[dict, dict, dict, dict, list, dict]:
+    """remote（None=空 remote）を (datasets, entry_meta, files, file_meta, dropped, deleted)
+    に展開。files/file_meta は _ALLOWED_FILES の whitelist 内のみ採用し、許可外キーは dropped に
+    集め warning する。"""
     remote = remote or {}
     datasets = remote.get("datasets") or {}
     entry_meta = remote.get("entry_meta") or {}
+    deleted = _valid_tombs(remote.get("deleted"))
     raw_files = remote.get("files") or {}
     raw_file_meta = remote.get("file_meta") or {}
     files, file_meta, dropped = {}, {}, []
@@ -317,28 +380,52 @@ def _expand_remote(remote: dict | None, warnings: list) -> tuple[dict, dict, dic
             msg = f"remote files の許可外キーを無視: {k!r}"
             if msg not in warnings:
                 warnings.append(msg)
-    return datasets, entry_meta, files, file_meta, dropped
+    return datasets, entry_meta, files, file_meta, dropped, deleted
 
 
-def _merge_datasets(local_reg, local_meta, remote_reg, remote_meta, self_host, now_iso):
-    """戻り: (merged_reg, merged_meta)。(dataset,HOST) の union・非破壊（削除しない）。
-    各キーの path と meta を決め、meta が None のキーは merged_meta に入れない（omit）。"""
+def _merge_datasets(local_reg, local_meta, remote_reg, remote_meta, self_host, now_iso,
+                    local_tomb=None, remote_tomb=None):
+    """戻り: (merged_reg, merged_meta, merged_tomb)。(dataset,HOST) の union。
+    各キーの path と meta を決め、meta が None のキーは merged_meta に入れない（omit）。
+
+    削除は tombstone（"ds/HOST" → 削除時刻）があるときだけ起こる — 片側に無いだけでは
+    消さない（remote 消失でローカルを失わない）。meta は登録時刻（note_registered）:
+      - local のみ live: remote tombstone が local tombstone より新しく（local に無い場合を
+        含む）、local の meta がそれより新しくなければ削除。local tombstone と同じか古い
+        remote tombstone は既知の削除なので、live なのは削除後の再追加として残す。
+      - remote のみ live: local tombstone があり、remote の meta がそれより新しくなければ
+        削除（自分の削除を押し出す）。新しければ削除後の再登録として採用。
+    live で残ったキーの tombstone は落とし、どちらにも live でないキーの tombstone は新しい方を
+    持ち越す。"""
+    local_tomb = _valid_tombs(local_tomb)
+    remote_tomb = _valid_tombs(remote_tomb)
     merged_reg: dict = {}
     merged_meta: dict = {}
+    live: set = set()
 
     all_ds = set(local_reg) | set(remote_reg)
     for ds in all_ds:
         local_hosts = local_reg.get(ds, {})
         remote_hosts = remote_reg.get(ds, {})
         per_host: dict = {}
+        dropped = False
         for host in set(local_hosts) | set(remote_hosts):
             key = f"{ds}/{host}"
             in_local = host in local_hosts
             in_remote = host in remote_hosts
             if in_local and not in_remote:
+                tomb_at = remote_tomb.get(key)
+                if (tomb_at is not None
+                        and (key not in local_tomb or _newer(tomb_at, local_tomb[key]))
+                        and not _newer(local_meta.get(key), tomb_at)):
+                    dropped = True
+                    continue
                 per_host[host] = local_hosts[host]
                 meta = local_meta.get(key) or now_iso
             elif in_remote and not in_local:
+                if key in local_tomb and not _newer(remote_meta.get(key), local_tomb[key]):
+                    dropped = True
+                    continue
                 per_host[host] = remote_hosts[host]
                 meta = remote_meta.get(key)
             else:
@@ -348,7 +435,12 @@ def _merge_datasets(local_reg, local_meta, remote_reg, remote_meta, self_host, n
                     meta = remote_meta.get(key) or local_meta.get(key)
                 elif host == self_host:
                     per_host[host] = lp
-                    meta = now_iso
+                    # 登録時刻が remote より新しければそれを使う（sync 時刻で上書きすると、
+                    # オフライン中の編集がその後の他 PC の削除より新しく見えてしまう）。
+                    lm = local_meta.get(key)
+                    keep_lm = (_parse_iso(lm) is not None
+                               and not _newer(remote_meta.get(key), lm))
+                    meta = lm if keep_lm else now_iso
                 else:
                     lt = _parse_iso(local_meta.get(key))
                     rt = _parse_iso(remote_meta.get(key))
@@ -373,10 +465,18 @@ def _merge_datasets(local_reg, local_meta, remote_reg, remote_meta, self_host, n
                         else:
                             per_host[host] = rp
                         meta = local_meta.get(key) or remote_meta.get(key)
+            live.add(key)
             if meta is not None:
                 merged_meta[key] = meta
-        merged_reg[ds] = per_host
-    return merged_reg, merged_meta
+        # 削除で host が空になった DS は消す（元から {} の DS は従来どおり残す）。
+        if per_host or not dropped:
+            merged_reg[ds] = per_host
+
+    merged_tomb: dict = {}
+    for key in (set(local_tomb) | set(remote_tomb)) - live:
+        lt, rt = local_tomb.get(key), remote_tomb.get(key)
+        merged_tomb[key] = lt if rt is None or _newer(lt, rt) else rt
+    return merged_reg, merged_meta, merged_tomb
 
 
 def _merge_files(local_files, local_file_meta, remote_files, remote_file_meta, now_iso):
@@ -436,7 +536,6 @@ def sync(*, direction: str = "both", apply: bool = True,
     client = _client(creds)
     self_host = socket.gethostname().upper()
     now = _now_iso()
-    state = _local_state()
 
     # sidecar entry_meta（datasets の LWW 用）を取得するために make_bundle を使う。
     local = make_bundle(config_path=config_path, include_env=include_env, warnings=warnings)
@@ -445,8 +544,7 @@ def sync(*, direction: str = "both", apply: bool = True,
     if unusable:
         warnings.append("remote bundle が未知スキーマ/不正のため read-only フォールバック")
         if apply:
-            state["etag"] = etag
-            _save_local_state(state)
+            _update_local_state(config_path, lambda state: state.update(etag=etag))
         return {
             "remote_present": True, "unusable_remote": True, "pushed": False,
             "etag": etag, "datasets_total": len(local["datasets"]),
@@ -461,10 +559,14 @@ def sync(*, direction: str = "both", apply: bool = True,
     planned_write_files: list = []
     merged_reg: dict = local["datasets"]
     merged_files: dict = {}
+    merged_tomb: dict = {}
+    local_tomb: dict = {}
+    local_meta: dict = {}
+    new_entry_meta: dict | None = None
 
     for _attempt in range(PUT_RETRIES):
         (remote_datasets, remote_entry_meta, remote_files,
-         remote_file_meta, dropped_file_keys) = _expand_remote(remote, warnings)
+         remote_file_meta, dropped_file_keys, remote_tomb) = _expand_remote(remote, warnings)
 
         local_files, local_file_meta, unreadable_files = _collect_portable_files(
             include_env=include_env, warnings=warnings
@@ -476,9 +578,13 @@ def sync(*, direction: str = "both", apply: bool = True,
 
         wrote_local = False
         with config.registry_transaction(config_path=config_path) as (fresh_reg, writer):
-            merged_reg, merged_meta = _merge_datasets(
-                fresh_reg, local["entry_meta"], remote_datasets,
-                remote_entry_meta, self_host, now,
+            # tombstone と登録時刻は登録簿ロック内で fresh に読む（register/unregister_dataset
+            # と直列化）。
+            snap = _local_state()
+            local_tomb, local_meta = snap["deleted"], snap["entry_meta"]
+            merged_reg, merged_meta, merged_tomb = _merge_datasets(
+                fresh_reg, local_meta, remote_datasets,
+                remote_entry_meta, self_host, now, local_tomb, remote_tomb,
             )
             would_write_datasets = direction in ("both", "pull") and merged_reg != fresh_reg
             if apply and would_write_datasets:
@@ -523,11 +629,12 @@ def sync(*, direction: str = "both", apply: bool = True,
                     os.utime(target, (now_epoch, rdt.timestamp()))
 
         if apply and direction in ("both", "pull") and wrote_local:
-            state["entry_meta"] = merged_meta
+            new_entry_meta = merged_meta
 
         would_push = direction in ("both", "push") and (
             merged_reg != remote_datasets
             or merged_files != remote_files
+            or merged_tomb != remote_tomb
             or bool(dropped_file_keys)
         )
         need_push = apply and would_push
@@ -559,6 +666,7 @@ def sync(*, direction: str = "both", apply: bool = True,
             "entry_meta": merged_meta,
             "files": merged_files,
             "file_meta": merged_file_meta,
+            "deleted": merged_tomb,
         }
         body = json.dumps(put_bundle, ensure_ascii=False).encode("utf-8")
         put_kwargs = {"Bucket": bucket, "Key": object_key, "Body": body,
@@ -586,8 +694,28 @@ def sync(*, direction: str = "both", apply: bool = True,
         warnings.append("PUT リトライ上限に達したため push を諦めました")
 
     if apply:
-        state["etag"] = etag
-        _save_local_state(state)
+        def _apply(state: dict) -> None:
+            # マージに使った snapshot（local_meta / local_tomb）から変わったキーは、sync 中の
+            # register/unregister_dataset が書いたものなので fresh 側を優先する。
+            state["etag"] = etag
+            if new_entry_meta is not None:
+                em = dict(new_entry_meta)
+                for k, v in state["entry_meta"].items():
+                    if local_meta.get(k) != v:
+                        em[k] = v
+                state["entry_meta"] = em
+            if direction in ("both", "pull"):
+                # ローカル登録簿はマージ結果に揃っているので tombstone もマージ結果で置き換える。
+                # push のみのときは削除がローカルに未適用なので local の tombstone を消費しない。
+                tombs = dict(merged_tomb)
+                for k, v in state["deleted"].items():
+                    if local_tomb.get(k) != v:        # sync 中の削除（再削除を含む）
+                        tombs[k] = v
+                for k in set(local_tomb) - set(state["deleted"]):
+                    tombs.pop(k, None)                # sync 中の再登録が消した tombstone
+                state["deleted"] = tombs
+
+        _update_local_state(config_path, _apply)
 
     return {
         "remote_present": remote is not None,
