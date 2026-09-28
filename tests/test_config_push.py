@@ -1,7 +1,9 @@
 """ConfigPusher（gui/config_push.py）の Qt 非依存テストと機械ガード（Issue #98）。
 
 push 本体は config_share.try_push の代役（ゲート付きスタブ）に差し替える。worker を走らせる
-テストは finalizer でゲートを開けて stop し、デーモンスレッドを後続テストへ漏らさない。
+テストは reap_pushers fixture の teardown（テスト本体の成否に関わらず走る）でゲートを開け、
+stop し、worker スレッドを join して生存していないことを確認する — デーモンスレッドを後続
+テストへ漏らさず、元の失敗を後始末の失敗で覆わない。
 """
 
 from __future__ import annotations
@@ -57,18 +59,42 @@ class _Gate:
                 self.running -= 1
 
 
-def _stop_and_join(p: ConfigPusher, gate: _Gate) -> None:
-    gate.gate.set()
-    p.stop(wait_s=5.0)
-    t = p._thread
-    if t is not None:
+@pytest.fixture
+def reap_pushers(monkeypatch):
+    """このテストで作られた ConfigPusher とゲートを追跡し、成否に関わらず worker を回収する。
+
+    ゲートは戻り値の関数で作る（作ったものは全て追跡される）。teardown: 全ゲートを開ける →
+    全 pusher を stop → THREAD_NAME の生存スレッドを全て join し、生存していないことを確認。
+    """
+    pushers: list[ConfigPusher] = []
+    gates: list[_Gate] = []
+    orig_init = ConfigPusher.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        pushers.append(self)
+
+    monkeypatch.setattr(ConfigPusher, "__init__", tracking_init)
+
+    def new_gate() -> _Gate:
+        g = _Gate()
+        gates.append(g)
+        return g
+
+    yield new_gate
+    for g in gates:
+        g.gate.set()
+    for p in pushers:
+        p.stop(wait_s=5.0)
+    leftovers = [t for t in threading.enumerate() if t.name == THREAD_NAME]
+    for t in leftovers:
         t.join(5.0)
-        assert not t.is_alive()
+    assert not [t for t in leftovers if t.is_alive()]
 
 
 @pytest.fixture
-def pusher(monkeypatch):
-    gate = _Gate()
+def pusher(reap_pushers, monkeypatch):
+    gate = reap_pushers()
     logs: list[str] = []
     monkeypatch.setattr(config_share, "autosync_enabled", lambda: True)
     monkeypatch.setattr(config_share, "try_push", gate)
@@ -82,8 +108,7 @@ def pusher(monkeypatch):
     ctx.p = p
     ctx.gate = gate
     ctx.logs = logs
-    yield ctx
-    _stop_and_join(p, gate)
+    return ctx
 
 
 # --------------------------------------------------------------------------- #
@@ -201,32 +226,33 @@ def test_stop_returns_true_when_push_finishes_in_time(pusher):
     p, gate = pusher.p, pusher.gate
     assert p.request() is True
     _wait_until(lambda: len(gate.calls) == 1)
-    threading.Timer(0.1, gate.gate.set).start()
-    assert p.stop(wait_s=5.0) is True
-    assert not p._thread.is_alive()
+    timer = threading.Timer(0.1, gate.gate.set)
+    timer.start()
+    try:
+        assert p.stop(wait_s=5.0) is True
+        assert not p._thread.is_alive()
+    finally:
+        timer.cancel()
+        timer.join(5.0)
 
 
-def test_generations_are_serialized_by_push_lock(monkeypatch):
+def test_generations_are_serialized_by_push_lock(reap_pushers, monkeypatch):
     monkeypatch.setattr(config_share, "autosync_enabled", lambda: True)
-    g = _Gate()
+    g = reap_pushers()
     monkeypatch.setattr(config_share, "sync", g)   # try_push は実物（push ロックを取る）
     p1 = ConfigPusher()
     p2 = ConfigPusher()
-    try:
-        assert p1.request() is True
-        _wait_until(lambda: len(g.calls) == 1)
-        assert p1.stop(wait_s=0.05) is False       # 旧世代の stop が間に合わない
-        assert p2.request() is True
-        time.sleep(0.3)
-        assert len(g.calls) == 1                   # p2 の worker は push ロック待ち
-    finally:
-        g.gate.set()
-        p1.stop(5.0)
-        p2.stop(5.0)
-        for p in (p1, p2):
-            if p._thread is not None:
-                p._thread.join(5.0)
-                assert not p._thread.is_alive()
+    assert p1.request() is True
+    _wait_until(lambda: len(g.calls) == 1)
+    assert p1.stop(wait_s=0.05) is False       # 旧世代の stop が間に合わない
+    assert p2.request() is True
+    time.sleep(0.3)
+    assert len(g.calls) == 1                   # p2 の worker は push ロック待ち
+    g.gate.set()
+    for p in (p1, p2):
+        p.stop(5.0)
+        p._thread.join(5.0)
+        assert not p._thread.is_alive()
     assert len(g.calls) == 2
     assert g.max_running == 1
 

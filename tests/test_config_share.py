@@ -1122,23 +1122,31 @@ def test_try_push_never_writes_local(env):
 def test_try_push_is_serialized_by_push_lock(env, monkeypatch):
     gate = _Gate()
     monkeypatch.setattr(config_share, "sync", gate)
-    t1 = threading.Thread(target=config_share.try_push,
-                          kwargs={"config_path": env.cfg}, daemon=True)
-    t2 = threading.Thread(target=config_share.try_push,
-                          kwargs={"config_path": env.cfg}, daemon=True)
+    started: list[threading.Thread] = []
+
+    def start_push() -> None:
+        t = threading.Thread(target=config_share.try_push,
+                             kwargs={"config_path": env.cfg}, daemon=True)
+        t.start()
+        started.append(t)                      # 開始済みのものだけを回収対象にする
+
     try:
-        t1.start()
+        start_push()
         _wait_until(lambda: len(gate.calls) == 1)
-        t2.start()
+        start_push()
         time.sleep(0.3)
-        assert len(gate.calls) == 1            # t2 は push ロック待ち
-    finally:
+        assert len(gate.calls) == 1            # 2 本目は push ロック待ち
         gate.gate.set()
-        t1.join(5.0)
-        t2.join(5.0)
-    assert len(gate.calls) == 2
-    assert gate.max_running == 1
-    assert not t1.is_alive() and not t2.is_alive()
+        for t in started:
+            t.join(5.0)
+        assert not any(t.is_alive() for t in started)
+        assert len(gate.calls) == 2
+        assert gate.max_running == 1
+    finally:
+        # 失敗時の後始末だけ（assert しない＝元の失敗を覆わない）。未開始のスレッドは join しない。
+        gate.gate.set()
+        for t in started:
+            t.join(5.0)
 
 
 def test_client_disables_retries(monkeypatch):
