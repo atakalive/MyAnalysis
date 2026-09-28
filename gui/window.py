@@ -1398,24 +1398,31 @@ class ToolWindow(QMainWindow):
 
     def _register_dataset(self) -> None:
         import socket
+        from pathlib import Path
 
         import config
         from common.paths import validate_identifier_name
 
-        name, ok = QInputDialog.getText(
-            self, tr("dlg.register.title"), tr("dlg.register.label")
-        )
-        if not ok or not name:
-            return
-        try:
-            validate_identifier_name(name, check_reserved=False)
-        except ValueError as e:
-            QMessageBox.critical(self, tr("err.register.title"), str(e))
-            return
-
         path = QFileDialog.getExistingDirectory(self, tr("dlg.register_dir.title"))
         if not path:
             return
+
+        # 名前の既定値はフォルダ名。無効な名前はフォルダを選び直させず、
+        # 入力値を残したまま名前入力だけ再表示する。
+        name = Path(path).name
+        while True:
+            name, ok = QInputDialog.getText(
+                self, tr("dlg.register.title"), tr("dlg.register.label"), text=name
+            )
+            name = name.strip()
+            if not ok or not name:
+                return
+            try:
+                validate_identifier_name(name, check_reserved=False)
+            except ValueError as e:
+                QMessageBox.critical(self, tr("err.register.title"), str(e))
+                continue
+            break
 
         try:
             config.register_dataset(name, path)
