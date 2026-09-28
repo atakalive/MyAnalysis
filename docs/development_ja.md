@@ -25,7 +25,7 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 
 | 文書 | 読者 | 内容 |
 |---|---|---|
-| [README_ja.md](../README_ja.md) | 利用者 | インストール、使い方、設定、CLI リファレンス、トラブルシューティング |
+| [README_ja.md](../README_ja.md) と `docs/*_ja.md`（engines / usage / cli / analysis_module / config_sync / meeting_share / troubleshooting） | 利用者 | インストール、使い方、設定、CLI リファレンス、トラブルシューティング |
 | 本書 | 本体の開発者 | 構成、守るべき規律、変更の手順、テスト、開発ツール |
 | [CLAUDE.md](../CLAUDE.md) | AI コーディングエージェント | 各サブシステムの設計判断と規約。本書より詳しい |
 
@@ -35,7 +35,7 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 
 ## 2. 開発環境
 
-- **Python 3.11 以上**（標準ライブラリの `tomllib` を使う）。依存パッケージは README_ja.md の「動作環境」を参照。依存定義ファイル（`requirements.txt` 等）は無い。テストには別途 `pytest` が要る。
+- **Python 3.11 以上**（標準ライブラリの `tomllib` を使う）。依存パッケージは [README_ja.md の「インストールと起動」](../README_ja.md#インストールと起動) を参照。依存定義ファイル（`requirements.txt` 等）は無い。テストには別途 `pytest` が要る。
 - `.env` は GUI の起動時に読まれ（R2 同期の前にも毎回読み直す）、既に設定されている環境変数は上書きしない（`common/env.py`）。手で起動した CLI（`python -m llm_bridge engines` 等）は、R2 同期を伴うコマンドを除いて `.env` を読まない。
 
 **起動方法**
@@ -105,7 +105,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 
 ### 3.4 PC ローカルの状態
 
-同期ドライブ側（データセットディレクトリ）に置くものは README_ja.md の「保存データと再開」を参照。PC ローカルに置くのは以下。
+同期ドライブ側（データセットディレクトリ）に置くものは [usage_ja.md の「保存データと再開」](usage_ja.md#保存データと再開) を参照。PC ローカルに置くのは以下。
 
 | パス | 内容 |
 |---|---|
@@ -330,7 +330,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
   - 未知のキーは `TypeError` になり、`status: "error"` で記録される。
 - **実行** — ハンドラは GUI スレッドで動く。例外は `status: "error"`（`repr`）として記録される。
 - **戻り値** — JSON にできる値はそのまま `result` に入り、それ以外は `repr` される。既存の操作系 verb は `added:<name>` / `closed:<ds>:<n>` のような短い文字列を、一覧系は list / dict を返す。
-- **周知** — エージェントは verb を system プロンプト等から知る。必要に応じて更新する: `llm_backend/claude_code.py` の `_SYSTEM_PROMPT`、`llm_backend/pi.py` の `_SYSTEM_PROMPT_PI` と `.pi/skills/myanalysis-bridge/SKILL.md`、`llm_backend/codex.py` の `_SYSTEM_PROMPT_CODEX`、openai 系は `gui/tools.py`（[§6.4](#64-openai-互換バックエンド向けの-gui-ツール)）。利用者向けの一覧は README_ja.md の「CLI リファレンス」。
+- **周知** — エージェントは verb を system プロンプト等から知る。必要に応じて更新する: `llm_backend/claude_code.py` の `_SYSTEM_PROMPT`、`llm_backend/pi.py` の `_SYSTEM_PROMPT_PI` と `.pi/skills/myanalysis-bridge/SKILL.md`、`llm_backend/codex.py` の `_SYSTEM_PROMPT_CODEX`、openai 系は `gui/tools.py`（[§6.4](#64-openai-互換バックエンド向けの-gui-ツール)）。利用者向けの一覧は [cli_ja.md](cli_ja.md)。
 - `python -m llm_bridge list-commands` は手書きの固定リストで、登録済みの verb を反映しない（[§12](#12-既知の技術的負債)）。
 
 ### 6.3 UI 文言（i18n）の追加
@@ -465,7 +465,7 @@ python -X utf8 -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--ca
 
 0 バイトのファイル、primary と `.bak` の食い違い、`myanalysis.toml` の破損、`data/llm_state` の 0 バイトファイル、rclone キャッシュの孤児 tmp とログの失敗イベントを報告する。未解決の問題があれば終了コード 1（孤児 tmp とログの失敗イベントは数えない）。`--repair` は newest-wins で収束させ、`data/llm_state` の 0 バイトファイルは削除する（次回の書込で作り直される）。`--rescue` は 0 バイトのファイルを rclone キャッシュの孤児 tmp から復元する。
 
-`--cache` / `--log` の既定値は特定の rclone 構成を前提にしたパスなので、rclone を使う環境では必ず指定する（存在しないパスだと「孤児なし」「失敗なし」と表示されるだけ）。利用者向けの説明は [README_ja.md の「doctor（点検と修復）」](../README_ja.md#doctor点検と修復)。
+`--cache` / `--log` の既定値は特定の rclone 構成を前提にしたパスなので、rclone を使う環境では必ず指定する（存在しないパスだと「孤児なし」「失敗なし」と表示されるだけ）。利用者向けの説明は [troubleshooting_ja.md の「doctor（点検と修復）」](troubleshooting_ja.md#doctor点検と修復)。
 
 ### 9.3 `python -m devtools.mount_probe`
 
