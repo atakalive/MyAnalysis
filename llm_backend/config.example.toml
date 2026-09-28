@@ -1,15 +1,16 @@
 # LLM backend configuration. Copy to config.toml to activate.
 # config.toml is gitignored; this example is committed.
-# View → backend/model settings rewrites [backend].name and [claude_code].bin
-# here (and the model/provider keys in models.toml) and applies without a restart.
+# Settings → Backend/model settings (設定 → バックエンド/モデル設定…) rewrites
+# [backend].name and [claude_code].bin here (and the model/provider keys in
+# models.toml) and applies without a restart.
 
 [backend]
-name = "pi"          # "claude" | "pi" | "codex" | "openai" | "mock"
+name = "claude"      # "claude" | "pi" | "codex" | "openai" | "mock"
 
 [pi]
 # ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
 #   前方スラッシュか、リテラル文字列 '...' を使うこと。
-cwd  = '<repo>'   # 省略時はリポジトリ root
+# cwd = 'C:/path/to/workdir'   # 省略時はリポジトリ root
 bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
 # model / provider はモデル設定なので models.toml の [pi] で指定(models.example.toml 参照)
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
@@ -53,7 +54,7 @@ use_provider_system_prompt = true
 #   リポジトリ直下を cwd にすると開発者向け CLAUDE.md を読み込み「アプリ開発役」に
 #   なってしまうため、既定では外に出して「データ解析役」に保つ。リポジトリ自体は
 #   --add-dir + PYTHONPATH で参照可能。明示上書きしたい場合のみ↓を有効化:
-# cwd = '<repo>'
+# cwd = 'C:/path/to/agent_home'
 
 # ── Visual feedback (Observe self-view) ──
 # 図の self-view には次のいずれかが必要:

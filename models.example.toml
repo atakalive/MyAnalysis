@@ -7,9 +7,10 @@
 # conventional keys to its CLI/API; keys a backend doesn't use are ignored.
 #
 # Conventional keys: model / thinking / effort / provider.
-# Applied on process start, or live via View → backend/model settings (which
-# rewrites the model/provider keys here + [backend].name / [claude_code].bin in
-# config.toml and refreshes the cache — no restart needed).
+# Applied on process start, or live via Settings → Backend/model settings
+# (設定 → バックエンド/モデル設定…), which rewrites the model/provider keys here +
+# [backend].name / [claude_code].bin in config.toml and refreshes the cache — no
+# restart needed.
 
 [claude_code]
 # Reuses the VS Code Claude Code engine (stream-json mode).
@@ -20,7 +21,7 @@ effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode 
                       #   (high token use; needs an ultracode-capable model)
 
 [pi]
-provider = "openai-codex"  # --provider  (openai-codex | openai | llama.cpp)
+provider = "openai-codex"  # --provider  (openai-codex | github-copilot | llama.cpp)
 model    = "gpt-5.5"       # --model
 # *_choices は「バックエンド/モデル設定」ダイアログのドロップダウン候補。
 # ダイアログの ＋/－ が書き換えるので手編集は不要 (してもよい)。キー自体が無ければ
