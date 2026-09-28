@@ -98,10 +98,14 @@ def register_dataset(
     if not (PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()):
         raise ValueError(f"path must be absolute: {path!r}")
 
+    import config_share  # lazy: config_share imports config
+
     created = False
     with registry_transaction(config_path=config_path) as (registry, writer):
         created = name not in registry
         registry.setdefault(name, {})[host] = path
+        # R2 同期用に登録時刻を記録（他 PC の削除 tombstone より新しい再登録を残すため）。
+        config_share.note_registered(name, host)
         writer(registry)
 
     return {"name": name, "host": host, "path": path, "created": created}

@@ -893,3 +893,91 @@ def test_bad_deleted_type_is_unusable(env):
     r = _sync(env)
     assert r["unusable_remote"] is True
     assert r["pushed"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 27. 複数 PC シナリオ（レビュー指摘の回帰）— 決定的な時計で PC を切り替える
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def pcs(env, monkeypatch):
+    """PC ごとに登録簿・状態ファイル・ホスト名を切り替える。時計は単調増加の偽物。"""
+    import itertools
+    tick = itertools.count(1)
+    monkeypatch.setattr(
+        config_share, "_now_iso",
+        lambda: f"2030-01-01T00:00:{next(tick):02d}+00:00")
+
+    def use(host):
+        monkeypatch.setattr(config_share, "_state_path",
+                            lambda: env.tmp / f"state_{host}.json")
+        monkeypatch.setattr(socket, "gethostname", lambda: host)
+        return env.tmp / f"reg_{host}.json"
+
+    return use
+
+
+def test_register_stamps_meta_and_clears_local_tombstone(env):
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    config.register_dataset("ds_local", "/local/p", config_path=env.cfg)
+    st = config_share._local_state()
+    assert "ds_local/SELF" in st["entry_meta"]
+    assert st["deleted"] == {}
+
+
+def test_reregister_on_unsynced_pc_after_remote_delete_survives(env, pcs):
+    a = pcs("A")
+    config.register_dataset("x", "/a/x", config_path=a)
+    config_share.sync(config_path=a)
+    b = pcs("B")
+    config.register_dataset("x", "/b/x", config_path=b)
+    config_share.sync(config_path=b)                  # x = {A, B}
+    a = pcs("A")
+    config_share.sync(config_path=a)
+    config.unregister_dataset("x", config_path=a)     # 両ホスト分を削除
+    config_share.sync(config_path=a)                  # 削除を remote へ
+    b = pcs("B")                                      # B は未 sync のまま再登録
+    config.register_dataset("x", "/b/x_new", config_path=b)
+    config_share.sync(config_path=b)
+    assert _datasets_from(b)["x"] == {"B": "/b/x_new"}
+    assert env.fake.stored()["datasets"]["x"] == {"B": "/b/x_new"}
+
+
+def test_offline_self_host_edit_does_not_beat_later_delete(pcs):
+    b = pcs("B")
+    config.register_dataset("w", "/b/old", config_path=b)
+    config_share.sync(config_path=b)
+    a = pcs("A")
+    config_share.sync(config_path=a)                  # A も w を持つ
+    b = pcs("B")
+    config.register_dataset("w", "/b/new", config_path=b)   # オフライン編集
+    a = pcs("A")
+    config.unregister_dataset("w", config_path=a)           # 編集より後の削除
+    b = pcs("B")
+    config_share.sync(config_path=b)                  # B が先に sync（自ホスト優先）
+    a = pcs("A")
+    config_share.sync(config_path=a)
+    assert "w" not in _datasets_from(a)
+    b = pcs("B")
+    config_share.sync(config_path=b)
+    assert "w" not in _datasets_from(b)
+
+
+def test_redelete_during_sync_keeps_newer_tombstone(env, monkeypatch):
+    _sync(env)
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    _sync(env)                                         # tombstone を remote へ
+    # 手編集での再追加（tombstone はローカルに残ったまま）
+    _write_config(env.cfg, {"ds_local": {"SELF": "/local/p"}})
+    real_put = env.fake.put_object
+
+    def put_and_redelete(**kw):
+        config.unregister_dataset("ds_local", config_path=env.cfg)   # sync 中の再削除
+        return real_put(**kw)
+
+    monkeypatch.setattr(env.fake, "put_object", put_and_redelete)
+    _sync(env)
+    monkeypatch.setattr(env.fake, "put_object", real_put)
+    assert "ds_local/SELF" in config_share._local_state()["deleted"]
+    _sync(env)
+    assert "ds_local" not in env.fake.stored()["datasets"]
+    assert "ds_local" not in _datasets_from(env.cfg)

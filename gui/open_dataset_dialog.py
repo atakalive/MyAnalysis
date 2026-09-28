@@ -732,6 +732,8 @@ class OpenDatasetDialog(QDialog):
         import config
         try:
             config.unregister_dataset(name)
+        except KeyError:
+            pass                            # 並行 sync 等で既に登録簿から消えている
         except Exception as e:
             QMessageBox.warning(
                 self, tr("picker.delete.title"), tr("picker.delete.failed", error=str(e)))
