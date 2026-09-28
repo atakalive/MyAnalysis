@@ -337,7 +337,8 @@ def test_files_identical_no_write(env):
 # 10. Unknown schema / corrupt remote -> read-only
 # --------------------------------------------------------------------------- #
 def test_unknown_schema_readonly(env):
-    env.fake.seed({"schema_version": 2, "datasets": {"x": {"H": "/p"}}})
+    env.fake.seed({"schema_version": config_share.SCHEMA_VERSION + 1,
+                   "datasets": {"x": {"H": "/p"}}})
     before = env.fake.stored()
     r = _sync(env, apply=False)
     assert r["unusable_remote"] is True
@@ -770,3 +771,125 @@ def test_dry_run_leaves_registry_state_and_remote_untouched(env):
     assert env.cfg.read_bytes() == before
     assert env.fake.stored() == remote_before
     assert (state_path.read_bytes() if state_path.exists() else None) == state_before
+
+
+# --------------------------------------------------------------------------- #
+# 26. 登録削除の tombstone 伝播
+# --------------------------------------------------------------------------- #
+_OLD = "2020-01-01T00:00:00+00:00"
+_FUTURE = "2999-01-01T00:00:00+00:00"
+
+
+def _seed_v2(env, datasets, *, deleted=None, entry_meta=None):
+    env.fake.seed({
+        "schema_version": 2, "updated_by": "OTHER", "updated_at": _OLD,
+        "datasets": datasets, "entry_meta": entry_meta or {},
+        "files": {}, "file_meta": {}, "deleted": deleted or {},
+    })
+
+
+def test_unregister_dataset_removes_entry_and_records_tombstone(env):
+    _write_config(env.cfg, {"a": {"SELF": "/a", "OTHER": "/a2"}, "b": {"SELF": "/b"}})
+    removed = config.unregister_dataset("a", config_path=env.cfg)
+    assert removed == {"SELF": "/a", "OTHER": "/a2"}
+    assert _datasets_from(env.cfg) == {"b": {"SELF": "/b"}}
+    assert set(config_share._local_state()["deleted"]) == {"a/SELF", "a/OTHER"}
+    with pytest.raises(KeyError):
+        config.unregister_dataset("a", config_path=env.cfg)
+
+
+def test_local_unregister_propagates_to_remote(env):
+    _sync(env)                                     # remote に ds_local を載せる
+    assert "ds_local" in env.fake.stored()["datasets"]
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    r = _sync(env)
+    assert r["pushed"] is True
+    stored = env.fake.stored()
+    assert "ds_local" not in stored["datasets"]
+    assert "ds_local/SELF" in stored["deleted"]
+    assert "ds_local" not in _datasets_from(env.cfg)
+    assert _sync(env)["pushed"] is False           # 収束（復活しない）
+
+
+def test_remote_tombstone_deletes_local_entry(env):
+    _write_config(env.cfg, {"ds_local": {"SELF": "/local/p"}, "gone": {"OTHER": "/g"}})
+    _seed_v2(env, {"ds_local": {"SELF": "/local/p"}}, deleted={"gone/OTHER": _OLD})
+    _sync(env)
+    assert _datasets_from(env.cfg) == {"ds_local": {"SELF": "/local/p"}}
+    assert "gone" not in config.DATASETS
+    assert config_share._local_state()["deleted"] == {"gone/OTHER": _OLD}
+
+
+def test_missing_remote_never_deletes_local(env):
+    """tombstone 無しで remote に無いだけなら消さない（remote 消失でローカルを失わない）。"""
+    _seed_v2(env, {})
+    _sync(env)
+    assert _datasets_from(env.cfg) == {"ds_local": {"SELF": "/local/p"}}
+    assert env.fake.stored()["datasets"] == {"ds_local": {"SELF": "/local/p"}}
+
+
+def test_reregister_after_unregister_survives(env):
+    _sync(env)
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    _sync(env)                                     # remote に tombstone
+    config.register_dataset("ds_local", "/local/p", config_path=env.cfg)
+    _sync(env)
+    assert _datasets_from(env.cfg) == {"ds_local": {"SELF": "/local/p"}}
+    stored = env.fake.stored()
+    assert stored["datasets"] == {"ds_local": {"SELF": "/local/p"}}
+    assert stored["deleted"] == {}
+    assert config_share._local_state()["deleted"] == {}
+
+
+def test_remote_readd_newer_than_local_tombstone_is_adopted(env):
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    _seed_v2(env, {"ds_local": {"SELF": "/new"}},
+             entry_meta={"ds_local/SELF": _FUTURE})
+    _sync(env)
+    assert _datasets_from(env.cfg) == {"ds_local": {"SELF": "/new"}}
+    assert env.fake.stored()["deleted"] == {}
+
+
+def test_local_tombstone_beats_older_remote_entry(env):
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    _seed_v2(env, {"ds_local": {"SELF": "/local/p"}},
+             entry_meta={"ds_local/SELF": _OLD})
+    _sync(env)
+    assert "ds_local" not in _datasets_from(env.cfg)
+    assert env.fake.stored()["datasets"] == {}
+
+
+def test_push_only_keeps_local_tombstone_unconsumed(env):
+    _write_config(env.cfg, {"gone": {"OTHER": "/g"}})
+    _seed_v2(env, {}, deleted={"gone/OTHER": _OLD})
+    config_share.push(config_path=env.cfg)
+    assert _datasets_from(env.cfg) == {"gone": {"OTHER": "/g"}}   # push はローカルを書かない
+    assert config_share._local_state()["deleted"] == {}
+    _sync(env)                                     # 次の双方向 sync で削除が適用される
+    assert _datasets_from(env.cfg) == {}
+
+
+def test_tombstone_noted_during_sync_is_not_lost(env, monkeypatch):
+    real_put = env.fake.put_object
+
+    def put_and_unregister(**kw):
+        config_share.note_deleted("other", {"SELF": "/o"})   # sync 中の別プロセス相当
+        return real_put(**kw)
+
+    monkeypatch.setattr(env.fake, "put_object", put_and_unregister)
+    _sync(env)
+    assert "other/SELF" in config_share._local_state()["deleted"]
+
+
+def test_invalid_tombstone_times_are_ignored(env):
+    _write_config(env.cfg, {"ds_local": {"SELF": "/local/p"}, "keep": {"OTHER": "/k"}})
+    _seed_v2(env, {"ds_local": {"SELF": "/local/p"}}, deleted={"keep/OTHER": "not-a-time"})
+    _sync(env)
+    assert "keep" in _datasets_from(env.cfg)
+
+
+def test_bad_deleted_type_is_unusable(env):
+    env.fake.seed({"schema_version": 2, "datasets": {}, "deleted": {"a/B": 1}})
+    r = _sync(env)
+    assert r["unusable_remote"] is True
+    assert r["pushed"] is False

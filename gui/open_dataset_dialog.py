@@ -112,6 +112,15 @@ class DatasetTableModel(QAbstractTableModel):
                 self.dataChanged.emit(top, bot)
                 return
 
+    def remove_meta(self, name: str) -> None:
+        """Drop the row whose name matches (by name correlation)."""
+        for i, m in enumerate(self._metas):
+            if m.name == name:
+                self.beginRemoveRows(QModelIndex(), i, i)
+                del self._metas[i]
+                self.endRemoveRows()
+                return
+
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if orientation != Qt.Orientation.Horizontal \
                 or role != Qt.ItemDataRole.DisplayRole:
@@ -315,9 +324,12 @@ class OpenDatasetDialog(QDialog):
         self._edit_btn.clicked.connect(self._on_edit_desc)
         self._complete_btn = QPushButton(tr("picker.btn.mark_completed"), detail)
         self._complete_btn.clicked.connect(self._on_toggle_completed)
+        self._delete_btn = QPushButton(tr("picker.btn.delete"), detail)
+        self._delete_btn.clicked.connect(self._on_delete)
         btn_row.addWidget(self._refresh_btn)
         btn_row.addWidget(self._edit_btn)
         btn_row.addWidget(self._complete_btn)
+        btn_row.addWidget(self._delete_btn)
         detail_layout.addLayout(btn_row)
         detail_layout.addStretch(1)
         splitter.addWidget(detail)
@@ -486,8 +498,10 @@ class OpenDatasetDialog(QDialog):
             else tr("picker.btn.mark_completed"))
         self._complete_btn.setEnabled(avail)
         # [更新] stays enabled even for unavailable rows (rebuild_meta is a
-        # best-effort no-op there).
+        # best-effort no-op there). So does [登録を削除] — a row with no path on
+        # this host or a vanished directory is exactly what one wants to remove.
         self._refresh_btn.setEnabled(m is not None)
+        self._delete_btn.setEnabled(m is not None)
 
     def _clear_form(self) -> None:
         while self._form.rowCount() > 0:
@@ -680,6 +694,68 @@ class OpenDatasetDialog(QDialog):
                     self._view.selectRow(new_row)
                 else:
                     self._clear_all_selection()
+
+    def _on_delete(self) -> None:
+        # 登録簿（datasets.local.json）からエントリを外すだけ。DS フォルダには触れない。
+        m = self._current_meta()
+        if m is None or not m.name:
+            return
+        name = m.name
+        is_open = name in self._open_names
+        body = tr("picker.delete.confirm", name=name)
+        if is_open:
+            body += "\n\n" + tr("picker.delete.confirm_open")
+        try:
+            import config_share
+            synced = config_share.is_configured()
+        except Exception:
+            synced = False
+        if synced:
+            body += "\n\n" + tr("picker.delete.confirm_sync")
+        answer = QMessageBox.question(
+            self, tr("picker.delete.title"), body,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # 開いている DS は先に閉じる（セッションを flush してからグループを外す）。
+        close = getattr(self._main_window, "close_dataset", None)
+        if is_open and close is not None:
+            try:
+                n = close(name)
+            except LookupError:
+                n = 0                       # 既に閉じられていた
+            if n < 0:
+                return                      # flush 失敗 — close_dataset が警告済み
+
+        import config
+        try:
+            config.unregister_dataset(name)
+        except Exception as e:
+            QMessageBox.warning(
+                self, tr("picker.delete.title"), tr("picker.delete.failed", error=str(e)))
+            return
+        config.DATASETS.pop(name, None)
+        self._open_names.discard(name)
+        self._live_thumbs.pop(name, None)
+
+        view = self._active_view
+        idxs = view.selectionModel().selectedRows()
+        prev_row = idxs[0].row() if idxs else 0
+        self._model.remove_meta(name)
+        # 同じリストの同じ位置（末尾なら一つ上）を選び直す。完了リストが空になったら
+        # 通常リストの先頭へ。どちらも無ければ選択を外してボタンを無効化する。
+        n = view.model().rowCount()
+        if n > 0:
+            view.selectRow(min(prev_row, n - 1))
+        elif view is self._completed_view and self._proxy.rowCount() > 0:
+            self._active_view = self._view
+            self._view.selectRow(0)
+        else:
+            self._clear_all_selection()
+            return
+        self._on_selection_changed()   # selectRow が変化を通知しない場合も詳細を更新
 
     def _find_proxy_row(self, proxy, name: str) -> int | None:
         for r in range(proxy.rowCount()):
