@@ -186,6 +186,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `chat.py` | チャットドック `ChatWidget`、`_StreamWorker`、openai / mock 用の `_SYSTEM_PROMPT` |
 | `tools.py` | openai 互換バックエンド向けのツール定義 `TOOLS` と実行 `_dispatch` |
 | `open_dataset_dialog.py` | データセットピッカー |
+| `config_push.py` | `ConfigPusher`（Qt 非依存）。GUI での登録・登録削除の後に `config_share.try_push` をデーモンスレッドで 1 本ずつ実行する（実行中の要求は 1 回にまとめる）。終了時は最大 5 秒待ち、終わらなければそのまま（プロセス終了で消える）。push 本体は `try_push` の push ロックで直列化 |
 | `backend_selector_dialog.py` | バックエンド/モデル設定ダイアログ、チャット単位のエンジン上書き |
 | `backend_status_window.py` | バックエンドの状況ウィンドウ |
 | `persona_dialog.py` | AI ペルソナの設定ダイアログ |
@@ -436,7 +437,7 @@ python -m pytest tests/
 | サブシステム | テスト |
 |---|---|
 | 書込 chokepoint・FS 判定・ロック | `test_paths`, `test_fs_kind`, `test_filelock`, `test_mount_compat`, `test_figures`, `test_local_state_store` |
-| 登録簿・データセット設定・設定同期 | `test_dataset_registry`, `test_register_dataset`, `test_migrate_dataset_registry`, `test_dataset_config`, `test_config_share`, `test_cli_register_auto_open` |
+| 登録簿・データセット設定・設定同期 | `test_dataset_registry`, `test_register_dataset`, `test_migrate_dataset_registry`, `test_dataset_config`, `test_config_share`, `test_cli_register_auto_open`, `test_config_push` |
 | explore / export / newanalysis | `test_explore`, `test_export_driver`, `test_newanalysis` |
 | llm_bridge の CLI と状態ファイル | `test_active_state`, `test_cli_state_dataset`, `test_cli_set_description`, `test_cli_set_completed`, `test_annotations`, `test_annotations_handler`, `test_analysis_edit`, `test_guard_write`, `test_recent_datasets`, `test_dataset_meta` |
 | セッションとチャット履歴の保存 | `test_session`, `test_session_meta_hooks`, `test_chat_store`, `test_backend_session_store` |
@@ -490,7 +491,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `MYANALYSIS_FORCE_FRAGILE` | `1` で全パスを fragile として扱う |
 | `LLM_BACKEND` | バックエンドの全体既定の選択を上書きする（`config.toml` より優先。チャット単位のエンジン上書きには効かない） |
 | `CLAUDE_CODE_BIN` / `CODEX_BIN` | claude / codex の実行ファイル（`config.toml` の `bin` が空のときに使われる） |
-| `R2_AUTOSYNC` | `0` で起動時と CLI の `register-dataset` の R2 自動同期を止める（GUI からの登録はもともと自動同期しない） |
+| `R2_AUTOSYNC` | `0` で R2 の自動同期（起動時と CLI の `register-dataset` の後の双方向同期、GUI での登録・登録削除の後の送信）を止める。手動の `config-*` は残る |
 
 ### 9.5 旧形式の登録簿からの移行
 
@@ -523,7 +524,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 - `llm_bridge/` パッケージは CLI からも import されるので、トップレベルで PySide6 を import しない（必要な関数の中で遅延 import する）。
 - `llm_bridge/chat_store.py` は Qt にも `config` / `dataset_config` にも依存させない（依存するのは `llm_backend.base` と `common.paths` だけ）。`dataset_registry.py` は `config`・GUI・同期モジュールに依存しない。
 - `common/paths.py` はトップレベルで `common.i18n` を import しない（i18n → paths の一方向）。`gui/window.py` は `devtools` を import しない（開発メニューは retranslate hook で連携する）。
-- ロジックは Qt 非依存のコアに置き、Qt の配線と分けてヘッドレスでテストする。例: `llm_bridge/session.py`・`chat_store.py`・`dataset_meta.py`、`llm_backend/engines.py`・`preflight.py`・`settings_store.py`・`ping.py`、`devtools/hotreload.py`、`meeting/local_relay.py` の `RelayState`。
+- ロジックは Qt 非依存のコアに置き、Qt の配線と分けてヘッドレスでテストする。例: `config_share.py`・`gui/config_push.py`、`llm_bridge/session.py`・`chat_store.py`・`dataset_meta.py`、`llm_backend/engines.py`・`preflight.py`・`settings_store.py`・`ping.py`、`devtools/hotreload.py`、`meeting/local_relay.py` の `RelayState`。
 
 **例外を出さない（never-raise）**
 

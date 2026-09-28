@@ -5,9 +5,14 @@ R2 が運ぶのは「同期ドライブに乗らない repo 側 config」だけ�
 （任意）.env。データセット側の analysis.py / _work / state / batch / myanalysis.toml は
 同期ドライブで sync 済みなので bundle に含めない。
 
-best-effort 原則: 自動経路（try_sync）はクレデンシャル未設定・boto3 未導入・ネット不通・
-バケットエラー・remote 破損のいずれでも例外で起動を止めず、長時間ブロックもしない
-（boto3 は short timeout＋リトライ無効）。明示 CLI（sync/push/pull）はエラーを表に出す。
+best-effort 原則: 自動経路はクレデンシャル未設定・boto3 未導入・ネット不通・バケットエラー・
+remote 破損のいずれでも例外で呼び出し元を止めない（boto3 は short timeout＋再試行なし）。
+自動経路は 2 種類:
+  - try_sync（双方向）: GUI 起動時（tool.py）と CLI register-dataset の後。
+  - try_push（送信のみ）: GUI での登録・登録削除の直後。gui/config_push.py の ConfigPusher が
+    デーモンスレッドで実行する（GUI スレッドを塞がない。ローカルファイル・config.DATASETS には
+    触れない）。PC ローカルの push ロックで直列化する。
+明示 CLI（sync/push/pull）はエラーを表に出す。
 
 登録簿のマージは union・非破壊で、remote が消えてもローカルは消えない。削除は
 `config.unregister_dataset` が記録する明示的な tombstone（`deleted`: "ds/HOST" → 削除時刻）
@@ -20,11 +25,12 @@ import json
 import os
 import socket
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 import config
 from common.env import load_env
+from common.filelock import exclusive_lock
 from common.paths import repo_root
 
 SCHEMA_VERSION = 2                 # 2: 登録削除の tombstone（deleted）を追加
@@ -174,7 +180,8 @@ def _client(creds: dict):
             signature_version="s3v4",
             connect_timeout=2,
             read_timeout=3,
-            retries={"max_attempts": 1, "mode": "standard"},
+            # client config の max_attempts は「再試行回数」（total = +1）。初回だけにするのは total_max_attempts=1。
+            retries={"total_max_attempts": 1, "mode": "standard"},
         ),
     )
 
@@ -227,18 +234,39 @@ def _update_local_state(config_path: Path | None, update) -> None:
         _save_local_state(state)
 
 
+def _stamp_after_known(state: dict, key: str) -> str:
+    """key の新しいイベント（登録・削除）の時刻。
+
+    ローカル状態に記録済みのその key の時刻（entry_meta と deleted の大きい方）より厳密に
+    新しい値を返す（時計の同値・巻き戻りで、後の操作が先に push された操作に負けないように）。
+    表現上限で繰り上げられないときは高水位そのもの（同値）を返し、例外は出さない。"""
+    now = _now_iso()
+    known = [dt for dt in (_parse_iso(state["entry_meta"].get(key)),
+                           _parse_iso(state["deleted"].get(key))) if dt is not None]
+    if not known:
+        return now
+    last = max(known)
+    now_dt = _parse_iso(now)
+    if now_dt is not None and now_dt > last:
+        return now
+    try:
+        return (last + timedelta(microseconds=1)).isoformat()
+    except OverflowError:                                   # 9999-12-31T23:59:59.999999 等
+        _log_debug(f"cannot stamp after {last.isoformat()} for {key!r}; using it as-is")
+        return last.isoformat()
+
+
 def note_deleted(name: str, hosts) -> None:
     """登録解除した (name, HOST) を tombstone として記録する（次回 sync で remote/他 PC へ伝播）。
 
     `config.unregister_dataset` が登録簿ロック内から呼ぶ（sync はこのロック内で tombstone を
     読むので直列化される）。R2 未設定でも記録する — 後から設定したとき remote に残る古い
-    登録で復活させないため。
+    登録で復活させないため。時刻は `_stamp_after_known` で採る（同じキーの既知の時刻より厳密に新しい）。
     """
     state = _local_state()
-    now = _now_iso()
     for host in hosts:
         key = f"{name}/{host}"
-        state["deleted"][key] = now
+        state["deleted"][key] = _stamp_after_known(state, key)   # entry_meta を消す前に採る
         state["entry_meta"].pop(key, None)
     _save_local_state(state)
 
@@ -248,10 +276,11 @@ def note_registered(name: str, host: str) -> None:
 
     `config.register_dataset` が登録簿ロック内から呼ぶ。この時刻が無いと、他 PC の削除後に
     （まだ sync していない PC で）登録し直したエントリが tombstone より古く見えて消される。
+    時刻は `_stamp_after_known` で採る（同じキーの既知の時刻より厳密に新しい）。
     """
     state = _local_state()
     key = f"{name}/{host}"
-    state["entry_meta"][key] = _now_iso()
+    state["entry_meta"][key] = _stamp_after_known(state, key)    # tombstone を消す前に採る
     state["deleted"].pop(key, None)
     _save_local_state(state)
 
@@ -742,15 +771,49 @@ def pull(**kw) -> dict:
     return sync(direction="pull", **kw)
 
 
-def try_sync(*, config_path: Path | None = None) -> dict | None:
-    """繋がるときだけ双方向収束。起動も登録も絶対に止めない。戻り値は無視してよい。"""
+def autosync_enabled() -> bool:
+    """自動同期（try_sync / try_push）を行う条件。ネットワークは叩かない。例外は False。
+
+    GUI スレッドから呼んでよい（.env の小さな読取だけ）。"""
     try:
         load_env()
         if os.environ.get("R2_AUTOSYNC", "1") == "0":
-            return None
-        if not is_configured():
+            return False
+        return is_configured()
+    except Exception as exc:                                # best-effort
+        _log_debug(f"auto-sync gate failed: {exc}")
+        return False
+
+
+def try_sync(*, config_path: Path | None = None) -> dict | None:
+    """繋がるときだけ双方向収束。起動も登録も絶対に止めない。戻り値は無視してよい。"""
+    try:
+        if not autosync_enabled():
             return None
         return sync(direction="both", config_path=config_path)
     except Exception as exc:                                # best-effort: 例外は外へ出さない
         _log_debug(f"auto-sync skipped: {exc}")
+        return None
+
+
+def _push_lock_path() -> Path:
+    """自動 push を PC ローカルで直列化するロック（状態ファイルと同じディレクトリ）。"""
+    return _state_path().with_name("config_push.lock")
+
+
+def try_push(*, config_path: Path | None = None) -> dict | None:
+    """remote にだけ書く送信（never-raise）。GUI での登録・登録削除の直後にワーカースレッドから呼ぶ。
+
+    datasets.local.json / config.DATASETS / portable files には触れない（書くのは remote と
+    状態ファイルの etag だけ）。push の間は PC ローカルの push ロックを保持し、hot reload の
+    世代をまたいでも同時に push するのは 1 本だけにする（待ちはワーカースレッドで起こる）。"""
+    try:
+        if not autosync_enabled():
+            return None
+        lock = _push_lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with exclusive_lock(lock):
+            return sync(direction="push", config_path=config_path)
+    except Exception as exc:                                # best-effort: 例外は外へ出さない
+        _log_debug(f"auto-push skipped: {exc}")
         return None

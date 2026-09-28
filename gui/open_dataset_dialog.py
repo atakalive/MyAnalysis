@@ -730,14 +730,18 @@ class OpenDatasetDialog(QDialog):
                 return                      # flush 失敗 — close_dataset が警告済み
 
         import config
+        removed = False
         try:
             config.unregister_dataset(name)
+            removed = True
         except KeyError:
-            pass                            # 並行 sync 等で既に登録簿から消えている
+            pass                            # 並行 sync 等で既に登録簿から消えている（tombstone も書かれない）
         except Exception as e:
             QMessageBox.warning(
                 self, tr("picker.delete.title"), tr("picker.delete.failed", error=str(e)))
             return
+        if removed:
+            self._request_config_push()     # tombstone を remote へ（送信のみ・非同期・best-effort）
         config.DATASETS.pop(name, None)
         self._open_names.discard(name)
         self._live_thumbs.pop(name, None)
@@ -758,6 +762,16 @@ class OpenDatasetDialog(QDialog):
             self._clear_all_selection()
             return
         self._on_selection_changed()   # selectRow が変化を通知しない場合も詳細を更新
+
+    def _request_config_push(self) -> None:
+        # 親ウィンドウに R2 への送信を頼む（close_dataset と同じ duck-typing。無ければ何もしない）。
+        fn = getattr(self._main_window, "request_config_push", None)
+        if not callable(fn):
+            return
+        try:
+            fn()
+        except Exception:
+            pass                            # best-effort: 削除の成否に影響させない
 
     def _find_proxy_row(self, proxy, name: str) -> int | None:
         for r in range(proxy.rowCount()):

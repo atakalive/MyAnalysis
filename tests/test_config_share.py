@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
+import threading
+import time
+import types
 
 import pytest
 
 import config
 import config_share
+
+_REAL_CLIENT = config_share._client   # conftest の autouse が差し替える前の実物
 
 
 # --------------------------------------------------------------------------- #
@@ -981,3 +987,304 @@ def test_redelete_during_sync_keeps_newer_tombstone(env, monkeypatch):
     _sync(env)
     assert "ds_local" not in env.fake.stored()["datasets"]
     assert "ds_local" not in _datasets_from(env.cfg)
+
+
+# --------------------------------------------------------------------------- #
+# 28. 自動 push（try_push）・push ロック・イベント時刻の単調性（Issue #98）
+# --------------------------------------------------------------------------- #
+def _wait_until(pred, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        time.sleep(0.005)
+
+
+class _Gate:
+    """gate が開くまで戻らない代役。同時実行数と呼出スレッドを記録する。"""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.raise_exc: Exception | None = None
+        self.on_call = None                   # 呼ばれた直後に 1 回だけ実行する任意のフック
+        self.lock = threading.Lock()
+        self.calls: list[int] = []            # 呼ばれたスレッドの ident
+        self.running = 0
+        self.max_running = 0
+
+    def __call__(self, *args, **kwargs):
+        with self.lock:
+            self.calls.append(threading.get_ident())
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            hook, self.on_call = self.on_call, None
+        try:
+            if hook is not None:
+                hook()
+            self.gate.wait(10.0)
+            if self.raise_exc is not None:
+                raise self.raise_exc
+            return None
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _raise_runtime(*_a, **_k):
+    raise RuntimeError("boom")
+
+
+def test_autosync_enabled_true_when_configured(env):
+    assert config_share.autosync_enabled() is True
+
+
+def test_autosync_enabled_false_when_disabled(env, monkeypatch):
+    monkeypatch.setenv("R2_AUTOSYNC", "0")
+    assert config_share.autosync_enabled() is False
+
+
+def test_autosync_enabled_false_when_not_configured(env, monkeypatch):
+    monkeypatch.delenv("R2_BUCKET")
+    assert config_share.autosync_enabled() is False
+
+
+def test_autosync_enabled_false_when_load_env_raises(env, monkeypatch):
+    monkeypatch.setattr(config_share, "load_env", _raise_runtime)
+    assert config_share.autosync_enabled() is False
+
+
+def test_try_sync_uses_autosync_enabled(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(config_share, "autosync_enabled", lambda: False)
+    monkeypatch.setattr(config_share, "sync", lambda **kw: calls.append(kw))
+    assert config_share.try_sync(config_path=env.cfg) is None
+    assert calls == []
+
+
+def test_try_push_not_configured(env, monkeypatch):
+    monkeypatch.delenv("R2_BUCKET")
+    assert config_share.try_push(config_path=env.cfg) is None
+    assert env.fake.body is None
+
+
+def test_try_push_autosync_disabled(env, monkeypatch):
+    monkeypatch.setenv("R2_AUTOSYNC", "0")
+    assert config_share.try_push(config_path=env.cfg) is None
+    assert env.fake.body is None
+
+
+def test_try_push_swallows_client_error(env, monkeypatch):
+    monkeypatch.setattr(config_share, "_client", _raise_runtime)
+    assert config_share.try_push(config_path=env.cfg) is None
+
+
+def test_try_push_logs_skip_reason(env, monkeypatch, capsys):
+    monkeypatch.setenv("R2_DEBUG", "1")
+    monkeypatch.setattr(config_share, "_client", _raise_runtime)
+    config_share.try_push(config_path=env.cfg)
+    assert "auto-push skipped:" in capsys.readouterr().err
+
+
+def test_try_push_lock_failure_is_swallowed(env, monkeypatch, capsys):
+    monkeypatch.setenv("R2_DEBUG", "1")
+
+    def _lock_fail(_path):
+        raise OSError("lock wait exceeded")
+
+    monkeypatch.setattr(config_share, "exclusive_lock", _lock_fail)
+    assert config_share.try_push(config_path=env.cfg) is None
+    assert env.fake.body is None
+    assert "auto-push skipped:" in capsys.readouterr().err
+
+
+def test_try_push_pushes_registry(env):
+    r = config_share.try_push(config_path=env.cfg)
+    assert r["pushed"] is True
+    assert env.fake.stored()["datasets"] == {"ds_local": {"SELF": "/local/p"}}
+    assert config_share._push_lock_path().exists()
+
+
+def test_try_push_never_writes_local(env):
+    env.fake.seed({"schema_version": 2,
+                   "datasets": {"ds_remote": {"OTHER": "/r"}},
+                   "files": {"models.toml": "remote=1"},
+                   "file_meta": {"models.toml": "2030-01-01T00:00:00+00:00"}})
+    config.DATASETS["sentinel"] = {"H": "/s"}
+    snapshot = {k: dict(v) for k, v in config.DATASETS.items()}
+    config_share.try_push(config_path=env.cfg)
+    assert _datasets_from(env.cfg) == {"ds_local": {"SELF": "/local/p"}}
+    assert not (env.tmp / "models.toml").exists()
+    assert config.DATASETS == snapshot
+    assert env.fake.stored()["datasets"] == {"ds_local": {"SELF": "/local/p"},
+                                             "ds_remote": {"OTHER": "/r"}}
+
+
+def test_try_push_is_serialized_by_push_lock(env, monkeypatch):
+    gate = _Gate()
+    monkeypatch.setattr(config_share, "sync", gate)
+    t1 = threading.Thread(target=config_share.try_push,
+                          kwargs={"config_path": env.cfg}, daemon=True)
+    t2 = threading.Thread(target=config_share.try_push,
+                          kwargs={"config_path": env.cfg}, daemon=True)
+    try:
+        t1.start()
+        _wait_until(lambda: len(gate.calls) == 1)
+        t2.start()
+        time.sleep(0.3)
+        assert len(gate.calls) == 1            # t2 は push ロック待ち
+    finally:
+        gate.gate.set()
+        t1.join(5.0)
+        t2.join(5.0)
+    assert len(gate.calls) == 2
+    assert gate.max_running == 1
+    assert not t1.is_alive() and not t2.is_alive()
+
+
+def test_client_disables_retries(monkeypatch):
+    rec = {}
+    boto3 = types.ModuleType("boto3")
+    boto3.client = lambda *a, **kw: rec.setdefault("client", kw)
+    botocore = types.ModuleType("botocore")
+    botocore_config = types.ModuleType("botocore.config")
+
+    class Config:
+        def __init__(self, **kw):
+            rec["config"] = kw
+
+    botocore_config.Config = Config
+    botocore.config = botocore_config
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setitem(sys.modules, "botocore", botocore)
+    monkeypatch.setitem(sys.modules, "botocore.config", botocore_config)
+    _REAL_CLIENT({"endpoint": "e", "access_key": "a", "secret_key": "s",
+                  "bucket": "b", "prefix": "config/"})
+    assert rec["config"]["retries"] == {"total_max_attempts": 1, "mode": "standard"}
+    assert rec["config"]["connect_timeout"] == 2
+    assert rec["config"]["read_timeout"] == 3
+
+
+def test_unregister_then_try_push_puts_tombstone_on_remote_keeps_local(env):
+    _sync(env)
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+    config_share.try_push(config_path=env.cfg)
+    stored = env.fake.stored()
+    assert "ds_local" not in stored["datasets"]
+    assert "ds_local/SELF" in stored["deleted"]
+    assert "ds_local/SELF" in config_share._local_state()["deleted"]
+    assert _sync(env)["pushed"] is False
+
+
+def test_gui_delete_push_reaches_other_pc_on_its_next_sync(pcs):
+    a = pcs("A")
+    config.register_dataset("x", "/a/x", config_path=a)
+    config_share.sync(config_path=a)
+    b = pcs("B")
+    config_share.sync(config_path=b)
+    assert "x" in _datasets_from(b)
+    a = pcs("A")
+    config.unregister_dataset("x", config_path=a)
+    config_share.try_push(config_path=a)
+    b = pcs("B")
+    config_share.sync(config_path=b)
+    assert "x" not in _datasets_from(b)
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    now = {"v": "2030-01-01T00:00:10+00:00"}
+    monkeypatch.setattr(config_share, "_now_iso", lambda: now["v"])
+    return now
+
+
+def _unreg(env):
+    config.unregister_dataset("ds_local", config_path=env.cfg)
+
+
+def _reg(env):
+    config.register_dataset("ds_local", "/local/p", config_path=env.cfg)
+
+
+def _push(env):
+    config_share.try_push(config_path=env.cfg)
+
+
+def test_event_stamps_strictly_increase_under_fixed_clock(env, fixed_clock):
+    stamps = []
+    for op, field in ((_unreg, "deleted"), (_reg, "entry_meta"),
+                      (_unreg, "deleted"), (_reg, "entry_meta")):
+        op(env)
+        stamps.append(config_share._parse_iso(
+            config_share._local_state()[field]["ds_local/SELF"]))
+    assert all(x < y for x, y in zip(stamps, stamps[1:]))
+    assert config_share._local_state()["deleted"] == {}
+
+
+def test_reregister_beats_pushed_tombstone_same_timestamp(env, fixed_clock):
+    _sync(env)
+    _unreg(env)
+    _push(env)
+    _reg(env)
+    _push(env)
+    assert "ds_local" in env.fake.stored()["datasets"]
+    _sync(env)
+    assert "ds_local" in _datasets_from(env.cfg)
+
+
+def test_reregister_beats_pushed_tombstone_clock_rewind(env, fixed_clock):
+    _sync(env)
+    _unreg(env)
+    _push(env)
+    fixed_clock["v"] = "2030-01-01T00:00:05+00:00"
+    _reg(env)
+    _push(env)
+    assert "ds_local" in env.fake.stored()["datasets"]
+    _sync(env)
+    assert "ds_local" in _datasets_from(env.cfg)
+
+
+def _redelete_after_pushed_reregister(env, fixed_clock, rewind: bool) -> None:
+    _sync(env)
+    _unreg(env)
+    _push(env)
+    if rewind:
+        fixed_clock["v"] = "2030-01-01T00:00:05+00:00"
+    _reg(env)
+    _push(env)
+    assert "ds_local" in env.fake.stored()["datasets"]
+    _unreg(env)
+    _push(env)
+    assert "ds_local" not in env.fake.stored()["datasets"]
+    _sync(env)
+    assert "ds_local" not in _datasets_from(env.cfg)
+
+
+def test_redelete_after_pushed_reregister_same_clock(env, fixed_clock):
+    _redelete_after_pushed_reregister(env, fixed_clock, rewind=False)
+
+
+def test_redelete_after_pushed_reregister_clock_rewind(env, fixed_clock):
+    _redelete_after_pushed_reregister(env, fixed_clock, rewind=True)
+
+
+def test_double_reregister_before_push_same_clock(env, fixed_clock):
+    _sync(env)
+    _unreg(env)
+    _push(env)
+    _reg(env)
+    _reg(env)
+    _push(env)
+    assert "ds_local" in env.fake.stored()["datasets"]
+    _sync(env)
+    assert "ds_local" in _datasets_from(env.cfg)
+
+
+def test_stamp_at_representable_max_does_not_raise(env):
+    top = "9999-12-31T23:59:59.999999+00:00"
+    config_share._save_local_state(
+        {"entry_meta": {}, "etag": None, "deleted": {"ds_local/SELF": top}})
+    _reg(env)
+    st = config_share._local_state()
+    assert (config_share._parse_iso(st["entry_meta"]["ds_local/SELF"])
+            == config_share._parse_iso(top))
+    assert st["deleted"] == {}

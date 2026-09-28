@@ -1279,9 +1279,45 @@ class ToolWindow(QMainWindow):
         if relay is not None:
             relay.stop()
 
+    def request_config_push(self) -> bool:
+        """登録簿の変更を R2 へ送る（送信のみ・バックグラウンド・best-effort）。Issue #98.
+
+        GUI での登録・登録削除の直後に呼ぶ。R2 未設定・R2_AUTOSYNC=0 ではスレッドを作らず
+        False。絶対に raise しない（登録・削除の成否に影響させない）。
+        """
+        try:
+            pusher = getattr(self, "_config_pusher", None)
+            if pusher is None:
+                from gui.config_push import ConfigPusher
+                pusher = ConfigPusher()
+                self._config_pusher = pusher
+            return bool(pusher.request())
+        except Exception:
+            _log.debug("request_config_push failed", exc_info=True)
+            return False
+
+    def _stop_config_pusher(self) -> None:
+        """Stop the background R2 pusher (idempotent, bounded wait), then drop it.
+
+        Called on closeEvent accept paths and by the hot-reload Tier 3 rebuild.
+        The reference is dropped whether or not stop succeeds, so a window
+        recovered from a failed rebuild lazily creates a fresh pusher; a push
+        still running in the old one is serialized by config_share's push lock.
+        """
+        pusher = getattr(self, "_config_pusher", None)
+        if pusher is None:
+            return
+        try:
+            pusher.stop()
+        except Exception:
+            _log.debug("config pusher stop failed", exc_info=True)
+        finally:
+            self._config_pusher = None
+
     def closeEvent(self, event) -> None:
         if not self._session_dirty or self._session_saver is None:
             self._stop_meeting_relay()
+            self._stop_config_pusher()
             self._close_all_floats()
             event.accept()
             return
@@ -1310,10 +1346,12 @@ class ToolWindow(QMainWindow):
                 event.ignore()
                 return
             self._stop_meeting_relay()
+            self._stop_config_pusher()
             self._close_all_floats()
             event.accept()
         elif reply == QMessageBox.StandardButton.No:
             self._stop_meeting_relay()
+            self._stop_config_pusher()
             self._close_all_floats()
             event.accept()
         else:
@@ -1433,6 +1471,9 @@ class ToolWindow(QMainWindow):
         # 成功時のみメモリ poke: 直後に解析タブを追加しても get_dataset_dir が成功する。
         host = socket.gethostname().upper()
         config.DATASETS.setdefault(name, {})[host] = path
+
+        # 登録直後に remote へ送る（送信のみ・バックグラウンド・best-effort。登録の成否とは無関係）。
+        self.request_config_push()
 
         # Sticky dataset + chat push. GUI 登録はセッション復元しない — ユーザは
         # File → データセットを開く… で明示的に復元できる。

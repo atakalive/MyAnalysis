@@ -1,4 +1,7 @@
 """GUI tests for window-level current dataset (offscreen Qt)."""
+import threading
+import time
+
 import pytest
 
 
@@ -215,3 +218,249 @@ def test_gui_register_failure_updates_nothing(qapp, register_stubs, monkeypatch)
     assert not register_stubs.reg.exists()
     assert register_stubs.shown["critical"] == 1
     assert register_stubs.shown["info"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# GUI 登録直後の R2 送信（送信のみ・バックグラウンド）（Issue #98）
+# --------------------------------------------------------------------------- #
+def _wait_until(pred, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not pred():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out waiting for condition")
+        time.sleep(0.005)
+
+
+class _Gate:
+    """gate が開くまで戻らない代役。同時実行数と呼出スレッドを記録する。"""
+
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.raise_exc: Exception | None = None
+        self.on_call = None                   # 呼ばれた直後に 1 回だけ実行する任意のフック
+        self.lock = threading.Lock()
+        self.calls: list[int] = []            # 呼ばれたスレッドの ident
+        self.running = 0
+        self.max_running = 0
+
+    def __call__(self, *args, **kwargs):
+        with self.lock:
+            self.calls.append(threading.get_ident())
+            self.running += 1
+            self.max_running = max(self.max_running, self.running)
+            hook, self.on_call = self.on_call, None
+        try:
+            if hook is not None:
+                hook()
+            self.gate.wait(10.0)
+            if self.raise_exc is not None:
+                raise self.raise_exc
+            return None
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _stub_push(monkeypatch, register_stubs):
+    from gui.window import ToolWindow
+    from PySide6.QtWidgets import QMessageBox
+
+    def fake_push(self):
+        register_stubs.calls.append("push")
+        return True
+
+    monkeypatch.setattr(ToolWindow, "request_config_push", fake_push)
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda *a, **k: register_stubs.calls.append("info")),
+    )
+
+
+def test_gui_register_requests_push_once_before_info(qapp, register_stubs, monkeypatch):
+    from gui.window import ToolWindow
+
+    _stub_push(monkeypatch, register_stubs)
+    win = ToolWindow()
+    win._register_dataset()
+    assert register_stubs.calls == ["dir", "name", "push", "info"]
+
+
+def test_gui_register_failure_does_not_push(qapp, register_stubs, monkeypatch):
+    import config
+    from gui.window import ToolWindow
+
+    _stub_push(monkeypatch, register_stubs)
+
+    def boom(*a, **k):
+        raise config.RegistryError("nope")
+
+    monkeypatch.setattr(config, "register_dataset", boom)
+    win = ToolWindow()
+    win._register_dataset()
+    assert "push" not in register_stubs.calls
+    assert register_stubs.shown["critical"] == 1
+
+
+def test_gui_register_cancel_does_not_push(qapp, register_stubs, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from gui.window import ToolWindow
+
+    _stub_push(monkeypatch, register_stubs)
+    win = ToolWindow()
+
+    register_stubs.answers[:] = [("", False)]
+    win._register_dataset()
+    assert "push" not in register_stubs.calls
+
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: "")
+    )
+    win._register_dataset()
+    assert "push" not in register_stubs.calls
+
+
+def test_gui_register_succeeds_when_pusher_raises(qapp, register_stubs, monkeypatch):
+    from gui.config_push import ConfigPusher
+    from gui.window import ToolWindow
+
+    def boom(self):
+        raise RuntimeError("pusher")
+
+    monkeypatch.setattr(ConfigPusher, "request", boom)
+    win = ToolWindow()
+    win._register_dataset()
+    assert "sample_dataset" in register_stubs.read()
+    assert register_stubs.shown["info"] == 1
+    assert register_stubs.shown["critical"] == 0
+    assert win.request_config_push() is False
+
+
+def test_request_config_push_default_gate_creates_no_thread(qapp):
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    assert win.request_config_push() is False
+    assert win._config_pusher is not None
+    assert win._config_pusher._thread is None
+
+
+def test_stop_config_pusher_drops_and_recreates(qapp):
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    win.request_config_push()
+    old = win._config_pusher
+    win._stop_config_pusher()
+    assert win._config_pusher is None
+    assert old.request() is False
+    win._stop_config_pusher()
+    win.request_config_push()
+    assert win._config_pusher is not None and win._config_pusher is not old
+
+
+def test_gui_register_push_runs_in_background_and_close_is_bounded(
+        qapp, register_stubs, monkeypatch):
+    import config_share
+    from PySide6.QtWidgets import QMessageBox
+    from gui.config_push import ConfigPusher
+    from gui.window import ToolWindow
+
+    monkeypatch.setattr(ConfigPusher, "DEFAULT_WAIT_S", 0.2)
+    monkeypatch.setattr(config_share, "autosync_enabled", lambda: True)
+    g = _Gate()
+    monkeypatch.setattr(config_share, "try_push", g)
+    warned = {"n": 0}
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warned.__setitem__("n", warned["n"] + 1)),
+    )
+
+    win = ToolWindow()
+    pusher = None
+    try:
+        win._register_dataset()                     # gate 閉のまま返る
+        _wait_until(lambda: len(g.calls) == 1)
+        assert g.calls[0] != threading.get_ident()
+        win._register_dataset()
+        pusher = win._config_pusher
+        assert pusher.has_pending()
+        t0 = time.monotonic()
+        win.show()
+        win.close()
+        assert time.monotonic() - t0 < 2.0
+        assert win._config_pusher is None
+        assert pusher._thread.is_alive() and pusher._thread.daemon
+    finally:
+        g.gate.set()
+        if pusher is not None and pusher._thread is not None:
+            pusher._thread.join(5.0)
+            assert not pusher._thread.is_alive()
+    assert len(g.calls) == 1                        # pending は stop で破棄
+    assert register_stubs.shown["critical"] == 0
+    assert warned["n"] == 0
+    assert register_stubs.shown["info"] == 2
+
+
+def test_gui_register_push_exception_is_silent(qapp, register_stubs, monkeypatch):
+    import config_share
+    from PySide6.QtWidgets import QMessageBox
+    from gui.window import ToolWindow
+
+    monkeypatch.setattr(config_share, "autosync_enabled", lambda: True)
+
+    def boom(*a, **k):
+        raise RuntimeError("push")
+
+    monkeypatch.setattr(config_share, "try_push", boom)
+    warned = {"n": 0}
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warned.__setitem__("n", warned["n"] + 1)),
+    )
+    win = ToolWindow()
+    win._register_dataset()
+    _wait_until(lambda: not win._config_pusher.is_running())
+    assert register_stubs.shown["critical"] == 0
+    assert warned["n"] == 0
+    assert register_stubs.shown["info"] == 1
+    assert "sample_dataset" in register_stubs.read()
+
+
+def test_window_generations_serialize_pushes(qapp, monkeypatch):
+    import config_share
+    from gui.config_push import ConfigPusher
+    from gui.window import ToolWindow
+
+    monkeypatch.setattr(ConfigPusher, "DEFAULT_WAIT_S", 0.05)
+    monkeypatch.setattr(config_share, "autosync_enabled", lambda: True)
+    g = _Gate()
+    monkeypatch.setattr(config_share, "sync", g)    # try_push は実物（push ロックを取る）
+
+    pushers = []
+    try:
+        win1 = ToolWindow()
+        assert win1.request_config_push() is True
+        pushers.append(win1._config_pusher)
+        _wait_until(lambda: len(g.calls) == 1)
+        p1 = win1._config_pusher
+        win1._stop_config_pusher()                  # Tier 3 の停止（間に合わない）
+        r1 = win1.request_config_push()             # 失敗時の復帰経路
+        pushers.append(win1._config_pusher)
+        win2 = ToolWindow()                         # 成功時の新ウィンドウ
+        r2 = win2.request_config_push()
+        pushers.append(win2._config_pusher)
+        time.sleep(0.3)
+        assert r1 is True and r2 is True
+        assert win1._config_pusher is not p1
+        assert len(g.calls) == 1                    # 新しい 2 本は push ロック待ち
+    finally:
+        g.gate.set()
+        for p in pushers:
+            if p is None:
+                continue
+            p.stop(5.0)
+            if p._thread is not None:
+                p._thread.join(5.0)
+                assert not p._thread.is_alive()
+    assert len(g.calls) == 3
+    assert g.max_running == 1

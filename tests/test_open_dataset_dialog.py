@@ -605,6 +605,20 @@ class _FakeMainOpen(_FakeMain):
         return self._close_result
 
 
+class _FakeMainPush(_FakeMainOpen):
+    """request_config_push を持つ親（呼出を rec["calls"] に ("push",) で記録）。"""
+
+    def __init__(self, open_names=(), close_result=0, rec=None, push_exc=None):
+        super().__init__(open_names, close_result=close_result, rec=rec)
+        self._push_exc = push_exc
+
+    def request_config_push(self):
+        self._rec["calls"].append(("push",))
+        if self._push_exc is not None:
+            raise self._push_exc
+        return True
+
+
 def test_delete_enabled_for_unavailable_row(qapp, patch_picker):
     patch_picker([_meta("bad", available=False, unavailable_reason="no-host")])
     dlg, _m, _h = _make_dialog(qapp)
@@ -726,3 +740,104 @@ def test_delete_through_real_registry(qapp, real_registry, monkeypatch):
     assert json.loads(real_registry.path.read_text(encoding="utf-8")) == {"keep": {"H": "/k"}}
     assert config.DATASETS == {"keep": {"H": "/k"}}
     assert "drop/H" in config_share._local_state()["deleted"]
+
+
+# --------------------------------------------------------------------------- #
+# 登録削除の直後に R2 へ送る（送信のみ・バックグラウンド）（Issue #98）
+# --------------------------------------------------------------------------- #
+def test_delete_requests_push_after_unregister(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a")])
+    main = _FakeMainPush([], rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("unregister", "a"), ("push",)]
+
+
+def test_delete_open_dataset_pushes_after_close_and_unregister(
+        qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a"), _meta("b")])
+    main = _FakeMainPush(["a"], close_result=2, rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, "a"))
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("close", "a"), ("unregister", "a"), ("push",)]
+
+
+def test_delete_keyerror_does_not_push(qapp, patch_picker, delete_stubs, monkeypatch):
+    import config
+    patch_picker([_meta("a")])
+
+    def unregister(name, **k):
+        delete_stubs["calls"].append(("unregister", name))
+        raise KeyError(name)
+
+    monkeypatch.setattr(config, "unregister_dataset", unregister)
+    main = _FakeMainPush([], rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("unregister", "a")]
+    assert dlg._proxy.rowCount() == 0
+    assert delete_stubs["warned"] == 0
+
+
+def test_delete_failure_does_not_push(qapp, patch_picker, delete_stubs, monkeypatch):
+    import config
+    patch_picker([_meta("a")])
+
+    def boom(name, **k):
+        raise config.RegistryError("nope")
+
+    monkeypatch.setattr(config, "unregister_dataset", boom)
+    main = _FakeMainPush([], rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert ("push",) not in delete_stubs["calls"]
+    assert delete_stubs["warned"] == 1
+
+
+def test_delete_declined_does_not_push(qapp, patch_picker, delete_stubs):
+    from PySide6.QtWidgets import QMessageBox
+    patch_picker([_meta("a")])
+    delete_stubs["answer"] = QMessageBox.StandardButton.No
+    main = _FakeMainPush([], rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == []
+
+
+def test_delete_close_failure_does_not_push(qapp, patch_picker, delete_stubs):
+    patch_picker([_meta("a")])
+    main = _FakeMainPush(["a"], close_result=-1, rec=delete_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert delete_stubs["calls"] == [("close", "a")]
+
+
+def test_delete_succeeds_when_push_raises(qapp, patch_picker, delete_stubs):
+    import config
+    patch_picker([_meta("a")])
+    main = _FakeMainPush([], rec=delete_stubs, push_exc=RuntimeError("x"))
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_delete()
+    assert dlg._proxy.rowCount() == 0
+    assert "a" not in config.DATASETS
+    assert delete_stubs["warned"] == 0
+
+
+def test_delete_through_real_registry_requests_push(qapp, real_registry, monkeypatch):
+    import json
+
+    import config_share
+    from gui import open_dataset_dialog as mod
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(mod.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    real_registry.write({"keep": {"H": "/k"}, "drop": {"H": "/d"}})
+    main = _FakeMainPush([], rec={"calls": []})
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, "drop"))
+    dlg._on_delete()
+    assert json.loads(real_registry.path.read_text(encoding="utf-8")) == {"keep": {"H": "/k"}}
+    assert "drop/H" in config_share._local_state()["deleted"]
+    assert main._rec["calls"] == [("push",)]

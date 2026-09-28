@@ -486,6 +486,11 @@ class HotReloadController(QObject):
             _relay = getattr(old_window, "_meeting_relay", None)
             if _relay is not None:
                 _relay.stop()
+            # Stop the old config pusher (Issue #98; idempotent, bounded wait).
+            # getattr-guarded: windows built before the patch lack the method.
+            _scp = getattr(old_window, "_stop_config_pusher", None)
+            if _scp is not None:
+                _scp()
 
             # 6b. re-dock any floated tabs before purge (#56). getattr-guarded:
             # the first patch reload has no _close_all_floats on the old window.

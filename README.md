@@ -139,6 +139,8 @@ python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
 # GUI: File → データセットを新規登録 (New dataset)
 ```
 
+With R2 sync configured, GUI startup and CLI registration sync both ways; registering a dataset or deleting a registration in the GUI pushes to R2 right away in the background (push only; failures are silent and the next startup sync catches up). Settings-file edits ride along with the next push or startup sync. `R2_AUTOSYNC=0` turns all automatic syncing off.
+
 Hand-editing `datasets.local.json` is fine too (plain UTF-8 JSON, LF). A corrupt
 registry is never silently replaced with an empty one: reads fail loudly, and sync
 refuses to push or overwrite. Restore by fixing the JSON by hand, or by moving it
