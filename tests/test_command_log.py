@@ -112,6 +112,21 @@ def test_wait_for_resolves_secret_and_deletes_file(env):
     assert not (results / f"{_ID}.json").exists()
 
 
+def test_wait_for_keeps_redacted_when_results_dir_fails(env, monkeypatch):
+    """results/ を用意できない（mkdir が OSError）ときも、wait_for は例外を出さず
+    <redacted> のままエントリを返す（reviewer code P2-1）。"""
+    commands._execute(_Win(lambda: "tok-SECRET"), _payload("meeting-token"))
+
+    def _broken_results_dir():
+        raise PermissionError("results dir unavailable")
+
+    monkeypatch.setattr(commands, "command_results_dir", _broken_results_dir)
+    entry = commands.wait_for(_ID, timeout=1.0)
+    assert entry is not None
+    assert entry["result"] == "<redacted>"
+    assert entry["result_redacted"] is True
+
+
 def test_secret_with_invalid_id_is_redacted_without_file(env):
     log, _, results = env
     commands._execute(_Win(lambda: "tok-SECRET"), _payload("meeting-token", "../x"))

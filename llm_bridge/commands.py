@@ -90,13 +90,15 @@ def _scan_from(path, start: int, cmd_id: str) -> tuple[dict | None, int]:
 
 def _resolve_result(entry: dict, cmd_id: str) -> dict:
     """秘密の結果（result_redacted is True）なら results/<id>.json から本体を戻し、
-    ファイルを消す。読めない・壊れている・id が不正なら entry をそのまま返す。"""
+    ファイルを消す。results/ を用意できない・読めない・壊れている・id が不正なら
+    entry をそのまま返す（wait_for の呼び出し元へ例外を出さない）。"""
     if entry.get("result_redacted") is not True:
         return entry
     if not isinstance(cmd_id, str) or not _ID_RE.fullmatch(cmd_id):
         return entry
-    p = command_results_dir() / f"{cmd_id}.json"
     try:
+        # command_results_dir() は mkdir するので OSError を投げ得る。読み取りと同じ try に入れる
+        p = command_results_dir() / f"{cmd_id}.json"
         result = json.loads(p.read_text(encoding="utf-8"))["result"]
     except (OSError, ValueError, KeyError, TypeError):
         return entry

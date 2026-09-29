@@ -68,9 +68,9 @@ asynchronously.
   Window verbs: `add-tab name=<analysis> [dataset=<ds>]`,
   `close-tab name=<tab> [dataset=<ds>]`,
   `set-active-tab name=<tab> [dataset=<ds>]`,
-  `show path=<abs> [name=<tab>] (default tab `viewer`) [slot=<path>] [dataset=<ds>]` (result figure),
-  `show-image path=<abs> [name=<tab>] (default tab `image`) [panel=left|right] [slot=<path>] [dataset=<ds>]`
-  (raw TIFF/stack, interactive LUT/range — only when the user asks for it),
+  `show path=<abs> [name=<tab>] [slot=<path>] [dataset=<ds>]` (result figure; default tab `viewer`),
+  `show-image path=<abs> [name=<tab>] [panel=left|right] [slot=<path>] [dataset=<ds>]`
+  (raw TIFF/stack, interactive LUT/range; default tab `image` — only when the user asks for it),
   `toggle-chat-float`,
   `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions;
   adds it to the workspace — other open datasets stay open),
