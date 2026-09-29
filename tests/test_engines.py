@@ -247,6 +247,86 @@ def test_apply_config_fail_rollback_preserves_crlf(apply_env, monkeypatch):
     assert apply_env.mdl_p.read_bytes() == crlf   # byte-exact, CRLF not LF-ified
 
 
+# Issue #102: rollback restores what set_toml_keys replaced (under its lock) and only
+# while models.toml still holds what it wrote -- a concurrent R2 sync write wins.
+_REMOTE = '[claude_code]\nmodel = "remote"\n'
+_CFG_SEED_102 = '[backend]\nname = "claude"\n\n[claude_code]\nbin = ""\n'
+
+
+def _sync_before_models_write(apply_env):
+    def _set(path, changes):
+        if path == apply_env.cfg_p:
+            raise RuntimeError("config write boom")
+        path.write_text(_REMOTE, encoding="utf-8")   # sync lands before our write
+        return _real_set_toml_keys(path, changes)
+    return _set
+
+
+def _sync_after_models_write(apply_env):
+    def _set(path, changes):
+        if path == apply_env.cfg_p:
+            apply_env.mdl_p.write_text(_REMOTE, encoding="utf-8")   # sync lands after
+            raise RuntimeError("config write boom")
+        return _real_set_toml_keys(path, changes)
+    return _set
+
+
+def test_apply_rollback_keeps_update_before_models_write(apply_env, monkeypatch):
+    apply_env.cfg_p.write_text(_CFG_SEED_102, encoding="utf-8")
+    apply_env.mdl_p.write_text('[claude_code]\nmodel = "oldm"\n', encoding="utf-8")
+    monkeypatch.setattr(engines, "set_toml_keys", _sync_before_models_write(apply_env))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert apply_env.mdl_p.read_text(encoding="utf-8") == _REMOTE
+
+
+def test_apply_rollback_keeps_file_created_before_models_write(apply_env, monkeypatch):
+    apply_env.cfg_p.write_text(_CFG_SEED_102, encoding="utf-8")
+    assert not apply_env.mdl_p.exists()
+    monkeypatch.setattr(engines, "set_toml_keys", _sync_before_models_write(apply_env))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert apply_env.mdl_p.read_text(encoding="utf-8") == _REMOTE
+
+
+def test_apply_config_fail_keeps_concurrent_models_update(apply_env, monkeypatch):
+    apply_env.cfg_p.write_text(_CFG_SEED_102, encoding="utf-8")
+    apply_env.mdl_p.write_text('[claude_code]\nmodel = "oldm"\n', encoding="utf-8")
+    monkeypatch.setattr(engines, "set_toml_keys", _sync_after_models_write(apply_env))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert apply_env.mdl_p.read_text(encoding="utf-8") == _REMOTE
+
+
+def test_apply_config_fail_keeps_concurrently_created_models(apply_env, monkeypatch):
+    apply_env.cfg_p.write_text(_CFG_SEED_102, encoding="utf-8")
+    assert not apply_env.mdl_p.exists()
+    monkeypatch.setattr(engines, "set_toml_keys", _sync_after_models_write(apply_env))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert apply_env.mdl_p.read_text(encoding="utf-8") == _REMOTE
+
+
+def test_apply_rollback_takes_models_lock(apply_env, monkeypatch):
+    import contextlib
+    apply_env.cfg_p.write_text(_CFG_SEED_102, encoding="utf-8")
+    apply_env.mdl_p.write_text('[claude_code]\nmodel = "oldm"\n', encoding="utf-8")
+    locked: list = []
+
+    @contextlib.contextmanager
+    def rec_lock(path):
+        locked.append(path)
+        yield
+
+    monkeypatch.setattr(engines, "exclusive_lock", rec_lock)
+    monkeypatch.setattr(engines, "set_toml_keys", _fail_on_config(apply_env.cfg_p))
+    with pytest.raises(RuntimeError):
+        apply_selection(engine_by_id("claude-cli"), "newm", "", engine_changed=True)
+    assert locked == [apply_env.mdl_p.with_name("models.toml.lock")]
+    mdld = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert mdld["claude_code"]["model"] == "oldm"
+
+
 def test_apply_env_rewrite_when_set_and_differs(apply_env, monkeypatch):
     apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
     monkeypatch.setenv("LLM_BACKEND", "mock")

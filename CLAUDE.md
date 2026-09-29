@@ -304,7 +304,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`
 （0 バイトファイル・primary/.bak の乖離・空 TOML・rclone キャッシュの孤児 tmp・
 ログの失敗イベントを報告。`--repair` は newest-wins で収束、`--rescue` は 0 バイトファイルを
-キャッシュの孤児 tmp から復元）。実マウント上での検証は `python -m devtools.mount_probe`。
+キャッシュの孤児 tmp から復元。rclone の節は `--cache`/`--log`（または `MYANALYSIS_RCLONE_CACHE`/`MYANALYSIS_RCLONE_LOG`）で指定したものだけ。`--rescue` はキャッシュ必須）。実マウント上での検証は `python -m devtools.mount_probe --dir <マウント上の既存のディレクトリ> --log <rclone のログ>`（`--dir` と `--log` は必須。実行ごとに `--dir` の下へ専用ディレクトリを作り、終了時にそれだけを消す）。
 
 キルスイッチ: `MYANALYSIS_WRITE_STRATEGY=replace` で従来挙動へ戻せる。
 `MYANALYSIS_FS_OVERRIDE="M:=fragile,D:=local"` で判定を明示上書き。

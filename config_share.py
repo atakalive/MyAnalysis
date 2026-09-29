@@ -31,7 +31,7 @@ from pathlib import Path, PurePosixPath
 import config
 from common.env import load_env
 from common.filelock import exclusive_lock
-from common.paths import repo_root
+from common.paths import atomic_write_text, repo_root
 
 SCHEMA_VERSION = 2                 # 2: 登録削除の tombstone（deleted）を追加
 DEFAULT_PREFIX = "config/"
@@ -193,7 +193,7 @@ def _err_code(exc) -> str | None:
     return None
 
 
-_NOT_FOUND = {"NoSuchKey", "NoSuchBucket", "404", "NotFound"}
+_NOT_FOUND = {"NoSuchKey", "404", "NotFound"}
 _PRECONDITION = {"PreconditionFailed", "412"}
 
 
@@ -338,6 +338,10 @@ def _validate_bundle(bundle) -> bool:
         for k, v in val.items():
             if not isinstance(k, str) or not isinstance(v, str):
                 return False
+    try:
+        json.dumps(bundle, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return False   # 孤立サロゲート（JSON の "\ud800" 等）。書込でも push でも encode できない
     return True
 
 
@@ -348,11 +352,16 @@ def _get_remote(client, bucket: str, key: str) -> tuple[dict | None, str | None,
             -> (bundle, etag, False)
       - 取得成功だが schema_version > SCHEMA_VERSION か _validate_bundle False
             -> (None, etag, True)  # read-only
+      - NoSuchBucket -> RuntimeError（バケット名の誤り。空 remote とは扱わない）
     """
     try:
         resp = client.get_object(Bucket=bucket, Key=key)
     except Exception as exc:
-        if _err_code(exc) in _NOT_FOUND:
+        code = _err_code(exc)
+        if code == "NoSuchBucket":
+            raise RuntimeError(
+                f"R2 bucket {bucket!r} not found (check R2_BUCKET in .env)") from exc
+        if code in _NOT_FOUND:
             return (None, None, False)
         raise
     etag = resp.get("ETag")
@@ -391,7 +400,7 @@ def _expand_remote(remote: dict | None,
                    warnings: list) -> tuple[dict, dict, dict, dict, list, dict]:
     """remote（None=空 remote）を (datasets, entry_meta, files, file_meta, dropped, deleted)
     に展開。files/file_meta は _ALLOWED_FILES の whitelist 内のみ採用し、許可外キーは dropped に
-    集め warning する。"""
+    集め warning する。files の text は改行を LF にそろえて返す。"""
     remote = remote or {}
     datasets = remote.get("datasets") or {}
     entry_meta = remote.get("entry_meta") or {}
@@ -401,7 +410,9 @@ def _expand_remote(remote: dict | None,
     files, file_meta, dropped = {}, {}, []
     for k, v in raw_files.items():
         if k in _ALLOWED_FILES:
-            files[k] = v
+            # CR を LF にそろえる（ローカルは universal newlines で読むので LF だけ）。そろえないと
+            # マージで一致せず毎回書込予定に入り、atomic_write_text の読み戻し比較も一致しない。
+            files[k] = v.replace("\r\n", "\n").replace("\r", "\n")
             if k in raw_file_meta:
                 file_meta[k] = raw_file_meta[k]
         else:
@@ -635,27 +646,26 @@ def sync(*, direction: str = "both", apply: bool = True,
                 if target is None:
                     warnings.append(f"安全でない書き込み先を拒否: {rel!r}")
                     continue
-                if rel != ".env":
-                    kind, cur, _cur_mtime = _read_file_state(repo_root() / rel)
-                    if kind == "unreadable":
-                        warnings.append(
-                            f"{rel!r} が読込不能のため remote で上書きしない（ローカルを保持）"
-                        )
-                        continue
-                    if cur != local_files.get(rel):
-                        warnings.append(
-                            f"ローカルが直前に変更されたため {rel!r} の反映を skip"
-                            "（次回 sync で再マージ）"
-                        )
-                        continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target.with_name(target.name + ".tmp")
-                tmp.write_text(text, encoding="utf-8")
-                tmp.replace(target)
-                rdt = _parse_iso(rmeta)
-                if rdt is not None:
-                    now_epoch = _parse_iso(now).timestamp()
-                    os.utime(target, (now_epoch, rdt.timestamp()))
+                target.parent.mkdir(parents=True, exist_ok=True)   # ロックファイルの置き場を先に作る
+                with exclusive_lock(target.with_name(target.name + ".lock")):
+                    if rel != ".env":
+                        kind, cur, _cur_mtime = _read_file_state(repo_root() / rel)
+                        if kind == "unreadable":
+                            warnings.append(
+                                f"{rel!r} が読込不能のため remote で上書きしない（ローカルを保持）"
+                            )
+                            continue
+                        if cur != local_files.get(rel):
+                            warnings.append(
+                                f"ローカルが直前に変更されたため {rel!r} の反映を skip"
+                                "（次回 sync で再マージ）"
+                            )
+                            continue
+                    atomic_write_text(target, text)
+                    rdt = _parse_iso(rmeta)
+                    if rdt is not None:
+                        now_epoch = _parse_iso(now).timestamp()
+                        os.utime(target, (now_epoch, rdt.timestamp()))
 
         if apply and direction in ("both", "pull") and wrote_local:
             new_entry_meta = merged_meta

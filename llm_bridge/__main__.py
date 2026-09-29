@@ -77,7 +77,21 @@ def _resolve_dataset(args, active: dict | None = None, *,
         else active.get("dataset")
 
 
+def _harden_stdio() -> None:
+    """パイプ・リダイレクト先の文字コード（日本語版 Windows では cp932）で書けない文字を
+    ``\\uXXXX`` に置き換えて出す。全 verb の print と stderr が UnicodeEncodeError で落ちないようにする。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)   # None（pythonw）・StringIO には無い
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _harden_stdio()
     parser = argparse.ArgumentParser(prog="python -m llm_bridge")
     # metavar は choices の自動列挙（{state,active,…}）を抑える。help= を渡さない
     # サブコマンドを --help から完全に隠すために必要（metavar が無いと usage 行に
@@ -174,8 +188,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="primary/.bak の乖離を newest-wins で収束させる")
     p_doc.add_argument("--rescue", action="store_true", default=False,
                        help="0 バイトファイルを rclone キャッシュの孤児 tmp から復元する")
-    p_doc.add_argument("--cache", default=None, help="rclone の VFS キャッシュディレクトリ")
-    p_doc.add_argument("--log", default=None, help="rclone のログファイル")
+    p_doc.add_argument("--cache", default=None, help="rclone の VFS キャッシュディレクトリ（省略時は環境変数 MYANALYSIS_RCLONE_CACHE）")
+    p_doc.add_argument("--log", default=None, help="rclone のログファイル（省略時は環境変数 MYANALYSIS_RCLONE_LOG）")
 
     p_csync = sub.add_parser("config-sync", help="R2 と設定を双方向同期（収束）")
     p_csync.add_argument("--dry-run", action="store_true", default=False)

@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import config
 import dataset_config
-from common import fs_kind
+from common import fs_kind, rclone_paths
 from common.paths import (bak_path, durable_read_json, durable_write_json,
                           read_json_classified, strip_seq)
 
@@ -32,8 +33,8 @@ _LOG_EVENTS = (
     "d41d8cd98f00b204e9800998ecf8427e",     # 空文字列の MD5 = 空を転送しかけた
 )
 
-_DEFAULT_LOG = Path(os.environ.get("LOCALAPPDATA", "")) / "rclone" / "mount.log"
-_DEFAULT_CACHE = Path(r"X:\remote\vfs\remote")
+# 空が正常なファイル（0 バイト検出から除く。*.lock は従来どおり別途除く）
+_EMPTY_OK_NAMES = frozenset({"__init__.py", "py.typed", ".gitkeep"})
 
 # durable_write_json で 2 コピー管理しているファイル（乖離チェックの対象）
 _DURABLE_NAMES = ("meta.json", "session.json", "annotations.json")
@@ -57,11 +58,11 @@ def _iter_datasets(only: str | None):
 
 
 def find_zero_byte_files(root: Path) -> list[Path]:
-    """0 バイトのファイル（.lock は空が正常なので除く）。"""
+    """0 バイトのファイル（*.lock と _EMPTY_OK_NAMES は空が正常なので除く）。"""
     out = []
     for dirpath, _dirs, files in os.walk(root):
         for fn in files:
-            if fn.endswith(".lock"):
+            if fn.endswith(".lock") or fn in _EMPTY_OK_NAMES:
                 continue
             p = Path(dirpath) / fn
             try:
@@ -101,7 +102,7 @@ def check_local_state(*, repair: bool = False) -> tuple[list[str], list[str]]:
         except FileNotFoundError:
             continue                          # 未作成は正常（初回起動前など）
         except OSError as e:
-            issues.append(f"{p.name}: stat できない — {e}")
+            issues.append(f"{p.name}: stat できない: {e}")
             continue
         if size == 0:
             if not repair:
@@ -111,7 +112,7 @@ def check_local_state(*, repair: bool = False) -> tuple[list[str], list[str]]:
                 p.unlink()
                 notes.append(f"{p.name}: 0 バイト -> 削除（次回書込で作り直される）")
             except OSError as e:
-                issues.append(f"{p.name}: 0 バイト・削除できない — {e}")
+                issues.append(f"{p.name}: 0 バイト・削除できない: {e}")
             continue
         if p in durable_primaries:
             st, _ = durable_read_json(p)
@@ -166,24 +167,25 @@ def check_toml(name: str) -> str | None:
     return None
 
 
-def find_orphan_tmps(cache: Path) -> list[Path]:
+def find_orphan_tmps(cache: Path) -> list[Path] | None:
+    """キャッシュ内の孤児 tmp。キャッシュが無ければ None。"""
     if not cache.is_dir():
-        return []
+        return None
     out = []
     for dirpath, _dirs, files in os.walk(cache):
         out += [Path(dirpath) / fn for fn in files if ".tmp" in fn]
     return out
 
 
-def tail_log_events(log: Path, *, lines: int = 4000) -> tuple[dict[str, int], str, str]:
+def tail_log_events(log: Path, *, lines: int = 4000) -> tuple[dict[str, int], str, str] | None:
     """→ (イベント別件数, 走査範囲の開始時刻, 最後に失敗が起きた時刻)。
 
     件数だけだと「過去の残骸」と「今も起きている」の区別がつかないので、最後の
-    失敗イベントのタイムスタンプを一緒に返す。
+    失敗イベントのタイムスタンプを一緒に返す。ログが無い・読めないときは None。
     """
     counts = dict.fromkeys(_LOG_EVENTS, 0)
     if not log.is_file():
-        return (counts, "", "")
+        return None
     try:
         with open(log, "rb") as f:
             try:
@@ -192,7 +194,7 @@ def tail_log_events(log: Path, *, lines: int = 4000) -> tuple[dict[str, int], st
                 f.seek(0)
             tail = f.read().decode("utf-8", errors="replace").splitlines()[-lines:]
     except OSError:
-        return (counts, "", "")
+        return None
     last = ""
     for ln in tail:
         for ev in _LOG_EVENTS:
@@ -203,7 +205,7 @@ def tail_log_events(log: Path, *, lines: int = 4000) -> tuple[dict[str, int], st
     return (counts, since, last)
 
 
-def rescue_from_cache(root: Path, cache: Path, *, apply: bool) -> list[str]:
+def rescue_from_cache(root: Path, cache: Path | None, *, apply: bool) -> list[str]:
     """0 バイトのファイルを rclone キャッシュの孤児 tmp から復元する。
 
     孤児 tmp は「cache 層の rename が失敗して置き去りにされた**書けていたはずの中身**」
@@ -212,11 +214,17 @@ def rescue_from_cache(root: Path, cache: Path, *, apply: bool) -> list[str]:
 
     **キャッシュディレクトリには絶対に書かない**（rclone が "detected external removal"
     を起こす）。読むだけ。
+
+    ``cache`` が None か存在しないときは探さず、0 バイトのファイルを「復旧候補は探していない」
+    として報告するだけ（``apply`` は無視する。``run`` は --rescue でキャッシュが無ければ先に 2 で止める）。
     """
     msgs = []
     zeros = find_zero_byte_files(root)
     if not zeros:
         return msgs
+    if cache is None or not cache.is_dir():
+        return [f"0 バイト: {z}  -> 復旧候補は探していない（rclone のキャッシュが未指定か見つからない）"
+                for z in zeros]
     # 孤児 tmp はすべて `<元のファイル名>.<なにか>.tmp...` の形なので、元の名前を前方一致で
     # 引ける。remote 相対パスの対応付けはマウント構成に依存するため、名前の前方一致に加えて
     # 親ディレクトリ名の一致でも絞る（同名ファイルが複数の解析にあるため）。
@@ -250,30 +258,52 @@ def rescue_from_cache(root: Path, cache: Path, *, apply: bool) -> list[str]:
 
 
 def run(dataset: str | None = None, *, repair: bool = False, rescue: bool = False,
-        cache: Path | None = None, log: Path | None = None) -> int:
-    """健全性チェック。未解決の問題が残れば 1 を返す。"""
-    cache = Path(cache) if cache else _DEFAULT_CACHE
-    log = Path(log) if log else _DEFAULT_LOG
+        cache: str | Path | None = None, log: str | Path | None = None) -> int:
+    """健全性チェック。問題が無ければ 0、未解決の問題が残れば 1 を返す。--dataset を解決できない
+    とき、--rescue に存在するキャッシュの指定が無いときは、何も点検せず（stdout に何も出さず）2 を返す。"""
+    cache = rclone_paths.resolve(cache, rclone_paths.ENV_CACHE)
+    log = rclone_paths.resolve(log, rclone_paths.ENV_LOG)
+    if dataset is not None:
+        try:
+            config.get_dataset_dir(dataset)
+        except (KeyError, RuntimeError) as e:
+            print(f"error: データセット {dataset!r} を解決できない: {e}", file=sys.stderr)
+            return 2
+    if rescue and (cache is None or not cache.is_dir()):
+        print("error: --rescue には存在する rclone のキャッシュの指定が必要"
+              f"（--cache または {rclone_paths.ENV_CACHE}）", file=sys.stderr)
+        return 2
     problems = 0
+    zero_found = False        # 0 バイトのファイルを報告した（--rescue のヒント用）
+    divergent_found = False   # primary/.bak の乖離を問題として報告した（--repair のヒント用）
 
     print("=== filesystem strategy ===")
     for name, d in _iter_datasets(dataset):
         if isinstance(d, Exception):
-            print(f"  {name}: unresolvable — {d}")
+            print(f"  {name}: unresolvable: {d}")
             continue
         info = fs_kind.describe(d)
         print(f"  {name:24s} {info['kind']:8s} ({info['reason']})  {d}")
 
     print("\n=== per-dataset integrity ===")
     for name, d in _iter_datasets(dataset):
-        if isinstance(d, Exception) or not d.is_dir():
+        if isinstance(d, Exception):
+            continue
+        if not d.is_dir():
+            print(f"  [{name}]")
+            print(f"     ! フォルダが見えない（マウントとパスを確認）: {d}")
+            problems += 1
             continue
         issues, notes = [], []
         toml_err = check_toml(name)
         if toml_err:
             issues.append(f"myanalysis.toml: {toml_err}")
         for msg in rescue_from_cache(d, cache, apply=rescue):
-            (issues if "RESTORED" not in msg else notes).append(msg)
+            if "RESTORED" in msg:
+                notes.append(msg)
+            else:
+                issues.append(msg)
+                zero_found = True
         for p, why, severe in find_divergent_pairs(d):
             line = f"{p.name}: {why}  ({p.parent})"
             if repair:
@@ -283,7 +313,11 @@ def run(dataset: str | None = None, *, repair: bool = False, rescue: bool = Fals
                     notes.append(line + "  -> REPAIRED")
                     continue
                 line += "  -> 修復不能（両コピーとも読めない）"
-            (issues if severe else notes).append(line)
+            if severe:
+                issues.append(line)
+                divergent_found = True
+            else:
+                notes.append(line)
         if issues or notes:
             print(f"  [{name}]")
             for i in issues:
@@ -305,30 +339,45 @@ def run(dataset: str | None = None, *, repair: bool = False, rescue: bool = Fals
     problems += len(ls_issues)
 
     print("\n=== rclone cache / log ===")
-    orphans = find_orphan_tmps(cache)
-    if orphans:
+    orphans = None if cache is None else find_orphan_tmps(cache)
+    if cache is None:
+        print(f"  キャッシュ: 未指定のためスキップ（--cache または {rclone_paths.ENV_CACHE}）")
+    elif orphans is None:
+        print(f"  ! キャッシュが見つからない: {cache}")
+        problems += 1
+    elif orphans:
         total = sum(p.stat().st_size for p in orphans if p.exists())
         print(f"  孤児 tmp: {len(orphans)} 個 / {total:,} バイト  ({cache})")
         print("     ↑ rename がキャッシュ層で失敗した回数とほぼ 1:1。0 バイト化した"
               " ファイルの中身がここに残っていることがある（復旧候補）")
     else:
         print(f"  孤児 tmp: なし  ({cache})")
-    counts, since, last = tail_log_events(log)
-    if any(counts.values()):
-        print(f"  ログ {log.name}（{since} 以降を走査）:")
-        for ev, n in counts.items():
-            if n:
-                print(f"     {n:5d}  {ev}")
-        print(f"     最後の失敗: {last}")
-        print("     ↑ この時刻が「今」に近いなら、まだ rename 経路が残っている。"
-              "過去の日付なら修正前の残骸。")
+    tail = None if log is None else tail_log_events(log)
+    if log is None:
+        print(f"  ログ: 未指定のためスキップ（--log または {rclone_paths.ENV_LOG}）")
+    elif tail is None:
+        print(f"  ! ログが見つからない（または読めない）: {log}")
+        problems += 1
     else:
-        print(f"  ログに失敗イベントなし（{log}）")
+        counts, since, last = tail
+        if any(counts.values()):
+            print(f"  ログ {log.name}（{since} 以降を走査）:")
+            for ev, n in counts.items():
+                if n:
+                    print(f"     {n:5d}  {ev}")
+            print(f"     最後の失敗: {last}")
+            print("     ↑ この時刻が「今」に近いなら、まだ rename 経路が残っている。"
+                  "過去の日付なら修正前の残骸。")
+        else:
+            print(f"  ログに失敗イベントなし（{log}）")
 
     print(f"\n=== 未解決の問題: {problems} 件 ===")
-    if problems:
-        if not repair:
-            print("  `doctor --repair`  : primary/.bak の乖離を newest-wins で収束")
-        if not rescue:
+    if divergent_found and not repair:
+        print("  `doctor --repair`  : primary/.bak の乖離を newest-wins で収束")
+    if zero_found and not rescue:
+        if cache is not None and cache.is_dir():
             print("  `doctor --rescue`  : 0 バイトファイルをキャッシュの孤児 tmp から復元")
+        else:
+            print("  `doctor --rescue --cache <rclone のキャッシュ>`  : 0 バイトファイルを"
+                  "キャッシュの孤児 tmp から復元")
     return 1 if problems else 0

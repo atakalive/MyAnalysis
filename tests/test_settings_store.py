@@ -252,3 +252,23 @@ def test_models_sample_targeted_edit(tmp_path):
     assert parsed["pi"]["provider"] == "openai-codex"
     assert parsed["claude_code"]["model"] == "opus"
     assert "# --provider" in text
+
+
+@pytest.mark.parametrize("initial", [
+    '[a]\nk = "v"\n',          # LF
+    '[a]\r\nk = "v"\r\n',      # CRLF
+    None,                      # absent
+    "[x\n",                    # broken TOML
+])
+def test_set_toml_keys_returns_before_and_after(tmp_path, initial):
+    p = tmp_path / "m.toml"
+    if initial is not None:
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write(initial)
+    r = set_toml_keys(p, {"a": {"k": "w"}})
+    with open(p, encoding="utf-8", newline="") as f:
+        assert r.after == f.read()
+    assert r.before == initial
+    if initial == "[x\n":
+        with open(p.with_suffix(".toml.bak"), encoding="utf-8", newline="") as f:
+            assert f.read() == initial

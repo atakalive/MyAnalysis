@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.filelock import exclusive_lock
@@ -64,9 +65,22 @@ def _find_section(lines: list[str], section: str) -> tuple[int, int] | None:
     return hdr, end
 
 
+@dataclass(frozen=True)
+class TomlWriteResult:
+    """``set_toml_keys`` の 1 回の書込。どちらもロック内で newline="" で扱った本文そのもの
+    （改行変換なし）。
+
+    before: 書込の直前にロック内で読んだ本文。ファイルが無ければ None。壊れた TOML を
+            ``.bak`` へ退避して作り直した場合も、退避する前の元の本文。
+    after:  書き込んだ本文（``path`` の内容と一致する）。
+    """
+    before: str | None
+    after: str
+
+
 def set_toml_keys(
     path: Path, changes: dict[str, dict[str, str | bool | list[str]]]
-) -> None:
+) -> TomlWriteResult:
     """``changes`` = ``{section: {key: value}}`` の該当キーだけを ``path`` に書く。
 
     値は str / bool / list[str] のみ (それ以外 → ``TypeError``)。コメント・整列・改行・
@@ -75,6 +89,8 @@ def set_toml_keys(
     ``RuntimeError`` (fail-closed)。
     書き込み前に ``tomllib.loads`` でラウンドトリップ検証し、失敗ならファイル無変更で
     ``RuntimeError``。既存ファイルが構文破損なら ``.bak`` へ退避して最小再生成する。
+    書込前後の本文を ``TomlWriteResult`` で返す（呼び出し側の巻き戻し用。巻き戻し先は必ずこの
+    ``before`` を使い、ロックの外で読んだ内容は使わない）。
     """
     # 値型検証はロック取得前 (ファイルに触れる前) に行う。
     for section, kv in changes.items():
@@ -100,6 +116,7 @@ def set_toml_keys(
                 text: str | None = f.read()
         except FileNotFoundError:
             text = None
+        before = text
         if text is not None:
             try:
                 tomllib.loads(text)
@@ -144,6 +161,7 @@ def set_toml_keys(
                     )
 
         atomic_write_text(path, new_text, newline="")
+        return TomlWriteResult(before=before, after=new_text)
 
 
 def _apply_one(

@@ -15,10 +15,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from common.filelock import exclusive_lock
 from common.paths import atomic_write_text
 from llm_backend import backend_config
 from llm_backend.model_settings import merged_settings, model_config
 from llm_backend.settings_store import (
+    TomlWriteResult,
     config_toml_path,
     models_toml_path,
     set_toml_keys,
@@ -320,33 +322,25 @@ def apply_selection(
     """Persist the selection to the truth sources and refresh caches (no restart).
 
     All-or-nothing across the two files: if config.toml write fails, models.toml is
-    rolled back to its pre-apply state, so the "old engine + new model" middle state
-    (which the same ``settings_key`` for claude-vscode ⇔ claude-cli makes reachable)
-    never survives on disk.
+    rolled back to the text set_toml_keys replaced (read under its lock), so the "old
+    engine + new model" middle state (which the same ``settings_key`` for claude-vscode
+    ⇔ claude-cli makes reachable) never survives on disk. If another writer (the R2
+    sync) has replaced models.toml since, the rollback is skipped and that content is
+    kept.
     """
     models_path = models_toml_path()
     config_path = config_toml_path()
 
-    # 1. pre-apply snapshot of models.toml. newline="" keeps CRLF verbatim (Path.
-    #    read_text would collapse CRLF→LF via universal newlines) so the rollback
-    #    below is byte-exact — matching settings_store's CRLF-preserving contract,
-    #    which is the whole reason atomic_write_text grew a newline parameter.
-    try:
-        with open(models_path, encoding="utf-8", newline="") as f:
-            models_before: str | None = f.read()
-        models_existed = True
-    except FileNotFoundError:
-        models_before = None
-        models_existed = False
-
-    # 2. models.toml (model/provider knobs). May create the file.
+    # 1. models.toml (model/provider knobs). May create the file. set_toml_keys reports
+    #    the text it replaced (read under its lock), which is what a rollback restores.
+    models_write: TomlWriteResult | None = None
     if engine.settings_key:
         model_changes: dict[str, str | bool] = {"model": model}
         if "provider" in engine.fields:
             model_changes["provider"] = provider
-        set_toml_keys(models_path, {engine.settings_key: model_changes})
+        models_write = set_toml_keys(models_path, {engine.settings_key: model_changes})
 
-    # 3. config.toml: [backend].name always (idempotent) + config_patch (only on
+    # 2. config.toml: [backend].name always (idempotent) + config_patch (only on
     #    engine change) + empty-value clear rule, in one write.
     config_changes: dict[str, dict[str, str | bool]] = {
         "backend": {"name": engine.backend_key}
@@ -370,13 +364,24 @@ def apply_selection(
     try:
         set_toml_keys(config_path, config_changes)
     except Exception as e:
-        # Roll models.toml back to fully-old so no "old engine + new model" remains.
-        if engine.settings_key:
+        # Roll models.toml back to the text step 1 actually replaced (read under the
+        # lock by set_toml_keys) so no "old engine + new model" remains -- but only
+        # while it still holds exactly what step 1 wrote, checked under the same lock
+        # that set_toml_keys and the R2 sync take. If another writer (sync) replaced
+        # it since, its content wins and is left alone.
+        if models_write is not None:
             try:
-                if models_existed:
-                    atomic_write_text(models_path, models_before, newline="")
-                else:
-                    models_path.unlink(missing_ok=True)
+                with exclusive_lock(models_path.with_name(models_path.name + ".lock")):
+                    try:
+                        with open(models_path, encoding="utf-8", newline="") as f:
+                            models_now: str | None = f.read()
+                    except FileNotFoundError:
+                        models_now = None
+                    if models_now == models_write.after:
+                        if models_write.before is not None:
+                            atomic_write_text(models_path, models_write.before, newline="")
+                        else:
+                            models_path.unlink(missing_ok=True)
             except Exception as rb:
                 raise RuntimeError(
                     "backend settings apply failed and rolling models.toml back "

@@ -39,6 +39,7 @@ Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次�
 - 失敗しても起動も登録・削除も止まらない（通常は数秒で打ち切り、何も表示しない。送れなかった変更は次回起動時の同期で送られる）。止めるには `.env` に `R2_AUTOSYNC=0`（起動時・登録・削除の後の自動同期をすべて止める）。
 - 手動: `config-sync`（双方向）/ `config-push`（R2 側だけ書く）/ `config-pull`（ローカル側だけ書く）。どれもマージした結果を書くもので、片側で強制的に上書きするものではない。`--dry-run` で予定だけ表示。`--include-env` は `config-sync` / `config-push` だけ。
 - 自動同期が効かないときは、まず `python -m llm_bridge config-sync --dry-run` でエラーと警告を確認する。自動同期（起動時・登録・削除の後）の例外を見るには `R2_DEBUG=1` を設定し、`python tool.py` をコンソールから起動する（`run.bat` では表示されない。起動時は `auto-sync skipped:`、GUI での登録・削除の後は `auto-push skipped:` で始まる行）。
+- `R2_BUCKET` のバケットが存在しないと、`config-sync` / `config-push` / `config-pull` は `error: R2 bucket '…' not found` で終了コード 1 になる（何も書かない）。自動同期ではこれも表示されない。
 - Cloudflare R2 専用。他の S3 互換ストレージは未検証。
 
 ## 競合の規則
@@ -49,6 +50,7 @@ Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次�
 - ホスト名が同じ PC を 2 台使わない（互いのパスを上書きし合う）。
 - `config.toml` の PC 固有の値も他の PC に配られる。Claude / Codex の実行ファイルのパスを PC ごとに変えるなら、`[claude_code].bin` / `[codex].bin` を空にし、各 PC の `.env` の `CLAUDE_CODE_BIN` / `CODEX_BIN` で指定する（`bin` が空でないと環境変数は無視される。GUI で「Claude（PATH の CLI）」を選ぶと `bin = "claude"` が書かれる）。各セクションの `cwd` と `[pi].bin` は PC ごとに変えられないので、絶対パスを書かない。
 - R2 同期を使う全 PC で、アプリを同じ版にそろえる（古い版は新しい形式の同期データを読めず、その PC では同期が止まる。起動時には何も表示されない）。
+- `config-sync` などが `warning: remote bundle が未知スキーマ/不正のため read-only フォールバック` を出すときは、どの PC も R2 の同期データを読みも書きもしない。まず全 PC のアプリを同じ版にそろえる。それでも出るなら同期データが壊れている（UTF-8 で表せない文字を含む等）ので、下の「R2 から .env を消すには」の 1〜3 と同じ手順で `config/bundle.json` を削除して作り直す。
 
 ## R2 から .env を消すには
 

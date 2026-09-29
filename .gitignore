@@ -48,3 +48,7 @@ llm_backend/config.toml.lock
 !/.pi/skills/
 
 !/.pi/skills/**
+
+# 壊れた TOML の退避（llm_backend/settings_store.py）と、config_share が .env.pulled を書くときのロック（Issue #102）
+*.toml.bak
+/.env.pulled.lock

@@ -158,6 +158,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `fs_kind.py` | 書込先が rename を信頼できる FS（local）か同期マウント等（fragile）かの判定 |
 | `mount_compat.py` | `os.path.realpath` を包む shim。WinFsp 上で PIL / matplotlib が落ちる問題への対策 |
 | `filelock.py` | プロセス間の排他ロック（POSIX は fcntl、Windows は msvcrt） |
+| `rclone_paths.py` | rclone のキャッシュ・ログの場所の解決（引数 > 環境変数。doctor と mount_probe で共有） |
 | `proc.py` | `no_window_kwargs()`（コンソール窓の抑止）、`resolve_cmd_shim()`（npm シムの実体解決） |
 | `i18n.py` | 翻訳カタログと `tr()` |
 | `explore.py` | エージェント・対話用の解析 API（`load_dataset` / `dataset_summary` / `save_fig` / `save_code` / `save_text`） |
@@ -461,24 +462,25 @@ python -m pytest tests/
 ### 9.2 `python -m llm_bridge doctor`
 
 ```bash
-python -X utf8 -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rclone の VFS キャッシュ>] [--log <rclone のログ>]
+python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rclone の VFS キャッシュ>] [--log <rclone のログ>]
 ```
 
-0 バイトのファイル、primary と `.bak` の食い違い、`myanalysis.toml` の破損、`data/llm_state` の 0 バイトファイル、rclone キャッシュの孤児 tmp とログの失敗イベントを報告する。未解決の問題があれば終了コード 1（孤児 tmp とログの失敗イベントは数えない）。`--repair` は newest-wins で収束させ、`data/llm_state` の 0 バイトファイルは削除する（次回の書込で作り直される）。`--rescue` は 0 バイトのファイルを rclone キャッシュの孤児 tmp から復元する。
+0 バイトのファイル、primary と `.bak` の食い違い、`myanalysis.toml` の破損、`data/llm_state` の 0 バイトファイル、rclone キャッシュの孤児 tmp とログの失敗イベントを報告する。未解決の問題があれば終了コード 1（孤児 tmp とログの失敗イベントは数えない。指定したキャッシュ・ログが見つからないこと、フォルダが見えないデータセットは数える）。`--dataset` が解決できないとき、`--rescue` にキャッシュの指定が無いときは終了コード 2。空の `__init__.py` / `py.typed` / `.gitkeep` / `*.lock` は 0 バイトとして報告しない。`--repair` は newest-wins で収束させ、`data/llm_state` の 0 バイトファイルは削除する（次回の書込で作り直される）。`--rescue` は 0 バイトのファイルを rclone キャッシュの孤児 tmp から復元する。
 
-`--cache` / `--log` の既定値は特定の rclone 構成を前提にしたパスなので、rclone を使う環境では必ず指定する（存在しないパスだと「孤児なし」「失敗なし」と表示されるだけ）。利用者向けの説明は [troubleshooting_ja.md の「doctor（点検と修復）」](troubleshooting_ja.md#doctor点検と修復)。
+`--cache` / `--log` に既定値は無い。省略時は環境変数 `MYANALYSIS_RCLONE_CACHE` / `MYANALYSIS_RCLONE_LOG`（`common/rclone_paths.py`）を読み、それも無ければ、指定の無い方の点検をスキップする。利用者向けの説明は [troubleshooting_ja.md の「doctor（点検と修復）」](troubleshooting_ja.md#doctor点検と修復)。
 
 ### 9.3 `python -m devtools.mount_probe`
 
 ```bash
-python -m devtools.mount_probe --dir <マウント上の専用の空ディレクトリ> --log <rclone のログ> --cache <rclone の VFS キャッシュ> [--n 50] [--pace 12] [--keep]
+python -m devtools.mount_probe --dir <マウント上の既存のディレクトリ> --log <rclone のログ> [--cache <rclone の VFS キャッシュ>] [--n 50] [--pace 12] [--keep]
 python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 ```
 
 同期マウント上で 4 条件（`os.replace` / in-place × 事前に読む・読まない）の書込を繰り返し、rclone のログから失敗を数える。書込戦略を変えるときの検証に使う。
 
-- `--dir` / `--log` / `--cache` の既定値は環境依存なので必ず指定する。
-- **`--dir` は終了時に丸ごと削除される**（`--keep` で残す）。データセットのディレクトリを渡さない。
+- `--dir` と `--log` は必須（`--log` は OS の環境変数 `MYANALYSIS_RCLONE_LOG` でもよい。`.env` からは読まない）。`--cache`（または `MYANALYSIS_RCLONE_CACHE`）を省くと孤児 tmp を数えない。
+- `--dir` には既存のディレクトリを渡す。実行ごとにその下へ `mount_probe-XXXX` を作ってそこに書き、終了時（中断・例外でも）にこの実行が書いた `.bin` とそのディレクトリだけを消す（`--keep` で残す）。`--dir` 自体と、その中の他のファイルには触れない。
+- FS 判定は `--dir` と、Windows では全ドライブについて表示する（Python 3.12 未満ではドライブ一覧を省く）。
 - 既定（`--n 50`、`--pace 12` 秒）では 10 分以上かかる。
 - `--size`（1 ファイルのバイト数。既定 4096）と `--settle`（計測後に待つ秒数。既定 12）も指定できる。
 
@@ -489,6 +491,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `MYANALYSIS_WRITE_STRATEGY` | `replace` / `inplace` で書込戦略を強制する（FS 判定より優先するキルスイッチ） |
 | `MYANALYSIS_FS_OVERRIDE` | `M:=fragile,D:=local` のようにパスの接頭辞ごとに FS 種別を上書きする（最長一致） |
 | `MYANALYSIS_FORCE_FRAGILE` | `1` で全パスを fragile として扱う |
+| `MYANALYSIS_RCLONE_CACHE` / `MYANALYSIS_RCLONE_LOG` | `doctor` と `devtools.mount_probe` で `--cache` / `--log` を省略したときの rclone の VFS キャッシュ / ログの場所（OS の環境変数。`.env` からは読まない） |
 | `LLM_BACKEND` | バックエンドの全体既定の選択を上書きする（`config.toml` より優先。チャット単位のエンジン上書きには効かない） |
 | `CLAUDE_CODE_BIN` / `CODEX_BIN` | claude / codex の実行ファイル（`config.toml` の `bin` が空のときに使われる） |
 | `R2_AUTOSYNC` | `0` で R2 の自動同期（起動時と CLI の `register-dataset` の後の双方向同期、GUI での登録・登録削除の後の送信）を止める。手動の `config-*` は残る |
@@ -574,7 +577,6 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `command_log.jsonl` が増え続ける | ローテーションが無く、`--wait` は毎回ログを先頭から読むので、ログが大きくなるほど遅くなる |
 | pi の cwd がリポジトリ直下 | claude / codex はリポジトリ外にしているが、pi は既定でリポジトリ直下のまま。pi が cwd の CLAUDE.md を読み込むと、開発者向けの規約がデータ解析エージェントに混ざり得る |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
-| 環境依存の既定値 | `doctor` の `--cache` / `--log`、`mount_probe` の `--dir` / `--log` / `--cache` の既定値が特定の環境のパス。`mount_probe` は実行のたびに固定のドライブ文字の FS 判定も表示する |
 | リポジトリ内の venv とホットリロード | モジュール判定がパスだけなので、リポジトリ直下の `.venv` にあるパッケージがホットリロードの対象・パージ対象になる（[§7](#7-ホットリロード)） |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |
 | `data/llm_state` の一部が chokepoint 外 | `active.json`、コマンドキュー、`reload_manifest.json`、`command_log.jsonl`、`last_window.json`（`llm_bridge/session.py` の `write_last_window`。固定の tmp 名）は `common/paths.py` を通さず直接書いている（ローカルディスク前提） |

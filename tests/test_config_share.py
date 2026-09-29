@@ -1296,3 +1296,124 @@ def test_stamp_at_representable_max_does_not_raise(env):
     assert (config_share._parse_iso(st["entry_meta"]["ds_local/SELF"])
             == config_share._parse_iso(top))
     assert st["deleted"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# Issue #102: NoSuchBucket / write under lock / remote text validation
+# --------------------------------------------------------------------------- #
+def _raise_no_such_bucket(Bucket, Key):
+    raise FakeClientError("NoSuchBucket")
+
+
+def test_no_such_bucket_raises(env, monkeypatch):
+    (env.tmp / "models.toml").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(env.fake, "get_object", _raise_no_such_bucket)
+    with pytest.raises(RuntimeError, match="not found"):
+        config_share.pull(config_path=env.cfg)
+    assert (env.tmp / "models.toml").read_text(encoding="utf-8") == "keep"
+
+
+def test_no_such_bucket_swallowed_by_try_sync(env, monkeypatch):
+    monkeypatch.setattr(env.fake, "get_object", _raise_no_such_bucket)
+    assert config_share.try_sync(config_path=env.cfg) is None
+
+
+def test_file_write_rechecks_and_writes_under_lock(env, monkeypatch):
+    import contextlib
+    import os
+    (env.tmp / "models.toml").write_text("v1_local", encoding="utf-8")
+    os.utime(env.tmp / "models.toml", (0, 0))
+    env.fake.seed({
+        "schema_version": 1, "datasets": {},
+        "files": {"models.toml": "v2_remote"},
+        "file_meta": {"models.toml": "2999-01-01T00:00:00+00:00"},
+    })
+    held: list = []
+    events: list = []
+
+    @contextlib.contextmanager
+    def rec_lock(path):
+        held.append(path)
+        try:
+            yield
+        finally:
+            held.pop()
+
+    real_read = config_share._read_file_state
+    real_write = config_share.atomic_write_text
+
+    def spy_read(p):
+        events.append(("read", p.name, list(held)))
+        return real_read(p)
+
+    def spy_write(p, text, **kw):
+        events.append(("write", p.name, list(held)))
+        return real_write(p, text, **kw)
+
+    monkeypatch.setattr(config_share, "exclusive_lock", rec_lock)
+    monkeypatch.setattr(config_share, "_read_file_state", spy_read)
+    monkeypatch.setattr(config_share, "atomic_write_text", spy_write)
+    _sync(env)
+
+    lock = (env.tmp / "models.toml").resolve().with_name("models.toml.lock")
+    writes = [i for i, e in enumerate(events) if e[:2] == ("write", "models.toml")]
+    assert len(writes) == 1
+    assert [p.resolve() for p in events[writes[0]][2]] == [lock]
+    recheck = max(i for i, e in enumerate(events[:writes[0]])
+                  if e[:2] == ("read", "models.toml"))
+    assert [p.resolve() for p in events[recheck][2]] == [lock]
+    assert (env.tmp / "models.toml").read_text(encoding="utf-8") == "v2_remote"
+    assert not (env.tmp / "models.toml.tmp").exists()
+
+
+@pytest.mark.parametrize("strategy", ["replace", "inplace"])
+def test_remote_lone_surrogate_is_read_only(env, monkeypatch, strategy):
+    import os
+    monkeypatch.setenv("MYANALYSIS_WRITE_STRATEGY", strategy)
+    (env.tmp / "models.toml").write_text("keep", encoding="utf-8")
+    os.utime(env.tmp / "models.toml", (0, 0))
+    env.fake.seed(json.dumps({
+        "schema_version": 1, "datasets": {},
+        "files": {"models.toml": "x\ud800y"},
+        "file_meta": {"models.toml": "2999-01-01T00:00:00+00:00"},
+    }).encode("utf-8"))
+    r = _sync(env)
+    assert r["unusable_remote"] is True
+    assert (env.tmp / "models.toml").read_text(encoding="utf-8") == "keep"
+    assert any("read-only" in w for w in r["warnings"])
+
+
+@pytest.mark.parametrize("strategy", ["replace", "inplace"])
+def test_remote_cr_normalized_and_converges(env, monkeypatch, strategy):
+    import os
+    monkeypatch.setenv("MYANALYSIS_WRITE_STRATEGY", strategy)
+    (env.tmp / "models.toml").write_text("v1_local", encoding="utf-8")
+    os.utime(env.tmp / "models.toml", (0, 0))
+    env.fake.seed({
+        "schema_version": 1, "datasets": {},
+        "files": {"models.toml": "a\r\nb\rc\n"},
+        "file_meta": {"models.toml": "2999-01-01T00:00:00+00:00"},
+    })
+    _sync(env)
+    with open(env.tmp / "models.toml", encoding="utf-8", newline="") as f:
+        assert f.read() == "a\nb\nc\n".replace("\n", os.linesep)
+
+    r = _sync(env, apply=False)
+    assert r["planned"]["write_files"] == []
+
+    real_write = config_share.atomic_write_text
+    calls = {"n": 0}
+
+    def spy_write(*a, **kw):
+        calls["n"] += 1
+        return real_write(*a, **kw)
+
+    monkeypatch.setattr(config_share, "atomic_write_text", spy_write)
+    r = _sync(env)
+    assert r["planned"]["write_files"] == []
+    assert calls["n"] == 0
+
+
+def test_expand_remote_normalizes_newlines():
+    out = config_share._expand_remote({"files": {"models.toml": "a\r\nb\rc\n"}}, [])
+    assert out[2] == {"models.toml": "a\nb\nc\n"}
