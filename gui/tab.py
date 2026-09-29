@@ -10,8 +10,6 @@ from common.slots import format_slot, parse_slot
 
 _log = logging.getLogger(__name__)
 
-RESERVED_TAB_VERBS = frozenset(["set-split", "close-pane", "list-panes"])
-
 _ORIENT = {"h": Qt.Orientation.Horizontal, "v": Qt.Orientation.Vertical}
 
 
@@ -637,9 +635,15 @@ class AnalysisTab(QWidget):
                     )
 
     def connect_state(self, provider: Callable[[], dict] | None) -> None:
+        """互換のために残している。登録した provider は ``llm_bridge`` から読まれない
+        （状態の書き出しは ``attach_tab`` に渡した state_provider を ``refresh-state``
+        が直接呼ぶ）。新しいコードでは使わない。"""
         self._state_provider = provider
 
     def current_state(self) -> dict | None:
+        """互換のために残している。登録した provider は ``llm_bridge`` から読まれない
+        （状態の書き出しは ``attach_tab`` に渡した state_provider を ``refresh-state``
+        が直接呼ぶ）。新しいコードでは使わない。"""
         return self._state_provider() if self._state_provider else None
 
     def connect_snapshot_writer(

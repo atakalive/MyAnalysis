@@ -153,6 +153,41 @@ def test_language_survives_app_rebuild(qapp, tmp_path, monkeypatch):
         # window, restoring the persisted language (uses the real i18n/ catalogs).
         assert i18n.current_language() == "ja"
         assert win._file_menu.title() == "ファイル(&F)"
+        # create_main_window also installs the qtbase translator (Issue #103 G-1).
+        if _qtbase_ja_available():
+            assert getattr(qapp, "_myanalysis_qtbase_translator", None) is not None
     finally:
+        from gui.qt_translation import install_qt_translator
+        install_qt_translator(qapp, "en")
         win._hotreload._teardown_watchers(win)
+        win.deleteLater()
+
+
+def _qtbase_ja_available() -> bool:
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    return QTranslator().load("qtbase_ja", path)
+
+
+def test_on_set_language_swaps_qt_translator(qapp, tmp_path, monkeypatch):
+    """_on_set_language re-installs the qtbase translator (Issue #103 G-1)."""
+    if not _qtbase_ja_available():
+        pytest.skip("qtbase_ja.qm not available")
+    import llm_bridge.paths as lp
+    monkeypatch.setattr(lp, "ui_prefs_path", lambda: tmp_path / "ui_prefs.json")
+
+    import common.i18n as i18n
+    i18n._load_catalogs()
+    from gui.qt_translation import install_qt_translator
+    from gui.window import ToolWindow
+
+    win = ToolWindow()
+    try:
+        win._on_set_language("ja")
+        assert getattr(qapp, "_myanalysis_qtbase_translator", None) is not None
+        win._on_set_language("en")
+        assert getattr(qapp, "_myanalysis_qtbase_translator", None) is None
+    finally:
+        install_qt_translator(qapp, "en")
+        i18n.set_language("en")
         win.deleteLater()

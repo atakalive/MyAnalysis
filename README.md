@@ -33,18 +33,20 @@ Under the hood the agent analyzes with Python (`common/explore.py`) and drives t
 ## Requirements / Setup
 
 - **Python 3.11 or newer is required** (the code uses `tomllib` from the standard library; 3.10 and earlier will not work).
-- There is **no dependency manifest** yet (`requirements.txt` / `pyproject.toml`). For now, install the dependencies inferred from imports manually.
+- Dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). There is no `pyproject.toml`.
 
 **Core dependencies** (needed to launch the GUI):
 
 ```
-PySide6  pyqtgraph  numpy  pandas  matplotlib
+pip install -r requirements.txt
 ```
+
+(PySide6, pyqtgraph, numpy, pandas, matplotlib, Pillow — see requirements.txt)
 
 **Optional dependencies** (only for specific analyses):
 
 - `h5py` — needed only for analyses that handle `.h5` camera images (e.g. `dataset_d`). Imported lazily inside `load()`.
-- `tifffile` + `Pillow` — needed only for the ImageJ-style image viewer (Issue #60, `show_image`). `tifffile` opens 16bit / multi-page / N-dimensional TIFF; `Pillow` opens PNG/JPG/BMP. Both are imported lazily inside `common/image_io.py`; without them TIFF / raster loading raises a graceful `ImportError` pointing at `pip install`.
+- `tifffile` — needed only for opening TIFF in the ImageJ-style image viewer (Issue #60, `show_image`). `tifffile` opens 16bit / multi-page / N-dimensional TIFF. It is imported lazily inside `common/image_io.py`; without it TIFF loading raises a graceful `ImportError` pointing at `pip install`.
 
 **Config files** (copy each `.example` to activate; the real files are gitignored):
 

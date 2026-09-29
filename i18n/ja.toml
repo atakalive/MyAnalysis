@@ -89,7 +89,7 @@
 "figure.menu.shrink_half"     = "50% に縮小"
 
 # --- dock ---
-"dock.chat"                   = "Chat"
+"dock.chat"                   = "チャット"
 
 # --- dialogs ---
 "dlg.open_dataset.title"      = "データセットを開く"
@@ -147,8 +147,8 @@
 
 # --- chat ---
 "chat.input.placeholder"      = "メッセージ...（Ctrl+Enter で送信、Enter で改行）"
-"chat.btn.stop"               = "Stop"
-"chat.btn.send"               = "Send"
+"chat.btn.stop"               = "停止"
+"chat.btn.send"               = "送信"
 "chat.menu.rename"            = "名前変更"
 "chat.menu.archive"           = "アーカイブ"
 "chat.menu.show_archived"     = "アーカイブ済みを表示… ({n})"
@@ -316,3 +316,20 @@
 "picker.delete.confirm_open"     = "このデータセットは開いているため、先に閉じます。"
 "picker.delete.confirm_sync"     = "R2 同期により、他の PC の登録からも削除されます。"
 "picker.delete.failed"           = "登録を削除できませんでした: {error}"
+
+# Issue #103
+"tab.placeholder.body" = "解析はまだありません。お試し: python tool.py --demo"
+"dock.chat.placeholder" = "（チャットパネル: 未接続）"
+"chat.role.user" = "ユーザー"
+"chat.role.assistant" = "アシスタント"
+"chat.turn.stopped" = "[停止しました]"
+"chat.turn.error" = "[エラー: {error}]"
+"viewer.label.mode" = "モード"
+"viewer.label.active" = "操作対象"
+"viewer.check.invert" = "反転"
+"viewer.btn.auto" = "自動"
+"viewer.btn.reset" = "リセット"
+"dev.reload.status" = "再読み込み: {message}"
+"dev.reload.done" = "完了"
+"meeting.start_failed" = "開始に失敗: {error}"
+"backend.status.note.permission_mode_empty" = "permission_mode が空（または不正）なので bypassPermissions（制限なし）で動きます。絞るには permission_mode を bypassPermissions 以外に明示してください（allowed_tools だけでは絞れません）。docs/security_ja.md を参照。"

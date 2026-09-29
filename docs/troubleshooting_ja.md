@@ -53,9 +53,9 @@ python -X utf8 -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue --cach
 | 設定を変えたらアプリが起動しない | `[backend].name` / `LLM_BACKEND` の値が不正 | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直す |
 | GUI も全 CLI も `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
 | 最初の送信が HTTP 401 / 接続拒否 | エンジン未設定、または `llm_backend/config.toml` の構文が壊れている（OpenAI API か `.env` の接続先に送っている） | [エンジンを設定](../README_ja.md#ai-エンジン) |
-| `[error: Claude Code engine not found…]` | Claude Code が見つからない | 拡張を入れる、`claude` を PATH に通す、または `[claude_code].bin` / `CLAUDE_CODE_BIN` を指定 |
-| `[error: … not found in PATH…]`（pi / codex） | CLI 未導入 | `npm i -g …`（バックエンドの状況ウィンドウからも可）。Codex は `codex login` も必要 |
-| チャットに `[error: …]` | エンジン側のエラー（認証切れ・レート制限等） | 多くはそのまま再送で回復。認証切れはログインし直す |
+| `[エラー: Claude Code engine not found…]` | Claude Code が見つからない | 拡張を入れる、`claude` を PATH に通す、または `[claude_code].bin` / `CLAUDE_CODE_BIN` を指定 |
+| `[エラー: … not found in PATH…]`（pi / codex） | CLI 未導入 | `npm i -g …`（バックエンドの状況ウィンドウからも可）。Codex は `codex login` も必要 |
+| チャットに `[エラー: …]` | エンジン側のエラー（認証切れ・レート制限等） | 多くはそのまま再送で回復。認証切れはログインし直す |
 | インストールしたのに ✗ のまま | PATH は起動時のものを使う | アプリを再起動 |
 | 起動が数秒遅い | R2 同期のネットワーク待ち | `R2_AUTOSYNC=0` |
 | GUI で登録・削除したのに他の PC に届かない | この PC からの送信が失敗した（ネットワーク等）か、他の PC がまだ同期していない | この PC で `config-sync`（`R2_DEBUG=1` でコンソールから起動すると `auto-push skipped:` の行で理由が分かる）／他の PC で `config-sync` |

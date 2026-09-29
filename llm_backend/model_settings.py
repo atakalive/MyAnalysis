@@ -3,7 +3,7 @@
 Model-selection knobs (which model / how much thinking / effort / provider) live
 here, separate from the operational/transport config in ``config.toml`` (bin,
 cwd, permission_mode, tools, ...). ``models.toml`` has one section per backend
-key (``[claude_code]``, ``[pi]``, ``[openai]``, ...); each backend maps the
+key (``[claude_code]``, ``[pi]``, ``[codex]``, ``[openai-compat]``); each backend maps the
 conventional keys (model / thinking / effort / provider) to its own CLI/API.
 
 ``merged_settings`` overlays the ``models.toml`` section onto the backend's
@@ -23,8 +23,8 @@ from common.paths import repo_root
 def model_config() -> dict:
     """Load ``models.toml`` (repo root) once.
 
-    Cached; pick up edits via ``model_config.cache_clear()`` (the View →
-    backend/model dialog does this on apply) or a process restart.
+    Cached; pick up edits via ``model_config.cache_clear()`` (the Settings →
+    Backend / model settings dialog does this on apply) or a process restart.
     """
     p = repo_root() / "models.toml"
     try:
@@ -32,7 +32,7 @@ def model_config() -> dict:
             return tomllib.load(f)
     except (FileNotFoundError, tomllib.TOMLDecodeError):
         # Corrupt (hand-edited) TOML must not crash the app at read time — return
-        # {} so the app falls back to defaults and the View → backend/model dialog
+        # {} so the app falls back to defaults and the Settings → Backend / model settings dialog
         # can still open and self-heal it (settings_store .bak + regenerate).
         return {}
 

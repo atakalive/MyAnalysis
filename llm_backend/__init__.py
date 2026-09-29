@@ -31,8 +31,8 @@ __all__ = [
 def backend_config() -> dict:
     """Load llm_backend/config.toml once.
 
-    Cached; pick up edits via ``backend_config.cache_clear()`` (the View →
-    backend/model dialog does this on apply) or a process restart.
+    Cached; pick up edits via ``backend_config.cache_clear()`` (the Settings →
+    Backend / model settings dialog does this on apply) or a process restart.
     """
     p = repo_root() / "llm_backend" / "config.toml"
     try:
@@ -40,7 +40,7 @@ def backend_config() -> dict:
             return tomllib.load(f)
     except (FileNotFoundError, tomllib.TOMLDecodeError):
         # Corrupt (hand-edited) TOML must not crash the app at read time — return
-        # {} so the app falls back to defaults and the View → backend/model dialog
+        # {} so the app falls back to defaults and the Settings → Backend / model settings dialog
         # can still open and self-heal it (settings_store .bak + regenerate).
         return {}
 

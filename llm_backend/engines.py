@@ -1,7 +1,7 @@
 """Declarative engine catalog + apply (Qt-independent).
 
 An *engine* is the user-facing "利用方法" choice in the backend/model dialog. It
-maps onto existing knobs: a backend registry key (claude/pi/openai/mock) plus the
+maps onto existing knobs: a backend registry key (claude/pi/codex/openai/mock) plus the
 one operational knob that distinguishes same-backend variants — claude's
 ``[claude_code].bin`` (``""`` = VS Code bundled engine, ``"claude"`` = PATH CLI).
 The "model" is free text (no catalog), so the dialog offers an editable combo.
@@ -29,7 +29,7 @@ from llm_backend.settings_store import (
 class Engine:
     id: str
     label_key: str
-    backend_key: str      # "claude"|"pi"|"openai"|"mock" (_BACKENDS key)
+    backend_key: str      # "claude"|"pi"|"codex"|"openai"|"mock" (_BACKENDS key)
     settings_key: str     # models.toml section; "" = no model settings
     config_patch: tuple[tuple[str, str | bool], ...]  # written to config.toml [settings_key] on switch
     fields: tuple[str, ...]                            # dialog knobs ("model", "provider")

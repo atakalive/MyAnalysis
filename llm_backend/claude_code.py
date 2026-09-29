@@ -15,7 +15,8 @@ the SDK streaming transport the extension uses —
 multi-turn continuation via ``--resume <session_id>``.
 
 Tool execution happens inside the engine (its Bash tool runs
-``python -m llm_bridge ...`` to drive the GUI, cwd = repo root), so the
+``python -m llm_bridge ...`` to drive the GUI, cwd = ~/.myanalysis/agent_home by
+default, outside the repo (see _agent_home); overridable with [claude_code].cwd), so the
 GUI-side ``tools`` argument is ignored — same contract as the pi backend.
 """
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import collections
 import json
+import logging
 import os
 import platform
 import re
@@ -44,9 +46,10 @@ from llm_backend.base import (
 )
 
 # Mandatory rules + minimal llm_bridge contract, injected on every turn via
-# --append-system-prompt. The engine also auto-discovers CLAUDE.md and
-# .claude/skills from cwd (= repo root), but the safety-critical contract lives
-# here so it survives independent of skill/memory loading.
+# --append-system-prompt. The engine auto-discovers CLAUDE.md and .claude/skills
+# from cwd; with the default cwd (_agent_home(), outside the repo) the repo's ones
+# are not loaded (pointing [claude_code].cwd inside the repo would load them). The
+# safety-critical contract lives here so it does not depend on that loading.
 _SYSTEM_PROMPT = (
     "You are a DATA-ANALYSIS assistant for the MyAnalysis project. Your job is to "
     "ANALYZE the registered measurement datasets and operate the MyAnalysis GUI — "
@@ -109,6 +112,39 @@ _SYSTEM_PROMPT = (
 # bypassPermissions keeps it non-interactive. Override in config for a tighter
 # allowlist (then also set allowed_tools).
 _DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+_log = logging.getLogger(__name__)
+
+
+def permission_mode_is_invalid(raw: object) -> bool:
+    """permission_mode の値が「書かれているが使えない」か。
+
+    未指定（None）は正常（既定値を使う）。空文字・空白のみ・str 以外は不正。
+    preflight もこの判定を使う（判定を 1 か所にまとめる）。
+    """
+    return raw is not None and not (isinstance(raw, str) and raw.strip())
+
+
+def _resolve_permission_mode(config: dict) -> str:
+    """config の permission_mode を解決する。未指定・不正なら既定値。
+
+    不正なときは warning を出す。ただし logging の出力先は設定されていないので、
+    見えるのは python tool.py でコンソールから起動したときだけ（run.bat では
+    見えない）。利用者に見える経路は preflight の note（バックエンドの状況）。
+    """
+    raw = config.get("permission_mode")
+    if permission_mode_is_invalid(raw):
+        _log.warning(
+            "permission_mode=%r is empty or invalid; using %s (no restriction). "
+            "To restrict, set permission_mode explicitly to a mode other than "
+            "bypassPermissions; allowed_tools alone does not restrict under "
+            "bypassPermissions. See docs/security_ja.md.",
+            raw, _DEFAULT_PERMISSION_MODE,
+        )
+        return _DEFAULT_PERMISSION_MODE
+    if raw is None:
+        return _DEFAULT_PERMISSION_MODE
+    return raw.strip()
 
 _VER_RE = re.compile(r"claude-code-(\d+)\.(\d+)\.(\d+)")
 
@@ -236,9 +272,7 @@ class ClaudeCodeBackend:
         cmd += _system_prompt_args(
             self._use_provider_system_prompt, getattr(self, "_persona", "")
         )
-        perm = config.get("permission_mode") or _DEFAULT_PERMISSION_MODE
-        if perm:
-            cmd += ["--permission-mode", perm]
+        cmd += ["--permission-mode", _resolve_permission_mode(config)]
         cmd += _generation_flags(config)
         settings = _settings_payload(config)
         if settings:

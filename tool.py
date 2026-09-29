@@ -7,9 +7,10 @@ from PySide6.QtWidgets import QApplication, QLabel
 import llm_bridge
 from common import crashlog
 from common.env import load_env
-from common.i18n import init_language
+from common.i18n import current_language, init_language, tr
 from gui import apply_dark_theme
 from gui.chat import ChatWidget
+from gui.qt_translation import install_qt_translator
 from llm_backend import get_backend
 from gui.tab import AnalysisTab
 from gui.tools import make_dispatch
@@ -19,7 +20,7 @@ from gui.window import ToolWindow
 def build_demo_tab() -> tuple[
     AnalysisTab, Callable[[], dict], Callable[[dict], None]
 ]:
-    """合成データで全パネル種別を動かす検証用タブ。"""
+    """合成データで SelectorPanel / TrajectoryPanel / ImagePanel を動かす検証用タブ（FigurePanel は含まない）。"""
     import numpy as np
 
     from gui.panels import ImagePanel, SelectorPanel, TrajectoryPanel
@@ -94,7 +95,7 @@ def build_placeholder_tab() -> tuple[
     tab = AnalysisTab(name="(empty)", is_placeholder=True)
     tab.add_panel(
         "msg",
-        QLabel("No analyses defined yet. Try: python tool.py --demo"),
+        QLabel(tr("tab.placeholder.body")),
         "top",
     )
     return tab, None, None
@@ -128,6 +129,7 @@ def create_main_window(
     # common.i18n and re-imports it fresh (resetting _active to the "en" default)
     # without going through main(). Read-only/idempotent; safe to call each time.
     init_language()
+    install_qt_translator(app, current_language())
     win = ToolWindow()
     tab, state_provider, ann_handler = (
         build_demo_tab() if demo else build_placeholder_tab()

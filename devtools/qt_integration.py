@@ -693,9 +693,9 @@ def _install_menu(window, controller: HotReloadController) -> None:
 
 def _menu_patch(window, controller: HotReloadController) -> None:
     msg = controller.do_reload()
-    first = msg.splitlines()[0] if msg else "done"
-    window.statusBar().showMessage(f"reload: {first}", 5000)
     tr = _m("common.i18n").tr
+    first = msg.splitlines()[0] if msg else tr("dev.reload.done")
+    window.statusBar().showMessage(tr("dev.reload.status", message=first), 5000)
     report = controller._last_report
     if report is not None and report.requires_app:
         box = QMessageBox(window)
@@ -718,6 +718,6 @@ def _menu_patch(window, controller: HotReloadController) -> None:
         if box.exec() == QMessageBox.StandardButton.Yes:
             r = controller.reload_app()
             if r.startswith("reload-busy"):
-                window.statusBar().showMessage(f"reload: {r}", 5000)
+                window.statusBar().showMessage(tr("dev.reload.status", message=r), 5000)
     elif "scope=app recommended" in msg or "SYNTAX ERROR" in msg or "FAILED" in msg:
         QMessageBox.information(window, tr("dev.reload.title"), msg)

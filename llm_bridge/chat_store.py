@@ -6,9 +6,10 @@ across PCs/repos, mirroring `session.py`'s per-dataset session.json.
 
 IMPORTANT: this module must stay Qt-free and free of config/dataset_config
 imports. It is imported from `llm_bridge/session.py` (which the CLI imports too),
-so it stays standard-library only. Serialization is testable headless. work_dir
-resolution is the caller's responsibility — every function here takes a
-`pathlib.Path` work_dir / target path.
+so it imports only the standard library, the Qt-free llm_backend.base, and
+(lazily, inside write_session_file) common.paths. Serialization is testable
+headless. work_dir resolution is the caller's responsibility — every function
+here takes a `pathlib.Path` work_dir / target path.
 """
 
 from __future__ import annotations

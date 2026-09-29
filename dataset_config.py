@@ -3,8 +3,9 @@
 The dataset *registry* (which dataset lives where, per host) is `datasets.local.json`
 at the repo root, accessed through config.py.
 This module holds *per-dataset* settings that travel with the data on the synced
-drive. Today the only setting is the output location (`work_dir`, default
-`_work`); the file is a sidecar the tools write mechanically.
+drive. There are two settings: the output location (`work_dir`, default `_work`)
+and the load format (`format`, default `csv_per_subdir`); the file is a sidecar
+the tools write mechanically.
 
 Read is non-destructive: load_config() never writes. ensure_config()/get_work_dir()
 write only at *save* time, and only the sidecar (myanalysis.toml) + the output

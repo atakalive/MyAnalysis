@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from common import i18n
 from common.i18n import tr
 from gui.floating_window import FloatingTabWindow
+from gui.qt_translation import install_qt_translator
 from gui.tab import AnalysisTab
 from gui.tabbar import MultiRowTabBar
 
@@ -175,7 +176,7 @@ class ToolWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea
             | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self._chat_dock.setWidget(QLabel("(chat panel: not wired yet)"))
+        self._chat_dock.setWidget(QLabel(tr("dock.chat.placeholder")))
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
         self._chat_widget = None
 
@@ -334,6 +335,9 @@ class ToolWindow(QMainWindow):
 
     def _on_set_language(self, code: str) -> None:
         i18n.set_language(code)
+        app = QApplication.instance()
+        if app is not None:
+            install_qt_translator(app, i18n.current_language())
         self.retranslate()
 
     def _open_meeting_share(self) -> None:

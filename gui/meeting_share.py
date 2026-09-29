@@ -236,7 +236,7 @@ class MeetingShareWindow(QWidget):
         try:
             self._relay.meeting_start(int(ttl), lan=lan, host_ip=host_ip)
         except Exception as e:
-            self._log_line(f"start failed: {e!r}")
+            self._log_line(tr("meeting.start_failed", error=repr(e)))
             return
         # LAN が有効なら実際の ip:port をログ表示（固定ポート要求が typo 等で ephemeral
         # 化した場合に「要求ポートで無い」ことを可視化する。reviewer R2 P2-2）。

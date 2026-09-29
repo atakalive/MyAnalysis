@@ -349,6 +349,9 @@ class OpenDatasetDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         outer.addWidget(self._buttons)
         self._open_btn = self._buttons.button(QDialogButtonBox.StandardButton.Open)
+        # 標準ボタンなので、表示中に言語を切り替えると Qt の訳で上書きされる（ダイアログは開くたびに作るので実害なし）
+        self._open_btn.setText(tr("picker.btn.open"))
+        self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("picker.btn.cancel"))
 
         # Select first row (if any) and render detail. Degenerate case: no
         # normal rows but completed rows exist → auto-expand and select there so

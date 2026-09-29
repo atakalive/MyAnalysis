@@ -35,7 +35,7 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 
 ## 2. 開発環境
 
-- **Python 3.11 以上**（標準ライブラリの `tomllib` を使う）。依存パッケージは [README_ja.md の「インストールと起動」](../README_ja.md#インストールと起動) を参照。依存定義ファイル（`requirements.txt` 等）は無い。テストには別途 `pytest` が要る。
+- **Python 3.11 以上**（標準ライブラリの `tomllib` を使う）。依存パッケージは [README_ja.md の「インストールと起動」](../README_ja.md#インストールと起動) を参照。実行時の依存は `requirements.txt`、テストは `pip install -r requirements-dev.txt`（pytest と tifffile も入る）。
 - `.env` は GUI の起動時に読まれ（R2 同期の前にも毎回読み直す）、既に設定されている環境変数は上書きしない（`common/env.py`）。手で起動した CLI（`python -m llm_bridge engines` 等）は、R2 同期を伴うコマンドを除いて `.env` を読まない。
 
 **起動方法**
@@ -413,7 +413,7 @@ python -m pytest tests/
 
 - リポジトリ直下から `python -m pytest tests/` で実行する。`pytest.ini` / `pyproject.toml` / `tests/__init__.py` は無く、conftest がトップレベルのモジュール（`dataset_registry` 等）を import するので、`pytest` コマンドを直接使うと conftest の読込で失敗する。
 - pytest-qt は使っていない。GUI テストの多くは各ファイルの `qapp` fixture で、残りはテスト内で直接 `QApplication` を作る。どちらも `QT_QPA_PLATFORM=offscreen` を自分で設定する（ヘッドレスで動く）。
-- PySide6 はテストに必須。PySide6 を `pytest.importorskip` しているのは `test_backend_prompts.py` の 3 件だけで、GUI を使うテストは PySide6 が無いと失敗する。テストには PySide6 に加えて matplotlib・pandas・Pillow も実質必須。`pytest.importorskip` でスキップされるのは `test_figures.py`（matplotlib）、`test_image_io.py` / `test_show_image.py` の tifffile 系、`test_mount_compat.py` の 1 件（Pillow）だけ。
+- テストの依存は `requirements-dev.txt` で揃う。`requirements.txt` の必須依存（PySide6・pyqtgraph・numpy・pandas・matplotlib・Pillow）はテストでも skip しないので、入っていないとそのテストは失敗する。skip するのは任意依存の tifffile を使うテストだけ（`test_figures.py`（matplotlib）、`test_mount_compat.py`（Pillow）、`test_backend_prompts.py`（PySide6）には以前からの skip が残っている）。
 - **CI ではテストが走らない**（`.gitlab-ci.yml` は `chatdock.html` を GitLab Pages に配信するだけ）。push の前に手元で実行する。
 
 **`tests/conftest.py` が隔離するもの**
@@ -570,15 +570,13 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 |---|---|
 | `plans/` が古い | 初期の設計メモで、現在の API と一致しない（例: 存在しない `toggle-chat-visible` verb や `common.paths.state_dir`）。仕様として読まない |
 | `list-commands` が古い | 手書きの固定リストで、window verb 7 個と tab verb 3 個しか出さない（`list-tabs`、`show-image`、`set-active-dataset`、`close-dataset`、会議共有の verb 等が無い） |
-| 使われていない API | `gui/tab.py` の `RESERVED_TAB_VERBS`、`AnalysisTab.connect_state()` / `current_state()`（`llm_bridge` は state provider を直接呼ぶ） |
-| 古いコメント | `llm_backend/model_settings.py` の docstring の `[openai]`（実際のセクションは `[openai-compat]`）。同ファイルと `llm_backend/__init__.py` の「View → backend/model dialog」（実際は 設定 メニュー）。`llm_backend/claude_code.py` の冒頭 docstring と `_SYSTEM_PROMPT` 直前のコメントの「cwd = repo root」（実際は `~/.myanalysis/agent_home`）。`tool.py` の `build_demo_tab` の「全パネル種別」（実際は 4 種のうち `FigurePanel` を除く 3 種） |
+| 使われていない API | `AnalysisTab.connect_state()` / `current_state()` は互換のため残している（`llm_bridge` は読まない。リポジトリ外の解析コードから呼ばれている可能性があるため削除しない） |
 | `command_log.jsonl` が増え続ける | ローテーションが無く、`--wait` は毎回ログを先頭から読むので、ログが大きくなるほど遅くなる |
 | pi の cwd がリポジトリ直下 | claude / codex はリポジトリ外にしているが、pi は既定でリポジトリ直下のまま。pi が cwd の CLAUDE.md を読み込むと、開発者向けの規約がデータ解析エージェントに混ざり得る |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
 | 環境依存の既定値 | `doctor` の `--cache` / `--log`、`mount_probe` の `--dir` / `--log` / `--cache` の既定値が特定の環境のパス。`mount_probe` は実行のたびに固定のドライブ文字の FS 判定も表示する |
-| 整合テストが無い | `ENGINES` と `_BACKENDS`、`TOOLS` と `_dispatch()` の対応を検査するテストが無い |
 | リポジトリ内の venv とホットリロード | モジュール判定がパスだけなので、リポジトリ直下の `.venv` にあるパッケージがホットリロードの対象・パージ対象になる（[§7](#7-ホットリロード)） |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |
 | `data/llm_state` の一部が chokepoint 外 | `active.json`、コマンドキュー、`reload_manifest.json`、`command_log.jsonl`、`last_window.json`（`llm_bridge/session.py` の `write_last_window`。固定の tmp 名）は `common/paths.py` を通さず直接書いている（ローカルディスク前提） |
 | mock が完全にはオフラインでない | `mock` バックエンドは応答の一部を外部サイトから取得する（失敗しても 3 秒でタイムアウトして続行する） |
-| 依存定義・CI・リンタ設定が無い | `requirements.txt` / `pyproject.toml`、CI でのテスト実行、リンタ設定がどれも無い |
+| CI・リンタ設定が無い | CI でのテスト実行とリンタ設定が無い（依存定義は `requirements.txt` / `requirements-dev.txt`） |

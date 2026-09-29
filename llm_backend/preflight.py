@@ -360,6 +360,25 @@ def _codex_binary() -> tuple[str, str | None]:
         return "missing", None
 
 
+def _claude_config() -> dict:
+    """claude バックエンドが使う設定（config.toml の [claude_code] に models.toml を重ねたもの）。
+    llm_backend.__init__._make_claude と同じ組み立て。テストで差し替える。"""
+    from llm_backend import backend_config
+    from llm_backend.model_settings import merged_settings
+    return merged_settings("claude_code", backend_config().get("claude_code", {}))
+
+
+def _claude_permission_notes() -> tuple[tuple[str, dict], ...]:
+    """permission_mode が空・不正なら注意を 1 件返す。never raise（失敗時は注意なし）。"""
+    try:
+        from llm_backend.claude_code import permission_mode_is_invalid
+        if permission_mode_is_invalid(_claude_config().get("permission_mode")):
+            return (("backend.status.note.permission_mode_empty", {}),)
+    except Exception:
+        pass
+    return ()
+
+
 # ----- 公開 API -----
 
 
@@ -390,12 +409,14 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 engine_id=engine_id, binary_state=state, binary=path, version=ver,
                 auth_state=auth_state, auth_detail=auth_detail,
                 note_key="backend.status.note.vscode_ext",
+                notes=_claude_permission_notes(),
             )
         pre_state, pre_detail, notes = _prereq(tc, None)
         return EngineStatus(
             engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
             binary_state=state, binary=path, version=ver,
-            auth_state=auth_state, auth_detail=auth_detail, notes=notes,
+            auth_state=auth_state, auth_detail=auth_detail,
+            notes=notes + _claude_permission_notes(),
             install=(_NPM, "i", "-g", "@anthropic-ai/claude-code")
             if state in ("missing", "ok") and pre_state == "ok" else None,
             login=("claude",) if state == "ok" else None,

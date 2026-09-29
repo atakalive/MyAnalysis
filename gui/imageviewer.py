@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from common.i18n import tr
 from common.image_io import ImageMeta, load_image, _infer_meta
 
 if TYPE_CHECKING:
@@ -229,11 +230,11 @@ class ImageViewerPanel(QWidget):
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(["single", "composite"])
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        mode_row.addWidget(QLabel("mode"))
+        mode_row.addWidget(QLabel(tr("viewer.label.mode")))
         mode_row.addWidget(self._mode_combo)
         self._active_combo = QComboBox()
         self._active_combo.currentIndexChanged.connect(self._on_active_changed)
-        mode_row.addWidget(QLabel("active"))
+        mode_row.addWidget(QLabel(tr("viewer.label.active")))
         mode_row.addWidget(self._active_combo)
         mode_row.addStretch(1)
         outer.addLayout(mode_row)
@@ -432,7 +433,7 @@ class ImageViewerPanel(QWidget):
             lut.setCurrentText(ch["lut_name"])
             lut.currentTextChanged.connect(lambda _t, i=c: self._on_lut_changed(i))
 
-            inv = QCheckBox("inv")
+            inv = QCheckBox(tr("viewer.check.invert"))
             inv.setChecked(ch["invert"])
             inv.stateChanged.connect(lambda _s, i=c: self._on_lut_changed(i))
 
@@ -445,9 +446,9 @@ class ImageViewerPanel(QWidget):
             lo_spin.valueChanged.connect(lambda _v, i=c: self._on_spin_changed(i))
             hi_spin.valueChanged.connect(lambda _v, i=c: self._on_spin_changed(i))
 
-            auto_btn = QPushButton("Auto")
+            auto_btn = QPushButton(tr("viewer.btn.auto"))
             auto_btn.clicked.connect(lambda _c=False, i=c: self._on_auto_clicked(i))
-            reset_btn = QPushButton("Reset")
+            reset_btn = QPushButton(tr("viewer.btn.reset"))
             reset_btn.clicked.connect(lambda _c=False, i=c: self._on_reset_clicked(i))
 
             widgets = {

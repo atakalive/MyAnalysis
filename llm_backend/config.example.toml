@@ -44,7 +44,10 @@ bin = ""             # 省略時は VS Code 拡張同梱バイナリを自動検
 permission_mode = "bypassPermissions"
                      # default|acceptEdits|plan|bypassPermissions
                      # GUI 駆動(Bash で python -m llm_bridge)を無人実行するため
-                     #   既定は bypassPermissions。絞るなら allowed_tools も設定。
+                     #   既定は bypassPermissions。空文字 "" も bypassPermissions として扱い、
+                     #   設定 → バックエンドの状況 に注意が出る。絞るには permission_mode を
+                     #   bypassPermissions 以外に明示する（allowed_tools だけでは絞れない。
+                     #   docs/security_ja.md 参照）。
 allowed_tools = ""   # 任意 --allowedTools 許可リスト(空白/カンマ区切り)
 # true(既定)= CC 同梱エンジンの既定システムプロンプトに MyAnalysis の指示を追記。
 # false     = CC 既定を使わず MyAnalysis の指示のみをシステムプロンプトにする

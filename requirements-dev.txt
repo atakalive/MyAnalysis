@@ -1,0 +1,4 @@
+# Test dependencies: runtime deps + pytest + optional deps exercised by tests.
+-r requirements.txt
+pytest
+tifffile

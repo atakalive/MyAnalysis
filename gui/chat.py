@@ -325,6 +325,14 @@ class _Turn:
         self.stream_id = ""
 
 
+def _role_label(role: str) -> str:
+    if role == "user":
+        return tr("chat.role.user")
+    if role == "assistant":
+        return tr("chat.role.assistant")
+    return role
+
+
 def _is_archived(sess) -> bool:
     """アーカイブ済みか。hot-reload で新フィールドを持たない旧インスタンス防御に
     getattr で読む。"""
@@ -1827,13 +1835,13 @@ class ChatWidget(QWidget):
             self._live_timer.stop()           # アクティブ完了 → 保留 flush は不要
             self._render_session(sess)        # 生テキストを完了 Markdown 表示へ置換
             if turn.stopped:
-                self._append_system_line("[stopped]")
+                self._append_system_line(tr("chat.turn.stopped"))
             else:
                 self._show_usage(turn.backend)
         else:
             # Non-visible session: stash note for display on next switch.
             if turn.stopped:
-                self._turn_notes[sid] = "[stopped]"
+                self._turn_notes[sid] = tr("chat.turn.stopped")
             else:
                 note = self._format_usage(turn.backend)
                 if note:
@@ -1870,7 +1878,7 @@ class ChatWidget(QWidget):
         sess.updated = time.time()
         if sess.dataset is not None:
             self._mark_chat_dirty()
-        error_text = f"\n\n[error: {msg}]"
+        error_text = "\n\n" + tr("chat.turn.error", error=msg)
         # Relay the failed turn to guests too (bidirectional requirement): emit the
         # partial buffer + error so the relay's origin=="local" gate forwards it to
         # out:. Always emit (even on empty buffer) so the guest isn't left hanging
@@ -2070,7 +2078,7 @@ class ChatWidget(QWidget):
             cursor.insertBlock(QTextBlockFormat())   # ← 直前 fragment の block format 継承を断つ
         color_map = {"user": "#6ec1e4", "assistant": "#a8d08d"}
         color = color_map.get(role, "#cccccc")
-        header = f'<b style="color:{color}">{html.escape(role)}</b>'
+        header = f'<b style="color:{color}">{html.escape(_role_label(role))}</b>'
         if msg_index is not None:
             _labels = {
                 "edit": tr("chat.action.edit"),

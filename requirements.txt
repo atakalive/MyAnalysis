@@ -1,0 +1,8 @@
+# Runtime dependencies (required). Versions are not pinned;
+# tested versions are listed in README_ja.md.
+PySide6
+pyqtgraph
+numpy
+pandas
+matplotlib
+Pillow

@@ -841,3 +841,19 @@ def test_delete_through_real_registry_requests_push(qapp, real_registry, monkeyp
     assert json.loads(real_registry.path.read_text(encoding="utf-8")) == {"keep": {"H": "/k"}}
     assert "drop/H" in config_share._local_state()["deleted"]
     assert main._rec["calls"] == [("push",)]
+
+
+def test_open_cancel_buttons_are_translated(qapp, patch_picker, monkeypatch):
+    """Issue #103 G-1: Open/Cancel use tr() (no Qt translator installed here, so
+    Qt's own default would stay English — checked in ja to avoid a vacuous pass)."""
+    import common.i18n as i18n
+    from PySide6.QtWidgets import QDialogButtonBox
+    monkeypatch.setattr(i18n, "_catalogs", {})
+    monkeypatch.setattr(i18n, "_active", "ja")
+    patch_picker([_meta("a")])
+    dlg, _main, _holder = _make_dialog(qapp)
+    buttons = dlg._buttons
+    assert buttons.button(QDialogButtonBox.StandardButton.Open).text() \
+        == i18n.tr("picker.btn.open") == "開く"
+    assert buttons.button(QDialogButtonBox.StandardButton.Cancel).text() \
+        == i18n.tr("picker.btn.cancel") == "キャンセル"

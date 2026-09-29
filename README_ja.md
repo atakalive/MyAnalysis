@@ -26,13 +26,13 @@
    cd MyAnalysis
    py -3 -m venv .venv
    .venv\Scripts\activate
-   python -m pip install PySide6 pyqtgraph pandas matplotlib
+   python -m pip install -r requirements.txt
    ```
 
 2. **起動**: `run.bat` をダブルクリックする。UI は英語で起動するので、**Settings → Language / 言語 → 日本語** に切り替える。ウィンドウが出なければ → [トラブルシューティング](#トラブルシューティング)
 3. **AI エンジン**: **設定 → バックエンド/モデル設定…** で「Claude（VS Code 同梱エンジン）」を選び、**適用** を押す。[R2 設定同期](docs/config_sync_ja.md) を使う 2 台目以降の PC では、先に [2 台目以降](docs/config_sync_ja.md#2-台目以降) を読む。
 4. **データセット**: **ファイル → データセットを新規登録** で計測データのフォルダを選ぶ。名前にはフォルダ名が入るので、数字だけ（例 `000000`）・記号入り・`-` 始まりなら変える（→ [データセット](#データセット)）。続けて **ファイル → データセットを開く…** で開く。
-5. **依頼**: 右のチャット欄に「このデータセットの中身を説明して」「`<列A>` と `<列B>` の関係を図にして」などと書いて **Ctrl+Enter**。応答には数十秒〜数分かかることがあり、図は左側のタブに開く。その場で書いたコードは残らないので、再現に使うなら「コードも保存して」と頼む（→ [使い方](#使い方)）。`[error: …]` が出たら → [トラブルシューティング](#トラブルシューティング)
+5. **依頼**: 右のチャット欄に「このデータセットの中身を説明して」「`<列A>` と `<列B>` の関係を図にして」などと書いて **Ctrl+Enter**。応答には数十秒〜数分かかることがあり、図は左側のタブに開く。その場で書いたコードは残らないので、再現に使うなら「コードも保存して」と頼む（→ [使い方](#使い方)）。`[エラー: …]`（英語表示では `[error: …]`）が出たら → [トラブルシューティング](#トラブルシューティング)
 6. **保存**: タブ構成とチャットは自動保存されない。こまめに **ファイル → セッションを保存** し、終わったら **ファイル → 保存して終了**（→ [保存と再開](#保存と再開)）。
 
 ---
@@ -64,7 +64,7 @@
 - TIFF 画像を開くときは `pip install tifffile` も入れる。
 - パッケージの版は固定していないので、動かないときは動作確認済みの版に合わせる（Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2）。
 - データなしで画面を試すときは `python tool.py --demo`。
-- macOS / Linux で使うときは `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install PySide6 pyqtgraph pandas matplotlib` → `python tool.py`（動作は未検証）。
+- macOS / Linux で使うときは `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install -r requirements.txt` → `python tool.py`（動作は未検証）。
 
 ---
 
@@ -145,8 +145,8 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 |---|---|
 | `run.bat` でウィンドウが出ない | venv を有効にして `python tool.py` を実行し、エラーを見る（`run.bat` は PySide6 の不足・古い Python・登録簿の破損を表示しない）。起動後のクラッシュは `data/logs/gui-crash-*.log` に残る |
 | 最初の送信が HTTP 401 | AI エンジンが設定されていない → [QuickStart](#quickstart) の手順 3 |
-| `[error: RuntimeError('Claude Code engine not found…')]` | Claude Code の拡張を入れてサインインする（または `llm_backend/config.toml` の `[claude_code].bin` か環境変数 `CLAUDE_CODE_BIN` で `claude` の場所を指定する） |
-| チャットに `[error: …]` と出る | 認証切れ・レート制限など。再送するか、エンジンにログインし直す |
+| `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code の拡張を入れてサインインする（または `llm_backend/config.toml` の `[claude_code].bin` か環境変数 `CLAUDE_CODE_BIN` で `claude` の場所を指定する） |
+| チャットに `[エラー: …]` と出る | 認証切れ・レート制限など。再送するか、エンジンにログインし直す |
 | 「保存に失敗しました（検証NG）」 | 同期ドライブの不調。rclone などのマウントで起きやすい → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)（点検・修復コマンド `doctor` を含む） |
 
 その他の症状、同期ドライブで起きる問題、不具合を報告するときに添えるもの → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)
@@ -166,7 +166,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 
 - 動作確認は Windows 11 だけ。
 - 解析タブは、開いている間データをメモリに置き続ける。大きなデータを多数開くとメモリを圧迫する。
-- 一部の表示は英語のまま（Qt 標準のボタン、画像ビューアなど）。
+- 一部の表示は英語のまま（→ [表示言語](docs/usage_ja.md#表示言語)）。
 - 詳細 → [docs/usage_ja.md](docs/usage_ja.md#制限事項の詳細)
 
 ---

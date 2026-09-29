@@ -262,3 +262,14 @@ def test_spinbox_roundtrip_preserves_range(Panel):
         p._on_spin_changed(0)
         clo, chi = p.channels[0]["levels"]
         assert chi > clo
+
+
+def test_channel_row_buttons_follow_language(Panel, monkeypatch):
+    """Issue #103 G-2: the channel row labels go through tr()."""
+    import common.i18n as i18n
+    from common.i18n import tr
+    monkeypatch.setattr(i18n, "_catalogs", {})
+    monkeypatch.setattr(i18n, "_active", "ja")
+    p = Panel()
+    p.set_image(np.zeros((2, 8, 8), dtype=np.uint16))
+    assert p._ch_widgets[0]["auto"].text() == tr("viewer.btn.auto") == "自動"

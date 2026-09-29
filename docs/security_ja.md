@@ -9,7 +9,7 @@
 
 - **権限を絞る**: `llm_backend/config.toml` の `[claude_code].permission_mode` と `allowed_tools`、`[codex].sandbox_mode`、`[pi].tools`。
   - 絞ると GUI 操作や解析が動かなくなる。特に Codex の `workspace-write` / `read-only` では、GUI の操作とデータセットへの保存ができなくなる。
-  - `permission_mode` を空にすると `bypassPermissions` に戻るので、`"default"` などを明示する。`models.toml` の同じセクションに同名のキーがあると、そちらが優先される。
+  - `permission_mode` を空にすると `bypassPermissions`（制限なし）になる。このとき **設定 → バックエンドの状況** の Claude の行と `python -m llm_bridge engines` に注意が出る（`python tool.py` でコンソールから起動した場合はコンソールにも警告が出る。`run.bat` では出ない）。絞るには `"default"` などを明示する。`allowed_tools` は許可の追加で、`bypassPermissions` のままでは絞れない。`models.toml` の同じセクションに同名のキーがあると、そちらが優先される。
   - 確実に隔離したい場合は、専用の OS ユーザーや仮想マシンで動かす。
 - **秘密情報**: `.env` とシェルの環境変数（API キー・R2 の鍵・`RELAY_ADMIN_KEY`）はエージェントのプロセスに引き継がれ、エージェントから読める。`PI_API_KEY` はコマンドライン引数で渡るので、pi は `/login` でのログインを推奨。
 - **他人のデータセットを開くとコードが実行される**: データセットを開くと、保存されていた解析タブの `analyses/*/analysis.py` が GUI のプロセス内で実行される。前回のセッションの復元、CLI 登録時の自動オープン、エージェントやミーティング参加者によるデータセットのオープンも同じ。エージェントの権限設定では防げない。共有フォルダに書き込める人は、それを開いた人の PC でコードを実行できる。

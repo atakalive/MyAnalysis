@@ -20,6 +20,8 @@ def _no_real_processes(monkeypatch):
     # detail は中立な事実だけ（説明文は notes の i18n キー）。実物と同じ形にしておく。
     monkeypatch.setattr(preflight, "_claude_auth", lambda: ("missing", ""))
     monkeypatch.setattr(preflight, "_pi_providers_from_authfile", lambda: None)
+    # 実リポジトリの llm_backend/config.toml / models.toml を読まない。
+    monkeypatch.setattr(preflight, "_claude_config", lambda: {})
 
 
 def _tools(monkeypatch, *, node="v24.18.0", npm="11.16.0", present=("node", "npm")):
@@ -308,6 +310,7 @@ def test_note_keys_exist_in_every_catalog():
         "backend.status.note.offline_auth",
         "backend.status.note.openai_env_unset",
         "backend.status.note.vscode_ext",
+        "backend.status.note.permission_mode_empty",
     }
     for path in sorted(i18n_dir().glob("*.toml")):
         with open(path, "rb") as f:
@@ -402,3 +405,41 @@ def test_degenerate_argv_never_raises():
     assert preflight._run([None], 1.0) is None
     assert preflight._run([], 1.0) is None
     assert preflight._pi_providers_from_list_models(None) is None
+
+
+# ----- permission_mode の注意（Issue #103 G-7） -----
+
+_PERM_NOTE = "backend.status.note.permission_mode_empty"
+
+
+def _note_keys(st):
+    return [k for k, _ in st.notes]
+
+
+@pytest.mark.parametrize("engine_id", ["claude-vscode", "claude-cli"])
+def test_empty_permission_mode_adds_note(monkeypatch, engine_id):
+    # 実ユーザーの home / PATH を探索しない。
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
+    monkeypatch.setattr(preflight, "_claude_config", lambda: {"permission_mode": ""})
+    assert _PERM_NOTE in _note_keys(preflight.check_engine(engine_id))
+
+
+@pytest.mark.parametrize("engine_id", ["claude-vscode", "claude-cli"])
+@pytest.mark.parametrize("cfg", [{"permission_mode": "plan"}, {}])
+def test_valid_or_unset_permission_mode_has_no_note(monkeypatch, engine_id, cfg):
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
+    monkeypatch.setattr(preflight, "_claude_config", lambda: cfg)
+    assert _PERM_NOTE not in _note_keys(preflight.check_engine(engine_id))
+
+
+@pytest.mark.parametrize("engine_id", ["claude-vscode", "claude-cli"])
+def test_claude_config_failure_adds_no_note(monkeypatch, engine_id):
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
+
+    def boom():
+        raise RuntimeError("broken config")
+
+    monkeypatch.setattr(preflight, "_claude_config", boom)
+    st = preflight.check_engine(engine_id)
+    assert _PERM_NOTE not in _note_keys(st)
+    assert st.binary_state == "missing"   # 保険の except に落ちていない

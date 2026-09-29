@@ -8,10 +8,18 @@ with replay=(session_id is None).
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
+import pytest
+
 from llm_backend.base import Message
-from llm_backend.claude_code import ClaudeCodeBackend
+from llm_backend.claude_code import (
+    _DEFAULT_PERMISSION_MODE,
+    ClaudeCodeBackend,
+    _resolve_permission_mode,
+    permission_mode_is_invalid,
+)
 
 
 def _capture_prompt(msgs, monkeypatch, tmp_path, *, session_id=None):
@@ -98,3 +106,68 @@ def test_resolve_bin_existing_file_is_literal(monkeypatch, tmp_path):
     f.write_text("x")
     monkeypatch.setattr("llm_backend.claude_code.shutil.which", lambda v: "/wrong")
     assert ClaudeCodeBackend._resolve_bin(str(f)) == str(f)
+
+
+# ----- permission_mode（Issue #103 G-7） -----
+
+
+@pytest.mark.parametrize("raw,invalid", [
+    (None, False), ("plan", False), (" plan ", False),
+    ("", True), ("   ", True), (False, True), (0, True),
+])
+def test_permission_mode_is_invalid(raw, invalid):
+    assert permission_mode_is_invalid(raw) is invalid
+
+
+def _perm_warnings(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == "llm_backend.claude_code" and r.levelno == logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize("config,expected", [
+    ({}, _DEFAULT_PERMISSION_MODE),
+    ({"permission_mode": "plan"}, "plan"),
+    ({"permission_mode": " plan "}, "plan"),
+])
+def test_resolve_permission_mode_valid(caplog, config, expected):
+    with caplog.at_level(logging.WARNING, logger="llm_backend.claude_code"):
+        assert _resolve_permission_mode(config) == expected
+    assert _perm_warnings(caplog) == []
+
+
+@pytest.mark.parametrize("raw", ["", "   ", False, 0])
+def test_resolve_permission_mode_invalid_warns(caplog, raw):
+    with caplog.at_level(logging.WARNING, logger="llm_backend.claude_code"):
+        assert _resolve_permission_mode({"permission_mode": raw}) == _DEFAULT_PERMISSION_MODE
+    assert len(_perm_warnings(caplog)) == 1
+
+
+def test_empty_permission_mode_passes_default_to_cli(monkeypatch, tmp_path):
+    backend = ClaudeCodeBackend(
+        {"bin": "/usr/bin/claude", "cwd": str(tmp_path), "permission_mode": ""}
+    )
+    captured = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = iter([
+            json.dumps({
+                "type": "result", "subtype": "success", "session_id": "s1",
+            }).encode() + b"\n"
+        ])
+        proc.stderr = iter([])
+        proc.poll.return_value = 0
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    list(backend.stream(_msgs()))
+    cmd = captured["cmd"]
+    i = cmd.index("--permission-mode")
+    assert cmd[i + 1] == "bypassPermissions"

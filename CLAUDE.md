@@ -27,7 +27,7 @@ Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<
 
 ### Per-dataset settings — `myanalysis.toml`
 
-Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in the registry `datasets.local.json`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. Today the only setting is `work_dir` — where analysis output is saved (default `_work`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
+Settings specific to one dataset live in `myanalysis.toml` at the top of that dataset's directory (not in the registry `datasets.local.json`), so they sync with the data and follow it across PCs/repos. [dataset_config.py](dataset_config.py) reads/generates it. There are two settings: `work_dir` — where analysis output is saved (default `_work`) — and `format` — how the dataset is loaded (default `csv_per_subdir`). The tools write this sidecar mechanically; it's safe to hand-edit. Measurement files (CSV etc.) are never modified.
 
 ### 解析ファイルはデータセット側に置く（Issue #37）
 
@@ -218,7 +218,10 @@ catalog until llama-server has them loaded, which is why the list is editable.
   reachable via `--add-dir` + `PYTHONPATH` for `common/explore.py` and
   `llm_bridge`. `[claude_code].permission_mode` defaults to `bypassPermissions` so
   GUI-driving tool calls run unattended (stdin is closed after the prompt, so an
-  interactive permission prompt would deadlock); tighten with `allowed_tools`.
+  interactive permission prompt would deadlock); to tighten, set `permission_mode`
+  to a mode other than `bypassPermissions` (`allowed_tools` alone does not restrict
+  under `bypassPermissions`). An empty or invalid value falls back to
+  `bypassPermissions` and shows a note in the backend status window.
   `[claude_code].use_provider_system_prompt` defaults to `true` (append MyAnalysis's
   instructions onto CC's built-in system prompt); set it `false` to replace the CC
   default so only MyAnalysis's instructions remain (`--system-prompt` instead of
@@ -408,4 +411,4 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
 
 ## State
 
-Greenfield as of 2026-05-27 — no build system, dependencies, or package layout yet (no pyproject.toml/requirements, loose-directory layout). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.
+Greenfield as of 2026-05-27 — no build system or package layout yet (no pyproject.toml, loose-directory layout); dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.

@@ -1953,3 +1953,35 @@ def test_set_persona_default_persists_to_ui_prefs(widget):
     assert widget.persona_default() == "P1"
     assert read_ui_pref("chat_persona") == "P1"
     assert _load_persona_default() == "P1"
+
+
+# ----- 発言者ラベル・停止行の i18n（Issue #103 G-2） -----
+
+
+@pytest.fixture()
+def ja(monkeypatch):
+    import common.i18n as i18n
+    monkeypatch.setattr(i18n, "_catalogs", {})
+    monkeypatch.setattr(i18n, "_active", "ja")
+
+
+def test_role_labels_are_translated(widget, ja):
+    from llm_backend.base import Message
+    widget._tool_display_default = "full"
+    sess = widget._active
+    sess.messages.append(Message(role="user", content="質問"))
+    sess.messages.append(Message(role="assistant", content="回答"))
+    widget._render_session(sess)
+    text = widget._log.toPlainText()
+    assert tr("chat.role.user") == "ユーザー" and tr("chat.role.user") in text
+    assert tr("chat.role.assistant") == "アシスタント" and tr("chat.role.assistant") in text
+    assert "assistant" not in text
+
+
+def test_stopped_line_is_translated(widget, ja):
+    sess = widget._active
+    turn = _failed_turn(widget, sess, _TokenBackend(), stopped=True)
+    turn.buffer = "途中まで"
+    widget._on_done(sess.id)
+    assert tr("chat.turn.stopped") == "[停止しました]"
+    assert "[停止しました]" in widget._log.toPlainText()
