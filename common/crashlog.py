@@ -211,15 +211,26 @@ def install_file_logging(log_dir: Path | None = None) -> None:
         pass
 
 
-def _windows_message_box(title: str, text: str) -> bool:
-    """Windows ならメッセージボックスを出して True。それ以外・失敗は False。"""
+def _user32():
+    """Windows の user32（それ以外は None）。テストはこれを差し替える。"""
     if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
+        return None
+    import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)  # type: ignore[attr-defined]
-        return True
+    return ctypes.windll.user32  # type: ignore[attr-defined]
+
+
+def _windows_message_box(title: str, text: str) -> bool:
+    """Windows ならメッセージボックスを出し、表示できたら True。それ以外・失敗は False。
+
+    MessageBoxW は失敗を例外ではなく戻り値 0 で返す（表示できたときは押したボタンの
+    ID で非 0）。0 を成功扱いにすると、show_fatal が stderr への代替通知を飛ばす。
+    """
+    try:
+        user32 = _user32()
+        if user32 is None:
+            return False
+        return user32.MessageBoxW(None, text, title, 0x10) != 0
     except Exception:  # noqa: BLE001
         return False
 

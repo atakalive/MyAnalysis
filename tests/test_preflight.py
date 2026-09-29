@@ -452,7 +452,11 @@ def test_claude_config_failure_adds_no_note(monkeypatch, engine_id):
 # ---- pi の最低版（--no-context-files） ----
 
 
-@pytest.mark.parametrize("ver,expect", [("0.66.0", True), ("0.71.1", False)])
+# 境界は直下・ちょうど・直上を固定する（0.67.4 ちょうどの利用者に注意を出さない）。
+@pytest.mark.parametrize("ver,expect", [
+    ("0.66.0", True), ("0.67.3", True), ("0.67.4", False), ("0.67.5", False),
+    ("0.71.1", False),
+])
 def test_pi_too_old_note(monkeypatch, ver, expect):
     monkeypatch.delenv("PI_API_KEY", raising=False)
     monkeypatch.setattr(
@@ -515,6 +519,13 @@ def test_claude_auth_uses_auth_status(monkeypatch, _claude_home):
 
 def test_claude_auth_logged_out(monkeypatch, _claude_home):
     _write_credentials(_claude_home)
+    monkeypatch.setattr(preflight, "_run", lambda cmd, timeout: (1, '{"loggedIn": false}'))
+    assert _REAL_CLAUDE_AUTH("/x/claude") == ("missing", "")
+
+
+def test_claude_auth_cli_logged_out_wins_over_env_token(monkeypatch, _claude_home):
+    # CLI の判定を優先する契約: CLI が loggedIn=false と言えば、env にトークンがあっても missing。
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
     monkeypatch.setattr(preflight, "_run", lambda cmd, timeout: (1, '{"loggedIn": false}'))
     assert _REAL_CLAUDE_AUTH("/x/claude") == ("missing", "")
 

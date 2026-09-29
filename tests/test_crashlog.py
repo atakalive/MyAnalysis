@@ -337,3 +337,40 @@ def test_show_fatal_falls_back_to_stderr(monkeypatch, capsys):
     crashlog.show_fatal("the-title", "the-text")
     err = capsys.readouterr().err
     assert "the-title" in err and "the-text" in err
+
+
+class _FakeUser32:
+    """MessageBoxW だけを持つ user32 の代役（ネイティブ API は呼ばない）。"""
+
+    def __init__(self, result=None, exc=None):
+        self.result, self.exc, self.calls = result, exc, []
+
+    def MessageBoxW(self, hwnd, text, title, flags):  # noqa: N802 — Win32 の名前に合わせる
+        self.calls.append((hwnd, text, title, flags))
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+@pytest.mark.parametrize("result,shown", [(0, False), (1, True), (2, True)])
+def test_windows_message_box_checks_return_value(monkeypatch, result, shown):
+    # MessageBoxW は失敗を戻り値 0 で返す（例外ではない）。非 0 はボタン ID。
+    fake = _FakeUser32(result=result)
+    monkeypatch.setattr(crashlog, "_user32", lambda: fake)
+    assert crashlog._windows_message_box("the-title", "the-text") is shown
+    assert fake.calls == [(None, "the-text", "the-title", 0x10)]
+
+
+def test_windows_message_box_false_without_user32_or_on_error(monkeypatch):
+    monkeypatch.setattr(crashlog, "_user32", lambda: None)
+    assert crashlog._windows_message_box("t", "x") is False
+    monkeypatch.setattr(crashlog, "_user32", lambda: _FakeUser32(exc=OSError("boom")))
+    assert crashlog._windows_message_box("t", "x") is False
+
+
+@pytest.mark.parametrize("result,to_stderr", [(0, True), (1, False)])
+def test_show_fatal_uses_stderr_when_message_box_fails(monkeypatch, capsys, result, to_stderr):
+    monkeypatch.setattr(crashlog, "_user32", lambda: _FakeUser32(result=result))
+    crashlog.show_fatal("the-title", "the-text")
+    err = capsys.readouterr().err
+    assert ("the-text" in err) is to_stderr
