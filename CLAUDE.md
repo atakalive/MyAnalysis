@@ -56,7 +56,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
-- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `PI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
+- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
 - Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`). Dataset registration (per-host paths) now lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
 
@@ -65,7 +65,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 Chat-dock LLM access goes through the `llm_backend/` package. Backends implement
 the `LLMBackend` Protocol in `llm_backend/base.py`; `get_backend()` selects one
 by name. Five backends ship: `claude` (VS Code Claude Code engine), `openai`
-(OpenAI-compatible HTTP), `mock` (offline smoke test), `pi` (pi-coding-agent
+(OpenAI-compatible HTTP), `mock` (smoke test; ignores the input, but fetches the crude-oil price from stooq.com), `pi` (pi-coding-agent
 subprocess), `codex` (OpenAI Codex CLI subprocess).
 
 **No local persistence (all backends).** Every backend's system prompt appends
@@ -125,7 +125,8 @@ catalog until llama-server has them loaded, which is why the list is editable.
   - **Never call `pi auth print-bearer-token`**: it refreshes tokens expiring within 30
     minutes, and when the same refresh token is shared across pi(WSL)/pi(Windows)/codex
     it logs the others out. Measured-safe probes: `--version`, `codex login status`,
-    `pi --list-models` (all leave the auth files byte-identical).
+    `pi --list-models`, `claude auth status --json` (all leave the auth files
+    byte-identical; the last measured on claude 2.1.282 / Linux).
   - `install` doubles as the **update** command (`npm i -g <pkg>` is the same either
     way); the row labels it インストール when missing and 更新 when present, so an
     installed driver still has an upgrade path. ログイン is a separate button and stays
@@ -393,7 +394,7 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
 
 ## ホットリロード — `devtools/`
 
-走行中の GUI に修正コードを注入し、開いていたタブ・プロット・チャット文脈を破壊せず新コードを有効化する。トリガーは**手動のみ**（CLI verb + 開発(&D) メニュー、自動 file-watch なし）。リロード実行時は作業静止が前提（チャット応答中・モーダル表示中は `reload-busy:...` で拒否）。
+走行中の GUI に修正コードを注入し、開いていたタブ・プロット・チャット文脈を破壊せず新コードを有効化する。トリガーは**手動のみ**（CLI verb + 開発(&D) メニュー、自動 file-watch なし）。リロード実行時は作業静止が前提（モーダル表示中は `reload-busy:...` で拒否。`scope=tab` 以外はチャット応答中も拒否）。
 
 **エージェントの使い方**: repo コードを編集したら `python -m llm_bridge window reload --wait`。警告（「scope=app 推奨」）が出たら `python -m llm_bridge window reload scope=app --wait` → `command_log.jsonl` を `id==<送信id>` かつ `verb=="reload-result"` でポーリング（30秒）。
 

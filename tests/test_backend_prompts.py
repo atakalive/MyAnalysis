@@ -163,4 +163,25 @@ def test_gui_chat_prompt_includes_rule():
     from gui.chat import _SYSTEM_PROMPT
 
     assert NO_LOCAL_PERSISTENCE in _SYSTEM_PROMPT
-    assert MOUNT_SAFE_EDITS in _SYSTEM_PROMPT
+    # openai / mock はコードを実行できないので draft/apply の案内は載せない。
+    assert MOUNT_SAFE_EDITS not in _SYSTEM_PROMPT
+
+
+def test_gui_chat_prompt_says_it_cannot_run_code():
+    pytest.importorskip("PySide6")
+    from gui.chat import _SYSTEM_PROMPT
+
+    assert "cannot run code" in _SYSTEM_PROMPT
+    assert "GUI tools themselves save" in _SYSTEM_PROMPT
+    for verb in ("draft-analysis", "apply-analysis", "newanalysis"):
+        assert verb not in _SYSTEM_PROMPT
+
+
+def test_every_backend_prompt_starts_with_analyst_framing():
+    """コードを実行できるバックエンドは「データ解析の担当であり開発者ではない」で始まる。"""
+    from llm_backend.base import ANALYST_FRAMING
+
+    prompts = _all_backend_prompts()
+    assert prompts
+    for key, prompt in prompts.items():
+        assert prompt.startswith(ANALYST_FRAMING), key

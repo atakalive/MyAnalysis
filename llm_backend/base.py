@@ -38,7 +38,19 @@ NO_LOCAL_PERSISTENCE = (
 )
 
 
-# Shared across ALL backend system prompts. Editing an existing analysis's
+# Shared head of the code-capable backend prompts (claude / codex / pi). These
+# engines can run code and edit files, so they are told up front that they
+# analyze data and do NOT develop the MyAnalysis application itself.
+ANALYST_FRAMING = (
+    "You are a DATA-ANALYSIS assistant for the MyAnalysis project. Your job is to "
+    "ANALYZE the registered measurement datasets and operate the MyAnalysis GUI — "
+    "NOT to develop, refactor, build, test, or modify the MyAnalysis application "
+    "source code. Do not treat this as a software project to work on."
+)
+
+
+# Shared across the code-capable backend prompts (claude / codex / pi); NOT
+# gui.chat._SYSTEM_PROMPT (openai / mock cannot run code). Editing an existing analysis's
 # canonical analysis.py directly with Edit/Write on the synced mount can truncate
 # it to 0 bytes on a failed write, so route edits through the mount-safe
 # draft → apply → recover verbs (Issue #89). Names the three verbs so

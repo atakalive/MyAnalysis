@@ -24,6 +24,7 @@ __all__ = [
     "get_backend",
     "build_backend",
     "backend_config",
+    "default_backend_name",
 ]
 
 
@@ -121,6 +122,12 @@ def build_backend(name: str, settings: dict | None = None) -> LLMBackend:
     return factory(settings)
 
 
+def default_backend_name() -> str:
+    """LLM_BACKEND も [backend].name も無いときの既定（OPENAI_BASE_URL 後方互換）。"""
+    base_url = os.environ.get("OPENAI_BASE_URL") or ""
+    return "mock" if base_url.strip().lower() == "mock" else "openai"
+
+
 def get_backend() -> LLMBackend:
     """Construct the configured backend.
 
@@ -133,6 +140,5 @@ def get_backend() -> LLMBackend:
     if not name:
         name = backend_config().get("backend", {}).get("name")
     if not name:
-        base_url = os.environ.get("OPENAI_BASE_URL") or ""
-        name = "mock" if base_url.strip().lower() == "mock" else "openai"
+        name = default_backend_name()
     return build_backend(name)

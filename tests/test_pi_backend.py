@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,13 +23,18 @@ from llm_backend.pi import PiCodingAgentBackend, _SYSTEM_PROMPT_PI
 class TestCommandAssembly:
     """Verify that stream() builds the right pi CLI command."""
 
-    def _capture_cmd(self, config: dict, monkeypatch, *, session_id=None):
+    def _capture_cmd(
+        self, config: dict, monkeypatch, *, session_id=None,
+        env: dict[str, str] | None = None,
+    ):
         """Set up a backend, monkeypatch Popen, and return the cmd list."""
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(
             "llm_backend.pi.repo_root", lambda: __import__("pathlib").Path("/repo")
         )
         monkeypatch.delenv("PI_API_KEY", raising=False)
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
 
         backend = PiCodingAgentBackend(config)
         if session_id:
@@ -57,6 +61,21 @@ class TestCommandAssembly:
         msgs = [Message(role="user", content="hello")]
         list(backend.stream(msgs))  # consume the generator
         return captured["cmd"], captured["kwargs"]
+
+    def test_cmd_disables_context_files(self, monkeypatch, tmp_path):
+        """開発者向け CLAUDE.md / AGENTS.md を読ませない（cwd を指定しても常に）。"""
+        for config in ({}, {"cwd": str(tmp_path)}):
+            cmd, _ = self._capture_cmd(config, monkeypatch)
+            assert "--no-context-files" in cmd
+
+    def test_pi_api_key_is_not_passed_on_the_command_line(self, monkeypatch):
+        """PI_API_KEY をプロセス一覧から見える引数に載せない。"""
+        cmd, kwargs = self._capture_cmd(
+            {}, monkeypatch, env={"PI_API_KEY": "secret"})
+        assert "--api-key" not in cmd
+        assert "secret" not in cmd
+        # 環境変数としては子プロセスに渡っている（キーを消して空振りしていない）。
+        assert kwargs["env"]["PI_API_KEY"] == "secret"
 
     def test_append_system_prompt_always_present(self, monkeypatch):
         cmd, _ = self._capture_cmd({}, monkeypatch)
@@ -193,7 +212,7 @@ class TestJSONLParsing:
         def fake_popen(cmd, **kwargs):
             proc = MagicMock()
             proc.stdin = MagicMock()
-            proc.stdout = iter([l.encode() + b"\n" for l in lines])
+            proc.stdout = iter([line.encode() + b"\n" for line in lines])
             proc.stderr = iter([])
             proc.poll.return_value = 0
             proc.wait.return_value = 0
@@ -278,12 +297,10 @@ class TestJSONLParsing:
         backend._session_id = "sid"
         captured_stdin = {}
 
-        orig_popen = subprocess.Popen.__init__
-
         def fake_popen(cmd, **kwargs):
             proc = MagicMock()
             proc.stdin = MagicMock()
-            proc.stdout = iter([l.encode() + b"\n" for l in lines])
+            proc.stdout = iter([line.encode() + b"\n" for line in lines])
             proc.stderr = iter([])
             proc.poll.return_value = 0
             proc.wait.return_value = 0

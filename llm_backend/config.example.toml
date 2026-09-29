@@ -11,6 +11,8 @@ name = "claude"      # "claude" | "pi" | "codex" | "openai" | "mock"
 # ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
 #   前方スラッシュか、リテラル文字列 '...' を使うこと。
 # cwd = 'C:/path/to/workdir'   # 省略時はリポジトリ root
+#   cwd に関係なく AGENTS.md / CLAUDE.md は読み込まない（--no-context-files。
+#   グローバルの ~/.pi/agent/AGENTS.md も読まない。pi 0.67.4 以上）
 bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
 # model / provider はモデル設定なので models.toml の [pi] で指定(models.example.toml 参照)
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,

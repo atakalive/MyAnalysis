@@ -1985,3 +1985,189 @@ def test_stopped_line_is_translated(widget, ja):
     widget._on_done(sess.id)
     assert tr("chat.turn.stopped") == "[停止しました]"
     assert "[停止しました]" in widget._log.toPlainText()
+
+
+# ---- 全体設定のバックエンドが作れないとき（Issue #99 C-1） ----
+
+
+@pytest.fixture
+def _isolated_backend_config(monkeypatch, tmp_path):
+    import llm_backend
+    import llm_backend.model_settings as model_settings
+    monkeypatch.setattr(llm_backend, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(model_settings, "repo_root", lambda: tmp_path)
+    for key in ("LLM_BACKEND", "OPENAI_BASE_URL", "OPENAI_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    llm_backend.backend_config.cache_clear()
+    model_settings.model_config.cache_clear()
+    yield
+    llm_backend.backend_config.cache_clear()
+    model_settings.model_config.cache_clear()
+
+
+def _raising_factory():
+    raise RuntimeError("unknown backend: 'claud'")
+
+
+def _make_raising_widget():
+    from gui.chat import ChatWidget
+
+    w = ChatWidget(_raising_factory, dispatch=lambda *a, **k: None)
+    w.bind_window(MagicMock())
+    return w
+
+
+def test_widget_survives_raising_backend_factory(qapp, _isolated_backend_config):
+    from llm_backend.openai_compat import OpenAICompatBackend
+
+    w = _make_raising_widget()
+    assert isinstance(w._backend, OpenAICompatBackend)
+    assert "unknown backend" in w._backend_error
+    assert "unknown backend" in w._log.toPlainText()
+
+
+def test_raising_factory_falls_back_to_mock_when_base_url_is_mock(
+    qapp, _isolated_backend_config, monkeypatch,
+):
+    from llm_backend.mock import MockBackend
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "mock")
+    w = _make_raising_widget()
+    assert isinstance(w._backend, MockBackend)
+
+
+def test_session_backend_fallback_tags_fallback_engine_id(
+    qapp, _isolated_backend_config, monkeypatch,
+):
+    w = _make_raising_widget()
+    sess = _make_session(w)
+    assert w._build_session_backend(sess)._engine_id == "openai-http"
+    monkeypatch.setenv("OPENAI_BASE_URL", "mock")
+    assert w._build_session_backend(sess)._engine_id == "mock"
+
+
+def test_apply_backend_change_clears_backend_error(qapp, _isolated_backend_config):
+    from gui.chat import ChatWidget
+
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("unknown backend: 'claud'")
+        return _FakeBackend()
+
+    w = ChatWidget(factory, dispatch=lambda *a, **k: None)
+    w.bind_window(MagicMock())
+    assert w._backend_error is not None
+    w.apply_backend_change()
+    assert w._backend_error is None
+    assert "unknown backend" not in w._log.toPlainText()
+
+
+def test_backend_fallback_line_only_for_default_following_sessions(
+    qapp, _isolated_backend_config,
+):
+    w = _make_raising_widget()
+    sess = _make_session(w)
+    _override(w, sess, "pi")
+    w._active = sess
+    w._render_session(sess)
+    assert "unknown backend" not in w._log.toPlainText()
+
+
+def test_render_session_without_backend_error_attribute(widget):
+    """Tier 1 patch 前に作られた古いインスタンスには _backend_error が無い。"""
+    del widget._backend_error
+    widget._render_session(widget._active)     # must not raise
+
+
+# ---- 「このチャットのモデル…」と resume token（Issue #99 C-3） ----
+
+
+def test_model_only_change_keeps_the_resume_token(widget):
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    _override(widget, sess, "pi")
+    widget._capture_backend_session(_TokenBackend("tok-2", "pi"), sess)
+    widget._set_session_engine(sess, "pi", "other-model")
+    assert read_backend_session(sess.id)["token"] == "tok-2"
+    assert sess.backend_session_id == "tok-2"
+
+
+def test_reapplying_same_settings_keeps_the_resume_token(widget):
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    _override(widget, sess, "pi", "m", "p")
+    widget._capture_backend_session(_TokenBackend("tok-2", "pi"), sess)
+    _override(widget, sess, "pi", "m", "p")
+    assert read_backend_session(sess.id)["token"] == "tok-2"
+
+
+def test_override_to_the_global_engine_keeps_the_resume_token(widget, monkeypatch):
+    from gui.chat import ChatWidget
+    from llm_bridge.paths import read_backend_session
+    monkeypatch.setattr(ChatWidget, "_global_engine_id", staticmethod(lambda: "pi"))
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-3", "pi"), sess)
+    _override(widget, sess, "pi")
+    assert read_backend_session(sess.id)["token"] == "tok-3"
+
+
+def test_override_back_to_token_engine_keeps_the_resume_token(widget, monkeypatch):
+    """token は発行したエンジン（ストアの記録）と比べる。直前の実効エンジンではない。"""
+    from gui.chat import ChatWidget
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-4", "claude-cli"), sess)
+    # 全体設定の変更に相当（このチャットではまだ送信しない）。
+    monkeypatch.setattr(ChatWidget, "_global_engine_id", staticmethod(lambda: "pi"))
+    _override(widget, sess, "claude-cli")
+    assert read_backend_session(sess.id)["token"] == "tok-4"
+
+
+def test_changing_engine_drop_does_not_depend_on_global(widget, monkeypatch):
+    from gui.chat import ChatWidget
+    from llm_bridge.paths import read_backend_session
+    monkeypatch.setattr(ChatWidget, "_global_engine_id", staticmethod(lambda: "pi"))
+    sess = _make_session(widget)
+    widget._capture_backend_session(_TokenBackend("tok-1", "claude-cli"), sess)
+    _override(widget, sess, "pi")
+    assert sess.backend_session_id is None
+    assert read_backend_session(sess.id) is None
+
+
+def test_session_engine_change_still_rebuilds_backend(widget):
+    sess = _make_session(widget)
+    _override(widget, sess, "pi")
+    widget._session_backends[sess.id] = object()
+    widget._set_session_engine(sess, "pi", "other-model")
+    assert sess.id not in widget._session_backends
+
+
+# ---- プロバイダ既定のシステムプロンプト（Issue #99 C-4） ----
+
+
+def test_provider_prompt_toggle_reaches_cached_backends(widget, monkeypatch):
+    import gui.chat as chat_mod
+
+    store = {"value": True}
+    monkeypatch.setattr(chat_mod, "_save_use_provider_prompt",
+                        lambda v: store.__setitem__("value", bool(v)))
+    monkeypatch.setattr(chat_mod, "_effective_use_provider_prompt",
+                        lambda: store["value"])
+
+    class _Rec:
+        def __init__(self):
+            self.calls: list[bool] = []
+
+        def set_use_provider_system_prompt(self, value: bool) -> None:
+            self.calls.append(value)
+
+    a, b, c = _Rec(), _Rec(), _FakeBackend()
+    widget._session_backends.update({"a": a, "b": b, "c": c})
+    widget.set_use_provider_system_prompt(False)
+    assert a.calls == [False] and b.calls == [False]
+    assert widget._session_backends == {"a": a, "b": b, "c": c}
+    assert all(widget._session_backends[k] is v
+               for k, v in {"a": a, "b": b, "c": c}.items())

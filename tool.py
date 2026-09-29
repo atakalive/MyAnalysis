@@ -1,20 +1,36 @@
-import argparse
 import sys
-from collections.abc import Callable
 
-from PySide6.QtWidgets import QApplication, QLabel
+if __name__ == "__main__":
+    # 重い import より前に: 起動失敗を pythonw でも知らせ、import 以降の失敗は
+    # data/logs/ に残す（版の確認はフックより前なので、版不足はログに残らない）。
+    from common import crashlog
 
-import llm_bridge
-from common import crashlog
-from common.env import load_env
-from common.i18n import current_language, init_language, tr
-from gui import apply_dark_theme
-from gui.chat import ChatWidget
-from gui.qt_translation import install_qt_translator
-from llm_backend import get_backend
-from gui.tab import AnalysisTab
-from gui.tools import make_dispatch
-from gui.window import ToolWindow
+    crashlog.require_python((3, 11))  # 古い Python で動かすコードを最小にするため先頭
+    crashlog.install()
+    crashlog.install_file_logging()
+
+try:
+    import argparse
+    from collections.abc import Callable
+
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    import llm_bridge
+    from common import crashlog
+    from common.env import load_env
+    from common.i18n import current_language, init_language, tr
+    from gui import apply_dark_theme
+    from gui.chat import ChatWidget
+    from gui.qt_translation import install_qt_translator
+    from llm_backend import get_backend
+    from gui.tab import AnalysisTab
+    from gui.tools import make_dispatch
+    from gui.window import ToolWindow
+except Exception as _e:
+    if __name__ != "__main__":
+        raise  # テスト・Tier 3 再構築の import tool は従来どおり
+    crashlog.report_startup_failure(_e)
+    sys.exit(1)
 
 
 def build_demo_tab() -> tuple[
@@ -209,4 +225,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as _e:
+        # app.exec() より前の失敗（ウィンドウ構築中の例外など）も同じ経路で知らせる。
+        # exec 中のスロット例外は Qt が握って外に出ないので、対象は起動時だけ。
+        # sys.exit(app.exec()) の SystemExit は Exception ではないので通り抜ける。
+        crashlog.report_startup_failure(_e)
+        sys.exit(1)

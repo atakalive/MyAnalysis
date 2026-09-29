@@ -391,6 +391,8 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.status.ping_ok",
         "backend.status.ping_fail",
         "backend.status.note.vscode_ext",
+        "backend.status.note.pi_api_key_unused",
+        "backend.status.note.pi_too_old",
         "backend.applied",
         "backend.applied_busy",
     ]

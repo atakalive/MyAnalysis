@@ -41,7 +41,7 @@ from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
-    GUI_DISPLAY_VERBS,
+    ANALYST_FRAMING, GUI_DISPLAY_VERBS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     build_prompt_with_history, compose_system_prompt,
 )
@@ -52,11 +52,8 @@ from llm_backend.base import (
 # are not loaded (pointing [claude_code].cwd inside the repo would load them). The
 # safety-critical contract lives here so it does not depend on that loading.
 _SYSTEM_PROMPT = (
-    "You are a DATA-ANALYSIS assistant for the MyAnalysis project. Your job is to "
-    "ANALYZE the registered measurement datasets and operate the MyAnalysis GUI — "
-    "NOT to develop, refactor, build, test, or modify the MyAnalysis application "
-    "source code. Do not treat this as a software project to work on; the "
-    "repository is added read-only only so you can understand the helper APIs.\n"
+    ANALYST_FRAMING + " The repository is added read-only only so you can "
+    "understand the helper APIs.\n"
     "Analyze data with Python (Bash tool): "
     "`python -c \"from common.explore import load_dataset, dataset_summary, "
     "save_fig, save_code, save_text\"` — "
@@ -123,9 +120,9 @@ def permission_mode_is_invalid(raw: object) -> bool:
 def _resolve_permission_mode(config: dict) -> str:
     """config の permission_mode を解決する。未指定・不正なら既定値。
 
-    不正なときは warning を出す。ただし logging の出力先は設定されていないので、
-    見えるのは python tool.py でコンソールから起動したときだけ（run.bat では
-    見えない）。利用者に見える経路は preflight の note（バックエンドの状況）。
+    不正なときは warning を出す。warning は data/logs/myanalysis.log（と、
+    コンソールから起動したときはコンソール）に出る。利用者に見える経路は
+    preflight の note（バックエンドの状況）。
     """
     raw = config.get("permission_mode")
     if permission_mode_is_invalid(raw):

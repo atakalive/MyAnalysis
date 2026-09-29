@@ -181,7 +181,7 @@ README の [データセット](../README_ja.md#データセット)・[使い方
 | `llm_backend/config.toml`, `models.toml`, `.env` | 設定 |
 | `data/llm_state/personas.json` | ペルソナの定義（他にコピーが無いので必要ならバックアップ） |
 | `data/llm_state/` のその他 | 表示設定・最近開いたデータセット・前回のワークスペース・エンジンの会話 ID・コマンド履歴（`command_log.jsonl`） |
-| `data/logs/` | クラッシュログ |
+| `data/logs/` | クラッシュログ（`gui-crash-*.log`）と warning 以上のログ（`myanalysis.log`。1 MB で回転、3 世代） |
 | `data/locks/`, `data/pycache/` | ロックファイル・Python のキャッシュ（GUI と CLI を止めてから削除してよい） |
 
 **ホームディレクトリ**:
@@ -227,7 +227,7 @@ npm uninstall -g @anthropic-ai/claude-code @openai/codex @earendil-works/pi-codi
 
 ### 対応プラットフォーム
 
-開発と動作確認は Windows 11 のみ。ランチャーは `run.bat` だけで、macOS / Linux は `python tool.py` で起動する（未検証）。macOS では同期ドライブの自動判定が効かず（常に local 扱い。`MYANALYSIS_FORCE_FRAGILE=1` で強制できる）、Claude の認証状態の表示も誤ることがある。インストーラ・自動更新・依存定義ファイルは無い。
+開発と動作確認は Windows 11 のみ。ランチャーは `run.bat` だけで、macOS / Linux は `python tool.py` で起動する（未検証）。macOS では同期ドライブの自動判定が効かず（常に local 扱い。`MYANALYSIS_FORCE_FRAGILE=1` で強制できる）。インストーラ・自動更新・依存定義ファイルは無い。
 
 ### メモリと規模
 

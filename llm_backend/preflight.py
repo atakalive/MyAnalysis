@@ -26,7 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.proc import no_window_kwargs
@@ -38,6 +38,12 @@ _PROBE_TIMEOUT = 30.0
 
 # pi の package.json の engines.node。ここを満たさないと npm i が通らない。
 _PI_MIN_NODE = (22, 19)
+
+# pi の --no-context-files（開発者向け CLAUDE.md / AGENTS.md を読ませない）が入った版。
+_PI_MIN_VERSION = (0, 67, 4)
+
+# claude が env のトークンで認証する経路（credentials ファイルが無くても使える）。
+_CLAUDE_TOKEN_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
 
 _NPM = "npm"
 
@@ -243,11 +249,41 @@ def _prereq(tc: _Toolchain, min_node):
 # ----- 2 段目: 認証 -----
 
 
-def _claude_auth() -> tuple[str, str]:
-    """``~/.claude/.credentials.json`` の有無。
+def _claude_logged_in(bin_path: str) -> bool | None:
+    """`claude auth status --json` の loggedIn。判定できなければ None。never raise。
 
-    env の API キー経路もあるので**推定でしかない**。断定的な ✗ ではなく「未検出」に留める。
+    実測（claude 2.1.282 / Linux）: 前後で ~/.claude/.credentials.json はバイト同一
+    （トークンを更新しない）。出力は stdout+stderr 混在なので、最初の "{" から最後の
+    "}" までを JSON として読む。rc は見ない（未ログインで非 0 を返す版があっても
+    JSON が読めれば従う）。email などの他のフィールドは使わない。
     """
+    r = _run([bin_path, "auth", "status", "--json"], _VERSION_TIMEOUT)
+    if r is None:
+        return None
+    text = r[1]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+    v = data.get("loggedIn") if isinstance(data, dict) else None
+    return v if isinstance(v, bool) else None
+
+
+def _claude_auth(bin_path: str | None) -> tuple[str, str]:
+    """claude の認証。CLI の `auth status` を優先し、判定できなければ静的に推定する。
+
+    推定（env のトークン → ``~/.claude/.credentials.json`` の有無）は断定できないので、
+    断定的な ✗ ではなく「未検出」に留める。
+    """
+    if bin_path:
+        logged_in = _claude_logged_in(bin_path)
+        if logged_in is not None:
+            return ("ok", "") if logged_in else ("missing", "")
+    if any((os.environ.get(k) or "").strip() for k in _CLAUDE_TOKEN_ENV):
+        return "ok", ""
     p = Path.home() / ".claude" / ".credentials.json"
     try:
         if p.is_file() and p.stat().st_size > 0:
@@ -403,7 +439,7 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 state = "unknown"           # 起動できない/固まった → 「無い」ではない
             elif r[0] == 0:
                 ver = _parse_version(r[1])
-        auth_state, auth_detail = _claude_auth()
+        auth_state, auth_detail = _claude_auth(path if state == "ok" else None)
         if vscode:
             return EngineStatus(
                 engine_id=engine_id, binary_state=state, binary=path, version=ver,
@@ -435,6 +471,10 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 state = "unknown"
             elif r[0] == 0:
                 ver = _parse_version(r[1])
+            cur = _version_tuple(ver)
+            if cur and cur < _PI_MIN_VERSION:
+                notes = notes + (("backend.status.note.pi_too_old",
+                                  {"need": ".".join(str(x) for x in _PI_MIN_VERSION)}),)
             live = _pi_providers_from_list_models(path)
             if live is not None:
                 providers, auth_state = _visible_pi(live), "ok"
@@ -449,6 +489,8 @@ def _check_engine(engine_id: str) -> EngineStatus:
             # ✓ なのに一覧が空、は意味が分からない。
             if auth_state != "missing" and not providers:
                 auth_state = "missing"
+        if (os.environ.get("PI_API_KEY") or "").strip():
+            notes = notes + (("backend.status.note.pi_api_key_unused", {}),)
         return EngineStatus(
             engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
             binary_state=state, binary=path, version=ver,

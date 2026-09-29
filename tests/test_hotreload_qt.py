@@ -79,6 +79,21 @@ def test_busy_guard_blocks_reload(window, monkeypatch):
     assert result.startswith("reload-busy:")
 
 
+def test_tab_reload_allowed_while_chat_busy(window, monkeypatch):
+    """エージェントは自分のターンの中で reload scope=tab を実行する。"""
+    cw = window.chat_widget()
+    monkeypatch.setattr(cw, "is_busy", lambda: True)
+    result = window.dispatch_command("reload", scope="tab", target="__no_such_tab__")
+    assert not str(result).startswith("reload-busy:")
+
+
+def test_app_reload_still_blocked_while_chat_busy(window, monkeypatch):
+    cw = window.chat_widget()
+    monkeypatch.setattr(cw, "is_busy", lambda: True)
+    result = window.dispatch_command("reload", scope="app")
+    assert result.startswith("reload-busy:")
+
+
 def test_tier1_patch_reflects_new_code(qapp, probe, monkeypatch, tmp_path):
     from llm_bridge import paths
 

@@ -11,7 +11,7 @@
 | Claude（VS Code 同梱エンジン）**推奨** | `claude`（`bin` 空） | `[claude_code]` | ○ | VS Code / Cursor / Windsurf の Claude Code 拡張にサインイン（見つからなければ PATH 上の `claude` を使う）。Windows では Git for Windows を推奨（MyAnalysis のエージェントへの指示は Bash ツールを前提にしている） |
 | Claude（PATH の CLI） | `claude`（`bin` 指定） | `[claude_code]` | ○ | `npm i -g @anthropic-ai/claude-code` → `claude` でログイン |
 | Codex CLI（OpenAI） | `codex` | `[codex]` | ○ | `npm i -g @openai/codex` → `codex login` |
-| pi コーディングエージェント | `pi` | `[pi]` | ○ | Node.js 22.19+、`npm i -g @earendil-works/pi-coding-agent` → `pi` を起動して `/login`。Windows では Git Bash |
+| pi コーディングエージェント | `pi` | `[pi]` | ○ | Node.js 22.19+、pi 0.67.4 以上、`npm i -g @earendil-works/pi-coding-agent` → `pi` を起動して `/login`。Windows では Git Bash |
 | OpenAI 互換 HTTP | `openai` | `[openai-compat]` | ×（GUI 操作のみ） | `.env` の `OPENAI_BASE_URL` 等 |
 | モック（動作確認） | `mock` | — | × | 不要 |
 
@@ -46,12 +46,12 @@
 - **疎通確認**: 実際にエンジンへ 1 ターン送って応答を確かめる。ウィンドウを開く・**再確認** は導入状況を調べるだけで、推論は走らない。
 - 判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う。
 - インストール後も ✗ のままなら、アプリを再起動する（PATH は起動時のものを使うため）。
-- Claude の「認証」列は `~/.claude/.credentials.json` の有無で推定しているだけ。API キーで使っている場合や macOS（Keychain 保存）では、ログイン済みでも ✗ になることがある。
+- Claude の「認証」列は `claude auth status` の結果。取れないときは `~/.claude/.credentials.json` と環境変数（`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`）で推定する。
 
 ## 会話の引き継ぎ
 
 - Claude / Codex / pi では、エンジンの会話 ID（再開用トークン）が PC ローカルに保存され、通常は新しい発言だけを送って会話を続ける。OpenAI 互換は毎回、履歴全体を送る。
-- 次の場合は会話履歴の本文を全部送り直す（ツールの実行結果は含まれない）: エンジンを変えた / 「このチャットのモデル…」で **適用** した（モデルだけの変更でも）/ 別の PC で続けた / ✎ 編集・⑂ 分岐した / エラーの後 / そのチャットの最後の応答から 90 日以上たった。
+- 次の場合は会話履歴の本文を全部送り直す（ツールの実行結果は含まれない）: エンジンを変えた / 別の PC で続けた / ✎ 編集・⑂ 分岐した / エラーの後 / そのチャットの最後の応答から 90 日以上たった。
 - 全体設定（バックエンド/モデル設定…）での同じエンジン内のモデル変更、ペルソナの変更、**停止**（英語表示では Stop）では会話が維持される。
 
 ## 使用量の表示
@@ -82,7 +82,7 @@
 
 ## プロバイダ既定のシステムプロンプト
 
-**設定 → プロバイダ既定のシステムプロンプト**（チェック式・Claude のみ）。ON（既定）は Claude Code 標準のシステムプロンプトに MyAnalysis の指示を追記する。OFF は MyAnalysis の指示だけにする。既に使ったチャットには、再起動するか、バックエンド/ペルソナを適用するまで反映されない。このメニューで一度切り替えると、その PC では `config.toml` の `use_provider_system_prompt` より優先される。
+**設定 → プロバイダ既定のシステムプロンプト**（チェック式・Claude のみ）。ON（既定）は Claude Code 標準のシステムプロンプトに MyAnalysis の指示を追記する。OFF は MyAnalysis の指示だけにする。全チャットの次の送信から反映される（生成中の応答は元の設定のまま完了する）。このメニューで一度切り替えると、その PC では `config.toml` の `use_provider_system_prompt` より優先される。
 
 ## エンジン別の補足
 
@@ -107,7 +107,7 @@ GUI で設定すれば手で書く必要はない。手で書く場合は、雛�
 | `.env` | [.env.example](../.env.example) | 秘密情報と環境変数（`OPENAI_*`, `LLM_BACKEND`, R2 同期、ミーティング共有、同期ドライブ用の設定） |
 
 - **エンジンの選択順**: 環境変数 `LLM_BACKEND` → `config.toml` の `[backend].name` → `OPENAI_BASE_URL`（`mock` ならモック、それ以外は OpenAI 互換）。どれも無ければ OpenAI 互換（api.openai.com）になる。
-- `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。**それ以外の値だとアプリが起動しない**（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない。原因は `data/logs/gui-crash-*.log` に残る）。
+- `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。それ以外の値だと OpenAI 互換（`OPENAI_BASE_URL=mock` ならモック）で起動し、チャットの先頭にエラーの行が出る（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない）。値を直すか、**設定 → バックエンド/モデル設定…** で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す）。
 - `.env` に `LLM_BACKEND` を書くと、起動のたびに GUI での選択より優先される。
 - `models.toml` の Claude 用の値: `thinking` = `enabled` / `adaptive` / `disabled`。`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。Codex の `effort` = `minimal` / `low` / `medium` / `high`。
 - 手で編集したら、再起動するか GUI で **適用** し直す（起動時に一度だけ読む）。ただし `[backend].name` / `model` / `provider` を手で変えた場合は再起動する（ダイアログは古い値を表示するので、そのまま適用すると元に戻る）。

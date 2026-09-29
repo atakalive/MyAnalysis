@@ -38,7 +38,7 @@ from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
-    GUI_DISPLAY_VERBS,
+    ANALYST_FRAMING, GUI_DISPLAY_VERBS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     build_prompt_with_history, compose_system_prompt,
 )
@@ -48,7 +48,7 @@ from llm_backend.base import (
 # mount-safe write chokepoint, so the MOUNT_SAFE_EDITS guidance is the only
 # guard — the prompt routes edits through the llm_bridge draft/apply verbs.
 _SYSTEM_PROMPT_CODEX = (
-    "You are assisting with the MyAnalysis GUI. "
+    ANALYST_FRAMING + "\n"
     "Use 'python -m llm_bridge' commands to interact with the GUI. "
     "Key verbs: active, state [name], list-analyses (a {dataset: [names]} map "
     "across all open datasets), list-open-datasets, "

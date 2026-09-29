@@ -52,7 +52,7 @@ pip install -r requirements.txt
 
 | Copy from | Copy to | Purpose |
 |---|---|---|
-| [.env.example](.env.example) | `.env` | LLM connection & secrets (`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `PI_API_KEY` / `LLM_BACKEND`, etc.) |
+| [.env.example](.env.example) | `.env` | LLM connection & secrets (`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `LLM_BACKEND`, etc.) |
 | [llm_backend/config.example.toml](llm_backend/config.example.toml) | `llm_backend/config.toml` | Backend selection and operational settings |
 | [models.example.toml](models.example.toml) | `models.toml` | Model settings (model / thinking / effort / provider) |
 
@@ -75,7 +75,7 @@ python tool.py --resume-session  # Restore window/tabs/chat from the reload mani
 
 The GUI entry point is [tool.py](tool.py) (PySide6).
 
-When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are written as tracebacks to `data/logs/gui-crash-*.log` (a crash at the same site is recorded only on its first occurrence even if the message changes; at most 200 files per process; intentional exits are not recorded). Startup import errors etc. are visible only with the console-attached `python tool.py`.
+When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are written as tracebacks to `data/logs/gui-crash-*.log` (a crash at the same site is recorded only on its first occurrence even if the message changes; at most 200 files per process; intentional exits are not recorded). Startup failures show a dialog. An old Python is reported by the dialog only (nothing is logged). Import failures (missing packages, a corrupt registry) and errors while building the window also write a traceback to `data/logs/gui-crash-*.log` (best-effort); warnings go to `data/logs/myanalysis.log`.
 
 ---
 

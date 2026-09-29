@@ -45,9 +45,9 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 | `python tool.py` | 開発時はこれ。コンソールに traceback が出る |
 | `python tool.py --demo` | 合成データの `_demo` タブ付きで起動。`SelectorPanel` / `TrajectoryPanel` / `ImagePanel` の 3 種を使う。データセット不要で、タブ verb（`tab _demo set-split ...` 等）を試せる。`_demo` はデータセットに属さないので snapshot / state は保存されない |
 | `python tool.py --resume-session` | `data/llm_state/reload_manifest.json` からウィンドウ・タブ・チャットを復元する。ホットリロードの `restart` が内部で使う。manifest は読んだ後に削除され、無ければ通常起動になる |
-| `run.bat` | 利用者向けランチャ。リポジトリ直下の `.venv` があれば activate し、`pythonw` でコンソール無しで起動する。traceback は見えない |
+| `run.bat` | 利用者向けランチャ。リポジトリ直下の `.venv` があれば activate し、`pythonw` でコンソール無しで起動する。起動失敗はダイアログで知らせる（Python の版不足以外は `data/logs/gui-crash-*.log` にも残る） |
 
-**クラッシュログ** — 未捕捉例外（メインスレッド・Python スレッド）は `data/logs/gui-crash-*.log` に traceback が残る。同じ箇所の例外は 1 回だけ、1 プロセス最大 200 件、Ctrl-C / `SystemExit` は記録しない。フックは `tool.py` の `main()` の先頭で入るので、**モジュール import 時のエラー（PySide6 が無い等）は記録されない**。その場合は `python tool.py` で確認する。
+**クラッシュログ** — 未捕捉例外（メインスレッド・Python スレッド）は `data/logs/gui-crash-*.log` に traceback が残る。同じ箇所の例外は 1 回だけ、1 プロセス最大 200 件、Ctrl-C / `SystemExit` は記録しない。フックは `tool.py` の冒頭（`__main__` のときだけ）で入る。Python の版不足はダイアログだけ（フックより前に判定して終了するので、ログには残らない）。import 時の失敗と `main()` の中の起動失敗（`app.exec()` より前）は、原因を示すダイアログを出し、`data/logs/gui-crash-*.log` に traceback を残す（書き込みは best-effort）。warning 以上のログは `data/logs/myanalysis.log`（1 MB で回転、3 世代）。
 
 **`PYTHONPYCACHEPREFIX`** — `run.bat` とエージェントの子プロセスは `data/pycache` を設定するが、手元のシェルから起動した python には設定されない。同期ドライブ上の `.py` を import 機構で読むコマンド（例: `python -m export`）を手で実行するときは、`PYTHONPYCACHEPREFIX=<repo>/data/pycache` を設定しておく（理由は [§5.1](#51-同期ドライブへの書込)）。
 
@@ -96,7 +96,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 |---|---|---|---|---|
 | claude | `claude` を stream-json の双方向モードで起動（`-p` ではない） | `--resume <session_id>` | `~/.myanalysis/agent_home`（リポジトリ外） | `--append-system-prompt`（設定で `--system-prompt`） |
 | codex | `codex exec --json`。プロンプトは stdin | `codex exec resume <thread_id>` | `~/.myanalysis/codex_home`（リポジトリ外） | cwd に自動生成する `AGENTS.md` |
-| pi | `pi --mode json --skill .pi/skills/myanalysis-bridge` | `--session <id>` | リポジトリ直下 | `--append-system-prompt` |
+| pi | `pi --mode json --no-context-files --skill .pi/skills/myanalysis-bridge` | `--session <id>` | リポジトリ直下（既存セッションの互換のため。AGENTS.md / CLAUDE.md は読まない） | `--append-system-prompt` |
 | openai / mock | 子プロセスなし（HTTP / 定型文） | 毎回履歴を送る | — | チャット作成時に保存した system メッセージ（`gui/chat.py` の `_SYSTEM_PROMPT`） |
 
 - 3 つの子プロセスには `PYTHONPATH`（リポジトリ）と `PYTHONPYCACHEPREFIX`（`data/pycache`）が設定され、エージェントは `common.explore` と `python -m llm_bridge` を使える。cwd は `config.toml` の各セクションの `cwd` で変更できる。
@@ -120,7 +120,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `data/llm_state/backend_sessions.json` | ネイティブ resume token（90 日で自動削除） |
 | `data/llm_state/personas.json`（+ `.bak`） | AI ペルソナの定義 |
 | `data/locks/` | 同期ドライブ上のファイルを守るロックの実体 |
-| `data/logs/` | クラッシュログ |
+| `data/logs/` | クラッシュログ（`gui-crash-*.log`）と warning 以上のログ（`myanalysis.log`。1 MB で回転、3 世代） |
 | `data/pycache/` | `PYTHONPYCACHEPREFIX` の退避先 |
 | `~/.myanalysis/agent_home/` | claude の cwd |
 | `~/.myanalysis/codex_home/` | codex の cwd（`AGENTS.md` を自動生成・上書き） |
@@ -385,8 +385,8 @@ python -m llm_bridge window reload [scope=patch|tab|app|restart] [target=<タブ
 | `restart` | `tool.py` 自体、PySide6 の更新、`app` の失敗後 | セッション保存 → manifest → `tool.py --resume-session` を起動して自分は終了 | まず `reload-scheduled` が返る。`reload-result` が記録されるのは失敗したとき（保存失敗、または実行の直前にチャットの応答中・モーダルダイアログの表示中になっていたとき）だけ。成功は、新しいウィンドウが出てから `python -m llm_bridge window list-tabs --wait` が `status: ok` を返すことで確かめる（新しい GUI の watcher が動き出す前に積まれたコマンドは `stale` として記録され、実行されない） |
 
 - `--wait` が待つのは最初の結果（`app` / `restart` では `reload-scheduled`）まで。
-- チャットの応答中とモーダルダイアログの表示中は `reload-busy:...` を返して何もしない。`app` / `restart` はセッション保存に失敗したデータセットがあれば中止する。
-- `restart` は構文チェックをしない（`app` はする）。`tool.py` が起動時に import するモジュールに構文エラーがあると、新しいプロセスは import の時点で落ちてクラッシュログも残らず、旧プロセスは既に終了している。変更したモジュールは先に `patch` か `app` で確かめる。
+- モーダルダイアログの表示中は `reload-busy:...` を返して何もしない。`patch` / `app` / `restart` はチャットの応答中も同じ（`tab` はエージェントが自分のターン内で使うので、応答中でも実行する）。`app` / `restart` はセッション保存に失敗したデータセットがあれば中止する。
+- `restart` は構文チェックをしない（`app` はする）。`tool.py` が起動時に import するモジュールに構文エラーがあると、新しいプロセスは import の時点で落ちる（起動失敗のダイアログが出て、`gui-crash-*.log` に traceback が残る）が、旧プロセスは既に終了している。変更したモジュールは先に `patch` か `app` で確かめる。
 - **開発(&D) メニュー**: 「コード再読み込み」= `patch`（パッチできない構造変更を検出すると再構築を勧めるダイアログが出る）、「アプリ再構築」= `app`、「再起動して復元」= `restart`。`tab` に当たる項目は無い。
 
 **モジュール側のフック**
@@ -573,7 +573,6 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 |---|---|
 | `plans/` が古い | 初期の設計メモで、現在の API と一致しない（例: 存在しない `toggle-chat-visible` verb や `common.paths.state_dir`）。仕様として読まない |
 | 使われていない API | `AnalysisTab.connect_state()` / `current_state()` は互換のため残している（`llm_bridge` は読まない。リポジトリ外の解析コードから呼ばれている可能性があるため削除しない） |
-| pi の cwd がリポジトリ直下 | claude / codex はリポジトリ外にしているが、pi は既定でリポジトリ直下のまま。pi が cwd の CLAUDE.md を読み込むと、開発者向けの規約がデータ解析エージェントに混ざり得る |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |
 | `data/llm_state` の一部が chokepoint 外 | `active.json`、コマンドキュー、`reload_manifest.json`、`command_log.jsonl`、`last_window.json`（`llm_bridge/session.py` の `write_last_window`。固定の tmp 名）は `common/paths.py` を通さず直接書いている（ローカルディスク前提） |

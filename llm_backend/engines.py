@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from common.filelock import exclusive_lock
 from common.paths import atomic_write_text
-from llm_backend import backend_config
+from llm_backend import backend_config, default_backend_name
 from llm_backend.model_settings import merged_settings, model_config
 from llm_backend.settings_store import (
     TomlWriteResult,
@@ -151,8 +151,7 @@ def _resolved_backend_name() -> str:
     if not name:
         name = backend_config().get("backend", {}).get("name")
     if not name:
-        base_url = os.environ.get("OPENAI_BASE_URL") or ""
-        name = "mock" if base_url.strip().lower() == "mock" else "openai"
+        name = default_backend_name()
     return name
 
 

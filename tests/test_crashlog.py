@@ -223,3 +223,117 @@ def test_concurrent_distinct_sites_cap(tmp_path, monkeypatch):
     for t in threads:
         t.join()
     assert len(_crash_files(tmp_path)) <= 5
+
+
+# ---- ファイルログと起動失敗の通知（Issue #99 C-2） ----
+
+
+@pytest.fixture
+def _clean_root_handlers():
+    import logging
+
+    def _strip():
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            if getattr(h, "_myanalysis_logging", False) is True:
+                root.removeHandler(h)
+                h.close()
+    _strip()
+    yield
+    _strip()
+
+
+def _ours():
+    import logging
+    return [h for h in logging.getLogger().handlers
+            if getattr(h, "_myanalysis_logging", False) is True]
+
+
+def test_install_file_logging_is_idempotent(tmp_path, _clean_root_handlers):
+    import logging
+    import logging.handlers
+    from pathlib import Path
+
+    crashlog.install_file_logging(tmp_path)
+    crashlog.install_file_logging(tmp_path)
+    files = [h for h in _ours() if isinstance(h, logging.handlers.RotatingFileHandler)]
+    assert len(files) == 1
+    assert files[0].level == logging.WARNING
+    assert Path(files[0].baseFilename) == tmp_path / "myanalysis.log"
+
+
+@pytest.mark.parametrize("has_stderr", [False, True])
+def test_install_file_logging_adds_stream_handler_only_with_stderr(
+    tmp_path, monkeypatch, _clean_root_handlers, has_stderr,
+):
+    import io
+    import logging
+    import logging.handlers
+
+    monkeypatch.setattr(sys, "stderr", io.StringIO() if has_stderr else None)
+    crashlog.install_file_logging(tmp_path)
+    streams = [h for h in _ours()
+               if isinstance(h, logging.StreamHandler)
+               and not isinstance(h, logging.handlers.RotatingFileHandler)]
+    assert len(streams) == (1 if has_stderr else 0)
+
+
+def test_install_file_logging_writes_warnings(tmp_path, _clean_root_handlers):
+    import logging
+
+    crashlog.install_file_logging(tmp_path)
+    logging.getLogger("x").warning("hello")
+    for h in _ours():
+        h.flush()
+    assert "hello" in (tmp_path / "myanalysis.log").read_text(encoding="utf-8")
+
+
+def test_require_python_exits_when_too_old(monkeypatch):
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(crashlog, "show_fatal", lambda t, x: shown.append((t, x)))
+    with pytest.raises(SystemExit) as ei:
+        crashlog.require_python((3, 11), current=(3, 10, 12))
+    assert ei.value.code == 1
+    assert len(shown) == 1
+    assert "3.11" in shown[0][1]
+    assert "Details" not in shown[0][1]
+
+    shown.clear()
+    crashlog.require_python((3, 11), current=(3, 11, 0))
+    assert shown == []
+
+
+def test_report_startup_failure_messages(monkeypatch):
+    from dataset_registry import RegistryError
+
+    hooked: list[BaseException] = []
+    shown: list[str] = []
+    monkeypatch.setattr(sys, "excepthook", lambda t, e, tb: hooked.append(e))
+    monkeypatch.setattr(crashlog, "show_fatal", lambda t, x: shown.append(x))
+
+    cases = [
+        (RegistryError("x"), ["datasets.local.json"], []),
+        (ModuleNotFoundError("No module named 'PySide6'", name="PySide6"),
+         ["PySide6", "pip install -r requirements.txt"], []),
+        (ImportError("DLL load failed while importing QtWidgets",
+                     name="PySide6.QtWidgets"),
+         ["DLL load failed"], ["pip install"]),
+        (RuntimeError("boom"), ["boom"], []),
+    ]
+    for exc, must, must_not in cases:
+        hooked.clear()
+        shown.clear()
+        crashlog.report_startup_failure(exc)
+        assert hooked == [exc]
+        assert len(shown) == 1
+        for m in must:
+            assert m in shown[0], (exc, m)
+        for m in must_not:
+            assert m not in shown[0], (exc, m)
+
+
+def test_show_fatal_falls_back_to_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(crashlog, "_windows_message_box", lambda t, x: False)
+    crashlog.show_fatal("the-title", "the-text")
+    err = capsys.readouterr().err
+    assert "the-title" in err and "the-text" in err

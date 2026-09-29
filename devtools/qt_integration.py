@@ -305,9 +305,13 @@ class HotReloadController(QObject):
 
     # -- guards --
 
-    def _busy(self) -> str | None:
+    def _busy(self, *, check_chat: bool = True) -> str | None:
+        """リロードを拒否する理由（None = 実行してよい）。モーダル表示中は常に拒否。
+
+        check_chat を偽にするのは tab だけ: tab は応答中でも許す（エージェントが自分のターン
+        内で reload するため。Tier 2 はタブ 1 つを差し替えるだけでチャットに触れない）。"""
         cw = self._window.chat_widget()
-        if cw is not None and getattr(cw, "is_busy", lambda: False)():
+        if check_chat and cw is not None and getattr(cw, "is_busy", lambda: False)():
             return "reload-busy:a chat turn is streaming — retry when idle"
         if QApplication.activeModalWidget() is not None:
             return "reload-busy:a modal dialog is open — close it and retry"
@@ -327,7 +331,7 @@ class HotReloadController(QObject):
     # -- Tier 2 --
 
     def reload_tab(self, name: str) -> str:
-        busy = self._busy()
+        busy = self._busy(check_chat=False)
         if busy:
             return busy
         import dataset_config

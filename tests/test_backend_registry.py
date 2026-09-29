@@ -39,6 +39,17 @@ def test_build_unknown_raises():
         build_backend("nope")
 
 
+def test_default_backend_name(monkeypatch):
+    from llm_backend import default_backend_name
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    assert default_backend_name() == "openai"
+    monkeypatch.setenv("OPENAI_BASE_URL", " MOCK ")
+    assert default_backend_name() == "mock"
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://x")
+    assert default_backend_name() == "openai"
+
+
 def test_get_backend_env_precedence(monkeypatch):
     monkeypatch.setenv("LLM_BACKEND", "mock")
     b = get_backend()

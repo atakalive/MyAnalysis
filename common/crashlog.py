@@ -130,3 +130,141 @@ def install(log_dir: Path | None = None) -> None:
         _chain(prev_thread, args)
 
     threading.excepthook = _thook
+
+
+# ---------------------------------------------------------------------------
+# 起動失敗の通知とファイルログ（Issue #99 C-2）。
+# 起動失敗時は i18n（tomllib に依存）が使えないので、文言は英日併記の定数にする。
+# ---------------------------------------------------------------------------
+
+LOG_FILE_NAME = "myanalysis.log"
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(process)d]: %(message)s"
+
+STARTUP_TITLE = "MyAnalysis: startup failed / 起動に失敗しました"
+
+_MSG_TOO_OLD = (
+    "MyAnalysis needs Python 3.11 or newer (running {version}).\n"
+    "MyAnalysis には Python 3.11 以上が必要です（実行中: {version}）。"
+)
+_MSG_MISSING_MODULE = (
+    "A required package is missing: {module}\n"
+    "Install the dependencies: pip install -r requirements.txt\n"
+    "必要なパッケージがありません: {module}\n"
+    "依存パッケージを入れてください: pip install -r requirements.txt"
+)
+_MSG_REGISTRY = (
+    "The dataset registry datasets.local.json is corrupt:\n{error}\n"
+    "Move it aside (e.g. datasets.local.json.corrupt) and fix it by hand, or run "
+    "'python -m llm_bridge config-pull' after moving it if you use R2 sync.\n"
+    "登録簿 datasets.local.json が壊れています: {error}\n"
+    "別名（例: datasets.local.json.corrupt）に退避して手で直すか、R2 同期を使って"
+    "いるなら退避した後に 'python -m llm_bridge config-pull' を実行してください。"
+)
+_MSG_GENERIC = (
+    "{error}\n"
+    "An error occurred during startup.\n"
+    "起動中にエラーが起きました。"
+)
+_MSG_DETAILS = "\n\nDetails / 詳細: {log_dir}"
+
+
+def install_file_logging(log_dir: Path | None = None) -> None:
+    """ルートロガーに <log_dir>/myanalysis.log（WARNING 以上）を付ける。冪等・never raise。
+
+    ルートロガー自身のレベルは変えない。stderr があればコンソールにも同じ書式で
+    出す（ファイルハンドラを付けると logging.lastResort が働かなくなるため）。
+
+    既知の制限: Windows では、他のプロセスがログファイルを開いている間は回転の
+    rename が PermissionError になる。shouldRollover は真のままなので、1 MB を
+    超えた後は、複数のプロセス（Tier 4 restart の重なり、GUI の多重起動）が同時に
+    動いている間の記録がすべて落ちる。1 プロセスだけになれば次の記録で回転する。
+    """
+    try:
+        import logging
+        import logging.handlers
+
+        root = logging.getLogger()
+        if any(getattr(h, "_myanalysis_logging", False) is True for h in root.handlers):
+            return
+        log_dir = log_dir or _default_log_dir()
+        formatter = logging.Formatter(_LOG_FORMAT)
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            fh = logging.handlers.RotatingFileHandler(
+                log_dir / LOG_FILE_NAME, maxBytes=1_000_000, backupCount=3,
+                encoding="utf-8", delay=True,
+            )
+            fh.setLevel(logging.WARNING)
+            fh.setFormatter(formatter)
+            fh._myanalysis_logging = True  # type: ignore[attr-defined]
+            root.addHandler(fh)
+        except Exception:  # noqa: BLE001 — ログの保存は best-effort
+            pass
+        if sys.stderr is not None:
+            sh = logging.StreamHandler(sys.stderr)
+            sh.setLevel(logging.WARNING)
+            sh.setFormatter(formatter)
+            sh._myanalysis_logging = True  # type: ignore[attr-defined]
+            root.addHandler(sh)
+    except Exception:  # noqa: BLE001 — never raise
+        pass
+
+
+def _windows_message_box(title: str, text: str) -> bool:
+    """Windows ならメッセージボックスを出して True。それ以外・失敗は False。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)  # type: ignore[attr-defined]
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def show_fatal(title: str, text: str) -> None:
+    """起動失敗を利用者に知らせる（Windows はダイアログ、他は stderr）。never raise。"""
+    try:
+        if _windows_message_box(title, text):
+            return
+        if sys.stderr is not None:
+            sys.stderr.write(f"{title}\n{text}\n")
+            sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def require_python(
+    minimum: tuple[int, int] = (3, 11), *, current: tuple[int, ...] | None = None,
+) -> None:
+    """Python が minimum 未満ならダイアログを出して終了する（ログには残さない）。"""
+    if current is None:
+        current = tuple(sys.version_info[:3])
+    if tuple(current) >= tuple(minimum):
+        return
+    version = ".".join(str(x) for x in current)
+    show_fatal(STARTUP_TITLE, _MSG_TOO_OLD.format(version=version))
+    sys.exit(1)
+
+
+def report_startup_failure(exc: BaseException) -> None:
+    """起動時の例外を記録し（install 済みの excepthook 経由）、原因を示す。never raise。"""
+    try:
+        try:
+            sys.excepthook(type(exc), exc, exc.__traceback__)
+        except Exception:  # noqa: BLE001
+            pass
+        registry = sys.modules.get("dataset_registry")
+        registry_error = getattr(registry, "RegistryError", None)
+        if isinstance(registry_error, type) and isinstance(exc, registry_error):
+            text = _MSG_REGISTRY.format(error=exc)
+        elif isinstance(exc, ModuleNotFoundError):
+            text = _MSG_MISSING_MODULE.format(module=exc.name or str(exc))
+        else:
+            text = _MSG_GENERIC.format(error=f"{type(exc).__name__}: {exc}")
+        text += _MSG_DETAILS.format(log_dir=_default_log_dir())
+        show_fatal(STARTUP_TITLE, text)
+    except Exception:  # noqa: BLE001
+        pass

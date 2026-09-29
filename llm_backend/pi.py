@@ -24,7 +24,7 @@ from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
-    GUI_DISPLAY_VERBS,
+    ANALYST_FRAMING, GUI_DISPLAY_VERBS,
     build_prompt_with_history, compose_system_prompt,
 )
 
@@ -33,7 +33,7 @@ from llm_backend.base import (
 # match and may be absent on the first turn, so the safety-critical bits live
 # here (independent of skill loading, retained across compaction).
 _SYSTEM_PROMPT_PI = (
-    "You are assisting with the MyAnalysis GUI. "
+    ANALYST_FRAMING + "\n"
     "Use 'python -m llm_bridge' commands to interact with the GUI. "
     "Key verbs: active, state [name], list-analyses (a {dataset: [names]} map "
     "across all open datasets), list-open-datasets, "
@@ -84,7 +84,10 @@ class PiCodingAgentBackend:
                 "Install: npm i -g @earendil-works/pi-coding-agent"
             )
 
-        cmd = [pi_bin, "--mode", "json"]
+        # cwd は既存セッションの互換のため repo 直下のまま。開発者向け CLAUDE.md /
+        # AGENTS.md は --no-context-files で読ませない（グローバルの
+        # ~/.pi/agent/AGENTS.md も読まない。pi 0.67.4 以上が必要）。
+        cmd = [pi_bin, "--mode", "json", "--no-context-files"]
         # persona 空なら compose は _SYSTEM_PROMPT_PI を同一オブジェクトで返す（既定は
         # 従来とバイト同一）。getattr はホットリロード後の旧インスタンス対策。
         cmd += ["--append-system-prompt",
@@ -99,9 +102,6 @@ class PiCodingAgentBackend:
         provider = config.get("provider", "")
         if provider:
             cmd += ["--provider", provider]
-        api_key = os.environ.get("PI_API_KEY")
-        if api_key:
-            cmd += ["--api-key", api_key]
         tools_val = config.get("tools", "")
         if tools_val and tools_val != "none":
             cmd += ["--tools", tools_val]

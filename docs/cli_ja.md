@@ -50,7 +50,7 @@ python -m llm_bridge <verb> ...
 | `show-image` | `path=<絶対パス> [name=image] [panel=left\|right] [slot=<パス>] [dataset=<ds>]` | 画像ビューアに表示。`slot=` は `show` と同じ分割パス（図と生画像をペインごとに混在可）。`slot` 省略時は最初の画像ペインをその場で更新 |
 | `toggle-chat-float` | — | チャットの切り離し/格納 |
 | `meeting-start` / `meeting-token` / `meeting-lan-link` / `meeting-stop` | → [ミーティング共有](meeting_share_ja.md#コマンドから操作する) | |
-| `reload` | `scope=tab target=<解析名>` | 解析タブの再読み込み → `reloaded-tab:<名前>` / `reload-tab-error:…` / `reload-busy:…`（エージェントの応答中などは実行されない） |
+| `reload` | `scope=tab target=<解析名>` | 解析タブの再読み込み → `reloaded-tab:<名前>` / `reload-tab-error:…` / `reload-busy:…`（モーダルダイアログの表示中は実行されない。チャットの応答中でも実行する） |
 
 ## `tab` のサブコマンド
 

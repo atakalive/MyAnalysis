@@ -49,9 +49,9 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 
 | 症状 | 主な原因 | 対処 |
 |---|---|---|
-| `run.bat` でウィンドウが出ない | 依存不足・Python が古い・登録簿の破損 | venv を有効にして `python tool.py` で起動し、エラーを見る |
-| 設定を変えたらアプリが起動しない | `[backend].name` / `LLM_BACKEND` の値が不正 | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直す |
-| GUI も全 CLI も `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
+| `run.bat` でウィンドウが出ない | 依存不足・Python が古い・登録簿の破損 | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`） |
+| チャットの先頭に「全体設定のバックエンドを作れませんでした」と出る | `[backend].name` / `LLM_BACKEND` の値が不正（OpenAI 互換、`OPENAI_BASE_URL=mock` ならモックで起動している） | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直すか、設定 → バックエンド/モデル設定… で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す） |
+| GUI の起動時に登録簿の破損を知らせるダイアログが出る / CLI が `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
 | 最初の送信が HTTP 401 / 接続拒否 | エンジン未設定、または `llm_backend/config.toml` の構文が壊れている（OpenAI API か `.env` の接続先に送っている） | [エンジンを設定](../README_ja.md#ai-エンジン) |
 | `[エラー: Claude Code engine not found…]` | Claude Code が見つからない | 拡張を入れる、`claude` を PATH に通す、または `[claude_code].bin` / `CLAUDE_CODE_BIN` を指定 |
 | `[エラー: … not found in PATH…]`（pi / codex） | CLI 未導入 | `npm i -g …`（バックエンドの状況ウィンドウからも可）。Codex は `codex login` も必要 |
@@ -68,6 +68,6 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 | 毎回全履歴を送り直している | `data/llm_state/backend_sessions.json` が壊れている | `doctor` で「JSON として読めない」と出たら、GUI を終了してファイルを削除する |
 | CLI の出力をファイルやパイプに流すと `UnicodeEncodeError` / 文字化け | Windows の文字コード（cp932） | `python -X utf8 -m …`、または環境変数 `PYTHONUTF8=1` |
 
-エラーダイアログの「詳細はログ」は、`python tool.py`（コンソール付き）で起動したときのコンソール出力を指す。`run.bat` 起動では警告が残らない。ステータスバーの「保存に失敗しました」も 30 秒で消える。
+エラーダイアログの「詳細は data/logs/myanalysis.log」は、warning 以上のログのファイルを指す（`run.bat` 起動でも残る。`python tool.py` で起動したときはコンソールにも出る）。ステータスバーの「保存に失敗しました」も 30 秒で消える。
 
-**不具合を報告するときに添えるもの**: `doctor` の出力、`data/logs/gui-crash-*.log`、`python tool.py` で起動したときのコンソール出力、（必要なら）`data/llm_state/command_log.jsonl`。ログにはパスやデータセット名が含まれるので、添える前に確認する。この版より前のログ（`command_log.jsonl.1` を含む）にはミーティングのトークンが平文で残っていることがあるので、`meeting-` を含む行は消してから添える。
+**不具合を報告するときに添えるもの**: `doctor` の出力、`data/logs/gui-crash-*.log`、`data/logs/myanalysis.log`、`python tool.py` で起動したときのコンソール出力、（必要なら）`data/llm_state/command_log.jsonl`。ログにはパスやデータセット名が含まれるので、添える前に確認する。この版より前のログ（`command_log.jsonl.1` を含む）にはミーティングのトークンが平文で残っていることがあるので、`meeting-` を含む行は消してから添える。

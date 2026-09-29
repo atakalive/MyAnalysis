@@ -11,6 +11,9 @@ import pytest
 from llm_backend import preflight
 from llm_backend.preflight import EngineStatus, check_engine
 
+# autouse fixture が差し替える前の本物（C-6 のテストで使う）。
+_REAL_CLAUDE_AUTH = preflight._claude_auth
+
 
 @pytest.fixture(autouse=True)
 def _no_real_processes(monkeypatch):
@@ -18,7 +21,7 @@ def _no_real_processes(monkeypatch):
     monkeypatch.setattr(preflight, "_which", lambda name: None)
     monkeypatch.setattr(preflight, "_run", lambda cmd, timeout: None)
     # detail は中立な事実だけ（説明文は notes の i18n キー）。実物と同じ形にしておく。
-    monkeypatch.setattr(preflight, "_claude_auth", lambda: ("missing", ""))
+    monkeypatch.setattr(preflight, "_claude_auth", lambda *a, **k: ("missing", ""))
     monkeypatch.setattr(preflight, "_pi_providers_from_authfile", lambda: None)
     # 実リポジトリの llm_backend/config.toml / models.toml を読まない。
     monkeypatch.setattr(preflight, "_claude_config", lambda: {})
@@ -292,7 +295,8 @@ def test_preflight_returns_no_localised_prose(monkeypatch):
     en 表示に混ざる（実際に「Install」ボタンの隣に日本語が出て気づいた）。
     説明文は (i18n キー, params) を notes で返し、detail は中立な事実だけにする。"""
     _tools(monkeypatch, present=("node", "npm"))
-    cjk = lambda t: any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" for c in t or "")
+    def cjk(t):
+        return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" for c in t or "")
     for st in preflight.check_all():
         for fld in (st.prereq_detail, st.auth_detail, st.version or ""):
             assert not cjk(fld), (st.engine_id, fld)
@@ -443,3 +447,110 @@ def test_claude_config_failure_adds_no_note(monkeypatch, engine_id):
     st = preflight.check_engine(engine_id)
     assert _PERM_NOTE not in _note_keys(st)
     assert st.binary_state == "missing"   # 保険の except に落ちていない
+
+
+# ---- pi の最低版（--no-context-files） ----
+
+
+@pytest.mark.parametrize("ver,expect", [("0.66.0", True), ("0.71.1", False)])
+def test_pi_too_old_note(monkeypatch, ver, expect):
+    monkeypatch.delenv("PI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        preflight, "_which",
+        lambda n: f"/usr/bin/{n}" if n in ("pi", "node", "npm") else None,
+    )
+
+    def _run(cmd, timeout):
+        if cmd == ["/usr/bin/pi", "--version"]:
+            return (0, ver)
+        return None
+    monkeypatch.setattr(preflight, "_run", _run)
+    s = check_engine("pi")
+    note = ("backend.status.note.pi_too_old", {"need": "0.67.4"})
+    assert (note in s.notes) is expect
+
+
+# ---- PI_API_KEY は使われない ----
+
+
+@pytest.mark.parametrize("value,expect", [("secret", True), (None, False)])
+def test_pi_api_key_note(monkeypatch, value, expect):
+    if value is None:
+        monkeypatch.delenv("PI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("PI_API_KEY", value)
+    _tools(monkeypatch, present=("node", "npm", "pi"))
+    s = check_engine("pi")
+    note = ("backend.status.note.pi_api_key_unused", {})
+    assert (note in s.notes) is expect
+
+
+# ---- claude の認証: auth status を優先、取れなければ静的推定 ----
+
+
+@pytest.fixture
+def _claude_home(monkeypatch, tmp_path):
+    monkeypatch.setattr(preflight.Path, "home", lambda: tmp_path)
+    for k in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    return tmp_path
+
+
+def _write_credentials(home):
+    d = home / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".credentials.json").write_text('{"x": 1}', encoding="utf-8")
+
+
+def test_claude_auth_uses_auth_status(monkeypatch, _claude_home):
+    calls = []
+
+    def _run(cmd, timeout):
+        calls.append(list(cmd))
+        return (0, 'warn\n{"loggedIn": true}')
+    monkeypatch.setattr(preflight, "_run", _run)
+    assert _REAL_CLAUDE_AUTH("/x/claude") == ("ok", "")
+    assert calls == [["/x/claude", "auth", "status", "--json"]]
+
+
+def test_claude_auth_logged_out(monkeypatch, _claude_home):
+    _write_credentials(_claude_home)
+    monkeypatch.setattr(preflight, "_run", lambda cmd, timeout: (1, '{"loggedIn": false}'))
+    assert _REAL_CLAUDE_AUTH("/x/claude") == ("missing", "")
+
+
+def test_claude_auth_falls_back_when_probe_fails(monkeypatch, _claude_home):
+    monkeypatch.setattr(preflight, "_run", lambda cmd, timeout: None)
+    assert _REAL_CLAUDE_AUTH("/x/claude")[0] == "missing"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    assert _REAL_CLAUDE_AUTH("/x/claude")[0] == "ok"
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    _write_credentials(_claude_home)
+    assert _REAL_CLAUDE_AUTH("/x/claude")[0] == "ok"
+
+
+def test_claude_auth_without_binary_does_not_probe(monkeypatch, _claude_home):
+    calls = []
+
+    def _run(cmd, timeout):
+        calls.append(cmd)
+        return (0, '{"loggedIn": true}')
+    monkeypatch.setattr(preflight, "_run", _run)
+    assert _REAL_CLAUDE_AUTH(None) == ("missing", "")
+    assert calls == []
+
+
+def test_check_engine_passes_claude_binary_to_auth(monkeypatch):
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("ok", "/x/claude"))
+    monkeypatch.setattr(
+        preflight, "_run",
+        lambda cmd, timeout: (0, "2.1.282 (Claude Code)") if "--version" in cmd else None,
+    )
+    seen = []
+
+    def _auth(bin_path):
+        seen.append(bin_path)
+        return "ok", ""
+    monkeypatch.setattr(preflight, "_claude_auth", _auth)
+    check_engine("claude-cli")
+    assert seen == ["/x/claude"]
