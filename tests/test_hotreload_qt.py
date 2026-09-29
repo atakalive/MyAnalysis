@@ -567,3 +567,45 @@ def test_menu_patch_soft_warning_uses_info_dialog(window, monkeypatch):
     qt_integration._menu_patch(window, controller)
     assert rebuilt == []          # requires_app 空 → 再ビルドしない
     assert len(info_calls) == 1   # 既存のソフト警告 info 経路のまま
+
+
+def test_do_restart_aborts_before_side_effects_when_busy(window, monkeypatch):
+    """Issue #101 E-2: 予約後に応答が始まっていたら、Popen・保存・quit の前に中止する。"""
+    import llm_bridge.session as session
+    from PySide6.QtWidgets import QApplication
+
+    from devtools import qt_integration
+
+    monkeypatch.setattr(window.chat_widget(), "is_busy", lambda: True)
+    calls = []
+    monkeypatch.setattr(session, "save_all", lambda w: calls.append("save_all") or ([], []))
+    monkeypatch.setattr(qt_integration.subprocess, "Popen", lambda *a, **k: calls.append("popen"))
+    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: calls.append("quit")))
+    logged = []
+    monkeypatch.setattr(
+        window._hotreload, "_log_reload_result",
+        lambda cmd_id, status, tier, error=None: logged.append((cmd_id, status, tier, error)),
+    )
+
+    window._hotreload._do_restart("cmd-x")
+
+    assert calls == []
+    assert len(logged) == 1
+    assert logged[0][:3] == ("cmd-x", "failed", 4)
+    assert logged[0][3].startswith("reload-busy:")
+
+
+def test_dev_menu_has_no_keyboard_shortcut(window):
+    """Issue #101 E-5: 開発メニューの項目にはショートカットを割り当てない（誤操作防止）。"""
+    from PySide6.QtGui import QAction, QKeySequence
+    from PySide6.QtWidgets import QMenu
+
+    from common.i18n import tr
+
+    dev = [m for m in window.menuBar().findChildren(QMenu) if m.title() == tr("menu.dev")]
+    assert len(dev) == 1
+    assert dev[0].actions()
+    assert all(a.shortcut().isEmpty() for a in dev[0].actions())
+    assert all(
+        a.shortcut() != QKeySequence("Ctrl+F5") for a in window.findChildren(QAction)
+    )

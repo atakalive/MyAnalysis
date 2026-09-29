@@ -206,6 +206,12 @@ class ToolWindow(QMainWindow):
         self._register_action.triggered.connect(self._register_dataset)
         self._open_dataset_action = self._file_menu.addAction(tr("menu.file.open_dataset"))
         self._open_dataset_action.triggered.connect(self._open_dataset)
+        self._close_dataset_action = self._file_menu.addAction(
+            tr("menu.file.close_dataset"))
+        self._close_dataset_action.triggered.connect(self._close_current_dataset)
+        self.dataset_changed.connect(lambda _ds: self._update_close_dataset_action())
+        self.open_datasets_changed.connect(self._update_close_dataset_action)
+        self._update_close_dataset_action()
         self._restore_session_action = self._file_menu.addAction(
             tr("menu.file.restore_session"))
         self._restore_session_action.triggered.connect(self._restore_last_session)
@@ -292,6 +298,7 @@ class ToolWindow(QMainWindow):
     def retranslate(self) -> None:
         self._file_menu.setTitle(tr("menu.file"))
         self._open_dataset_action.setText(tr("menu.file.open_dataset"))
+        self._close_dataset_action.setText(tr("menu.file.close_dataset"))
         self._restore_session_action.setText(tr("menu.file.restore_session"))
         self._register_action.setText(tr("menu.file.register"))
         self._save_session_action.setText(tr("menu.file.save_session"))
@@ -1136,6 +1143,20 @@ class ToolWindow(QMainWindow):
     def has_command(self, verb: str) -> bool:
         return verb in self._command_handlers
 
+    def _close_current_dataset(self) -> None:
+        """File → データセットを閉じる: 前面のデータセットを閉じる（Issue #101 E-3）。
+
+        切替バーはデータセットが 2 つ以上のときしか出ないので、1 つだけのときに
+        GUI から閉じる手段はこの項目だけ。保存失敗時の警告は close_dataset が出す。
+        """
+        ds = self._current_dataset
+        if ds is not None and ds in self._groups:
+            self.close_dataset(ds)
+
+    def _update_close_dataset_action(self) -> None:
+        ds = self._current_dataset
+        self._close_dataset_action.setEnabled(ds is not None and ds in self._groups)
+
     def _open_dataset(self) -> None:
         import config
         try:
@@ -1158,6 +1179,15 @@ class ToolWindow(QMainWindow):
         if not self.has_command("open-dataset"):
             QMessageBox.critical(self, tr("err.generic.title"), tr("err.no_open_dataset"))
             return
+        self._open_dataset_by_name(name)
+
+    def _open_dataset_by_name(self, name: str) -> None:
+        """Dispatch open-dataset for *name* and surface failure results as dialogs.
+
+        Shared by File → データセットを開く… and File → データセットを新規登録
+        (Issue #101 E-4). Precondition: has_command("open-dataset") is True —
+        callers check it (their fallbacks differ).
+        """
         try:
             res = self.dispatch_command("open-dataset", name=name)
         except Exception as e:
@@ -1318,48 +1348,71 @@ class ToolWindow(QMainWindow):
         finally:
             self._config_pusher = None
 
-    def closeEvent(self, event) -> None:
-        if not self._session_dirty or self._session_saver is None:
-            self._stop_meeting_relay()
-            self._stop_config_pusher()
-            self._close_all_floats()
-            event.accept()
-            return
+    def _chat_busy(self) -> bool:
+        """True if the chat widget has an in-flight (streaming) turn."""
+        cw = self.chat_widget()
+        return cw is not None and cw.is_busy()
+
+    def _confirm_quit_while_busy(self) -> bool:
+        """生成中でも終了してよいかを聞く（既定 No）。Yes なら True（Issue #101 E-2）。"""
         reply = QMessageBox.question(
             self,
-            tr("dlg.unsaved.title"),
-            tr("dlg.unsaved.body"),
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
+            tr("dlg.quit_busy.title"),
+            tr("dlg.quit_busy.body"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                result = self._session_saver()
-            except Exception as e:
-                QMessageBox.critical(self, tr("err.save.title"), str(e))
+        return reply == QMessageBox.StandardButton.Yes
+
+    def closeEvent(self, event) -> None:
+        # 生成中のターンは終了時に _shutdown_worker が止め、途中まで生成した応答は
+        # sess.messages に入らないまま消える（Issue #101 E-2）。
+        # 不変条件: 終了の副作用と event.accept() の時点で生成中なら、この closeEvent の
+        # 中で quit_busy に Yes をもらっている。入口で 1 回聞き、未保存確認（ネストした
+        # イベントループ。その間もゲストの発言や CLI の chat-inject で生成が始まり得る）
+        # の後、副作用の直前にもう一度確かめる。一度 Yes をもらったら聞き直さない。
+        busy_consented = False
+        if self._chat_busy():
+            if not self._confirm_quit_while_busy():
                 event.ignore()
                 return
-            saved, failed = result
-            if failed:
-                QMessageBox.warning(
-                    self,
-                    tr("err.save_partial.title"),
-                    tr("err.save_partial.body", datasets="\n".join(failed)),
-                )
+            busy_consented = True
+        if self._session_dirty and self._session_saver is not None:
+            reply = QMessageBox.question(
+                self,
+                tr("dlg.unsaved.title"),
+                tr("dlg.unsaved.body"),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    result = self._session_saver()
+                except Exception as e:
+                    QMessageBox.critical(self, tr("err.save.title"), str(e))
+                    event.ignore()
+                    return
+                saved, failed = result
+                if failed:
+                    QMessageBox.warning(
+                        self,
+                        tr("err.save_partial.title"),
+                        tr("err.save_partial.body", datasets="\n".join(failed)),
+                    )
+                    event.ignore()
+                    return
+            elif reply != QMessageBox.StandardButton.No:
                 event.ignore()
                 return
-            self._stop_meeting_relay()
-            self._stop_config_pusher()
-            self._close_all_floats()
-            event.accept()
-        elif reply == QMessageBox.StandardButton.No:
-            self._stop_meeting_relay()
-            self._stop_config_pusher()
-            self._close_all_floats()
-            event.accept()
-        else:
+        if (not busy_consented and self._chat_busy()
+                and not self._confirm_quit_while_busy()):
             event.ignore()
+            return
+        self._stop_meeting_relay()
+        self._stop_config_pusher()
+        self._close_all_floats()
+        event.accept()
 
     def _on_tab_context_menu(self, grp: "_DatasetGroup", pos: QPoint) -> None:
         tab_bar = grp.tabs.tabBar()
@@ -1479,9 +1532,13 @@ class ToolWindow(QMainWindow):
         # 登録直後に remote へ送る（送信のみ・バックグラウンド・best-effort。登録の成否とは無関係）。
         self.request_config_push()
 
-        # Sticky dataset + chat push. GUI 登録はセッション復元しない — ユーザは
-        # File → データセットを開く… で明示的に復元できる。
-        self.note_current_dataset(name)
+        # 登録したデータセットを開く（File → データセットを開く… と同じ open-dataset verb。
+        # CLI register-dataset の自動オープンと揃える。Issue #101 E-4）。current_dataset だけを
+        # 書き換えると「アクティブなタブは現在のグループにある」不変条件が壊れるので、
+        # グループを作らずに note_current_dataset を呼ばない。open-dataset が未登録の
+        # 素の ToolWindow（テスト）では開かない（登録自体は成功しているのでエラーにしない）。
+        if self.has_command("open-dataset"):
+            self._open_dataset_by_name(name)
 
         QMessageBox.information(
             self, tr("dlg.register_done.title"), tr("register.done", name=name)

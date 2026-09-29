@@ -378,15 +378,15 @@ python -m llm_bridge window reload [scope=patch|tab|app|restart] [target=<タブ
 
 | scope | 対象 | 仕組み | 結果の返り方 |
 |---|---|---|---|
-| `patch`（既定） | `sys.modules` にあるリポジトリのモジュール（`__main__` と `devtools.*` を除く） | 変更されたファイルを構文チェックし、1 つでも構文エラーがあれば何もしない。問題なければ in-place でパッチする（関数は `__code__` を移植、クラスは属性を移植）。表示状態は保たれる。開いている解析の `analysis.py` の変更は「scope=tab を使え」と報告するだけ | すぐ返る（要約文字列） |
+| `patch`（既定） | `sys.modules` にあるリポジトリのモジュール（`__main__`・`devtools.*` と、リポジトリの下にあってもサードパーティのコード（`site-packages` / `dist-packages` の下＝リポジトリ直下の `.venv` など、および `sys.prefix` 等がリポジトリの内側を指す Python 本体）を除く。判定は `devtools/hotreload.py` の `is_project_module`） | 変更されたファイルを構文チェックし、1 つでも構文エラーがあれば何もしない。問題なければ in-place でパッチする（関数は `__code__` を移植、クラスは属性を移植）。表示状態は保たれる。開いている解析の `analysis.py` の変更は「scope=tab を使え」と報告するだけ | すぐ返る（要約文字列） |
 | `tab` | 1 つの解析タブの `analysis.py`。`target=<タブ名>` が必須。開いているデータセット全体でその名前のタブが 1 つだけなら、どのデータセットにあってもそのタブを対象にする。複数のデータセットにあればアクティブなデータセットのタブを対象にし、アクティブなデータセットに無ければエラーになる。図・画像ビューアのタブは拒否する | sandbox で新しいタブを組み立て、成功したら旧タブと差し替える。失敗したら旧タブが残る | すぐ返る |
 | `app` | 構造の変更（`__init__`、Signal、`__bases__`、長寿命のクロージャ等） | 構文チェック → 開いているデータセットのセッション保存 → manifest → リポジトリのモジュールを全パージ → 新しいコードで ToolWindow を作り直す。失敗したら旧ウィンドウに戻る | まず `reload-scheduled` が返り、後から同じ id で `"verb": "reload-result"`（`status` は ok / failed）の行が `command_log.jsonl` に追記される |
-| `restart` | `tool.py` 自体、PySide6 の更新、`app` の失敗後 | セッション保存 → manifest → `tool.py --resume-session` を起動して自分は終了 | まず `reload-scheduled` が返る。`reload-result` が記録されるのは失敗（保存失敗）したときだけ。成功は、新しいウィンドウが出てから `python -m llm_bridge window list-tabs --wait` が `status: ok` を返すことで確かめる（新しい GUI の watcher が動き出す前に積まれたコマンドは `stale` として記録され、実行されない） |
+| `restart` | `tool.py` 自体、PySide6 の更新、`app` の失敗後 | セッション保存 → manifest → `tool.py --resume-session` を起動して自分は終了 | まず `reload-scheduled` が返る。`reload-result` が記録されるのは失敗したとき（保存失敗、または実行の直前にチャットの応答中・モーダルダイアログの表示中になっていたとき）だけ。成功は、新しいウィンドウが出てから `python -m llm_bridge window list-tabs --wait` が `status: ok` を返すことで確かめる（新しい GUI の watcher が動き出す前に積まれたコマンドは `stale` として記録され、実行されない） |
 
 - `--wait` が待つのは最初の結果（`app` / `restart` では `reload-scheduled`）まで。
 - チャットの応答中とモーダルダイアログの表示中は `reload-busy:...` を返して何もしない。`app` / `restart` はセッション保存に失敗したデータセットがあれば中止する。
 - `restart` は構文チェックをしない（`app` はする）。`tool.py` が起動時に import するモジュールに構文エラーがあると、新しいプロセスは import の時点で落ちてクラッシュログも残らず、旧プロセスは既に終了している。変更したモジュールは先に `patch` か `app` で確かめる。
-- **開発(&D) メニュー**: 「コード再読み込み」（Ctrl+F5）= `patch`（パッチできない構造変更を検出すると再構築を勧めるダイアログが出る）、「アプリ再構築」= `app`、「再起動して復元」= `restart`。`tab` に当たる項目は無い。
+- **開発(&D) メニュー**: 「コード再読み込み」= `patch`（パッチできない構造変更を検出すると再構築を勧めるダイアログが出る）、「アプリ再構築」= `app`、「再起動して復元」= `restart`。`tab` に当たる項目は無い。
 
 **モジュール側のフック**
 
@@ -402,7 +402,6 @@ python -m llm_bridge window reload [scope=patch|tab|app|restart] [target=<タブ
 - dataclass のフィールド変更は、既存のインスタンスには反映されない。
 - in-place で更新されるのは関数とクラスだけ。値として取り込んだ定数（`from X import CONST`）は、変更していないモジュール側では旧い値のままになる。
 - `__main__`（`python tool.py` で起動したときの `tool.py`）と `devtools.*` は `patch` の対象外。`restart` を使う。
-- **既知の問題（リポジトリ内の `.venv`）**: リポジトリのモジュールかどうかは「ファイルがリポジトリの下にあるか」だけで判定する（`devtools/hotreload.py` の `is_project_module`）。README_ja.md はリポジトリ直下に `.venv` を作る手順で、`run.bat` もそこしか認識しないが、リポジトリ内の `.venv` では numpy・PySide6 等のサードパーティのパッケージもリポジトリのモジュールとして扱われ、`patch` は毎回それらを走査し、`app` はパージして import し直す。開発ではリポジトリの外に仮想環境を作り、activate してから `python tool.py` で起動する（`run.bat` を使うなら、その仮想環境を activate してから実行すれば PATH 上の `pythonw` が使われる）。
 
 ---
 
@@ -577,7 +576,6 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `command_log.jsonl` が増え続ける | ローテーションが無く、`--wait` は毎回ログを先頭から読むので、ログが大きくなるほど遅くなる |
 | pi の cwd がリポジトリ直下 | claude / codex はリポジトリ外にしているが、pi は既定でリポジトリ直下のまま。pi が cwd の CLAUDE.md を読み込むと、開発者向けの規約がデータ解析エージェントに混ざり得る |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
-| リポジトリ内の venv とホットリロード | モジュール判定がパスだけなので、リポジトリ直下の `.venv` にあるパッケージがホットリロードの対象・パージ対象になる（[§7](#7-ホットリロード)） |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |
 | `data/llm_state` の一部が chokepoint 外 | `active.json`、コマンドキュー、`reload_manifest.json`、`command_log.jsonl`、`last_window.json`（`llm_bridge/session.py` の `write_last_window`。固定の tmp 名）は `common/paths.py` を通さず直接書いている（ローカルディスク前提） |
 | mock が完全にはオフラインでない | `mock` バックエンドは応答の一部を外部サイトから取得する（失敗しても 3 秒でタイムアウトして続行する） |

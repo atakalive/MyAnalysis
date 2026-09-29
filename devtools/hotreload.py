@@ -59,6 +59,11 @@ _CLASS_DUNDER_SKIP = frozenset({
     "__dataclass_fields__", "__dataclass_params__",
 })
 
+# Directory names (compared case-insensitively) marking a third-party install
+# tree. A module below one of these under the repo root (e.g. an in-repo
+# `.venv/Lib/site-packages/`) is not a repo module. Issue #101 E-1.
+_THIRD_PARTY_DIRS = frozenset({"site-packages", "dist-packages"})
+
 
 # ---------------------------------------------------------------------------
 # Report
@@ -129,11 +134,31 @@ def _file_sha1(path: Path) -> str:
     return hashlib.sha1(path.read_bytes()).hexdigest()
 
 
+def _interpreter_prefixes_inside(root: Path) -> list[Path]:
+    """Interpreter prefixes strictly inside *root* (an in-repo venv / embedded
+    Python). A prefix equal to or above *root* is ignored — it would otherwise
+    exclude every repo module."""
+    out: list[Path] = []
+    for raw in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
+        if not raw:
+            continue
+        try:
+            pre = Path(raw).resolve()
+        except (OSError, ValueError):
+            continue
+        if pre != root and pre.is_relative_to(root):
+            out.append(pre)
+    return out
+
+
 def is_project_module(name: str, root: Path | None = None) -> bool:
     """True if sys.modules[name] is a repo module eligible for reload/purge.
 
-    Excludes `__main__` (entry script — Tier 1 unreachable) and `devtools.*`
-    (the reloader itself).
+    Excludes `__main__` (entry script — Tier 1 unreachable), `devtools.*` (the
+    reloader itself), and third-party code that merely lives under the repo:
+    anything below a `site-packages` / `dist-packages` directory (an in-repo
+    `.venv`) or below an interpreter prefix strictly inside the repo (an
+    in-repo embedded Python). Issue #101 E-1.
     """
     if name == "__main__" or name == "devtools" or name.startswith("devtools."):
         return False
@@ -145,9 +170,15 @@ def is_project_module(name: str, root: Path | None = None) -> bool:
         return False
     root = (root or repo_root()).resolve()
     try:
-        return Path(f).resolve().is_relative_to(root)
+        p = Path(f).resolve()
+        if not p.is_relative_to(root):
+            return False
+        rel = p.relative_to(root)
     except (ValueError, OSError):
         return False
+    if any(part.lower() in _THIRD_PARTY_DIRS for part in rel.parts):
+        return False
+    return not any(p.is_relative_to(pre) for pre in _interpreter_prefixes_inside(root))
 
 
 def purge_project_modules(root: Path | None = None) -> list[str]:

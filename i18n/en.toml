@@ -5,6 +5,7 @@
 # --- menu ---
 "menu.file"                   = "File(&F)"
 "menu.file.open_dataset"      = "Open dataset…"
+"menu.file.close_dataset"     = "Close dataset"
 "menu.file.restore_session"   = "Restore last session"
 "menu.file.register"          = "New dataset"
 "menu.file.save_session"      = "Save session"
@@ -100,6 +101,8 @@
 "dlg.save_session.title"      = "Save session"
 "dlg.unsaved.title"           = "Session not saved"
 "dlg.unsaved.body"            = "Save the session?"
+"dlg.quit_busy.title"         = "Response in progress"
+"dlg.quit_busy.body"          = "A response is still being generated. If you quit now, the partial response will be lost. Quit anyway?"
 "dlg.register.title"          = "Register dataset"
 "dlg.register.label"          = "Dataset name:"
 "dlg.register_dir.title"      = "Select dataset directory"

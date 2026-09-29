@@ -25,7 +25,6 @@ import traceback
 from datetime import datetime
 
 from PySide6.QtCore import QByteArray, QObject, QTimer
-from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from devtools import hotreload
@@ -555,6 +554,17 @@ class HotReloadController(QObject):
         from common.paths import repo_root
 
         window = self._window
+        # restart() checked _busy() when scheduling, but a chat turn may have
+        # started before this deferred call ran. Re-check before any side effect:
+        # QApplication.quit() below goes through ToolWindow.closeEvent, whose
+        # busy-quit prompt could cancel the quit AFTER the new process was
+        # spawned (two GUIs). Issue #101 E-2. Between this check and
+        # QApplication.quit() nothing may run the event loop (no modal dialog,
+        # processEvents or exec) — otherwise a turn could start after the check.
+        busy = self._busy()
+        if busy:
+            self._log_reload_result(cmd_id, "failed", 4, error=busy)
+            return
         _saved, failed = _m("llm_bridge.session").save_all(window)
         if failed:
             self._log_reload_result(
@@ -673,7 +683,6 @@ def _install_menu(window, controller: HotReloadController) -> None:
     tr = _m("common.i18n").tr
     menu = window.menuBar().addMenu(tr("menu.dev"))
     a_patch = menu.addAction(tr("menu.dev.reload"))
-    a_patch.setShortcut(QKeySequence("Ctrl+F5"))
     a_patch.triggered.connect(lambda: _menu_patch(window, controller))
     a_app = menu.addAction(tr("menu.dev.rebuild"))
     a_app.triggered.connect(controller.reload_app)

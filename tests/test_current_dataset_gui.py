@@ -156,7 +156,7 @@ def test_gui_register_writes_json_and_memory(qapp, register_stubs):
         }
     }
     assert "sample_dataset" in register_stubs.config.DATASETS
-    assert win.current_dataset == "sample_dataset"
+    assert win.current_dataset is None
     assert register_stubs.shown["info"] == 1
     assert register_stubs.shown["critical"] == 0
     # フォルダ選択が先、名前の既定値はフォルダ名
@@ -196,7 +196,7 @@ def test_gui_register_invalid_name_reprompts(qapp, register_stubs):
     assert register_stubs.shown["critical"] == 1
     assert register_stubs.shown["info"] == 1
     assert list(register_stubs.read()) == ["good_name"]
-    assert win.current_dataset == "good_name"
+    assert win.current_dataset is None
 
 
 def test_gui_register_failure_updates_nothing(qapp, register_stubs, monkeypatch):
@@ -493,3 +493,58 @@ def test_window_generations_serialize_pushes(qapp, reap_pushers, monkeypatch):
         assert not p._thread.is_alive()
     assert len(g.calls) == 3
     assert g.max_running == 1
+
+
+# --------------------------------------------------------------------------- #
+# GUI 登録後はそのデータセットを開く（Issue #101 E-4）
+# --------------------------------------------------------------------------- #
+def test_gui_register_opens_dataset_via_verb(qapp, register_stubs, monkeypatch):
+    from gui.window import ToolWindow
+
+    _stub_push(monkeypatch, register_stubs)
+    win = ToolWindow()
+    win.register_command(
+        "open-dataset",
+        lambda name: register_stubs.calls.append(f"open:{name}") or f"no-session:{name}",
+    )
+    win._register_dataset()
+    assert register_stubs.calls == ["dir", "name", "push", "open:sample_dataset", "info"]
+
+
+def test_gui_register_open_error_warns_but_keeps_registration(
+        qapp, register_stubs, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from common.i18n import tr
+    from gui.window import ToolWindow
+
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[1]))
+    )
+    win = ToolWindow()
+    win.register_command("open-dataset", lambda name: f"error:{name}")
+    win._register_dataset()
+    assert "sample_dataset" in register_stubs.read()
+    assert warned == [tr("err.open_dataset.title")]
+    assert register_stubs.shown["info"] == 1
+    assert register_stubs.shown["critical"] == 0
+
+
+def test_gui_register_opens_group_with_real_verbs(qapp, register_stubs, monkeypatch):
+    import llm_bridge
+    from PySide6.QtWidgets import QMessageBox
+    from gui.window import ToolWindow
+
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
+    )
+    win = ToolWindow()
+    llm_bridge._rewire_window(win)
+    win._register_dataset()
+    assert win.open_dataset_names() == ["sample_dataset"]
+    assert win.current_dataset == "sample_dataset"
+    assert win._current_group() is win._groups["sample_dataset"]
+    assert not (register_stubs.ds_dir / "myanalysis.toml").exists()
+    assert warned == []
+    assert register_stubs.shown == {"info": 1, "critical": 0}

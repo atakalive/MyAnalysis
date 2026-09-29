@@ -474,3 +474,241 @@ def test_dataset_reorder_keeps_none_group(win, tmp_path):
     assert None in win._groups
     assert list(win._groups)[-1] is None
     assert win.find_tab("orphan", dataset=None) is not None
+
+
+# --------------------------------------------------------------------------- #
+# 生成中の終了確認（Issue #101 E-2）
+# --------------------------------------------------------------------------- #
+class _FakeChat:
+    def __init__(self, busy: bool):
+        self.busy = busy
+
+    def is_busy(self) -> bool:
+        return self.busy
+
+
+def _stub_question(monkeypatch, replies, on_ask=None):
+    """QMessageBox.question を差し替え、(title, default) を記録して replies を順に返す。
+
+    on_ask(title) は返答の直前に呼ぶ（ダイアログ表示中に状態が変わるのを再現する）。
+    """
+    from PySide6.QtWidgets import QMessageBox
+
+    asked = []
+
+    def fake(parent, title, text, buttons=None, default=None):
+        asked.append((title, default))
+        if on_ask is not None:
+            on_ask(title)
+        return replies.pop(0)
+
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(fake))
+    return asked
+
+
+def _spy_close_side_effects(monkeypatch, win):
+    stopped = []
+    for attr in ("_stop_meeting_relay", "_stop_config_pusher", "_close_all_floats"):
+        monkeypatch.setattr(win, attr, lambda a=attr: stopped.append(a))
+    return stopped
+
+
+_ALL_STOPPED = ["_stop_meeting_relay", "_stop_config_pusher", "_close_all_floats"]
+
+
+def test_close_while_busy_no_keeps_window(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    chat = _FakeChat(True)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    win.clear_session_dirty()
+    asked = _stub_question(monkeypatch, [QMessageBox.StandardButton.No])
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert not ev.isAccepted()
+    assert asked == [(tr("dlg.quit_busy.title"), QMessageBox.StandardButton.No)]
+    assert stopped == []
+
+
+def test_close_while_busy_yes_closes(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    chat = _FakeChat(True)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    win.clear_session_dirty()
+    asked = _stub_question(monkeypatch, [QMessageBox.StandardButton.Yes])
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert ev.isAccepted()
+    assert [t for t, _ in asked] == [tr("dlg.quit_busy.title")]
+    assert stopped == _ALL_STOPPED
+
+
+def test_close_while_busy_yes_then_unsaved_prompt(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    chat = _FakeChat(True)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    win.set_session_saver(lambda: ([], []))
+    win.mark_session_dirty()
+    asked = _stub_question(
+        monkeypatch,
+        [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Cancel],
+    )
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert not ev.isAccepted()
+    assert [t for t, _ in asked] == [tr("dlg.quit_busy.title"), tr("dlg.unsaved.title")]
+    assert stopped == []
+
+
+def test_close_when_idle_skips_busy_prompt(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    chat = _FakeChat(False)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    win.clear_session_dirty()
+    asked = _stub_question(monkeypatch, [])
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert ev.isAccepted()
+    assert asked == []
+    assert stopped == _ALL_STOPPED
+
+
+def test_close_without_chat_widget_skips_busy_prompt(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    win.clear_session_dirty()
+    asked = _stub_question(monkeypatch, [])
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert ev.isAccepted()
+    assert asked == []
+    assert stopped == _ALL_STOPPED
+
+
+def test_close_busy_consent_is_not_asked_twice(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    chat = _FakeChat(True)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    win.set_session_saver(lambda: ([], []))
+    win.mark_session_dirty()
+    asked = _stub_question(
+        monkeypatch,
+        [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No],
+    )
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert ev.isAccepted()
+    assert [t for t, _ in asked] == [tr("dlg.quit_busy.title"), tr("dlg.unsaved.title")]
+    assert stopped == _ALL_STOPPED
+
+
+def _start_busy_during_unsaved(monkeypatch, win, replies):
+    from common.i18n import tr
+
+    chat = _FakeChat(False)
+    monkeypatch.setattr(win, "chat_widget", lambda: chat)
+    saves = []
+    win.set_session_saver(lambda: saves.append(1) or ([], []))
+    win.mark_session_dirty()
+
+    def on_ask(title):
+        if title == tr("dlg.unsaved.title"):
+            chat.busy = True
+
+    asked = _stub_question(monkeypatch, replies, on_ask=on_ask)
+    return asked, saves
+
+
+def test_close_generation_started_during_unsaved_prompt_no_keeps_window(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    asked, saves = _start_busy_during_unsaved(
+        monkeypatch, win,
+        [QMessageBox.StandardButton.No, QMessageBox.StandardButton.No],
+    )
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert not ev.isAccepted()
+    assert asked == [
+        (tr("dlg.unsaved.title"), None),
+        (tr("dlg.quit_busy.title"), QMessageBox.StandardButton.No),
+    ]
+    assert stopped == []
+    assert saves == []
+
+
+def test_close_generation_started_during_unsaved_prompt_yes_closes(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QMessageBox
+
+    from common.i18n import tr
+
+    stopped = _spy_close_side_effects(monkeypatch, win)
+    asked, saves = _start_busy_during_unsaved(
+        monkeypatch, win,
+        [QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.Yes],
+    )
+    ev = QCloseEvent()
+    win.closeEvent(ev)
+    assert ev.isAccepted()
+    assert [t for t, _ in asked] == [tr("dlg.unsaved.title"), tr("dlg.quit_busy.title")]
+    assert saves == [1]
+    assert stopped == _ALL_STOPPED
+
+
+# --------------------------------------------------------------------------- #
+# ファイル → データセットを閉じる（Issue #101 E-3）
+# --------------------------------------------------------------------------- #
+def test_file_menu_close_dataset(win, tmp_path):
+    """Issue #101 E-3: ファイル → データセットを閉じる は前面のデータセットを閉じ、
+    切替バーが出ない 1 つだけの状態でも使える。"""
+    from common.i18n import tr
+
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsB", "b")
+    act = win._close_dataset_action
+    assert act in win._file_menu.actions()
+    assert act.text() == tr("menu.file.close_dataset")
+    assert not act.isEnabled()                      # 何も開いていない
+
+    win.dispatch_command("add-tab", name="a", dataset="dsA")
+    win.dispatch_command("add-tab", name="b", dataset="dsB")
+    win.dispatch_command("set-active-dataset", name="dsB")
+    assert act.isEnabled()
+
+    act.trigger()                                   # 前面の dsB だけ閉じる
+    assert win.open_dataset_names() == ["dsA"]
+    assert win.current_dataset == "dsA"
+    assert win._switcher.isHidden()                 # 1 つだけ＝切替バーは出ない
+    assert act.isEnabled()
+
+    act.trigger()                                   # 最後の 1 つも閉じられる
+    assert win.open_dataset_names() == []
+    assert win.current_dataset is None
+    assert not act.isEnabled()

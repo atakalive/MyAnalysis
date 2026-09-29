@@ -5,6 +5,7 @@
 # --- menu ---
 "menu.file"                   = "ファイル(&F)"
 "menu.file.open_dataset"      = "データセットを開く…"
+"menu.file.close_dataset"     = "データセットを閉じる"
 "menu.file.restore_session"   = "前回のセッションを復元"
 "menu.file.register"          = "データセットを新規登録"
 "menu.file.save_session"      = "セッションを保存"
@@ -100,6 +101,8 @@
 "dlg.save_session.title"      = "セッションを保存"
 "dlg.unsaved.title"           = "セッション未保存"
 "dlg.unsaved.body"            = "セッションを保存しますか？"
+"dlg.quit_busy.title"         = "応答を生成中"
+"dlg.quit_busy.body"          = "応答を生成中です。今終了すると、生成途中の応答は保存されずに失われます。終了しますか？"
 "dlg.register.title"          = "データセット登録"
 "dlg.register.label"          = "データセット名:"
 "dlg.register_dir.title"      = "データセットディレクトリを選択"

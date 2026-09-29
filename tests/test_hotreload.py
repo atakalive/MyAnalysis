@@ -12,14 +12,18 @@ import hashlib
 import importlib
 import importlib.util
 import sys
+import types
 
 import pytest
 
 from devtools.hotreload import (
+    HotReloader,
     ModuleRecord,
     ReloadReport,
     _extract_toplevel_names,
     _toposort,
+    is_project_module,
+    purge_project_modules,
     superreload,
 )
 
@@ -425,3 +429,81 @@ def test_needs_app_reload_true_for_requires_app_only():
     rep = ReloadReport(requires_app=["C: Signal set changed — requires scope=app"])
     assert rep.warnings == []
     assert rep.needs_app_reload() is True
+
+
+# ---------------------------------------------------------------------------
+# is_project_module: in-repo third-party code (Issue #101 E-1)
+# ---------------------------------------------------------------------------
+
+def _fake_module(monkeypatch, name, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    monkeypatch.setitem(sys.modules, name, mod)
+
+
+def _set_prefixes(monkeypatch, value):
+    for attr in ("prefix", "exec_prefix", "base_prefix", "base_exec_prefix"):
+        monkeypatch.setattr(sys, attr, str(value))
+
+
+def test_is_project_module_excludes_site_packages_under_root(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    _set_prefixes(monkeypatch, tmp_path / "outside_python")
+    _fake_module(monkeypatch, "_e1_mod", root / "mod.py")
+    _fake_module(monkeypatch, "_e1_pkg_sub", root / "pkg" / "sub.py")
+    _fake_module(monkeypatch, "_e1_fake", root / ".venv" / "Lib" / "site-packages" / "fake.py")
+    _fake_module(monkeypatch, "_e1_fake2", root / ".venv" / "Lib" / "Site-Packages" / "fake2.py")
+    _fake_module(monkeypatch, "_e1_fake3", root / "x" / "dist-packages" / "fake3.py")
+    _fake_module(monkeypatch, "_e1_other", tmp_path / "elsewhere" / "o.py")
+    assert is_project_module("_e1_mod", root)
+    assert is_project_module("_e1_pkg_sub", root)
+    assert not is_project_module("_e1_fake", root)
+    assert not is_project_module("_e1_fake2", root)
+    assert not is_project_module("_e1_fake3", root)
+    assert not is_project_module("_e1_other", root)
+
+
+def test_is_project_module_excludes_interpreter_prefix_inside_root(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    _set_prefixes(monkeypatch, tmp_path / "outside_python")
+    _fake_module(monkeypatch, "_e1_mod", root / "mod.py")
+    _fake_module(monkeypatch, "_e1_os_fake", root / "python_embed" / "Lib" / "os_fake.py")
+    assert is_project_module("_e1_mod", root)
+    assert is_project_module("_e1_os_fake", root)
+    monkeypatch.setattr(sys, "prefix", str(root / "python_embed"))
+    assert not is_project_module("_e1_os_fake", root)
+    assert is_project_module("_e1_mod", root)
+
+
+def test_is_project_module_ignores_prefix_at_or_above_root(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    _set_prefixes(monkeypatch, tmp_path / "outside_python")
+    _fake_module(monkeypatch, "_e1_mod", root / "mod.py")
+    _set_prefixes(monkeypatch, root)
+    assert is_project_module("_e1_mod", root)
+    _set_prefixes(monkeypatch, tmp_path)
+    assert is_project_module("_e1_mod", root)
+
+
+def test_is_project_module_site_packages_above_root_not_excluded(tmp_path, monkeypatch):
+    root = tmp_path / "site-packages" / "repo2"
+    _set_prefixes(monkeypatch, tmp_path / "outside_python")
+    _fake_module(monkeypatch, "_e1_m", root / "m.py")
+    assert is_project_module("_e1_m", root)
+
+
+def test_purge_and_scan_skip_in_repo_venv(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    _set_prefixes(monkeypatch, tmp_path / "outside_python")
+    _fake_module(monkeypatch, "_e1_mod", root / "mod.py")
+    _fake_module(monkeypatch, "_e1_fake", root / ".venv" / "Lib" / "site-packages" / "fake.py")
+    keys = set(HotReloader(root).records)
+    assert "_e1_mod" in keys
+    assert "_e1_fake" not in keys
+    purged = purge_project_modules(root)
+    assert "_e1_mod" in purged
+    assert "_e1_fake" not in purged
+    assert "_e1_fake" in sys.modules
+    assert "_e1_mod" not in sys.modules
