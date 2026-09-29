@@ -340,6 +340,30 @@ def probe_analysis(monkeypatch, tmp_path):
     yield name, af
 
 
+def test_add_tab_future_annotations_dataclass(window, probe_analysis):
+    """`from __future__ import annotations` + 最上位の @dataclass を含む解析が開ける。
+    登録は build の間だけで、終わると sys.modules から外れる（Issue #100 D-2）。"""
+    name, af = probe_analysis
+    af.write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "import llm_bridge\n"
+        f"NAME = {name!r}\n"
+        "@dataclass\n"
+        "class P:\n"
+        "    x: int = 1\n"
+        "def build_tab(parent, data):\n"
+        "    from gui.tab import AnalysisTab\n"
+        "    tab = AnalysisTab(name=NAME, parent=parent)\n"
+        "    tab._watchers = llm_bridge.attach_tab(tab, lambda: {\"x\": P().x})\n"
+        "    return tab\n",
+        encoding="utf-8",
+    )
+    assert window.dispatch_command("add-tab", name=name, dataset=HR_DS) \
+        == f"added:{name}"
+    assert not any(k.startswith("_myanalysis_analysis_") for k in sys.modules)
+
+
 def test_tier2_reload_tab_swaps_and_syncs_state(window, probe_analysis):
     from llm_bridge import state
 
@@ -469,6 +493,7 @@ def test_tier2_sync_failure_does_not_update_bak(window, probe_analysis):
     )
     result = window.dispatch_command("reload", scope="tab", target=name)
     assert result.startswith("reload-tab-error:")
+    assert "apply_state failed: RuntimeError: boom" in result
     assert bak_path(af).read_text(encoding="utf-8") == v1   # unchanged
 
 

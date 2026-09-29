@@ -234,7 +234,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Absolute path to image file"},
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "panel": {
                         "type": "string",
                         "enum": ["left", "right"],
@@ -262,7 +262,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "lut": {"type": "string"},
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
                     "invert": {"type": "boolean"},
@@ -282,7 +282,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "min": {"type": "number"},
                     "max": {"type": "number"},
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
@@ -302,7 +302,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "mode": {"type": "string", "enum": ["single", "composite"]},
                     "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
@@ -319,7 +319,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "index": {"type": "integer", "description": "0-based channel index"},
                     "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
@@ -337,7 +337,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "channel": {"type": "integer", "description": "0-based channel index"},
                     "visible": {"type": "boolean"},
                     "slot": _IMG_SLOT_PROP,
@@ -355,7 +355,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "index": {"type": "integer", "description": "0-based Z index"},
                     "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
@@ -372,7 +372,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "index": {"type": "integer", "description": "0-based T index"},
                     "slot": _IMG_SLOT_PROP,
                     "dataset": _DATASET_PROP,
@@ -390,7 +390,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Tab name (default: viewer)"},
+                    "name": {"type": "string", "description": "Tab name (default: image)"},
                     "channel": {"type": "integer", "description": "0-based; omit for active channel"},
                     "low": {"type": "number"},
                     "high": {"type": "number"},
@@ -510,7 +510,7 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         "set_z", "set_t", "auto_contrast",
     ):
         verb = name.replace("_", "-")
-        tab_name = args.get("name", "viewer")
+        tab_name = args.get("name", "image")
         verb_args = {k: v for k, v in args.items() if k not in ("name", "dataset")}
         # Forward dataset for tab addressing (commands._execute pops it at the
         # tab tier); mirrors set_split. Without this the _DATASET_PROP the schema

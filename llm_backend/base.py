@@ -64,6 +64,36 @@ MOUNT_SAFE_EDITS = (
     "mechanically rejects Write/Edit on the synced mount."
 )
 
+# Shared across ALL backend system prompts. The display verbs (figure / raw image
+# viewer / panes) that the OpenAI path gets as function tools (gui/tools.py) but
+# the CLI-driven backends only learn from their prompt (Issue #100 D-1). Names
+# every image-viewer verb so tests/test_backend_prompts.py can check it against
+# llm_bridge.verbs.IMAGE_VIEWER_VERBS.
+GUI_DISPLAY_VERBS = (
+    "Display verbs (the GUI must be running; add --wait to get the result): "
+    "`python -m llm_bridge window show path=<abs> [name=viewer] [slot=<path>] "
+    "[dataset=<ds>]` shows a result figure (PNG etc.). "
+    "`python -m llm_bridge window show-image path=<abs> [name=image] "
+    "[panel=left|right] [slot=<path>] [dataset=<ds>]` opens a raw/source image "
+    "(TIFF, 16-bit, z/t stack, multi-channel) in the interactive image viewer. "
+    "Use show-image ONLY when the user explicitly asks to view a raw image / TIFF "
+    "or to open it in ImageJ; never open one on your own initiative. "
+    "slot is a split path: left|right|top|bottom joined by '/' (e.g. top/left for "
+    "a 2x2 grid); figures and raw images can share one tab; re-orienting a split "
+    "renames other panes' slots, so read them with `tab <name> list-panes`. "
+    "Tab verbs for any tab: `set-split left=<n> right=<n> [slot=<region>]`, "
+    "`close-pane slot=<path>`, `list-panes`. "
+    "Image-viewer tab verbs (all take an optional slot=; default = the first image "
+    "pane): `set-lut lut=<name> [invert=true] [channel=<n>]`, `set-range min=<v> "
+    "max=<v> [channel=<n>]`, `auto-contrast [low=0.35] [high=99.65] "
+    "[channel=<n>]`, `set-channel index=<n>`, `set-mode mode=single|composite`, "
+    "`set-z index=<n>`, `set-t index=<n>`, `set-visible channel=<n> "
+    "visible=true|false`, `load-image path=<abs>`. "
+    "Datasets and tabs: `window open-dataset name=<ds>`, `window close-dataset "
+    "name=<ds>`, `window list-tabs [detail=true]`. "
+    "Full verb list: `python -m llm_bridge list-commands [<tab>]`."
+)
+
 
 # ユーザー選択ペルソナ（応答口調）のセクション見出し。合成は compose_system_prompt
 # の一箇所のみ — 各バックエンドは送信時に自分の base プロンプトへ合成する。

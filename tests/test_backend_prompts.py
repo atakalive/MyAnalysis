@@ -82,6 +82,27 @@ def test_every_backend_prompt_names_save_text():
     assert not missing, f"backend prompts missing save_text: {missing}"
 
 
+def test_every_backend_prompt_includes_display_verbs():
+    """CLI 駆動のバックエンドは表示系 verb をプロンプトからしか知らない（Issue #100 D-1）。"""
+    from llm_backend.base import GUI_DISPLAY_VERBS
+
+    prompts = _all_backend_prompts()
+    assert prompts, "no backend system prompts discovered — the sweep is broken"
+    missing = [name for name, text in prompts.items() if GUI_DISPLAY_VERBS not in text]
+    assert not missing, f"backend prompts missing GUI_DISPLAY_VERBS: {missing}"
+
+
+def test_display_verbs_names_every_viewer_verb():
+    from llm_backend.base import GUI_DISPLAY_VERBS
+    from llm_bridge.verbs import IMAGE_VIEWER_VERBS
+
+    for needle in (
+        *IMAGE_VIEWER_VERBS, "show-image", "list-panes", "open-dataset",
+        "ONLY when the user explicitly asks",
+    ):
+        assert needle in GUI_DISPLAY_VERBS, needle
+
+
 def test_gui_chat_prompt_names_save_text():
     # openai / mock backends もここを system message として送るので別建てで見る。
     pytest.importorskip("PySide6")

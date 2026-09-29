@@ -70,4 +70,4 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 
 エラーダイアログの「詳細はログ」は、`python tool.py`（コンソール付き）で起動したときのコンソール出力を指す。`run.bat` 起動では警告が残らない。ステータスバーの「保存に失敗しました」も 30 秒で消える。
 
-**不具合を報告するときに添えるもの**: `doctor` の出力、`data/logs/gui-crash-*.log`、`python tool.py` で起動したときのコンソール出力、（必要なら）`data/llm_state/command_log.jsonl`。ログにはパスやデータセット名が含まれるので、添える前に確認する。
+**不具合を報告するときに添えるもの**: `doctor` の出力、`data/logs/gui-crash-*.log`、`python tool.py` で起動したときのコンソール出力、（必要なら）`data/llm_state/command_log.jsonl`。ログにはパスやデータセット名が含まれるので、添える前に確認する。この版より前のログ（`command_log.jsonl.1` を含む）にはミーティングのトークンが平文で残っていることがあるので、`meeting-` を含む行は消してから添える。

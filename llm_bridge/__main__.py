@@ -1,6 +1,8 @@
 """CLI for LLM operation: python -m llm_bridge <subcommand> ..."""
 import argparse
 import json
+import math
+import re
 import socket
 import sys
 from pathlib import Path
@@ -11,20 +13,36 @@ from llm_bridge import state, annotations, commands
 from llm_bridge.paths import active_state_path
 
 
+# 名前・パス・識別子・自由文のキー。数値に見えても変換しない（Issue #100 D-6）。
+_STRING_KEYS: frozenset[str] = frozenset({
+    "name", "dataset", "target", "path", "scope", "slot", "panel", "mode", "lut",
+    "text", "label", "color", "sender", "session",
+})
+_INT_RE = re.compile(r"[+-]?[0-9]+")
+_FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
 def _parse_kvs(kvs: list[str]) -> dict:
-    """Parse [k=v, ...] into dict, with int → float → str type coercion."""
+    """Parse [k=v, ...] into dict. Values of `_STRING_KEYS` stay str; others
+    become int / float only when they fully match a plain ASCII decimal literal
+    (finite); everything else stays str."""
     out: dict = {}
     for kv in kvs:
         if "=" not in kv:
             raise SystemExit(f"error: expected key=value, got: {kv!r}")
         k, v = kv.split("=", 1)
-        try:
-            out[k] = int(v)
-        except ValueError:
+        out[k] = v
+        if k in _STRING_KEYS:
+            continue
+        if _INT_RE.fullmatch(v):
             try:
-                out[k] = float(v)
-            except ValueError:
-                out[k] = v
+                out[k] = int(v)
+            except ValueError:  # 桁数上限（4300 桁）超え
+                pass
+        elif _FLOAT_RE.fullmatch(v):
+            f = float(v)
+            if math.isfinite(f):
+                out[k] = f
     return out
 
 
@@ -121,9 +139,10 @@ def main(argv: list[str] | None = None) -> int:
     p_reg.add_argument("path", help="Absolute path to dataset directory")
     p_reg.add_argument("--host", default=None, help="Hostname (default: current host)")
     p_reg.add_argument(
-        "--format", default="csv_per_subdir",
+        "--format", default=None,
         choices=("csv_per_subdir", "custom"),
-        help="Dataset format (default: csv_per_subdir)",
+        help="Dataset format written to myanalysis.toml. Omit to keep the existing "
+             "value (a new file gets csv_per_subdir)",
     )
     p_reg.add_argument(
         "--no-open", action="store_true", default=False,
@@ -381,8 +400,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if is_current_host and Path(args.path).exists():
             try:
-                from dataset_config import set_format
-                set_format(args.name, args.format)
+                from dataset_config import ensure_config, set_format
+                if args.format is not None:
+                    set_format(args.name, args.format)
+                else:
+                    ensure_config(args.name)   # 既存の myanalysis.toml は触らない
             except Exception as e:
                 print(f"warning: could not set format in myanalysis.toml: {e}", file=sys.stderr)
 
@@ -442,17 +464,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "list-commands":
+        from llm_bridge import verbs
+
+        def _print_table(title: str, table: dict[str, str]) -> None:
+            print(title)
+            for verb, usage in table.items():
+                print(f"  {verb}  {usage}")
+
         if args.name is None:
-            print("window verbs (built-in by llm_bridge):")
-            for v in ("add-tab", "close-tab", "open-dataset", "set-active-tab",
-                      "show", "show-image", "toggle-chat-float", "reload"):
-                print(f"  {v}")
+            _print_table("window verbs:", verbs.WINDOW_VERBS)
+            _print_table(
+                "internal window verbs (GUI / meeting share; do not call unless "
+                "the user asks):",
+                verbs.INTERNAL_WINDOW_VERBS,
+            )
             return 0
         _check_tab_name(args.name)
-        print("tab verbs (built-in by llm_bridge):")
-        for v in ("set-split", "close-pane", "list-panes", "snapshot",
-                  "refresh-state"):
-            print(f"  {v}")
+        _print_table("tab verbs (every tab):", verbs.COMMON_TAB_VERBS)
+        _print_table("analysis tab verbs (tabs opened by add-tab):",
+                     verbs.ANALYSIS_TAB_VERBS)
+        _print_table("image-viewer tab verbs (tabs holding an image pane):",
+                     verbs.IMAGE_VIEWER_VERBS)
         print("(analysis-specific verbs also registered at runtime — "
               "see analysis source)")
         print("Viewer tabs: `show`/`show-image slot=<path>` where <path> is "

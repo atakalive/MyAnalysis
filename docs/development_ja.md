@@ -110,7 +110,8 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | パス | 内容 |
 |---|---|
 | `data/llm_state/commands/` | CLI → GUI のコマンドキュー |
-| `data/llm_state/command_log.jsonl` | コマンドの実行結果（追記のみ） |
+| `data/llm_state/command_log.jsonl` | コマンドの実行結果（追記。1 MiB 以上になっていたら、次の追記の前に `command_log.jsonl.1` へ回す。保持は 1 世代） |
+| `data/llm_state/results/` | 秘密を含む結果の一時置き場。`--wait` が読んだら消す。残った分は次に秘密を書くときか GUI の起動時に、1 時間以上経っていれば消す |
 | `data/llm_state/active.json` | アクティブなタブ・データセット・開いているデータセット一覧 |
 | `data/llm_state/ui_prefs.json` | 表示言語・ツール表示・全体ペルソナ等の UI 設定 |
 | `data/llm_state/recent_datasets.json` | データセットピッカーの最近使った順 |
@@ -263,7 +264,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 - **読めないものを既定値で上書きしない。** `read_json_classified` / `durable_read_json` が `unreadable` を返したら書込を中止する。データセットディレクトリの read-modify-write（`llm_bridge/annotations.py`、`llm_bridge/dataset_meta.py`）では 0 バイトのファイルも `unreadable` として扱い（`.bak` が読めればそちらを採る）、書込を中止する。0 バイト化したファイルは `doctor --rescue` で復旧する（rescue は 0 バイトのファイルを手がかりに復元元を探すので、書き直して消さない）。`myanalysis.toml` の 0 バイトも「設定なし」ではなく `ConfigUnreadableError` として扱う。
 - 0 バイトのファイルを新しい内容で書き直してよいのは PC ローカルの `data/llm_state` の状態ファイルだけ（守る中身が無いため）。`llm_bridge/paths.py` の `update_ui_pref` / `note_recent_dataset` / `_write_backend_sessions` が `_preserve_unreadable` で判定する。`llm_bridge/personas.py` は primary と `.bak` の両方が 0 バイトのときだけ書き直す。
 - ロックは `common/filelock.exclusive_lock` を使う。同期マウント上のパスのロックファイルは自動で `data/locks/` に置かれる（PC 間の排他はもともと成立しない）。
-- 同期マウント上の `.py` を import 機構で読むと `__pycache__/*.pyc` が tmp + rename で書かれ、同じ失敗に当たる。GUI は解析タブの `analysis.py` を import せず `compile` + `exec` で読む。手で実行するときの対策は [§2](#2-開発環境)。
+- 同期マウント上の `.py` を import 機構で読むと `__pycache__/*.pyc` が tmp + rename で書かれ、同じ失敗に当たる。GUI と `python -m export` は `analysis.py` を import せず `compile` + `exec` で読む（`common/analysis_module.py`）。手で実行するときの対策は [§2](#2-開発環境)。
 - エージェント自身の Write/Edit ツールはこの chokepoint を通らない。claude バックエンドは PreToolUse hook（`python -m llm_bridge guard-write`）で同期マウント上への Write/Edit を拒否する（`analysis.draft.py` だけは許可）。**codex / pi にこの hook は無く**、プロンプト（`MOUNT_SAFE_EDITS`）による誘導だけに頼っている。
 
 実測値と経緯は CLAUDE.md の「同期マウントへの書込規律」節、`common/paths.py` と `common/fs_kind.py` の docstring を参照。
@@ -325,15 +326,15 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
   - `attach_tab()` にはデータセットに属さないタブ（`--demo` の `_demo` タブ等）の分岐と通常の分岐があるので、全解析タブ共通の verb は両方に登録する。
   - `show` / `show-image` が作る図・画像ビューアのタブは `attach_tab()` を通らず、`llm_bridge/__init__.py` の各ハンドラが自分で verb を登録する（画像ビューアの verb は `gui/imageviewer.py` の `_register_viewer_verbs`）。
 - CLI 側の変更は要らない（`window <verb> k=v` / `tab <name> <verb> k=v` は汎用）。
-- **引数** — `k=v` の値は `int` → `float` → `str` の順に変換され、キーワード引数としてハンドラに渡る。
+- **引数** — `k=v` の値は、キーに応じて文字列のまま、または int / float に変換されて、キーワード引数としてハンドラに渡る。
   - `true` / `false` は文字列のままなので、真偽値は `llm_bridge._flag()` で受ける（1/0・true/false・yes/no・on/off）。
-  - 数字だけの名前は `int` になるので、名前として使う引数はハンドラ側で `str()` する。`1e3`・`nan`・`inf`・`1_000` のような値も数値になり、`str()` しても元の文字列には戻らない。
+  - 名前・パス・自由文のキー（`llm_bridge/__main__.py` の `_STRING_KEYS`）は文字列のまま届く。それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ int / float になり、`1_000`・`nan`・`inf`・全角数字は文字列のまま届く。
   - tab verb の `dataset=` は宛先タブの特定に使われて取り除かれるので、tab verb は `dataset` という名前の引数を受け取れない。
   - 未知のキーは `TypeError` になり、`status: "error"` で記録される。
-- **実行** — ハンドラは GUI スレッドで動く。例外は `status: "error"`（`repr`）として記録される。
+- **実行** — ハンドラは GUI スレッドで動く。例外は `status: "error"`、`error: "<型>: <メッセージ>"` と、`traceback`（末尾 10 フレーム。`raise … from` の連鎖も含む）として記録される。
 - **戻り値** — JSON にできる値はそのまま `result` に入り、それ以外は `repr` される。既存の操作系 verb は `added:<name>` / `closed:<ds>:<n>` のような短い文字列を、一覧系は list / dict を返す。
 - **周知** — エージェントは verb を system プロンプト等から知る。必要に応じて更新する: `llm_backend/claude_code.py` の `_SYSTEM_PROMPT`、`llm_backend/pi.py` の `_SYSTEM_PROMPT_PI` と `.pi/skills/myanalysis-bridge/SKILL.md`、`llm_backend/codex.py` の `_SYSTEM_PROMPT_CODEX`、openai 系は `gui/tools.py`（[§6.4](#64-openai-互換バックエンド向けの-gui-ツール)）。利用者向けの一覧は [cli_ja.md](cli_ja.md)。
-- `python -m llm_bridge list-commands` は手書きの固定リストで、登録済みの verb を反映しない（[§12](#12-既知の技術的負債)）。
+- `python -m llm_bridge list-commands [タブ名]` は `llm_bridge/verbs.py` の表を表示する。verb を追加・削除したら表も直す（`tests/test_verbs_registry.py` が不一致を検出する）。解析ごとの独自 verb は表示されない。
 
 ### 6.3 UI 文言（i18n）の追加
 
@@ -571,9 +572,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | 項目 | 内容 |
 |---|---|
 | `plans/` が古い | 初期の設計メモで、現在の API と一致しない（例: 存在しない `toggle-chat-visible` verb や `common.paths.state_dir`）。仕様として読まない |
-| `list-commands` が古い | 手書きの固定リストで、window verb 7 個と tab verb 3 個しか出さない（`list-tabs`、`show-image`、`set-active-dataset`、`close-dataset`、会議共有の verb 等が無い） |
 | 使われていない API | `AnalysisTab.connect_state()` / `current_state()` は互換のため残している（`llm_bridge` は読まない。リポジトリ外の解析コードから呼ばれている可能性があるため削除しない） |
-| `command_log.jsonl` が増え続ける | ローテーションが無く、`--wait` は毎回ログを先頭から読むので、ログが大きくなるほど遅くなる |
 | pi の cwd がリポジトリ直下 | claude / codex はリポジトリ外にしているが、pi は既定でリポジトリ直下のまま。pi が cwd の CLAUDE.md を読み込むと、開発者向けの規約がデータ解析エージェントに混ざり得る |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |

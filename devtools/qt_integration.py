@@ -379,10 +379,14 @@ class HotReloadController(QObject):
         try:
             new_tab, mod, source = _m("llm_bridge")._build_analysis(sandbox, dataset, name)
         except Exception as e:  # noqa: BLE001 — keep old tab on any build failure
+            _log.warning("reload-tab build failed for %s/%s", dataset, name, exc_info=True)
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
                 _m("llm_bridge.state").writer(dataset, name)(captured_state)
-            return f"reload-tab-error:build failed: {e!r} (old tab retained)"
+            return (
+                f"reload-tab-error:build failed: {type(e).__name__}: {e} "
+                f"(old tab retained)"
+            )
         if new_tab.name != name:
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
@@ -391,15 +395,14 @@ class HotReloadController(QObject):
                 f"reload-tab-error:tab name mismatch: expected {name!r}, "
                 f"got {new_tab.name!r} (old tab retained)"
             )
-        if not _m("llm_bridge")._sync_new_tab_state(
+        err = _m("llm_bridge")._sync_new_tab_state(
             new_tab, mod, dataset, name, captured_state
-        ):
+        )
+        if err is not None:
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
                 _m("llm_bridge.state").writer(dataset, name)(captured_state)
-            return (
-                "reload-tab-error:apply_state / refresh-state failed (old tab retained)"
-            )
+            return f"reload-tab-error:{err[0]} (old tab retained)"
         # All good — swap the old tab for the new one (dataset-scoped so a
         # same-named tab in another dataset is untouched).
         new_tab.setParent(None)

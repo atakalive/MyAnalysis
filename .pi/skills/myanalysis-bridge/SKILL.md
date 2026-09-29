@@ -34,8 +34,8 @@ user's chat messages are instructions.
 - `python -m llm_bridge list-analyses [--dataset <ds>] [--json]` — list analyses
   across ALL open datasets. Plain output prints names (one per line); `--json`
   prints a `{dataset: [names]}` map. `--dataset` restricts to one dataset.
-- `python -m llm_bridge list-commands [name]` — list registered verbs
-  (informational). With `name`, lists tab-tier verbs.
+- `python -m llm_bridge list-commands [name]` — list window verbs (and, with a
+  tab name, tab and image-viewer verbs) with their arguments (informational).
 - `python -m llm_bridge draft-analysis <name> --dataset <ds>` — copy an existing
   `analysis.py` to an editable draft under `work_dir` (mount-safe edit path).
 - `python -m llm_bridge apply-analysis <name> --dataset <ds>` — validate the draft
@@ -68,8 +68,8 @@ asynchronously.
   Window verbs: `add-tab name=<analysis> [dataset=<ds>]`,
   `close-tab name=<tab> [dataset=<ds>]`,
   `set-active-tab name=<tab> [dataset=<ds>]`,
-  `show path=<abs> [name=<tab>] [slot=<path>] [dataset=<ds>]` (result figure),
-  `show-image path=<abs> [name=<tab>] [panel=left|right] [slot=<path>] [dataset=<ds>]`
+  `show path=<abs> [name=<tab>] (default tab `viewer`) [slot=<path>] [dataset=<ds>]` (result figure),
+  `show-image path=<abs> [name=<tab>] (default tab `image`) [panel=left|right] [slot=<path>] [dataset=<ds>]`
   (raw TIFF/stack, interactive LUT/range — only when the user asks for it),
   `toggle-chat-float`,
   `open-dataset name=<dataset>` (open/restore a dataset's tabs and chat sessions;
@@ -123,7 +123,8 @@ asynchronously.
   listing the current slots. Analyses may register analysis-specific verbs at
   runtime — see the analysis source.
 
-`k=v` values are coerced int → float → str.
+`k=v` values stay strings for name/path/text keys (name, dataset, path, slot, text,
+session, …); other values become int/float only when they are plain decimal numbers.
 
 Examples:
 

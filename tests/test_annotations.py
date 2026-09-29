@@ -94,3 +94,30 @@ def test_clear_marker_does_not_wipe_notes_on_unreadable(ann_env, monkeypatch):
 
 def test_read_absent_returns_empty(ann_env):
     assert annotations.read("ds", "a1") == {"markers": [], "notes": []}
+
+
+# ---- ファイル変更時の読み（Issue #100 D-3）----
+
+def test_read_changed_strips_seq(ann_env):
+    annotations.submit("ds", "a1", "marker", x=1)
+    data = annotations._read_changed(_p(ann_env))
+    assert "_seq" not in data
+    assert data["markers"] == [{"x": 1}]
+
+
+def test_read_changed_prefers_newer_bak(ann_env):
+    annotations.submit("ds", "a1", "marker", x=1)
+    old_body = _p(ann_env).read_bytes()
+    annotations.submit("ds", "a1", "marker", x=2)
+    _p(ann_env).write_bytes(old_body)            # primary の _seq が古くなる
+    data = annotations._read_changed(_p(ann_env))
+    assert data["markers"] == [{"x": 1}, {"x": 2}]
+    assert "_seq" not in data
+
+
+def test_read_changed_unreadable_returns_none(ann_env, monkeypatch):
+    assert annotations._read_changed(_p(ann_env)) is None   # absent
+    annotations.submit("ds", "a1", "marker", x=1)
+    _blind_reads(monkeypatch, ann_env)
+    assert annotations._read_changed(_p(ann_env)) is None
+

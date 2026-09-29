@@ -24,6 +24,18 @@ def command_log_path() -> Path:
     return global_state_dir() / "command_log.jsonl"
 
 
+def command_results_dir() -> Path:
+    """Return data/llm_state/results/ (created) — secret command results (Issue #100 D-9)."""
+    p = global_state_dir() / "results"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def rotated_command_log_path() -> Path:
+    """Return data/llm_state/command_log.jsonl.1 (the single rotated generation)."""
+    return global_state_dir() / "command_log.jsonl.1"
+
+
 def active_state_path() -> Path:
     """Return data/llm_state/active.json (file may not exist yet)."""
     return global_state_dir() / "active.json"

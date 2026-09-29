@@ -297,6 +297,47 @@ def test_add_tab_sync_state_failure_writes_no_bak(qapp, monkeypatch, tmp_path):
 
     win = ToolWindow()
     add_tab = llm_bridge._make_add_tab_handler(win)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as ei:
         add_tab("demo", dataset="dsA")
     assert not _bak_of(tmp_path, "dsA", "demo").exists()
+    assert isinstance(ei.value.__cause__, RuntimeError)
+    assert str(ei.value.__cause__) == "boom"
+    assert "apply_state failed: RuntimeError: boom" in str(ei.value)
+
+
+# ---- _sync_new_tab_state は失敗の原因を返す（Issue #100 D-4）----
+
+def test_sync_new_tab_state_reports_apply_state_cause():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    exc = ValueError("bad")
+
+    def apply_state(tab, state):
+        raise exc
+
+    mod = SimpleNamespace(apply_state=apply_state)
+    err = llm_bridge._sync_new_tab_state(MagicMock(), mod, "ds", "a", {})
+    assert err == ("apply_state failed: ValueError: bad", exc)
+    assert isinstance(err[1], ValueError)
+    assert str(err[1]) == "bad"
+
+
+def test_sync_new_tab_state_reports_refresh_cause():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    exc = RuntimeError("x")
+    tab = MagicMock()
+    tab.dispatch_command.side_effect = exc
+    err = llm_bridge._sync_new_tab_state(tab, SimpleNamespace(), "ds", "a", {})
+    assert err == ("refresh-state failed: RuntimeError: x", exc)
+    assert err[1] is exc
+
+
+def test_sync_new_tab_state_success_returns_none():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    mod = SimpleNamespace(apply_state=lambda tab, state: None)
+    assert llm_bridge._sync_new_tab_state(MagicMock(), mod, "ds", "a", {}) is None

@@ -12,6 +12,9 @@ so patching "config.get_dataset_dir" is sufficient to redirect path resolution.
 
 from __future__ import annotations
 
+import importlib
+import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -56,6 +59,17 @@ def load():
 def build_export_figs(data):
     return {}
 """
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bytecode(monkeypatch, tmp_path):
+    """main() はプロセス全体の sys.pycache_prefix を書き換えるので、全テストで保存・復元する。
+    退避先は実リポジトリの data/pycache ではなく tmp_path の下にする。
+    dont_write_bytecode を False に固定するのは、PYTHONDONTWRITEBYTECODE=1 / python -B の
+    下で .pyc がそもそも書かれず、__pycache__ のテストが HEAD でも通ってしまうのを防ぐため。"""
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.setattr("export.__main__.pycache_prefix", lambda: tmp_path / "pycache")
 
 
 def _write_analysis(tmp_path: Path, dataset: str, name: str, source: str) -> None:
@@ -138,3 +152,57 @@ def test_export_driver_load_raises_is_caught(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, tmp_path, ds, name)
     assert exc.value.code == 1
+
+
+# ---- Issue #100 D-2 / D-8: sys.modules 登録と __pycache__ ----
+
+def test_export_driver_future_annotations_dataclass(tmp_path, monkeypatch, capsys):
+    ds, name = "ds_test", "demo_dc"
+    src = (
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class P:\n"
+        "    x: int = 1\n"
+        + SYNTH_OK
+    )
+    _write_analysis(tmp_path, ds, name, src)
+    _run(monkeypatch, tmp_path, ds, name)
+    assert "saved 2 figure(s)" in capsys.readouterr().out
+
+
+def test_export_driver_accepts_bom(tmp_path, monkeypatch, capsys):
+    ds, name = "ds_test", "demo_bom"
+    adir = tmp_path / ds / "analyses" / name
+    adir.mkdir(parents=True)
+    (adir / "analysis.py").write_bytes(("\ufeff" + SYNTH_OK).encode("utf-8"))
+    _run(monkeypatch, tmp_path, ds, name)
+    assert "saved 2 figure(s)" in capsys.readouterr().out
+
+
+def test_export_driver_writes_no_pycache(tmp_path, monkeypatch):
+    ds, name = "ds_test", "demo_nopyc"
+    _write_analysis(tmp_path, ds, name, SYNTH_OK)
+    _run(monkeypatch, tmp_path, ds, name)
+    assert not (tmp_path / ds / "analyses" / name / "__pycache__").exists()
+
+
+def test_export_driver_sets_pycache_prefix(tmp_path, monkeypatch):
+    ds, name = "ds_test", "demo_prefix"
+    _write_analysis(tmp_path, ds, name, SYNTH_OK)
+    _run(monkeypatch, tmp_path, ds, name)
+    assert sys.pycache_prefix == str(tmp_path / "pycache")
+
+
+def test_export_driver_helper_import_pyc_goes_to_prefix(tmp_path, monkeypatch, request):
+    mod = f"helper_{uuid.uuid4().hex[:8]}"
+    request.addfinalizer(lambda: sys.modules.pop(mod, None))
+    ds, name = "ds_test", "demo_helper"
+    _write_analysis(tmp_path, ds, name, f"import {mod}\n" + SYNTH_OK)
+    adir = tmp_path / ds / "analyses" / name
+    (adir / f"{mod}.py").write_text("V = 1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(adir))
+    importlib.invalidate_caches()
+    _run(monkeypatch, tmp_path, ds, name)
+    assert not (adir / "__pycache__").exists()
+    assert list((tmp_path / "pycache").rglob(f"{mod}*.pyc"))

@@ -9,19 +9,22 @@ Both return iterables of QFileSystemWatcher etc. — caller must hold references
 
 import contextlib
 import contextvars
-import importlib.util
 import json
+import logging
 import shlex
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 import dataset_config
 from common.paths import safe_resolve, bak_path, backup_text_if_changed
+from common.analysis_module import analysis_module, analysis_module_name
 from common.slots import parse_slot
 
 if TYPE_CHECKING:
     from gui.window import ToolWindow
 from llm_bridge import state, snapshots, commands, annotations, session
 from llm_bridge.paths import active_state_path
+
+_log = logging.getLogger(__name__)
 
 
 _building_dataset: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -138,21 +141,19 @@ def _build_analysis(parent, dataset, name: str):
     failure can't leave a stale `_touched` entry that makes `save_all`
     overwrite a dataset's session with empty tabs.
 
-    Re-import behavior: the analysis module is NOT registered in sys.modules.
-    Each call re-executes the file and re-runs `load()`. Analyses that want
-    caching should memoize inside `load()` themselves.
+    Re-import behavior: the analysis module is registered in sys.modules only
+    while its source executes and `load()` / `build_tab()` run, and is removed
+    again afterwards (common.analysis_module). Each call re-executes the file and
+    re-runs `load()`. Analyses that want caching should memoize inside `load()`
+    themselves.
     """
     analysis_file = _resolve_analysis_file(dataset, name)
-    spec = importlib.util.spec_from_file_location(
-        f"_llm_bridge_analysis_{name}", analysis_file
-    )
-    if spec is None:
-        raise ImportError(f"could not build module spec for {analysis_file}")
-    mod = importlib.util.module_from_spec(spec)
-    # Compile + exec from source bytes directly rather than spec.loader.exec_module:
+    # Compile + exec from source directly rather than spec.loader.exec_module:
     # the loader may read a stale .pyc when an edit and a reload land in the same
     # filesystem-mtime second (the exact agent edit-then-reload pattern). The
-    # module is never registered in sys.modules, so it's always a fresh build.
+    # module is registered in sys.modules only during the build (so @dataclass /
+    # typing.get_type_hints work) and removed afterwards, so every call is a
+    # fresh build.
     source = analysis_file.read_text(encoding="utf-8")
     if not source:   # 真の 0 バイト（Edit 失敗の truncate）だけを診断対象にする
         bp = bak_path(analysis_file)
@@ -175,17 +176,18 @@ def _build_analysis(parent, dataset, name: str):
             f"analyses/{name}/analysis.py が空です（0 バイト）。バックアップ"
             f"（{bp}）も見つかりません。チャット履歴・git 等から内容を復元してください。"
         )
-    code = compile(source, str(analysis_file), "exec")
-    exec(code, mod.__dict__)
-    if not hasattr(mod, "build_tab"):
-        raise AttributeError(
-            f"analyses/{name}/analysis.py has no build_tab(parent, data)"
-        )
-    data = mod.load() if hasattr(mod, "load") else None
-    # dataset を contextvar 経由で attach_tab に供給する（build_tab 同期実行中のみ）。
-    # mod.load() は mod.DATASET を使うので囲まない（前提 2）。
-    with _building(dataset):
-        tab = mod.build_tab(parent, data)
+    with analysis_module(
+        analysis_module_name(dataset, name), analysis_file, source
+    ) as mod:
+        if not hasattr(mod, "build_tab"):
+            raise AttributeError(
+                f"analyses/{name}/analysis.py has no build_tab(parent, data)"
+            )
+        data = mod.load() if hasattr(mod, "load") else None
+        # dataset を contextvar 経由で attach_tab に供給する（build_tab 同期実行中のみ）。
+        # mod.load() は mod.DATASET を使うので囲まない（前提 2）。
+        with _building(dataset):
+            tab = mod.build_tab(parent, data)
     # Assign session_spec BEFORE the tab is inserted so the currentChanged that
     # add_tab fires sees the final spec (→ chat gets the right dataset).
     # 所在 dataset ＝ 呼び出し側が解決済みの登録名（前提 2）。
@@ -264,14 +266,15 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
             raise ValueError(
                 f"tab name mismatch: expected {name!r}, got {new_tab.name!r}"
             )
-        if not _sync_new_tab_state(new_tab, mod, dataset, name, captured_state):
+        err = _sync_new_tab_state(new_tab, mod, dataset, name, captured_state)
+        if err is not None:
             sandbox.deleteLater()
             if captured_status != "unreadable":   # transient miss は復元しない（既存を温存）
                 state.writer(dataset, name)(captured_state)
+            msg, cause = err
             raise RuntimeError(
-                f"could not establish state for {name!r} (apply_state / "
-                f"refresh-state failed); tab not inserted"
-            )
+                f"could not establish state for {name!r} ({msg}); tab not inserted"
+            ) from cause
         new_tab.setParent(None)
         sandbox.deleteLater()
         window.add_tab(new_tab)
@@ -306,25 +309,30 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
     return _add_tab
 
 
-def _sync_new_tab_state(tab, mod, dataset, name: str, captured_state: dict) -> bool:
+def _sync_new_tab_state(
+    tab, mod, dataset, name: str, captured_state: dict
+) -> tuple[str, BaseException] | None:
     """Apply optional `apply_state` then sync the real UI state into state.json.
 
-    Returns True on success, False if apply_state or refresh-state raised (the
-    caller then discards the tab and restores captured_state). The read-back
-    from refresh-state — not captured_state — is always the truth on success:
-      - apply_state present & restores state → state.json = captured = UI
-      - apply_state no-op / absent          → state.json = fresh   = UI
+    Returns None on success, or ("<stage> failed: <Type>: <msg>", exc) when
+    apply_state / refresh-state raised (the caller then discards the tab and
+    restores captured_state). Callers that raise should chain the returned
+    exception (`raise ... from exc`) so the analysis-side frames show up in the
+    traceback that commands._execute records. The read-back from refresh-state —
+    not captured_state — is always the truth on success.
     """
     if hasattr(mod, "apply_state"):
         try:
             mod.apply_state(tab, captured_state)
-        except Exception:
-            return False
+        except Exception as e:
+            _log.warning("apply_state failed for %s/%s", dataset, name, exc_info=True)
+            return (f"apply_state failed: {type(e).__name__}: {e}", e)
     try:
         tab.dispatch_command("refresh-state")
-    except Exception:
-        return False
-    return True
+    except Exception as e:
+        _log.warning("refresh-state failed for %s/%s", dataset, name, exc_info=True)
+        return (f"refresh-state failed: {type(e).__name__}: {e}", e)
+    return None
 
 
 def _is_viewer_host(tab) -> bool:
@@ -631,7 +639,7 @@ def _make_show_image_handler(window: "ToolWindow") -> Callable[..., str]:
 
     def _show_image(
         path: str,
-        name: str = "viewer",
+        name: str = "image",
         panel: str = "left",
         slot: str | None = None,
         dataset: str | None = None,
@@ -756,7 +764,7 @@ def _rewire_window(window) -> None:
     window.register_command(
         "close-tab", lambda name, dataset=None: window.close_tab(name, dataset=dataset)
     )
-    window.register_command("list-tabs", lambda detail=False: _list_tabs(window, detail))
+    window.register_command("list-tabs", lambda detail=False: _list_tabs(window, _flag(detail)))
     window.register_command(
         "set-active-tab",
         lambda name, dataset=None: window.set_active_tab(name, dataset=dataset),

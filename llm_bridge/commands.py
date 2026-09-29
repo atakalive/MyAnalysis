@@ -1,11 +1,30 @@
 """Command queue (LLM → GUI). All tiers share data/llm_state/commands/."""
 import json
+import logging
+import os
+import re
 import sys
 import time
+import traceback
 import uuid
 from datetime import datetime
 from common.filelock import exclusive_lock
-from llm_bridge.paths import commands_queue_dir, command_log_path
+from common.paths import atomic_write_text
+from llm_bridge.paths import (
+    commands_queue_dir, command_log_path, command_results_dir,
+    rotated_command_log_path,
+)
+
+_log = logging.getLogger(__name__)
+
+# 結果に招待の秘密（トークン・#token= リンク）を含む window verb。
+_SECRET_RESULT_VERBS: frozenset[str] = frozenset(
+    {"meeting-start", "meeting-token", "meeting-lan-link"}
+)
+_REDACTED = "<redacted>"
+_ID_RE = re.compile(r"[0-9a-f]{32}")   # submit() の uuid4().hex
+_RESULT_MAX_AGE_SEC = 3600.0
+_LOG_ROTATE_BYTES = 1 << 20   # 1 MiB。追記の前に判定するので各世代は「1 MiB 未満 + 最後の 1 エントリ」まで育つ
 
 
 def submit(tier: str, target: str | None, verb: str, args: dict) -> str:
@@ -32,6 +51,64 @@ def submit(tier: str, target: str | None, verb: str, args: dict) -> str:
     return cmd_id
 
 
+def _log_sig(path) -> tuple[int, int, int, int] | None:
+    """path の世代シグネチャ。無い・読めないときは None。
+    .1 は追記されず回転で丸ごと置き換わるだけなので、これが変われば回転が起きている。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _scan_from(path, start: int, cmd_id: str) -> tuple[dict | None, int]:
+    """path の start 以降の「改行で終わる行」だけを読み、id == cmd_id のエントリを探す。
+    返り値は (見つかったエントリ or None, 次に読む位置)。ファイルが無い・読めないときは
+    (None, start)。開いたファイルの大きさが start より小さければ 0 から読む。"""
+    try:
+        with open(path, "rb") as f:
+            if os.fstat(f.fileno()).st_size < start:
+                start = 0
+            f.seek(start)
+            chunk = f.read()
+    except OSError:
+        return None, start
+    last_nl = chunk.rfind(b"\n")
+    if last_nl == -1:
+        return None, start
+    for line in chunk[: last_nl + 1].decode("utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("id") == cmd_id:
+            return entry, start + last_nl + 1
+    return None, start + last_nl + 1
+
+
+def _resolve_result(entry: dict, cmd_id: str) -> dict:
+    """秘密の結果（result_redacted is True）なら results/<id>.json から本体を戻し、
+    ファイルを消す。読めない・壊れている・id が不正なら entry をそのまま返す。"""
+    if entry.get("result_redacted") is not True:
+        return entry
+    if not isinstance(cmd_id, str) or not _ID_RE.fullmatch(cmd_id):
+        return entry
+    p = command_results_dir() / f"{cmd_id}.json"
+    try:
+        result = json.loads(p.read_text(encoding="utf-8"))["result"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return entry
+    entry["result"] = result
+    entry.pop("result_redacted")
+    try:
+        p.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return entry
+
+
 def wait_for(cmd_id: str, timeout: float = 30.0, poll: float = 0.1) -> dict | None:
     """Block until command_log.jsonl contains an entry with id=cmd_id, or timeout.
 
@@ -39,35 +116,48 @@ def wait_for(cmd_id: str, timeout: float = 30.0, poll: float = 0.1) -> dict | No
     that long log files don't get re-scanned from the start each iteration.
     Only advances the offset past complete lines (terminated by newline) to avoid
     losing partially-written entries.
+
+    Rotation: _append_log moves the log to command_log.jsonl.1 once it reaches
+    _LOG_ROTATE_BYTES. Rotation is detected by a change of the .1 generation
+    signature (not by the main log shrinking); on detection .1 is scanned from
+    the start and the new main log is re-read from offset 0. .1 is also scanned
+    once on the first poll (rotation between submit and the first read).
+    Guarantee: if the log rotates twice between two consecutive polls (>= 1 MiB
+    written in one poll interval), the generation holding the entry may be gone
+    and this returns None on timeout — it never returns a wrong entry.
+
+    Secret results (meeting-* verbs) are logged as "<redacted>" with
+    result_redacted=True; the real result is read back from
+    data/llm_state/results/<id>.json (then deleted) and returned in `result`.
+
     Note: a stale entry (GUI was offline when submitted) is a valid completion
     — callers must check `status` on the returned dict.
     """
     log = command_log_path()
+    old = rotated_command_log_path()
     deadline = time.monotonic() + timeout
     offset = 0
+    old_sig = _log_sig(old)
+    first = True
     while time.monotonic() < deadline:
-        if log.exists():
-            try:
-                with open(log, "rb") as f:
-                    f.seek(offset)
-                    chunk = f.read()
-                last_nl = chunk.rfind(b"\n")
-                if last_nl == -1:
-                    time.sleep(poll)
-                    continue
-                complete = chunk[:last_nl + 1]
-                offset += last_nl + 1
-                for line in complete.decode("utf-8", errors="replace").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("id") == cmd_id:
-                        return entry
-            except OSError:
-                pass
+        sig = _log_sig(old)
+        if sig != old_sig:
+            # 回転が起きた。さっきまで読んでいた本体は .1 になった（2 回回っていれば消えた）。
+            # .1 を頭から探し、新しい本体は 0 から読み直す。
+            old_sig = sig
+            offset = 0
+            entry, _ = _scan_from(old, 0, cmd_id)
+            if entry is not None:
+                return _resolve_result(entry, cmd_id)
+        entry, offset = _scan_from(log, offset, cmd_id)
+        if entry is not None:
+            return _resolve_result(entry, cmd_id)
+        if first:
+            # submit から最初の読み取りまでの間に回っていた場合に備え、.1 も 1 回だけ見る
+            first = False
+            entry, _ = _scan_from(old, 0, cmd_id)
+            if entry is not None:
+                return _resolve_result(entry, cmd_id)
         time.sleep(poll)
     return None
 
@@ -116,8 +206,45 @@ def _append_log(entry: dict) -> None:
     log = command_log_path()
     lock_path = log.with_suffix(".jsonl.lock")
     with exclusive_lock(lock_path):
+        _rotate_if_needed(log)
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _rotate_if_needed(log) -> None:
+    """ロック内で呼ぶ。本体が _LOG_ROTATE_BYTES 以上なら .1 に回す（.1 は上書き）。
+    失敗（無い・Windows で他プロセスが開いている等）は今回は回さず、次の追記で再試行する。"""
+    try:
+        if log.stat().st_size < _LOG_ROTATE_BYTES:
+            return
+        os.replace(log, rotated_command_log_path())
+    except OSError:
+        return
+
+
+def _prune_results() -> None:
+    """results/ の *.json のうち _RESULT_MAX_AGE_SEC より古いものを消す。never raise。"""
+    try:
+        d = command_results_dir()
+        cutoff = time.time() - _RESULT_MAX_AGE_SEC
+        files = list(d.glob("*.json"))
+    except OSError:
+        return
+    for f in files:
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _write_result(cmd_id: str, result) -> None:
+    """秘密を含む結果を results/<id>.json に置く（wait_for が読んで消す）。"""
+    _prune_results()
+    atomic_write_text(
+        command_results_dir() / f"{cmd_id}.json",
+        json.dumps({"result": result}, ensure_ascii=False),
+    )
 
 
 def _execute(window, payload: dict) -> None:
@@ -131,6 +258,7 @@ def _execute(window, payload: dict) -> None:
     status = "ok"
     error = None
     result_repr = None
+    tb = None
     try:
         if tier == "window":
             dispatcher = window
@@ -157,12 +285,30 @@ def _execute(window, payload: dict) -> None:
             result_repr = _summarize(result)
     except Exception as e:
         status = "error"
-        error = repr(e)
+        error = f"{type(e).__name__}: {e}"
+        tb = traceback.format_exc(limit=-10)
+        _log.warning("command %s %s failed", tier, verb, exc_info=True)
+    extra: dict = {}
+    if tier == "window" and verb in _SECRET_RESULT_VERBS and status == "ok":
+        # 別ファイルの書き込みはログ追記より前（ログの行が見えた時点でファイルが在る）。
+        # 書けなければ結果は捨てる — 秘密をログに書くより CLI に届かない方を選ぶ。
+        cmd_id = payload.get("id")
+        redacted_to_file = False
+        if isinstance(cmd_id, str) and _ID_RE.fullmatch(cmd_id):
+            try:
+                _write_result(cmd_id, result_repr)
+                redacted_to_file = True
+            except OSError:
+                redacted_to_file = False
+        result_repr = _REDACTED
+        extra["result_redacted"] = redacted_to_file
     _append_log({
         **{k: payload.get(k) for k in ("id", "ts", "tier", "target", "verb", "args")},
         "status": status,
         "error": error,
         "result": result_repr,
+        **extra,
+        "traceback": tb,
         "completed_at": datetime.now().isoformat(timespec="milliseconds"),
     })
 
@@ -202,6 +348,7 @@ def start_watcher(window, *, resume_after: float | None = None) -> object:
     does not fire directoryChanged for files that already existed).
     """
     from PySide6.QtCore import QFileSystemWatcher
+    _prune_results()   # --wait 無しで残った秘密の結果を掃除（GUI 起動時）
     qd = commands_queue_dir()
     watcher = QFileSystemWatcher([str(qd)])
 

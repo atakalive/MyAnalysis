@@ -684,3 +684,28 @@ def test_register_dataset_format_custom_new(monkeypatch, capsys):
     assert kinds.index("register") < kinds.index("reload") < kinds.index("set_format")
     sf = [c for c in calls if c[0] == "set_format"][0]
     assert sf[1] == "newds" and sf[2] == "custom"
+
+
+def test_register_dataset_format_omitted_keeps_existing(monkeypatch, capsys):
+    """--format 省略時は set_format を呼ばず ensure_config だけ（既存の format を
+    上書きしない。Issue #100 D-7）。"""
+    calls = []
+
+    def fake_register_dataset(name, path, host):
+        return {"created": False, "name": name, "host": "HOST", "path": path}
+
+    monkeypatch.setattr("config.register_dataset", fake_register_dataset)
+    monkeypatch.setattr("config.reload_datasets", lambda: None)
+    monkeypatch.setattr(
+        "dataset_config.set_format", lambda name, fmt: calls.append(("set_format", name))
+    )
+    monkeypatch.setattr(
+        "dataset_config.ensure_config", lambda name: calls.append(("ensure_config", name))
+    )
+
+    import os
+    existing_path = os.getcwd()  # an existing path on this host
+    rc = bridge_main.main(["register-dataset", "newds", existing_path, "--no-open"])
+    assert rc == 0
+    assert [c for c in calls if c[0] == "set_format"] == []
+    assert [c for c in calls if c[0] == "ensure_config"] == [("ensure_config", "newds")]

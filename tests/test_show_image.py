@@ -41,17 +41,33 @@ def tif_path2(tmp_path):
 def test_show_image_new_tab(win, tif_path):
     from gui.imageviewer import ImageViewerPanel
     result = win.dispatch_command("show-image", path=str(tif_path))
-    assert result == "shown:viewer"
-    assert "viewer" in win.tab_names()
+    assert result == "shown:image"
+    assert "image" in win.tab_names()
     assert isinstance(win.active_tab().panel("viewer"), ImageViewerPanel)
 
 
 def test_show_image_update_same_tab(win, tif_path, tif_path2):
     win.dispatch_command("show-image", path=str(tif_path))
-    result = win.dispatch_command("show-image", path=str(tif_path2), name="viewer")
-    assert result == "updated:viewer"
-    assert win.tab_names().count("viewer") == 1
+    result = win.dispatch_command("show-image", path=str(tif_path2), name="image")
+    assert result == "updated:image"
+    assert win.tab_names().count("image") == 1
     assert win.active_tab().panel("viewer").nC == 2
+
+
+def test_show_then_show_image_default_names_keep_both_tabs(win, tif_path, tmp_path):
+    """show と show-image の既定タブ名が別（viewer / image）なので、名前を省略して
+    続けて実行しても図が画像に置き換わらない（Issue #100 D-5）。"""
+    from PySide6.QtGui import QPixmap
+    from gui.panels import FigurePanel
+    from llm_bridge import _make_show_handler
+    win.register_command("show", _make_show_handler(win))
+    png = tmp_path / "f.png"
+    QPixmap(10, 10).save(str(png))
+    win.dispatch_command("show", path=str(png))
+    win.dispatch_command("show-image", path=str(tif_path))
+    names = win.tab_names()
+    assert "viewer" in names and "image" in names
+    assert isinstance(win.find_tab("viewer", None).panel("figure"), FigurePanel)
 
 
 def test_show_image_invalid_panel(win, tif_path):

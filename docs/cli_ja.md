@@ -9,9 +9,9 @@ python -m llm_bridge <verb> ...
 - リポジトリ直下で、GUI と同じ venv の Python で実行する（別の場所からなら `PYTHONPATH=<リポジトリ>` を設定）。
 - `window` / `tab` は、起動中の GUI にコマンドを渡して実行させる。仕組みは `data/llm_state/commands/` にファイルを置くだけなので、次の点に注意する。
   - **GUI が起動していなくてもエラーにならない**（ID を表示して終了コード 0）。そのコマンドは次回起動時に捨てられる。起動確認には `python -m llm_bridge window list-tabs --wait 3`（終了コード 1 なら未起動か無応答）。
-  - `--wait [秒]`（既定 30 秒）は**必ず末尾に置く**。結果の JSON を表示する。タイムアウトすると終了コード 1 だが、GUI が動いていればコマンドは後で実行される（未起動なら次回起動時に捨てられる）。`--wait` を付けないと、結果は `data/llm_state/command_log.jsonl` に記録されるだけ。
+  - `--wait [秒]`（既定 30 秒）は**必ず末尾に置く**。結果の JSON を表示する。タイムアウトすると終了コード 1 だが、GUI が動いていればコマンドは後で実行される（未起動なら次回起動時に捨てられる）。`--wait` を付けないと、結果は `data/llm_state/command_log.jsonl` に記録されるだけ。ただし `meeting-start` / `meeting-token` / `meeting-lan-link` の結果はログでは `<redacted>` になり、本体は `--wait` で受け取るまで `data/llm_state/results/` に残る。
   - **終了コード 0 でも成功とは限らない。** JSON の `status` が `ok` 以外（`error` / `rejected` / `stale` など）なら理由は `error` にある。`ok` でも `result` が `error:…` や `false` なら失敗。
-  - `path=` は絶対パスで渡す。`k=v` の値は数値に見えれば（`1e3` などを含む）数値に変換される。
+  - `path=` は絶対パスで渡す。`k=v` の値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキーでは文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。`true` / `false` は文字列のまま。
 - 出力をファイルやパイプに流すときに日本語が化ける場合は、環境変数 `PYTHONUTF8=1` を設定する。
 
 ## 主な verb
@@ -47,7 +47,7 @@ python -m llm_bridge <verb> ...
 | `close-tab` / `set-active-tab` | `name=<タブ名> [dataset=<ds>]` | `true` / `false` |
 | `list-tabs` | `[detail=1]` | タブの一覧 |
 | `show` | `path=<絶対パス> [name=viewer] [slot=<パス>] [dataset=<ds>]` | 図ビューアに表示。`slot=right` / `bottom` で 2 枚目を並べる。`top/left` のように `/` で繋ぐと入れ子分割（2×2 など、深さ 6 まで） → `shown:<名前>` / `updated:<名前>` |
-| `show-image` | `path=<絶対パス> [name=viewer] [panel=left\|right] [slot=<パス>] [dataset=<ds>]` | 画像ビューアに表示。`slot=` は `show` と同じ分割パス（図と生画像をペインごとに混在可）。`slot` 省略時は最初の画像ペインをその場で更新 |
+| `show-image` | `path=<絶対パス> [name=image] [panel=left\|right] [slot=<パス>] [dataset=<ds>]` | 画像ビューアに表示。`slot=` は `show` と同じ分割パス（図と生画像をペインごとに混在可）。`slot` 省略時は最初の画像ペインをその場で更新 |
 | `toggle-chat-float` | — | チャットの切り離し/格納 |
 | `meeting-start` / `meeting-token` / `meeting-lan-link` / `meeting-stop` | → [ミーティング共有](meeting_share_ja.md#コマンドから操作する) | |
 | `reload` | `scope=tab target=<解析名>` | 解析タブの再読み込み → `reloaded-tab:<名前>` / `reload-tab-error:…` / `reload-busy:…`（エージェントの応答中などは実行されない） |

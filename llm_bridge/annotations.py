@@ -1,6 +1,5 @@
 """Annotation read/write + GUI-side file watcher."""
 import contextlib
-import json
 from common.filelock import exclusive_lock
 from common.paths import durable_read_json, durable_write_json
 import dataset_config
@@ -78,6 +77,16 @@ def clear(dataset: str, name: str, kind: str | None = None) -> None:
         _write(dataset, name, data)
 
 
+def _read_changed(p) -> dict | None:
+    """ファイル変更時にハンドラへ渡す注釈を読む。primary と .bak の新しい方を採り、
+    `_seq` を剥がした dict を返す。absent / unreadable は None（ハンドラを呼ばない）。
+
+    `read()` は使わない: absent / unreadable を `_empty()` にするので、同期の一時的な
+    欠落で表示中のマーカーが全部消えてしまう。"""
+    status, data = durable_read_json(p)
+    return data if status in ("ok", "recovered") else None
+
+
 def start_watcher(tab, dataset: str) -> object:
     """Watch annotations.json via parent directory; call tab.apply_annotations(dict) on change.
 
@@ -119,9 +128,8 @@ def start_watcher(tab, dataset: str) -> object:
         if mtime == last_mtime_ns[0]:
             return
         last_mtime_ns[0] = mtime
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        data = _read_changed(p)
+        if data is None:
             return
         tab.apply_annotations(data)
 

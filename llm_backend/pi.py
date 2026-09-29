@@ -24,6 +24,7 @@ from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
+    GUI_DISPLAY_VERBS,
     build_prompt_with_history, compose_system_prompt,
 )
 
@@ -49,7 +50,7 @@ _SYSTEM_PROMPT_PI = (
     " Never modify measurement files (CSV etc.); analysis output is written by"
     " the tools to the dataset's per-dataset work_dir (default _work, set in"
     " myanalysis.toml)."
-) + "\n" + NO_LOCAL_PERSISTENCE + "\n" + MOUNT_SAFE_EDITS
+) + "\n" + GUI_DISPLAY_VERBS + "\n" + NO_LOCAL_PERSISTENCE + "\n" + MOUNT_SAFE_EDITS
 
 
 class PiCodingAgentBackend:
