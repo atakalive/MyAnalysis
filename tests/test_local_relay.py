@@ -1057,12 +1057,24 @@ def test_scope_put_rejects_stale_version(clock):
 def test_scope_put_bad_version_400(clock):
     st = RelayState(ADMIN)
     _new_channel(st)
-    for v in ("abc", "-1", "１"):
+    # "9" * 5000 is all digits but past int()'s 4300-digit limit: must be a 400,
+    # not a ValueError escaping handle().
+    for v in ("abc", "-1", "１", "1" * 19, "9" * 5000):
         q = urllib.parse.quote(v)
         status, _, p = _call(st, "PUT", f"/sessions/ch1?v={q}", _admin_h(), _jbody([]))
-        assert status == 400 and _json(p)["error"] == "bad version", v
+        assert status == 400 and _json(p)["error"] == "bad version", v[:20]
         status, _, _ = _call(st, "PUT", f"/tabs/ch1?v={q}", _admin_h(), _jbody([]))
-        assert status == 400, v
+        assert status == 400, v[:20]
+    # 18 digits is still a valid version.
+    status, _, p = _call(st, "PUT", "/sessions/ch1?v=" + "9" * 18, _admin_h(), _jbody([]))
+    assert status == 200 and "stale" not in _json(p)
+
+
+def test_parse_decimal_bounds():
+    assert lr._parse_decimal("0") == 0
+    assert lr._parse_decimal("9" * 18) == int("9" * 18)
+    for bad in ("", "1" * 19, "9" * 5000, "-1", "+1", "1.0", "１", " 1", "1\n"):
+        assert lr._parse_decimal(bad) is None, repr(bad[:20])
 
 
 def test_scope_put_without_version_applies(clock):
@@ -1115,6 +1127,11 @@ def test_socket_unauth_huge_content_length_rejected_without_body():
     srv = lr.start_server(ADMIN)
     try:
         h = {"Content-Length": "1073741824"}
+        assert _raw_status(srv.port, _head("POST", "/msg/x/y", h)) == 410
+        assert _raw_status(srv.port, _head("POST", "/out/x/y", h)) == 401
+        # All digits but past int()'s 4300-digit limit: still answered (not a dropped
+        # connection from a ValueError before precheck).
+        h = {"Content-Length": "9" * 5000}
         assert _raw_status(srv.port, _head("POST", "/msg/x/y", h)) == 410
         assert _raw_status(srv.port, _head("POST", "/out/x/y", h)) == 401
     finally:
@@ -1180,9 +1197,12 @@ def test_socket_bad_content_length_400():
     srv = lr.start_server(ADMIN)
     try:
         _mk_live_channel(srv)
-        for bad in ("abc", "-5"):
+        for bad in ("abc", "-5", "1" * 19, "9" * 5000):
             h = {"Authorization": "Bearer " + SECRET, "Content-Length": bad}
-            assert _raw_status(srv.port, _head("POST", "/msg/ch1/s1", h)) == 400, bad
+            assert _raw_status(srv.port, _head("POST", "/msg/ch1/s1", h)) == 400, bad[:20]
+        # Admin route (no body cap) too: the digit cap, not the size cap, rejects it.
+        h = {"Authorization": "Bearer " + ADMIN, "Content-Length": "9" * 5000}
+        assert _raw_status(srv.port, _head("PUT", "/sessions/ch1", h)) == 400
     finally:
         srv.shutdown()
 

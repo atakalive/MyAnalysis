@@ -108,6 +108,17 @@ _CORS = {
 
 _BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 
+# Content-Length and the scope-PUT ``?v=`` are ASCII decimals of at most 18 digits
+# (fits int64; real values are far smaller). The digit cap is not cosmetic: int()
+# raises ValueError past sys.get_int_max_str_digits() (4300 by default), so a
+# syntax-only [0-9]+ check still lets a long all-digit header crash the handler.
+_DECIMAL_RE = re.compile(r"[0-9]{1,18}")
+
+
+def _parse_decimal(raw: str) -> "int | None":
+    """int for a 1-18 digit ASCII decimal, else None (never raises)."""
+    return int(raw) if _DECIMAL_RE.fullmatch(raw) else None
+
 
 def now_sec() -> int:
     return int(time.time())
@@ -829,9 +840,10 @@ class RelayState:
         v = self._q1(query, "v")
         if v is None:
             return None, None
-        if not re.fullmatch(r"[0-9]+", v):
+        n = _parse_decimal(v)
+        if n is None:
             return None, self._json({"error": "bad version"}, 400)
-        return int(v), None
+        return n, None
 
     @staticmethod
     def _parse_json(body: bytes):
@@ -973,14 +985,11 @@ def start_server(admin_key: str, *, html_path: "Path | None" = None,
                     t.cancel()
 
         def _content_length(self) -> "int | None":
-            """0 when absent, None when not a non-negative integer."""
+            """0 when absent, None when not a 1-18 digit decimal (see _parse_decimal)."""
             raw = self.headers.get("Content-Length")
             if raw is None:
                 return 0
-            raw = raw.strip()
-            if not re.fullmatch(r"[0-9]+", raw):
-                return None
-            return int(raw)
+            return _parse_decimal(raw.strip())
 
         def _dispatch(self) -> None:
             length = self._content_length()
