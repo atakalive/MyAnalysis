@@ -175,6 +175,26 @@ def test_unconvertible_updated_does_not_break_verbs():
     assert cs.show_session(ctx, a.id[:8])["updated"] == "-"
 
 
+@pytest.mark.parametrize("bad", ["x", None, True, 10**400, float("nan"), [1]])
+def test_bad_updated_type_does_not_break_search(bad):
+    """同期・手編集で updated に型違い・巨大な整数・NaN が入っても、並べ替えで落ちない。
+
+    不正な updated は 0.0 扱い（未設定と同じ）で、正しいチャットより後ろに並ぶ。"""
+    good = _sess([("user", "peak new")], updated=200.0, title="good")
+    odd = _sess([("user", "peak odd")], updated=100.0, title="odd")
+    odd.updated = bad
+    ctx = _ctx([odd, good])
+    assert [r["title"] for r in cs.list_sessions(ctx)] == ["good", "odd"]
+    assert cs.list_page(ctx)["total"] == 2
+    hits = cs.text_search(ctx, "peak")
+    assert [h.title for h in hits] == ["good", "odd"]
+    assert hits[1].updated == 0.0
+    assert [h["title"] for h in cs.search_hits(ctx, "peak")["hits"]] == ["good", "odd"]
+    assert cs.show_session(ctx, odd.id[:8])["updated"] == cs.format_ts(0.0)
+    req = SearchRequest(query="", scope="dataset", dataset="dsA", include_archived=False, ai=True)
+    assert "odd" in cs.build_overview(ctx, req)
+
+
 def test_list_sessions():
     a = _sess([("user", "q" * 200), ("assistant", "a")], updated=1.0, title="A")
     b = _sess([("assistant", "only")], updated=2.0, title="B")

@@ -13,6 +13,7 @@ system なので user/assistant は 1 以上。対象外のメッセージ（sys
 
 from __future__ import annotations
 
+import math
 import re
 import urllib.parse
 from dataclasses import dataclass, field
@@ -123,6 +124,21 @@ def _snippet(text: str, terms: list[str]) -> str:
     return s
 
 
+def _updated_value(s) -> float:
+    """s.updated を並べ替え・表示に使える float にする。never raise。
+
+    session_from_dict は updated の型を検証しない（同期・手編集で "x" や巨大な整数が入り得る）。
+    数値でない・bool・float にできない・非有限の値は 0.0（未設定の `or 0.0` と同じ扱い）。"""
+    u = getattr(s, "updated", None)
+    if isinstance(u, bool) or not isinstance(u, (int, float)):
+        return 0.0
+    try:
+        f = float(u)
+    except OverflowError:
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
 def format_ts(ts) -> str:
     """epoch 秒を "YYYY-MM-DD HH:MM"（ローカル時刻）にする。never raise。
 
@@ -169,7 +185,7 @@ def scope_sessions(ctx: SearchContext, *, scope: str = "dataset", dataset=None,
             if s.dataset is not None:
                 continue
         out.append(s)
-    out.sort(key=lambda s: -(s.updated or 0.0))
+    out.sort(key=lambda s: -_updated_value(s))
     return out
 
 
@@ -194,7 +210,7 @@ def text_search(ctx: SearchContext, query: str, *, scope: str = "dataset", datas
             hits.append(SearchHit(
                 session_id=s.id, dataset=s.dataset, title=_title_of(ctx, s),
                 archived=bool(getattr(s, "archived", False)), msg_index=i,
-                role=m.role, snippet=_snippet(text, terms), updated=s.updated or 0.0,
+                role=m.role, snippet=_snippet(text, terms), updated=_updated_value(s),
             ))
             if limit is not None and len(hits) >= limit:
                 return hits
@@ -243,7 +259,7 @@ def list_sessions(ctx: SearchContext, *, scope: str = "dataset", dataset=None,
             "sid": short_id(s.id),
             "title": _clip(_title_of(ctx, s), 80),
             "dataset": s.dataset,
-            "updated": format_ts(s.updated),
+            "updated": format_ts(_updated_value(s)),
             "archived": bool(getattr(s, "archived", False)),
             "n": len(msgs),
             "first_user": _clip(first, 80) if first else "",
@@ -370,7 +386,7 @@ def show_session(ctx: SearchContext, sid, *, start: int = 0, end: int | None = N
         "sid": short_id(s.id),
         "title": _title_of(ctx, s),
         "dataset": s.dataset,
-        "updated": format_ts(s.updated),
+        "updated": format_ts(_updated_value(s)),
         "n": len(targets),
         "messages": out,
         "truncated": truncated,
