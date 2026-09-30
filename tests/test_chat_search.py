@@ -156,6 +156,25 @@ def test_links_roundtrip():
 # ---- list / page ----
 
 
+@pytest.mark.parametrize("ts", [1e20, -1e20, 10**400, 1e13, "x"])
+def test_format_ts_never_raises(ts):
+    """同期ファイル由来の updated は日時にできない値もあり得る（1e20・巨大な整数・年の範囲外・型違い）。"""
+    assert cs.format_ts(ts) == "-"
+
+
+def test_format_ts_normal():
+    from datetime import datetime
+    assert cs.format_ts(100.0) == datetime.fromtimestamp(100.0).strftime("%Y-%m-%d %H:%M")
+
+
+def test_unconvertible_updated_does_not_break_verbs():
+    a = _sess([("user", "peak")], updated=1e20)
+    ctx = _ctx([a])
+    assert cs.list_sessions(ctx)[0]["updated"] == "-"
+    assert cs.search_hits(ctx, "peak")["hits"][0]["updated"] == "-"
+    assert cs.show_session(ctx, a.id[:8])["updated"] == "-"
+
+
 def test_list_sessions():
     a = _sess([("user", "q" * 200), ("assistant", "a")], updated=1.0, title="A")
     b = _sess([("assistant", "only")], updated=2.0, title="B")

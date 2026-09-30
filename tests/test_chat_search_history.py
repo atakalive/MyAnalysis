@@ -105,6 +105,18 @@ def test_invalid_entries_dropped(tmp_path):
     assert [x["query"] for x in h.load_history(tmp_path)[0]] == ["good", "next"]
 
 
+@pytest.mark.parametrize("ts", [1e20, -1e20, 10**400, 1e13])
+def test_unconvertible_ts_dropped(tmp_path, ts):
+    """有限でも日時にできない ts は load で落とす（一覧の日時表示で落ちないように）。
+
+    10**400 は math.isfinite 自体が OverflowError になる値。load_history は never raise。"""
+    assert h.valid_entry(_entry(ts=ts)) is False
+    data = {"version": 1, "entries": [_entry(ts=ts, query="bad"), _entry(query="good")]}
+    h.history_path(tmp_path).write_text(json.dumps(data), encoding="utf-8")
+    entries, status = h.load_history(tmp_path)
+    assert status == "ok" and [x["query"] for x in entries] == ["good"]
+
+
 def test_new_entry_valid():
     e = h.new_entry(_req(ai=True, hint="w", scope="all", dataset=None),
                     datasets=["dsA", "dsB"], n_hits=None, session_id="s")

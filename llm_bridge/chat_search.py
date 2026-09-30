@@ -123,8 +123,15 @@ def _snippet(text: str, terms: list[str]) -> str:
     return s
 
 
-def _fmt_time(ts) -> str:
-    return datetime.fromtimestamp(ts or 0.0).strftime("%Y-%m-%d %H:%M")
+def format_ts(ts) -> str:
+    """epoch 秒を "YYYY-MM-DD HH:MM"（ローカル時刻）にする。never raise。
+
+    updated / ts は同期ファイルから無検証で入り得る（1e20・巨大な整数・年 10000 以降・
+    Windows の負値）。datetime に変換できない値は "-" にする。"""
+    try:
+        return datetime.fromtimestamp(ts or 0.0).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError, TypeError):
+        return "-"
 
 
 def _title_of(ctx: SearchContext, s) -> str:
@@ -236,7 +243,7 @@ def list_sessions(ctx: SearchContext, *, scope: str = "dataset", dataset=None,
             "sid": short_id(s.id),
             "title": _clip(_title_of(ctx, s), 80),
             "dataset": s.dataset,
-            "updated": _fmt_time(s.updated),
+            "updated": format_ts(s.updated),
             "archived": bool(getattr(s, "archived", False)),
             "n": len(msgs),
             "first_user": _clip(first, 80) if first else "",
@@ -275,7 +282,7 @@ def search_hits(ctx: SearchContext, query: str, *, scope: str = "dataset", datas
             "dataset": h.dataset,
             "role": h.role,
             "snippet": h.snippet,
-            "updated": _fmt_time(h.updated),
+            "updated": format_ts(h.updated),
         } for h in page],
         "total": len(all_hits),
         "next_offset": _next_offset(offset, len(page), len(all_hits)),
@@ -363,7 +370,7 @@ def show_session(ctx: SearchContext, sid, *, start: int = 0, end: int | None = N
         "sid": short_id(s.id),
         "title": _title_of(ctx, s),
         "dataset": s.dataset,
-        "updated": _fmt_time(s.updated),
+        "updated": format_ts(s.updated),
         "n": len(targets),
         "messages": out,
         "truncated": truncated,

@@ -381,6 +381,7 @@
 "chat.search.dataset_closed" = "データセット「{dataset}」が開いていないため切り替えられません"
 "chat.search.restored_archived" = "アーカイブから戻しました: {title}"
 "backend.dialog.search_group" = "AI 検索用モデル"
+"backend.dialog.search_apply_failed" = "バックエンド/モデルの設定は適用しました。AI 検索用モデルは保存できませんでした: {error}"
 "chat.search.history.title_n" = "検索履歴 ({n})"
 "chat.search.history.col.time" = "日時"
 "chat.search.history.col.mode" = "種別"

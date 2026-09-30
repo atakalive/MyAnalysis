@@ -10,7 +10,6 @@ Markdown、検索履歴の記録。検索そのものは Qt 非依存の llm_bri
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QTimer
@@ -107,7 +106,7 @@ def hits_to_markdown(hits, req) -> str:
         if h.archived:
             name += _md_escape(tr("chat.search.result.archived_mark"))
         role = tr("chat.role.user") if h.role == "user" else tr("chat.role.assistant")
-        when = datetime.fromtimestamp(h.updated or 0.0).strftime("%Y-%m-%d %H:%M")
+        when = core.format_ts(h.updated)
         link = core.make_search_link(h.session_id, h.msg_index, req.query)
         lines.append(f"{i}. [{name}]({link}) · {role} · {when} — {_md_escape(h.snippet)}")
     if len(hits) > _MAX_MD_HITS:
@@ -426,7 +425,7 @@ class ChatSearchDialog(QDialog):
         self._history_tree.clear()
         for i, (ds, e) in enumerate(rows):
             item = QTreeWidgetItem([
-                datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d %H:%M"),
+                core.format_ts(e["ts"]),
                 tr("chat.search.mode.ai") if e["mode"] == "ai" else tr("chat.search.mode.text"),
                 _first_line(e["query"]),
                 tr("chat.search.scope.all_short") if e["scope"] == "all" else e["datasets"][0],

@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 HISTORY_FILE = "chat_search_history.json"
@@ -30,7 +31,15 @@ def valid_entry(e) -> bool:
     if not isinstance(e.get("id"), str) or not e["id"]:
         return False
     ts = e.get("ts")
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    try:
+        # 巨大な整数では isfinite 自体が OverflowError。有限でも 1e20 や年 10000 以降は
+        # 日時にできず、履歴の一覧（datetime.fromtimestamp）で落ちるので、ここで弾く。
+        if not math.isfinite(ts):
+            return False
+        datetime.fromtimestamp(ts)
+    except (OverflowError, OSError, ValueError):
         return False
     if e.get("mode") not in ("text", "ai"):
         return False

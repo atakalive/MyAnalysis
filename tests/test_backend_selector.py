@@ -4,6 +4,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from common.i18n import tr
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
@@ -519,18 +521,39 @@ def test_apply_follow_writes_empty_search_selection(monkeypatch, parent_widget):
     dlg._search_spy.assert_called_once_with(None, "", "")
 
 
-def test_search_apply_error_shows_message(monkeypatch, parent_widget):
+def test_search_apply_error_warns_partial_and_closes(monkeypatch, parent_widget):
+    """主の設定は書けたのに AI 検索用モデルの保存だけ失敗 → 部分適用だと警告して閉じる。
+
+    開いたままにすると、ディスクは新しい設定なのにチャットは古いバックエンドのまま
+    （apply_backend_change は accept の後で呼ばれる）になる。"""
     import gui.backend_selector_dialog as mod
     from PySide6.QtWidgets import QDialog
 
     _patch_config(monkeypatch)
-    monkeypatch.setattr(mod, "apply_selection", MagicMock())
-    shown = {}
-    monkeypatch.setattr(
-        mod.QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True)
-    )
+    main = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", main)
+    warned, critical = [], []
+    monkeypatch.setattr(mod.QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    monkeypatch.setattr(mod.QMessageBox, "critical", lambda *a, **k: critical.append(a[2]))
     dlg, _ = _make_dialog(monkeypatch, parent_widget)
     dlg._search_spy.side_effect = RuntimeError("bad toml")
     dlg._on_apply()
-    assert shown.get("called")
+    main.assert_called_once()
+    assert warned == [tr("backend.dialog.search_apply_failed", error="bad toml")]
+    assert critical == []
+    assert dlg.result() == QDialog.DialogCode.Accepted
+
+
+def test_main_apply_error_skips_search_and_stays_open(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from PySide6.QtWidgets import QDialog
+
+    _patch_config(monkeypatch)
+    monkeypatch.setattr(mod, "apply_selection", MagicMock(side_effect=OSError("denied")))
+    critical = []
+    monkeypatch.setattr(mod.QMessageBox, "critical", lambda *a, **k: critical.append(a[2]))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._on_apply()
+    assert critical == ["denied"]
+    dlg._search_spy.assert_not_called()
     assert dlg.result() != QDialog.DialogCode.Accepted

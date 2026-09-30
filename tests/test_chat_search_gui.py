@@ -445,6 +445,33 @@ def test_history_mixed_valid_invalid(env, dirs):
     d._history_tree.itemDoubleClicked.emit(item, 0)
 
 
+def test_history_unconvertible_ts_dialog_opens(env, dirs):
+    """同期で入った ts=1e20 / 巨大な整数の記録があってもダイアログが開き、正しい行だけ並ぶ。"""
+    import dataset_config
+    from llm_bridge import chat_search_history as h
+    w, _ = env
+    _add(w, "dsA", [("user", "peak")])
+    w.run_search(_req())
+    wd = dataset_config.get_work_dir("dsA", create=False)
+    entries, _ = h.load_history(wd)
+    bad1 = dict(entries[0], id="bad1", ts=1e20)
+    bad2 = dict(entries[0], id="bad2", ts=10**400)
+    h.history_path(wd).write_text(
+        json.dumps({"version": 1, "entries": [bad1, bad2] + entries}), encoding="utf-8")
+    (wd / "chat_search_history.json.bak").unlink()
+    d = _dialog(w)
+    assert d._history_tree.topLevelItemCount() == 1
+
+
+def test_hits_markdown_unconvertible_updated():
+    from gui import chat_search as gcs
+    from llm_bridge.chat_search import SearchHit
+    hit = SearchHit(session_id="abcdef12" + "0" * 24, dataset="dsA", title="t", archived=False,
+                    msg_index=1, role="user", snippet="s", updated=1e20)
+    md = gcs.hits_to_markdown([hit], _req())
+    assert " · - — " in md
+
+
 def test_history_unreadable(env, dirs):
     import dataset_config
     from llm_bridge import chat_search_history as h

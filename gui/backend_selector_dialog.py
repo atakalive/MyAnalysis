@@ -500,13 +500,22 @@ class BackendSelectorDialog(QDialog):
         provider = self._current_provider_text(engine)
         try:
             self._do_apply(engine, model, provider)
-            self._apply_search_selection()
         except (RuntimeError, OSError) as e:
             # RuntimeError = set_toml_keys validation / rollback double-fault;
             # OSError (incl. PermissionError) = raw IO on either write. Both must
             # surface to the user, not become an uncaught Qt slot exception.
             QMessageBox.critical(self, tr("backend.dialog.title"), str(e))
             return
+        try:
+            self._apply_search_selection()
+        except (RuntimeError, OSError, TypeError) as e:
+            # 主の設定はもう書けている。ダイアログを開いたままにすると、ディスクには
+            # 新しい設定があるのにチャットは古いバックエンドのまま（apply_backend_change は
+            # accept 後に呼ばれる）になるので、部分適用だと知らせたうえで閉じる。
+            QMessageBox.warning(
+                self, tr("backend.dialog.title"),
+                tr("backend.dialog.search_apply_failed", error=str(e)),
+            )
         self._stop_ping_worker()
         super().accept()
 
