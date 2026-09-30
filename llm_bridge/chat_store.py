@@ -15,6 +15,7 @@ here takes a `pathlib.Path` work_dir / target path.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import time
@@ -180,6 +181,26 @@ def session_from_dict(data: dict) -> ChatSession:
         engine_provider=_opt_str("engine_provider"),
         persona=persona,
     )
+
+
+# 指紋に入れないフィールド: order は並び位置として別に判定し、dataset はファイルの
+# 置き場所が真実（merge_dataset_sessions が付け直す）なので内容に数えない。
+_FINGERPRINT_EXCLUDE = ("order", "dataset")
+
+
+def content_fingerprint(sess: ChatSession) -> str:
+    """永続される内容の指紋（order と dataset を除く）。保存時の変化判定に使う（Issue #106 A-3）。
+
+    updated は PC 間で一意な改訂番号ではない（時計が遅れた 2 台がどちらも
+    max(time, T + 1e-3) で同じ値を作り得る）ので、内容の同一性は updated ではなく
+    この指紋で見る。session_from_dict を一度通して正規化してから数えるので、
+    ディスクから読んだ版と手元の版で表記ゆれ（空白だけのエンジン指定など）が出ない。
+    """
+    d = session_to_dict(session_from_dict(session_to_dict(sess)))
+    for k in _FINGERPRINT_EXCLUDE:
+        d.pop(k, None)
+    text = json.dumps(d, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # ----- factory -----

@@ -66,7 +66,7 @@ _touched: set[str] = set()
 class ChatBaseline(NamedTuple):
     """チャット 1 件が最後にディスクと一致していた時点の記録（A-3）。"""
     work_dir: str            # _norm_dir(読み書きした work_dir)
-    updated: float | None    # そのときの updated
+    fingerprint: str         # そのときの chat_store.content_fingerprint（order・dataset を除く内容）
     order: float             # 手元の一覧での並び位置（書いた order、開いた・取り込んだ時点の位置）
 
 
@@ -771,6 +771,8 @@ def _save_chat_sessions(window) -> list[str]:
 
     A-3（Issue #106）: 時刻の大小ではなく、前回ディスクと一致していた時点
     （_chat_baseline）からの変化で「書く／取り込む／書かない／失敗」を決める。
+    内容の変化は chat_store.content_fingerprint（updated ではない）で、並べ替えは
+    一覧での位置で見る。
     PC 間の排他制御は無い（best-effort。判定から書込までの間の他 PC の変更は残る）。
     """
     sessions = getattr(window, "chat_sessions", lambda: [])()
@@ -836,7 +838,10 @@ def _save_chat_sessions(window) -> list[str]:
                     base = _chat_baseline.get(key)
                     moved = base is not None and base.work_dir != wd   # 出力先が変わった
                     new_order = float(idx)
-                    content_changed = base is None or sess.updated != base.updated
+                    # 内容の同一性は updated ではなく指紋で見る（updated は時計が遅れた
+                    # 2 台で同じ値になり得るので、別の本文を「同じ」と取り違える）。
+                    mem_fp = chat_store.content_fingerprint(sess)
+                    content_changed = base is None or mem_fp != base.fingerprint
                     order_changed = base is not None and new_order != base.order
                     status, disk = chat_store.read_session_file_status(work_dir, sess.id)
                     if moved:
@@ -850,7 +855,8 @@ def _save_chat_sessions(window) -> list[str]:
                             action = "fail"      # 手元が変わった／読めない → どちらが正しいか決められない
                     elif content_changed:
                         action = "write"         # 手元の内容が変わった（新規を含む）。衝突は手元が勝つ
-                    elif status == "ok" and disk.updated != base.updated:
+                    elif (status == "ok"
+                          and chat_store.content_fingerprint(disk) != base.fingerprint):
                         action = "adopt"         # ディスクの内容だけが変わった（手元の並べ替えより優先）
                     elif status == "ok":
                         action = "write" if order_changed else "skip"
@@ -861,7 +867,7 @@ def _save_chat_sessions(window) -> list[str]:
                     if action == "write":
                         sess.order = new_order
                         chat_store.write_session_file(work_dir, sess)
-                        _chat_baseline[key] = ChatBaseline(wd, sess.updated, new_order)
+                        _chat_baseline[key] = ChatBaseline(wd, mem_fp, new_order)
                     elif action == "adopt":
                         to_adopt.append((disk, new_order))
                     elif action == "fail":
@@ -892,7 +898,7 @@ def _save_chat_sessions(window) -> list[str]:
                 for disk, order in to_adopt:
                     if disk.id in adopted:
                         _chat_baseline[(ds, disk.id)] = ChatBaseline(
-                            wd, disk.updated, order
+                            wd, chat_store.content_fingerprint(disk), order
                         )
         except Exception:
             _log.warning(
@@ -1196,7 +1202,7 @@ def open_dataset(window, dataset: str) -> str:
                     for s in loaded:
                         if s.id in adopted and s.id in pos:
                             _chat_baseline[(dataset, s.id)] = ChatBaseline(
-                                wd, s.updated, pos[s.id]
+                                wd, chat_store.content_fingerprint(s), pos[s.id]
                             )
             except Exception:
                 _log.warning(

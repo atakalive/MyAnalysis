@@ -3,6 +3,7 @@ per-file IO round-trip, dataset load, delete, and merge rules."""
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -12,6 +13,7 @@ from llm_bridge.chat_store import (
     ChatSession,
     SCHEMA_VERSION,
     _DEFAULT_TITLE,
+    content_fingerprint,
     delete_session_file,
     fork_session,
     load_dataset_sessions,
@@ -316,6 +318,28 @@ def test_merge_older_keeps_existing():
     a_old = _s("a", 1.0)
     out = merge_sessions([a], [a_old])
     assert out[0] is a
+
+
+def test_content_fingerprint_covers_content_but_not_order_or_dataset():
+    """保存時の変化判定の指紋（Issue #106 A-3）。order と dataset は数えず、
+    本文や updated は数える。正規化されて同じになる表記ゆれは同じ指紋になる。"""
+    a = _sample_session()
+    moved = copy.deepcopy(a)
+    moved.order = a.order + 7.0
+    moved.dataset = "other"
+    assert content_fingerprint(moved) == content_fingerprint(a)
+    body = copy.deepcopy(a)
+    body.messages[-1] = Message(role="assistant", content="different")
+    assert content_fingerprint(body) != content_fingerprint(a)
+    stamp = copy.deepcopy(a)
+    stamp.updated = (a.updated or 0.0) + 1.0
+    assert content_fingerprint(stamp) != content_fingerprint(a)
+    blank, none = copy.deepcopy(a), copy.deepcopy(a)
+    blank.engine_model = "  "      # session_from_dict が None に正規化する
+    none.engine_model = None
+    assert content_fingerprint(blank) == content_fingerprint(none)
+    # ディスクへ書いて読み戻した版と同じ指紋になる
+    assert content_fingerprint(session_from_dict(session_to_dict(a))) == content_fingerprint(a)
 
 
 def test_merge_prefer_incoming_replaces_older():

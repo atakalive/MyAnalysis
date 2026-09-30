@@ -1418,10 +1418,15 @@ def _disk_copy(sess, *, text=None, updated=None, order=None):
     return d
 
 
-def _set_base(ds, sid, work_dir, updated, order=0.0):
-    session._chat_baseline[(ds, sid)] = session.ChatBaseline(
-        session._norm_dir(work_dir), updated, order
+def _set_base(ds, sess, work_dir, order=0.0):
+    """sess の今の内容を baseline（最後にディスクと一致した版）として置く。"""
+    session._chat_baseline[(ds, sess.id)] = session.ChatBaseline(
+        session._norm_dir(work_dir), chat_store.content_fingerprint(sess), order
     )
+
+
+def _fp(sess):
+    return chat_store.content_fingerprint(sess)
 
 
 def _fail_chat_writes(monkeypatch, sids):
@@ -1488,7 +1493,7 @@ def _disk_changed_setup(text="disk", delta=50.0):
     mem = _chat("ds_a", "mem")
     disk = _disk_copy(mem, text=text, updated=mem.updated + delta, order=0.0)
     chat_store.write_session_file(work_dir, disk)
-    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    _set_base("ds_a", mem, work_dir, 0.0)
     return work_dir, mem, disk
 
 
@@ -1500,7 +1505,7 @@ def test_chat_disk_only_change_is_adopted_not_written(ds_env):
     saved, failed = session.save_all(win)
     assert _chat_bytes(work_dir, mem.id) == before
     assert win._sessions[0].messages[-1].content == "disk"
-    assert session._chat_baseline[("ds_a", mem.id)].updated == disk.updated
+    assert session._chat_baseline[("ds_a", mem.id)].fingerprint == _fp(disk)
     assert win.merge_calls == 1
     assert failed == []
 
@@ -1522,7 +1527,7 @@ def test_chat_adopt_batched_per_dataset(ds_env):
     for i, m in enumerate(mems):
         chat_store.write_session_file(
             work_dir, _disk_copy(m, text="d", updated=m.updated + 5, order=float(i)))
-        _set_base("ds_a", m.id, work_dir, m.updated, float(i))
+        _set_base("ds_a", m, work_dir, float(i))
     win = _ChatFakeWindow(mems)
     session.save_all(win)
     assert win.merge_calls == 1
@@ -1535,7 +1540,7 @@ def _written_setup(text="hi"):
     mem = _chat("ds_a", text)
     mem.order = 0.0
     chat_store.write_session_file(work_dir, _disk_copy(mem))
-    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    _set_base("ds_a", mem, work_dir, 0.0)
     return work_dir, mem
 
 
@@ -1553,7 +1558,7 @@ def test_chat_local_only_change_written(ds_env):
     session.save_all(_ChatFakeWindow([mem]))
     disk = _read_disk(work_dir, mem.id)
     assert disk.messages[-1].content == "local"
-    assert session._chat_baseline[("ds_a", mem.id)].updated == mem.updated
+    assert session._chat_baseline[("ds_a", mem.id)].fingerprint == _fp(mem)
 
 
 def test_chat_both_changed_local_wins(ds_env):
@@ -1602,7 +1607,7 @@ def _two_written():
     for i, s in enumerate((a, b)):
         s.order = float(i)
         chat_store.write_session_file(work_dir, _disk_copy(s))
-        _set_base("ds_a", s.id, work_dir, s.updated, float(i))
+        _set_base("ds_a", s, work_dir, float(i))
     return work_dir, a, b
 
 
@@ -1626,18 +1631,48 @@ def test_chat_local_reorder_loses_to_disk_content_change(ds_env):
     assert win._sessions[1].messages[-1].content == "disk"
 
 
+def test_chat_same_updated_other_body_not_clobbered_by_reorder(ds_env):
+    """時計が baseline より遅れた 2 台は、どちらも max(time, T + 1e-3) で同じ updated を作る。
+    他の PC が後から同じ updated・別の本文で保存した版を、手元の並べ替えの保存で
+    書き戻さない（内容の同一性は updated でなく指紋で見る。reviewer code R1 P0）。"""
+    session._touched.clear()
+    work_dir, a, b = _two_written()
+    t1 = a.updated + 1e-3                       # 両 PC が作る同じ updated
+    a.messages[-1] = Message(role="user", content="mine")
+    a.updated = t1
+    session.save_all(_ChatFakeWindow([a, b]))   # 手元の版を保存（baseline＝手元の版）
+    assert _read_disk(work_dir, a.id).messages[-1].content == "mine"
+    theirs = _disk_copy(a, text="theirs", updated=t1, order=0.0)
+    chat_store.write_session_file(work_dir, theirs)   # 他の PC が後から保存
+    before = _chat_bytes(work_dir, a.id)
+    win = _ChatFakeWindow([b, a])               # 手元で並べ替え
+    saved, failed = session.save_all(win)
+    assert _chat_bytes(work_dir, a.id) == before
+    assert _read_disk(work_dir, a.id).messages[-1].content == "theirs"
+    assert win._sessions[1].messages[-1].content == "theirs"   # 取り込まれる
+    assert failed == []
+
+
+def test_chat_content_change_without_updated_change_written(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    mem.messages[-1] = Message(role="user", content="edited")   # updated は変えない
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _read_disk(work_dir, mem.id).messages[-1].content == "edited"
+
+
 def test_chat_deleted_elsewhere_not_resurrected(ds_env):
     session._touched.clear()
     work_dir = dataset_config.get_work_dir("ds_a")
     mem = _chat("ds_a")
-    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    _set_base("ds_a", mem, work_dir, 0.0)
     saved, failed = session.save_all(_ChatFakeWindow([mem]))
     assert not _chat_path(work_dir, mem.id).exists()
     assert failed == []
     # 位置だけが変わった版でも作られない。
     a, b = _chat("ds_a"), _chat("ds_a")
-    _set_base("ds_a", a.id, work_dir, a.updated, 0.0)
-    _set_base("ds_a", b.id, work_dir, b.updated, 1.0)
+    _set_base("ds_a", a, work_dir, 0.0)
+    _set_base("ds_a", b, work_dir, 1.0)
     saved, failed = session.save_all(_ChatFakeWindow([b, a]))
     assert not _chat_path(work_dir, a.id).exists()
     assert not _chat_path(work_dir, b.id).exists()
@@ -1648,7 +1683,7 @@ def test_chat_deleted_elsewhere_local_edit_rewritten(ds_env):
     session._touched.clear()
     work_dir = dataset_config.get_work_dir("ds_a")
     mem = _chat("ds_a")
-    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    _set_base("ds_a", mem, work_dir, 0.0)
     mem.updated += 1
     session.save_all(_ChatFakeWindow([mem]))
     assert _chat_path(work_dir, mem.id).exists()
@@ -1660,7 +1695,7 @@ def test_chat_new_session_without_baseline_written(ds_env):
     mem = _chat("ds_a")
     session.save_all(_ChatFakeWindow([mem]))
     assert _chat_path(work_dir, mem.id).exists()
-    assert session._chat_baseline[("ds_a", mem.id)].updated == mem.updated
+    assert session._chat_baseline[("ds_a", mem.id)].fingerprint == _fp(mem)
 
 
 def test_chat_work_dir_changed_absent_written(ds_env, tmp_path):
@@ -1669,7 +1704,7 @@ def test_chat_work_dir_changed_absent_written(ds_env, tmp_path):
     old = tmp_path / "old_wd"
     old.mkdir()
     mem = _chat("ds_a")
-    _set_base("ds_a", mem.id, old, mem.updated, 0.0)
+    _set_base("ds_a", mem, old, 0.0)
     session.save_all(_ChatFakeWindow([mem]))
     assert _chat_path(work_dir, mem.id).exists()
     assert session._chat_baseline[("ds_a", mem.id)].work_dir == session._norm_dir(work_dir)
@@ -1684,7 +1719,7 @@ def _moved_same_id_setup(tmp_path):
     chat_store.write_session_file(wd_a, _disk_copy(mem))
     chat_store.write_session_file(
         wd_b, _disk_copy(mem, text="B", updated=mem.updated + 3))
-    _set_base("ds_a", mem.id, wd_a, mem.updated, 0.0)
+    _set_base("ds_a", mem, wd_a, 0.0)
     return wd_b, mem
 
 
@@ -1827,7 +1862,7 @@ def test_open_dataset_records_chat_baseline_only_for_adopted(ds_env):
     assert ("ds_a", x.id) not in session._chat_baseline
     base = session._chat_baseline[("ds_a", y.id)]
     assert base.work_dir == session._norm_dir(work_dir)
-    assert base.updated == y.updated
+    assert base.fingerprint == _fp(y)
     assert base.order == 0.0   # chat_sessions() での位置（ディスクの order 1 ではない）
 
     session._chat_baseline.clear()
@@ -1847,7 +1882,7 @@ def test_open_dataset_chat_baseline_order_is_merged_position(ds_env):
     work_dir = dataset_config.get_work_dir("ds_a")
     y, x = _write_disk_chats(work_dir, 0, 1)   # Y が先頭（他の PC で新規）、X は 2 番目
     x_mem = copy.deepcopy(x)
-    _set_base("ds_a", x.id, work_dir, x.updated, 0.0)
+    _set_base("ds_a", x, work_dir, 0.0)
     cw = _MergingCW(pool=[x_mem])
     win = _ChatDispatchWindow(cw)
     session.open_dataset(win, "ds_a")
