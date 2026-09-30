@@ -220,6 +220,10 @@ class MeetingShareWindow(QWidget):
         self._token = self._relay.current_token()
         if self._token:
             self._token_edit.setText(self._token)
+        # A tunnel failure that happened before this window existed (e.g. a CLI
+        # meeting-start) never reached _on_state — surface its reason once (B-10).
+        if self._relay.share_status() in ("tunnel_failed", "external_unavailable"):
+            self._log_tunnel_reason()
 
         self._refresh_lists()
         self._update_enabled()
@@ -243,6 +247,9 @@ class MeetingShareWindow(QWidget):
         lan_base = self._relay.lan_base_url()
         if lan_base:
             self._log_line(tr("meeting.lan.ready", url=lan_base))
+        elif lan:
+            # ホスト IP が空 → relay は LAN なしで開始している（B-27(3)）。
+            self._log_line(tr("meeting.lan.no_host"))
         # Token arrives asynchronously via _on_token_ready (tunnel URL resolves
         # off-thread); LAN リンクは meeting_start 完了時点で final（_update_enabled が
         # relay.lan_link() を live 照会して LAN ボタンを有効化する）。
@@ -360,11 +367,13 @@ class MeetingShareWindow(QWidget):
             self._token = ""
             self._token_edit.setText("")
             self._log_line(tr("meeting.state.external_unavailable"))
+            self._log_tunnel_reason()
         elif state == "tunnel_failed":
             # 外部トークンのみクリア（LAN ボタンを道連れにしない）。
             self._token = ""
             self._token_edit.setText("")
             self._log_line(tr("meeting.state.tunnel_failed"))
+            self._log_tunnel_reason()
         self._update_state_label()
         self._update_enabled()
 
@@ -396,8 +405,10 @@ class MeetingShareWindow(QWidget):
             remaining = 0
         h, rem = divmod(remaining, 3600)
         m, _s = divmod(rem, 60)
+        ph, prem = divmod(self._relay.ttl_sec(), 3600)
         self._remaining_label.setText(
-            tr("meeting.remaining", remaining=f"{h}h{m:02d}m", period="")
+            tr("meeting.remaining", remaining=f"{h}h{m:02d}m",
+               period=f"{ph}h{prem // 60:02d}m")
         )
 
     # ---- list rendering ----
@@ -410,11 +421,16 @@ class MeetingShareWindow(QWidget):
         summaries = cw.session_summaries() if cw is not None else []
         cur_ds = getattr(self._window, "current_dataset", None)
         sharing = self._relay.is_sharing()
+        # 規則による非公開（未設定チャット・非公開チャットの分岐）を先に記録する。共有前も
+        # 呼ぶので、開始前の行のチェックが実際に開始したときの公開範囲と一致する（B-6）。
+        self._relay.classify_private_sessions(summaries)
         self._relay.absorb_new_sessions(summaries)
         published = self._relay.published_session_ids()
         # absorb は archived 込みの full summaries で known をマークできるが、以降の表示
-        # ・件数（行・has_new）は archived を除外する。
-        summaries = [s for s in summaries if not s.get("archived")]
+        # ・件数（行・has_new）は archived を除外する。共有されるのは開いているデータ
+        # セットのチャットだけなので、閉じた・未設定のものも一覧に出さない（Issue #107）。
+        summaries = [s for s in summaries
+                     if not s.get("archived") and self._relay.ds_shared(s["dataset"])]
 
         sig = tuple((s["id"], s["dataset"], s["title"]) for s in summaries) + (sharing,)
         if sig != self._sess_sig:
@@ -443,6 +459,8 @@ class MeetingShareWindow(QWidget):
             if name is None:
                 continue
             tds = (getattr(t, "session_spec", None) or {}).get("dataset")
+            if not self._relay.ds_shared(tds) or getattr(t, "is_placeholder", False):
+                continue
             tab_pairs.append(("" if tds is None else tds, name))
         pub_tabs = self._relay.published_tabs()
         tsig = tuple(tab_pairs) + (sharing,)
@@ -457,6 +475,7 @@ class MeetingShareWindow(QWidget):
             if w is not None:
                 w.deleteLater()
         self._sess_boxes = {}
+        optout = self._relay.session_optout()
         # group by dataset (None last)
         by_ds: dict = {}
         for s in summaries:
@@ -470,7 +489,7 @@ class MeetingShareWindow(QWidget):
                 if sharing:
                     box.setChecked(s["id"] in published)
                 else:
-                    box.setChecked(True)   # default scope = all sessions
+                    box.setChecked(s["id"] not in optout)   # default = shared unless opted out
                 if ds != cur_ds:
                     box.setText(box.text() + " " + tr("meeting.other_dataset_note"))
                 box.toggled.connect(self._on_session_toggle)
@@ -486,6 +505,7 @@ class MeetingShareWindow(QWidget):
             if w is not None:
                 w.deleteLater()
         self._tab_boxes = {}
+        tab_optout = self._relay.tab_optout()
         # group by dataset ("" = null group, sorted last) — mirrors _rebuild_session_rows
         by_ds: dict = {}
         for (ds, name) in pairs:
@@ -496,7 +516,8 @@ class MeetingShareWindow(QWidget):
             self._tab_layout.addWidget(header)
             for name in by_ds[ds]:
                 box = QCheckBox(name)
-                box.setChecked((ds, name) in pub_tabs if sharing else True)
+                box.setChecked((ds, name) in pub_tabs if sharing
+                               else (ds, name) not in tab_optout)
                 box.toggled.connect(self._on_tab_toggle)
                 self._tab_layout.addWidget(box)
                 self._tab_boxes[(ds, name)] = box
@@ -504,6 +525,10 @@ class MeetingShareWindow(QWidget):
         self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
     def _on_session_toggle(self, _checked=False) -> None:
+        # opt-out は共有中かどうかに関係なく記録する（停止→開始でも外れたまま。B-5）。
+        boxes = self._sess_boxes
+        self._relay.set_session_optout(
+            set(boxes), {sid for sid, b in boxes.items() if b.isChecked()})
         if self._relay.is_sharing():
             checked = {sid for sid, box in self._sess_boxes.items() if box.isChecked()}
             visible = set(self._sess_boxes)                          # いま描画中の box の全 sid
@@ -517,9 +542,12 @@ class MeetingShareWindow(QWidget):
         self._refresh_lists()
 
     def _on_tab_toggle(self, _checked=False) -> None:
+        boxes = self._tab_boxes
+        checked = {key for key, b in boxes.items() if b.isChecked()}
+        self._relay.set_tab_optout(set(boxes), checked)
         if self._relay.is_sharing():
-            keys = [key for key, box in self._tab_boxes.items() if box.isChecked()]
-            self._relay.set_published_tabs(keys)
+            preserved = self._relay.published_tabs() - set(boxes)   # 非表示だが公開中（閉じたデータセット等）
+            self._relay.set_published_tabs(checked | preserved)
         self._sync_select_all(self._tab_boxes, self._tab_select_all)
 
     def _on_select_all_sessions(self, _checked=False) -> None:
@@ -531,6 +559,8 @@ class MeetingShareWindow(QWidget):
             b.blockSignals(True)
             b.setChecked(target)
             b.blockSignals(False)
+        self._relay.set_session_optout(
+            set(boxes), {sid for sid, b in boxes.items() if b.isChecked()})
         if self._relay.is_sharing():
             checked = {sid for sid, b in boxes.items() if b.isChecked()}
             preserved = self._relay.published_session_ids() - set(boxes)  # 非表示だが published を温存
@@ -546,9 +576,11 @@ class MeetingShareWindow(QWidget):
             b.blockSignals(True)
             b.setChecked(target)
             b.blockSignals(False)
+        checked = {key for key, b in boxes.items() if b.isChecked()}
+        self._relay.set_tab_optout(set(boxes), checked)
         if self._relay.is_sharing():
-            keys = [key for key, b in boxes.items() if b.isChecked()]
-            self._relay.set_published_tabs(keys)
+            preserved = self._relay.published_tabs() - set(boxes)   # 非表示だが公開中（閉じたデータセット等）
+            self._relay.set_published_tabs(checked | preserved)
         self._sync_select_all(boxes, self._tab_select_all)
 
     def _sync_select_all(self, boxes, master) -> None:
@@ -566,6 +598,11 @@ class MeetingShareWindow(QWidget):
 
     def _log_line(self, text: str) -> None:
         self._log.appendPlainText(time.strftime("%H:%M:%S ") + text)
+
+    def _log_tunnel_reason(self) -> None:
+        reason = self._relay.last_tunnel_error()
+        if reason:
+            self._log_line(tr("meeting.tunnel.reason", error=reason))
 
     def _update_state_label(self) -> None:
         # relay.share_status() を SSOT にする（_token/_lan_link の有無から派生させると

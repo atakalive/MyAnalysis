@@ -49,6 +49,47 @@ TTL_MAX = 86400        # channel ttl clamp max (24h)
 MSG_TTL = 86400        # message liveness (seconds) = 24h
 MAX_NEW_SESSIONS = 20  # guest new-chat request queue cap (abuse backstop, Issue #81)
 
+# Request-size / rate / connection limits (Issue #107 B-7). Only guest routes get a
+# body cap: admin (the host itself, already authenticated) sends arbitrarily long
+# out/backlog bodies, and a cap there would drop them silently.
+_KiB = 1024
+GUEST_BODY_MAX = 128 * _KiB    # ゲストの POST 本体（JSON 全体＝envelope 込みのバイト数）
+MSG_TEXT_MAX = 16000           # /msg の text の文字数（Python の len、コードポイント数）
+NAME_MAX = 64                  # 文字数（/msg・/newsession・/presence の name）
+PRESENCE_FIELD_MAX = 256       # 文字数（/presence の pid・sid・tab・ds）
+MAX_PRESENCE = 200             # チャンネルあたり
+MAX_IN_MSGS = 1000             # チャンネルあたり
+HANDLER_TIMEOUT_SEC = 30       # 1 回の読み書きの無通信の上限（socket timeout）
+REQUEST_DEADLINE_SEC = 60.0    # 接続からこの時間でソケットを切る（処理スレッドの終了は保証しない）
+MAX_CONNECTIONS = 64           # 同時に処理する接続の上限
+
+# (method, seg[0], len(seg)) -> ("admin" | "guest", 本体の上限バイト。None は上限なし)
+# One entry per _route branch (17). A combination not listed here is either
+# unauthenticated (OPTIONS, GET /) or a 404, and gets a body cap of 0.
+_ROUTE_AUTH = {
+    ("POST", "admin", 2): ("admin", None),
+    ("DELETE", "admin", 3): ("admin", None),
+    ("PUT", "sessions", 2): ("admin", None),
+    ("PUT", "tabs", 2): ("admin", None),
+    ("PUT", "heartbeat", 2): ("admin", None),
+    ("POST", "out", 3): ("admin", None),
+    ("PUT", "backlog", 3): ("admin", None),
+    ("GET", "inbound", 2): ("admin", None),
+    ("GET", "newsessions", 2): ("admin", None),
+    ("GET", "presence", 2): ("admin", None),
+    ("PUT", "view", 3): ("admin", None),
+    ("POST", "msg", 3): ("guest", GUEST_BODY_MAX),
+    ("POST", "newsession", 2): ("guest", GUEST_BODY_MAX),
+    ("POST", "presence", 2): ("guest", GUEST_BODY_MAX),
+    ("GET", "view", 3): ("guest", 0),
+    ("GET", "poll", 3): ("guest", 0),
+    ("GET", "history", 3): ("guest", 0),
+}
+
+# Per-(channel, route) token bucket: (refill per second, burst). Not per peer —
+# behind cloudflared every guest arrives from 127.0.0.1.
+_RATE_LIMITS = {"msg": (5.0, 20), "newsession": (1.0, 5), "presence": (10.0, 30)}
+
 _B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 # Sentinel for "body was not valid JSON" — distinct from a valid JSON ``null``
@@ -114,11 +155,16 @@ def _header_get(headers, name: str) -> str:
 class RelayState:
     """Socket-independent routing core. Drive via ``handle()``."""
 
-    def __init__(self, admin_key: str, html_path: "Path | None" = None) -> None:
+    def __init__(self, admin_key: str, html_path: "Path | None" = None, *,
+                 mono=None) -> None:
         self._admin = admin_key or ""
         self._html_path = html_path  # None -> repo_root()/relay-worker/chatdock.html
         self._lock = threading.Lock()
         self._ch: dict[str, dict] = {}
+        # Rate-limit clock (injectable for tests) and buckets: (ch, route) ->
+        # (tokens left, last refill time).
+        self._mono = mono or time.monotonic
+        self._buckets: dict[tuple[str, str], tuple[float, float]] = {}
 
     # ---- time / since (the reference Worker parity) ----
 
@@ -215,6 +261,27 @@ class RelayState:
             orphan = not meta and now_sec_val - cs.get("hb", 0) >= HB_GRACE
             if expired or orphan:
                 del self._ch[ch]
+                self._drop_buckets(ch)
+
+    def _drop_buckets(self, ch: str) -> None:
+        buckets = getattr(self, "_buckets", {})
+        for k in [k for k in buckets if k[0] == ch]:
+            buckets.pop(k, None)
+
+    def _rate_ok(self, ch: str, route: str) -> bool:
+        """Token bucket per (channel, route) (Issue #107 B-7). getattr/setdefault
+        guard a mid-meeting hot reload that patches this onto an older instance."""
+        rate, burst = _RATE_LIMITS[route]
+        mono = getattr(self, "_mono", time.monotonic)
+        buckets = self.__dict__.setdefault("_buckets", {})
+        now = mono()
+        tokens, last = buckets.get((ch, route), (float(burst), now))   # 未登録は満杯から始める
+        tokens = min(float(burst), tokens + max(0.0, now - last) * rate)
+        if tokens < 1.0:
+            buckets[(ch, route)] = (tokens, now)
+            return False
+        buckets[(ch, route)] = (tokens - 1.0, now)
+        return True
 
     def _scan(self, msgs: list, since_cmp: str, now_ms_val: int, sid: "str | None") -> list:
         ttl_cmp = f"{max(0, now_ms_val - MSG_TTL * 1000):013d}-{'0' * 13}"
@@ -261,11 +328,8 @@ class RelayState:
 
     # ---- routing ----
 
-    def handle(self, method: str, path: str, headers, body: bytes) -> "tuple[int, dict, bytes]":
-        # CORS preflight: answer before any routing/auth.
-        if method == "OPTIONS":
-            return (204, dict(_CORS), b"")
-
+    @staticmethod
+    def _split_path(path: str) -> "tuple[list[str], dict]":
         split = urllib.parse.urlsplit(path)
         # keep_blank_values: an empty `?ds=` must survive as "" (the null/dataset-
         # less group key), distinct from an absent `ds` (None → host-active). The
@@ -274,6 +338,40 @@ class RelayState:
         # the two; every other query consumer coerces "" to its default anyway.
         query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
         seg = [urllib.parse.unquote(s) for s in split.path.split("/") if s]
+        return seg, query
+
+    def precheck(self, method: str, path: str, headers) -> "tuple[tuple[int, dict, bytes] | None, int | None]":
+        """Authenticate BEFORE the body is read (Issue #107 B-7).
+
+        Returns ``(early_response, max_body)``: an early response (401/410/503) when
+        authentication fails, else ``None`` plus the route's body cap in bytes
+        (``None`` = uncapped, admin only). ``_route`` keeps its own auth checks
+        (tests drive ``handle()`` directly)."""
+        if method == "OPTIONS":
+            return (None, 0)
+        seg, _query = self._split_path(path)
+        if not seg:
+            return (None, 0)
+        rule = _ROUTE_AUTH.get((method, seg[0], len(seg)))
+        if rule is None:
+            return (None, 0)
+        kind, limit = rule
+        if kind == "admin":
+            if not self._is_admin(headers):
+                return (self._json({"error": "unauthorized"}, 401), 0)
+            return (None, limit)
+        with self._lock:
+            ok, status = self._check_guest(headers, seg[1], now_sec())
+        if not ok:
+            return (self._json({"error": "not live"}, status), 0)
+        return (None, limit)
+
+    def handle(self, method: str, path: str, headers, body: bytes) -> "tuple[int, dict, bytes]":
+        # CORS preflight: answer before any routing/auth.
+        if method == "OPTIONS":
+            return (204, dict(_CORS), b"")
+
+        seg, query = self._split_path(path)
 
         # GET / -> serve the guest HTML (file I/O outside the lock).
         if len(seg) == 0 and method == "GET":
@@ -313,21 +411,36 @@ class RelayState:
                 if not self._is_admin(headers):
                     return self._json({"error": "unauthorized"}, 401)
                 self._ch.pop(seg[2], None)
+                self._drop_buckets(seg[2])
                 return self._json({"ok": True})
 
+        # Scope PUTs (sessions / tabs) may carry `?v=<n>`, a monotonic version from
+        # the host (Issue #107 B-6): a PUT not newer than the applied one is ignored,
+        # so a timed-out PUT landing late can't roll the published scope back. A PUT
+        # without `v` (older host, tests) is applied unconditionally.
         if seg[:1] == ["sessions"] and len(seg) == 2 and method == "PUT":
             if not self._is_admin(headers):
                 return self._json({"error": "unauthorized"}, 401)
+            v, err = self._scope_version(query)
+            if err:
+                return err
             obj = self._parse_json(body)
             if obj is _BAD:
                 return self._json({"error": "bad json"}, 400)
             cs = self._ensure_channel(seg[1], now_s)
+            if v is not None and v <= cs.get("sessions_ver", -1):
+                return self._json({"ok": True, "stale": True})
             cs["sessions"] = obj if isinstance(obj, list) else []
+            if v is not None:
+                cs["sessions_ver"] = v
             return self._json({"ok": True})
 
         if seg[:1] == ["tabs"] and len(seg) == 2 and method == "PUT":
             if not self._is_admin(headers):
                 return self._json({"error": "unauthorized"}, 401)
+            v, err = self._scope_version(query)
+            if err:
+                return err
             # _parse_json (not _json_obj): a pre-DS host sends a bare name list,
             # which must stay accepted as active_dataset=None — _json_obj would
             # coerce it to {} and silently unpublish every tab.
@@ -335,6 +448,8 @@ class RelayState:
             if obj is _BAD:
                 return self._json({"error": "bad json"}, 400)
             cs = self._ensure_channel(seg[1], now_s)
+            if v is not None and v <= cs.get("tabs_ver", -1):
+                return self._json({"ok": True, "stale": True})
             if isinstance(obj, dict) and isinstance(obj.get("tabs_by_dataset"), dict):
                 # New multi-DS shape: full per-DS namespace in one PUT (Issue #78).
                 tbd = obj["tabs_by_dataset"]
@@ -370,6 +485,8 @@ class RelayState:
                     cs["tabs_by_ds"].pop(k, None)
                     cs["views_by_ds"].pop(k, None)
                     cs["vv_by_ds"].pop(k, None)
+            if v is not None:
+                cs["tabs_ver"] = v
             return self._json({"ok": True})
 
         if seg[:1] == ["heartbeat"] and len(seg) == 2 and method == "PUT":
@@ -501,6 +618,8 @@ class RelayState:
             ok, status = self._check_guest(headers, ch, now_s)
             if not ok:
                 return self._json({"error": "not live"}, status)
+            if not self._rate_ok(ch, "msg"):
+                return self._json({"error": "rate limited"}, 429)
             cs = self._ch[ch]
             if not self._session_scope_ok(cs, sid, self._q1(query, "ds")):
                 return self._json({"error": "session not in scope"}, 403)
@@ -510,12 +629,17 @@ class RelayState:
             text = str(obj.get("text") or "")
             if not text.strip():
                 return self._json({"error": "empty text"}, 400)
-            name = str(obj.get("name") or "").strip() or "Guest"
+            if len(text) > MSG_TEXT_MAX:
+                return self._json({"error": "text too long"}, 413)
+            name = str(obj.get("name") or "").strip()[:NAME_MAX] or "Guest"
             mid = gen_mid(now_m)
-            cs["in_msgs"].append({
+            lst = cs["in_msgs"]
+            lst.append({
                 "text": text, "name": name, "role": "user",
                 "origin": "guest", "mid": mid, "sid": sid,
             })
+            if len(lst) > MAX_IN_MSGS:
+                del lst[:len(lst) - MAX_IN_MSGS]   # drop oldest
             return self._json({"mid": mid})
 
         # POST /newsession/{ch}?ds= (guest) — ask the HOST to mint a new chat
@@ -531,11 +655,13 @@ class RelayState:
             ok, status = self._check_guest(headers, ch, now_s)
             if not ok:
                 return self._json({"error": "not live"}, status)
+            if not self._rate_ok(ch, "newsession"):
+                return self._json({"error": "rate limited"}, 429)
             cs = self._ch[ch]
             obj, err = self._json_obj(body)
             if err:
                 return err
-            name = str(obj.get("name") or "").strip() or "Guest"
+            name = str(obj.get("name") or "").strip()[:NAME_MAX] or "Guest"
             # _ds_key canonicalises here (NOT host-side): absent `ds` → the host's
             # active DS key, "" stays the null group. Keeping the wire value a plain
             # str is what lets the worker's new signal be Signal(str, str).
@@ -555,6 +681,8 @@ class RelayState:
             ok, status = self._check_guest(headers, ch, now_s)
             if not ok:
                 return self._json({"error": "not live"}, status)
+            if not self._rate_ok(ch, "presence"):
+                return self._json({"error": "rate limited"}, 429)
             cs = self._ch[ch]
             obj, err = self._json_obj(body)
             if err:
@@ -562,18 +690,25 @@ class RelayState:
             pid = str(obj.get("pid") or "")
             if not pid:
                 return self._json({"error": "missing pid"}, 400)
+            pid = pid[:PRESENCE_FIELD_MAX]
+            pres = cs["presence"]
+            if pid not in pres and len(pres) >= MAX_PRESENCE:
+                self._evict_presence(cs, now_s)
+                if len(pres) >= MAX_PRESENCE:
+                    oldest = min(pres, key=lambda k: pres[k].get("last", 0))
+                    del pres[oldest]
             entry = {
                 "pid": pid,
-                "name": str(obj.get("name") or "").strip() or "Guest",
-                "sid": str(obj.get("sid") or ""),
-                "tab": str(obj.get("tab") or ""),
+                "name": str(obj.get("name") or "").strip()[:NAME_MAX] or "Guest",
+                "sid": str(obj.get("sid") or "")[:PRESENCE_FIELD_MAX],
+                "tab": str(obj.get("tab") or "")[:PRESENCE_FIELD_MAX],
                 "last": now_s,
             }
             # Only record `ds` when the guest actually sent it: a bootstrap/legacy
             # guest omits it, and the host's watched-DS derivation keys on "ds" in
             # p — an absent key must not be mistaken for the null group ("") (Issue #78).
             if "ds" in obj:
-                entry["ds"] = str(obj.get("ds") or "")
+                entry["ds"] = str(obj.get("ds") or "")[:PRESENCE_FIELD_MAX]
             cs["presence"][pid] = entry
             return self._json({"ok": True})
 
@@ -689,6 +824,15 @@ class RelayState:
         vals = query.get(key)
         return vals[0] if vals else None
 
+    def _scope_version(self, query: dict):
+        """`?v=` of a scope PUT: ``(int | None, None)`` or ``(None, 400 response)``."""
+        v = self._q1(query, "v")
+        if v is None:
+            return None, None
+        if not re.fullmatch(r"[0-9]+", v):
+            return None, self._json({"error": "bad version"}, 400)
+        return int(v), None
+
     @staticmethod
     def _parse_json(body: bytes):
         """Decode a JSON body. Returns ``_BAD`` on parse failure (incl. empty body,
@@ -763,10 +907,34 @@ class _ExclusiveAddrHTTPServer(http.server.ThreadingHTTPServer):
 
     allow_reuse_address = sys.platform != "win32"
 
+    def __init__(self, *args, **kwargs):
+        # Concurrent-connection cap (Issue #107 B-7). Read at construction time
+        # (not a default argument) so tests can monkeypatch MAX_CONNECTIONS.
+        self._conn_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def process_request(self, request, client_address):
+        # Over the cap: close without spawning a thread. The slot is counted at
+        # accept time (before auth), so it is released when the handler thread ends.
+        if not self._conn_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._conn_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_slots.release()
 
 
 def start_server(admin_key: str, *, html_path: "Path | None" = None,
@@ -774,18 +942,76 @@ def start_server(admin_key: str, *, html_path: "Path | None" = None,
     state = RelayState(admin_key, html_path=html_path)
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        # One blocking read/write may idle this long (socket timeout). A trickling
+        # peer defeats it, so setup() also arms a whole-connection deadline.
+        timeout = HANDLER_TIMEOUT_SEC
+
         def log_message(self, *args):  # noqa: N802 — suppress access log
             pass
 
+        def setup(self) -> None:
+            super().setup()
+            # Cut the SOCKET after REQUEST_DEADLINE_SEC (read at run time so tests
+            # can monkeypatch it). This fails any blocked socket read/write; it does
+            # not bound the handler thread (lock waits / JSON work run to the end).
+            self._deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._expire)
+            self._deadline.daemon = True
+            self._deadline.start()
+
+        def _expire(self) -> None:
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def finish(self) -> None:
+            try:
+                super().finish()
+            finally:
+                t = getattr(self, "_deadline", None)
+                if t is not None:
+                    t.cancel()
+
+        def _content_length(self) -> "int | None":
+            """0 when absent, None when not a non-negative integer."""
+            raw = self.headers.get("Content-Length")
+            if raw is None:
+                return 0
+            raw = raw.strip()
+            if not re.fullmatch(r"[0-9]+", raw):
+                return None
+            return int(raw)
+
         def _dispatch(self) -> None:
+            length = self._content_length()
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except (TypeError, ValueError):
-                length = 0
-            try:
-                body = self.rfile.read(length) if length > 0 else b""
-                status, headers, payload = state.handle(
-                    self.command, self.path, self.headers, body)
+                # Authenticate and size-check BEFORE reading the body (Issue #107 B-7).
+                early, max_body = state.precheck(self.command, self.path, self.headers)
+                if early is None:
+                    if length is None:
+                        early = state._json({"error": "bad content-length"}, 400)
+                    elif max_body is not None and length > max_body:
+                        early = state._json({"error": "body too large"}, 413)
+                if early is not None:
+                    self.close_connection = True
+                    # Drain a small body so a well-behaved client isn't reset before
+                    # it reads the response; never read a large or bogus one.
+                    if isinstance(length, int) and 0 < length <= GUEST_BODY_MAX:
+                        try:
+                            self.rfile.read(length)
+                        except Exception:
+                            pass
+                    status, headers, payload = early
+                else:
+                    body = self.rfile.read(length) if length > 0 else b""
+                    if len(body) != length:
+                        # Deadline cut or the peer stopped sending: never hand a
+                        # truncated body (e.g. a view PNG) to the router.
+                        self.close_connection = True
+                        status, headers, payload = state._json({"error": "short body"}, 400)
+                    else:
+                        status, headers, payload = state.handle(
+                            self.command, self.path, self.headers, body)
             except Exception:
                 status, headers, payload = 500, dict(_CORS), b""
             try:

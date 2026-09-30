@@ -51,8 +51,9 @@ class FakeMsg:
 
 
 class FakeSession:
-    def __init__(self, messages):
+    def __init__(self, messages, dataset=None):
         self.messages = list(messages)
+        self.dataset = dataset
 
 
 class FakeChat:
@@ -73,8 +74,16 @@ class FakeChat:
         return sid
 
     def _session_by_id(self, sid):
-        msgs = self._messages.get(sid)
-        return FakeSession(msgs) if msgs is not None else None
+        s = next((s for s in self._summaries if s["id"] == sid), None)
+        if s is None:
+            return None
+        return FakeSession(self._messages.get(sid, []), dataset=s.get("dataset"))
+
+    def session_has_history(self, sid):
+        return bool(self._messages.get(sid))
+
+    def set_remote_gate(self, gate):
+        self.remote_gate = gate
 
     def inject_remote_message(self, text, sender, session_id=None):
         self.injected.append((text, sender, session_id))
@@ -82,9 +91,10 @@ class FakeChat:
 
 class _FakeTabObj:
     """A window tab carrying a session_spec dataset (for active-DS filtering)."""
-    def __init__(self, name, dataset):
+    def __init__(self, name, dataset, is_placeholder=False):
         self.name = name
         self.session_spec = {"kind": "analysis", "name": name, "dataset": dataset}
+        self.is_placeholder = is_placeholder
 
     def grab(self):
         # A minimal real pixmap so _capture_tab can produce a PNG (view-render tests).
@@ -95,8 +105,13 @@ class _FakeTabObj:
 
 
 class FakeWindow:
-    def __init__(self, chat, dataset=None, tabs=None, tab_datasets=None, tab_objs=None):
+    def __init__(self, chat, dataset=None, tabs=None, tab_datasets=None, tab_objs=None,
+                 open_datasets=None):
         self._chat = chat
+        # Explicit open-dataset list (closing/reopening tests mutate it and then
+        # call relay._on_open_datasets_changed()). None → everything referenced
+        # counts as open (the pre-#107 "all open" premise of older tests).
+        self._open_datasets = None if open_datasets is None else list(open_datasets)
         self.current_dataset = dataset
         self._tabs = tabs or []
         # Each tab's owning dataset (fixed at construction; defaults to the
@@ -113,27 +128,28 @@ class FakeWindow:
 
     def tab_names(self):
         if self._tab_objs:
-            return [n for n, _ in self._tab_objs]
+            return [spec[0] for spec in self._tab_objs]
         return list(self._tabs)
 
     def tabs(self):
         if self._tab_objs:
-            return [_FakeTabObj(n, ds) for n, ds in self._tab_objs]
+            return [_FakeTabObj(*spec) for spec in self._tab_objs]
         return [
             _FakeTabObj(n, self._tab_datasets.get(n, self._default_ds))
             for n in self._tabs
         ]
 
-    def open_dataset_keys(self):
-        # Model the real window: all open DS groups (null → "") in display order.
-        # Here we synthesize from current_dataset + each tab's dataset.
-        keys = ["" if self.current_dataset is None else self.current_dataset]
-        for t in self.tabs():
-            ds = t.session_spec.get("dataset")
-            k = "" if ds is None else ds
-            if k not in keys:
-                keys.append(k)
-        return keys
+    def open_dataset_names(self):
+        if self._open_datasets is not None:
+            return list(self._open_datasets)
+        names = []
+        cands = [self.current_dataset]
+        cands += [t.session_spec.get("dataset") for t in self.tabs()]
+        cands += [s.get("dataset") for s in self._chat.session_summaries()]
+        for ds in cands:
+            if ds is not None and ds not in names:
+                names.append(ds)
+        return names
 
     def register_retranslate_hook(self, fn):
         pass
@@ -231,8 +247,8 @@ def test_meeting_start_and_token(qapp, monkeypatch):
 # ---- out: send gate ----
 
 def test_out_gate(qapp, monkeypatch):
-    chat = FakeChat()
-    win = FakeWindow(chat)
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
     mr, r = _make_relay(monkeypatch, win)
     w = mr._RelayWorker("http://relay.test", "ADMIN", "ch")
     r._worker = w
@@ -261,9 +277,10 @@ def test_out_gate(qapp, monkeypatch):
 # ---- in: receive gate ----
 
 def test_in_gate(qapp, monkeypatch):
-    chat = FakeChat()
-    win = FakeWindow(chat)
+    chat = FakeChat([_sess("a")])
+    win = FakeWindow(chat, dataset="ds1")
     mr, r = _make_relay(monkeypatch, win)
+    r._sharing = True
     r._published_session_ids = {"a"}
 
     r._on_remote_message("a", "Bob", "hello")
@@ -330,7 +347,7 @@ def test_worker_lookback_dedup(qapp):
     import meeting.relay as mr
     w = mr._RelayWorker("http://x", "k", "ch")
     got = []
-    w.sig_inbound.connect(lambda s, n, t: got.append(t))
+    w.sig_inbound.connect(lambda g, s, n, t: got.append(t))
     seq = [
         {"messages": [{"sid": "S", "name": "n", "text": "M2", "mid": _mid(2000)}],
          "server_now_ms": 2000},
@@ -387,7 +404,7 @@ def test_expired_and_stop_idempotent(qapp, monkeypatch):
     import meeting.relay as mr
     w = mr._RelayWorker("http://x", "k", "ch")
     states = []
-    w.sig_state.connect(lambda s: states.append(s))
+    w.sig_state.connect(lambda g, s: states.append(s))
 
     def gone(method, path, data=None, is_png=False):
         raise urllib.error.HTTPError("http://x", 410, "gone", {}, io.BytesIO(b""))
@@ -592,7 +609,7 @@ def test_newsession_worker_end_to_end(qapp):
             assert json.loads(r.read().decode())["ok"] is True
         w = mr._RelayWorker(base, "ADMIN", "ch")
         got = []
-        w.sig_new_session.connect(lambda ds, n: got.append((ds, n)))
+        w.sig_new_session.connect(lambda g, ds, n: got.append((ds, n)))
         w._do_new_sessions()
         assert got == [("dsA", "Bob")]   # 応答キー・フィールド名・パスの三者一致
         w._do_new_sessions()
@@ -624,32 +641,32 @@ def test_backfill_runs_after_hot_reload_without_field(qapp, monkeypatch):
 
 def test_tab_auto_share(qapp, monkeypatch):
     chat = FakeChat()
-    win = FakeWindow(chat, tabs=["t1", "t2"])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1", "t2"])
     mr, r = _make_relay(monkeypatch, win)
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
                             json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
     r.meeting_start(3600)
-    assert r.published_tabs() == {("", "t1"), ("", "t2")}
+    assert r.published_tabs() == {("ds1", "t1"), ("ds1", "t2")}
 
     # a tab opened mid-meeting auto-joins the published set (default-share).
     win._tabs = ["t1", "t2", "t3"]
-    assert r.absorb_new_tabs() == [("", "t3")]
-    assert r.published_tabs() == {("", "t1"), ("", "t2"), ("", "t3")}
+    assert r.absorb_new_tabs() == [("ds1", "t3")]
+    assert r.published_tabs() == {("ds1", "t1"), ("ds1", "t2"), ("ds1", "t3")}
     r._on_capture_tick()
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    assert tab_puts and set(tab_puts[-1]["data"]["tabs_by_dataset"][""]) == {"t1", "t2", "t3"}
-    assert tab_puts[-1]["data"]["active_dataset"] is None   # dataset-less window
+    assert tab_puts and set(tab_puts[-1]["data"]["tabs_by_dataset"]["ds1"]) == {"t1", "t2", "t3"}
+    assert tab_puts[-1]["data"]["active_dataset"] == "ds1"
 
     # an explicitly deselected tab is NOT re-added on the next absorb.
-    r.set_published_tabs([("", "t1"), ("", "t3")])   # host unchecks t2
+    r.set_published_tabs([("ds1", "t1"), ("ds1", "t3")])   # host unchecks t2
     assert r.absorb_new_tabs() == []                 # t2 is known, not re-absorbed
-    assert r.published_tabs() == {("", "t1"), ("", "t3")}
+    assert r.published_tabs() == {("ds1", "t1"), ("ds1", "t3")}
 
     # a brand-new tab still auto-shares even after a prior deselect.
     win._tabs = ["t1", "t2", "t3", "t4"]
-    assert r.absorb_new_tabs() == [("", "t4")]
-    assert r.published_tabs() == {("", "t1"), ("", "t3"), ("", "t4")}
+    assert r.absorb_new_tabs() == [("ds1", "t4")]
+    assert r.published_tabs() == {("ds1", "t1"), ("ds1", "t3"), ("ds1", "t4")}
     r.stop()
 
 
@@ -693,16 +710,17 @@ def test_publish_scope_all_dataset_tabs(qapp, monkeypatch):
 
 
 def test_all_ds_tab_pairs_none_safe(qapp, monkeypatch):
-    """Issue #78: a dataset-less tab (session_spec dataset None) maps to the ""
-    (null-group) key in _all_ds_tab_pairs without crashing."""
+    """Issue #107 B-6: a dataset-less tab (session_spec dataset None) is not shared
+    — _all_ds_tab_pairs skips it without crashing, so it never gets published."""
     chat = FakeChat()
     win = FakeWindow(chat, dataset=None, tabs=["v"], tab_datasets={"v": None})
     mr, r = _make_relay(monkeypatch, win)
     monkeypatch.setattr(mr.urllib.request, "urlopen",
                         lambda req, timeout=None: FakeResp(
                             json.dumps({"expires_at": 9999999999, "server_now_ms": 1}).encode()))
+    assert r._all_ds_tab_pairs() == set()
     r.meeting_start(3600)
-    assert r.published_tabs() == {("", "v")}
+    assert r.published_tabs() == set()
     r.stop()
 
 
@@ -721,13 +739,13 @@ def test_tabs_payload_carries_dataset(qapp, monkeypatch):
         "active_dataset": "dsA", "datasets": ["dsA"], "tabs_by_dataset": {"dsA": ["t1"]}}
     r.stop()
 
-    # dataset-less window → active_dataset None, null-group "" key in the payload
+    # dataset-less window → nothing is shared (Issue #107 B-6): no "" key
     win2 = FakeWindow(chat, dataset=None, tabs=["v"], tab_datasets={"v": None})
     mr2, r2 = _make_relay(monkeypatch, win2)
     r2.meeting_start(3600)
     tab_puts = [i for i in r2._worker._outbox if i["kind"] == "tabs"]
     assert tab_puts and tab_puts[-1]["data"] == {
-        "active_dataset": None, "datasets": [""], "tabs_by_dataset": {"": ["v"]}}
+        "active_dataset": None, "datasets": [], "tabs_by_dataset": {}}
     r2.stop()
 
 
@@ -850,7 +868,7 @@ def test_tabs_sendfail_resets_latch(qapp, monkeypatch):
     # a dropped view PUT evicts just that (ds, tab) dedupe entry (not the whole cache)
     r._view_hashes = {("dsA", "t1"): b"a", ("dsB", "t1"): b"b"}
     r._view_cachekeys = {("dsA", "t1"): 1, ("dsB", "t1"): 2}
-    r._worker.sig_sendfail.emit("view", "dsB", "t1")
+    r._worker.sig_sendfail.emit(r._meeting_gen, "view", "dsB", "t1")
     assert r._view_hashes == {("dsA", "t1"): b"a"}
     assert r._view_cachekeys == {("dsA", "t1"): 1}
     r.stop()
@@ -1007,9 +1025,9 @@ def test_new_session_note_gated_by_toggle(qapp, monkeypatch):
 
 
 def test_pub_sessions_carry_dataset_and_datasets_union(qapp, monkeypatch):
-    """Issue #78: every published session carries a `dataset` key (str or None),
-    and a dataset=None published session unions "" into the `datasets` list so it
-    is reachable from the guest UI (no unreachable-but-/msg-able published sid)."""
+    """Issue #78: every published session carries a `dataset` key. Issue #107 B-6:
+    a dataset=None session is neither published nor sent, and `datasets` never
+    carries the "" (null group) key."""
     chat = FakeChat([
         {"id": "a", "title": "A", "busy": False, "dataset": "ds1"},
         {"id": "n", "title": "N", "busy": False, "dataset": None},
@@ -1024,9 +1042,10 @@ def test_pub_sessions_carry_dataset_and_datasets_union(qapp, monkeypatch):
     sess_puts = [i for i in r._worker._outbox if i["kind"] == "sessions"]
     # invariant: every session dict has the "dataset" key
     assert all("dataset" in s for s in sess_puts[-1]["data"])
+    assert "n" not in r.published_session_ids()
+    assert {s["id"] for s in sess_puts[-1]["data"]} == {"a"}
     tab_puts = [i for i in r._worker._outbox if i["kind"] == "tabs"]
-    # the dataset=None session's "" key is unioned into datasets
-    assert "" in tab_puts[-1]["data"]["datasets"]
+    assert "" not in tab_puts[-1]["data"]["datasets"]
     r.stop()
 
 
@@ -1164,11 +1183,16 @@ def test_share_window_smoke(qapp, monkeypatch):
     # select-all masters exist and retranslate covers their labels
     assert sw._sess_select_all is not None and sw._tab_select_all is not None
     sw.retranslate()
-    # toggles + select-all (not sharing → no-op) must not raise
+    # toggles + select-all before sharing must not raise
     sw._on_session_toggle()
     sw._on_tab_toggle()
     sw._on_select_all_sessions()
     sw._on_select_all_tabs()
+    sw._on_select_all_sessions()   # back to all-checked
+    assert r.session_optout() == set()
+    # unchecking a row before sharing records it as opt-out (Issue #107 B-5)
+    sw._sess_boxes["a"].setChecked(False)
+    assert r.session_optout() == {"a"}
     sw._timer.stop()
 
 
@@ -1428,7 +1452,7 @@ def test_worker_new_sessions_emit_and_dedup(qapp):
     import meeting.relay as mr
     w = mr._RelayWorker("http://x", "k", "ch")
     got = []
-    w.sig_new_session.connect(lambda ds, n: got.append((ds, n)))
+    w.sig_new_session.connect(lambda g, ds, n: got.append((ds, n)))
     payload = {"requests": [{"ds": "dsA", "name": "Bob", "mid": _mid(2000)}],
                "server_now_ms": 2000}
 
@@ -1460,7 +1484,7 @@ def test_new_sessions_expired_emits_state(qapp):
     import meeting.relay as mr
     w = mr._RelayWorker("http://x", "k", "ch")
     states = []
-    w.sig_state.connect(states.append)
+    w.sig_state.connect(lambda g, s: states.append(s))
 
     def gone(method, path, data=None, is_png=False):
         raise urllib.error.HTTPError("http://x", 410, "gone", {}, io.BytesIO(b""))
@@ -1501,38 +1525,38 @@ def test_new_session_request_rejects_null_group(qapp, monkeypatch, caplog):
     assert r.published_session_ids() == before
 
 
-def test_new_session_request_unknown_ds_falls_back(qapp, monkeypatch):
+def test_new_session_request_unknown_ds_rejected(qapp, monkeypatch):
     chat = FakeChat([_sess("a")])
     win = FakeWindow(chat, dataset="ds1")
     _mr, r = _make_relay(monkeypatch, win)
     r._sharing = True
     r._published_session_ids = {"a"}
     r._on_new_session_request("bogus", "Bob")
-    assert chat.created == ["ds1"]
+    assert chat.created == []
 
 
-def test_new_session_request_accepts_closed_dataset_with_sessions(qapp, monkeypatch):
+def test_new_session_request_rejects_closed_dataset_with_sessions(qapp, monkeypatch):
     chat = FakeChat([
         _sess("a"),
         {"id": "c", "title": "C", "busy": False, "dataset": "dsClosed"},
     ])
-    win = FakeWindow(chat, dataset="ds1")
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1"])
     _mr, r = _make_relay(monkeypatch, win)
     r._sharing = True
     r._published_session_ids = {"a", "c"}
     r._on_new_session_request("dsClosed", "Bob")
-    assert chat.created == ["dsClosed"]
+    assert chat.created == []
 
 
-def test_new_session_request_accepts_published_tab_only_dataset(qapp, monkeypatch):
+def test_new_session_request_rejects_published_tab_only_dataset(qapp, monkeypatch):
     chat = FakeChat([_sess("a")])
-    win = FakeWindow(chat, dataset="ds1")
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1"])
     _mr, r = _make_relay(monkeypatch, win)
     r._sharing = True
     r._published_session_ids = {"a"}
     r._published_tabs = {("dsTabOnly", "t1")}
     r._on_new_session_request("dsTabOnly", "Bob")
-    assert chat.created == ["dsTabOnly"]
+    assert chat.created == []
 
 
 def test_new_session_request_rejects_opted_out_dataset(qapp, monkeypatch):
@@ -1540,12 +1564,12 @@ def test_new_session_request_rejects_opted_out_dataset(qapp, monkeypatch):
         _sess("a"),
         {"id": "o", "title": "O", "busy": False, "dataset": "dsOut"},
     ])
-    win = FakeWindow(chat, dataset="ds1")
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1"])
     _mr, r = _make_relay(monkeypatch, win)
     r._sharing = True
-    r._published_session_ids = {"a"}       # "o" opted out → no dsOut chip
+    r._published_session_ids = {"a"}       # "o" opted out, dsOut closed
     r._on_new_session_request("dsOut", "Bob")
-    assert chat.created == ["ds1"]
+    assert chat.created == []
 
 
 def test_new_session_request_ignored_when_not_sharing(qapp, monkeypatch):
@@ -1568,7 +1592,7 @@ def test_new_session_request_no_active_dataset_drops(qapp, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="meeting.relay"):
         r._on_new_session_request("bogus", "Bob")
     hits = [rec for rec in caplog.records
-            if "the host has no current dataset to fall back to" in rec.getMessage()]
+            if "is not an open dataset" in rec.getMessage()]
     assert len(hits) == 1
     assert chat.created == []
 
@@ -1590,16 +1614,16 @@ def test_new_session_survives_capture_tick(qapp, monkeypatch):
 
 
 def test_shareable_ds_keys_order(qapp, monkeypatch):
-    chat = FakeChat()
-    win = FakeWindow(chat, dataset="ds1")
+    chat = FakeChat([
+        {"id": "b", "title": "B", "busy": False, "dataset": "dsSess"},
+        {"id": "c", "title": "C", "busy": False, "dataset": None},
+    ])
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds2", "ds1"])
     _mr, r = _make_relay(monkeypatch, win)
     r._published_tabs = {("dsTabOnly", "t1")}
-    sessions = [
-        {"id": "a", "dataset": "ds1"},        # already open → no duplicate
-        {"id": "b", "dataset": "dsSess"},     # session-derived extra
-        {"id": "c", "dataset": None},         # null group
-    ]
-    assert r._shareable_ds_keys(sessions) == ["ds1", "dsSess", "", "dsTabOnly"]
+    r._published_session_ids = {"b", "c"}
+    # exactly open_dataset_names() in display order — no session/tab-derived extras, no ""
+    assert r._shareable_ds_keys() == ["ds2", "ds1"]
 
 
 # ---- Issue #85: LAN 直結リンク ----
@@ -1938,4 +1962,739 @@ def test_select_all_sessions_preserves_hidden_published(qapp, monkeypatch):
     assert "s1" in r.published_session_ids()
     sw._on_select_all_sessions()
     assert "s1" in r.published_session_ids()
+    r.stop()
+
+
+# ---- Issue #107 B-5: opt-out survives stop/start ----
+
+def _kinds(r, kind):
+    return [i for i in r._worker._outbox if i["kind"] == kind]
+
+
+def _sess_ids_in_puts(r):
+    return [{s["id"] for s in i["data"]} for i in _kinds(r, "sessions")]
+
+
+def _backlog_sids(r):
+    return {i["sid"] for i in _kinds(r, "backlog")}
+
+
+def _share_window(win, r):
+    from gui.meeting_share import MeetingShareWindow
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+    return sw
+
+
+def test_optout_before_start_survives_restart(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess("b")],
+                    messages={"a": [FakeMsg("user", "qa")], "b": [FakeMsg("user", "qb")]})
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1", "t2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.set_session_optout(visible={"a", "b"}, checked={"a"})
+    r.set_tab_optout(visible={("ds1", "t1"), ("ds1", "t2")}, checked={("ds1", "t1")})
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"a"}
+    assert r.published_tabs() == {("ds1", "t1")}
+    assert "b" not in _backlog_sids(r)
+    assert all("b" not in ids for ids in _sess_ids_in_puts(r))
+    r.stop()
+    r.meeting_start(3600)
+    assert "b" not in r.published_session_ids()
+    assert ("ds1", "t2") not in r.published_tabs()
+    assert "b" not in _backlog_sids(r)
+    r.stop()
+
+
+def test_optout_during_meeting_survives_restart(qapp, monkeypatch):
+    chat, r, sw = _share_window_with_two_published(qapp, monkeypatch)
+    sw._sess_boxes["s2"].setChecked(False)          # host unchecks s2 mid-meeting
+    assert "s2" not in r.published_session_ids()
+    r.stop()
+    r.meeting_start(3600)
+    assert "s2" not in r.published_session_ids()
+    assert "s1" in r.published_session_ids()
+    r.stop()
+
+
+def test_share_window_pre_start_rows_reflect_optout(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess("b")])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1", "t2"])
+    mr, r = _make_relay(monkeypatch, win)
+    sw = _share_window(win, r)
+    sw._sess_boxes["b"].setChecked(False)
+    sw._tab_boxes[("ds1", "t2")].setChecked(False)
+    sw._sess_sig = None
+    sw._tab_sig = None
+    sw._refresh_lists()
+    assert not sw._sess_boxes["b"].isChecked() and sw._sess_boxes["a"].isChecked()
+    assert not sw._tab_boxes[("ds1", "t2")].isChecked()
+    assert sw._tab_boxes[("ds1", "t1")].isChecked()
+
+
+def test_set_optout_ignores_hidden_ids_in_checked(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    r.set_session_optout(visible={"a"}, checked=set())
+    assert r.session_optout() == {"a"}
+    r.set_session_optout(visible={"b"}, checked={"a", "b"})
+    assert r.session_optout() == {"a"}
+    ta, tb = ("ds1", "a"), ("ds1", "b")
+    r.set_tab_optout(visible={ta}, checked=set())
+    assert r.tab_optout() == {ta}
+    r.set_tab_optout(visible={tb}, checked={ta, tb})
+    assert r.tab_optout() == {ta}
+
+
+def test_optout_tab_closed_at_start_not_absorbed_on_reopen(qapp, monkeypatch):
+    # (a) the tab itself is closed at start
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds1", tab_objs=[("t1", "ds1")])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.set_tab_optout(visible={("ds1", "secret")}, checked=set())
+    r.meeting_start(3600)
+    win._tab_objs.append(("secret", "ds1"))
+    assert r.absorb_new_tabs() == []
+    assert ("ds1", "secret") not in r.published_tabs()
+    r.stop()
+
+    # (b) the whole dataset is closed at start
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds0", tab_objs=[("t0", "ds0"), ("secret", "ds1")],
+                     open_datasets=["ds0"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.set_tab_optout(visible={("ds1", "secret")}, checked=set())
+    r.meeting_start(3600)
+    win._open_datasets.append("ds1")
+    assert r.absorb_new_tabs() == []
+    assert ("ds1", "secret") not in r.published_tabs()
+    r.stop()
+
+
+def test_tab_toggle_preserves_closed_dataset_tabs(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="dsB", tab_objs=[("tA", "dsA"), ("tB", "dsB")],
+                     open_datasets=["dsA", "dsB"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert r.published_tabs() == {("dsA", "tA"), ("dsB", "tB")}
+    # close dsA
+    win._open_datasets = ["dsB"]
+    win._tab_objs = [("tB", "dsB")]
+    r._on_open_datasets_changed()
+    sw = _share_window(win, r)
+    assert set(sw._tab_boxes) == {("dsB", "tB")}
+    sw._on_tab_toggle()
+    assert ("dsA", "tA") in r.published_tabs()
+    sw._on_select_all_tabs()                         # uncheck all visible
+    assert ("dsA", "tA") in r.published_tabs()
+    assert ("dsB", "tB") not in r.published_tabs()
+    sw._on_select_all_tabs()                         # check all visible again
+    assert ("dsA", "tA") in r.published_tabs()
+    # reopen dsA → its tab is shared again
+    win._open_datasets = ["dsA", "dsB"]
+    win._tab_objs = [("tA", "dsA"), ("tB", "dsB")]
+    r._worker._outbox.clear()
+    r._on_open_datasets_changed()
+    tab_puts = _kinds(r, "tabs")
+    assert tab_puts and tab_puts[-1]["data"]["tabs_by_dataset"].get("dsA") == ["tA"]
+    r.stop()
+
+
+# ---- Issue #107 B-6: only open datasets are shared ----
+
+def test_closed_dataset_chat_not_shared_and_reshared_on_reopen(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("c", dataset="dsClosed")],
+                    messages={"a": [FakeMsg("user", "qa")], "c": [FakeMsg("user", "qc")]})
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert all("c" not in ids for ids in _sess_ids_in_puts(r))
+    assert "c" not in _backlog_sids(r)
+    assert _kinds(r, "tabs")[-1]["data"]["datasets"] == ["ds1"]
+    r._on_remote_message("c", "Bob", "hi")
+    assert chat.injected == []
+    win._open_datasets.append("dsClosed")
+    r._on_open_datasets_changed()
+    assert "c" in _sess_ids_in_puts(r)[-1]
+    assert "c" in _backlog_sids(r)
+    r._on_remote_message("c", "Bob", "hi")
+    assert chat.injected == [("hi", "Bob", "c")]
+    r.stop()
+
+
+def test_close_dataset_pushes_scope_immediately(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("b", dataset="ds2")])
+    win = FakeWindow(chat, dataset="ds1", tab_objs=[("t1", "ds1"), ("t2", "ds2")],
+                     open_datasets=["ds1", "ds2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    r._worker._outbox.clear()
+    win._open_datasets = ["ds1"]
+    win._tab_objs = [("t1", "ds1")]
+    r._on_open_datasets_changed()
+    sess_puts = _sess_ids_in_puts(r)
+    assert sess_puts and "b" not in sess_puts[-1]
+    tab_puts = _kinds(r, "tabs")
+    assert tab_puts and "ds2" not in tab_puts[-1]["data"]["datasets"]
+    r.stop()
+
+
+def test_out_after_close_kept_only_for_backfilled_session(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("c", dataset="ds2"), _sess_a("d", dataset="ds3")])
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1", "ds2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "c" in r._backfilled_ids and "d" not in r._backfilled_ids
+    win._open_datasets = ["ds1"]
+    r._on_open_datasets_changed()
+    r._worker._outbox.clear()
+    r._on_message_added("c", "assistant", "x", "local")
+    assert [i["kind"] for i in r._worker._outbox] == ["out"]
+    r._worker._outbox.clear()
+    r._on_message_added("d", "assistant", "x", "local")
+    assert not r._worker._outbox
+    r.stop()
+
+
+def test_view_cache_dropped_when_dataset_leaves_scope(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds2", tab_objs=[("t1", "ds1"), ("t2", "ds2")],
+                     open_datasets=["ds1", "ds2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert ("ds2", "t2") in r._view_hashes
+    assert any(i["ds"] == "ds2" and i["tab"] == "t2" for i in _kinds(r, "view"))
+    win._open_datasets = ["ds1"]
+    r._on_capture_tick()
+    assert not any(k[0] == "ds2" for k in r._view_hashes)
+    assert not any(k[0] == "ds2" for k in r._view_cachekeys)
+    win._open_datasets = ["ds1", "ds2"]
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    assert any(i["ds"] == "ds2" and i["tab"] == "t2" for i in _kinds(r, "view"))
+    r.stop()
+
+
+def test_close_dataset_drops_pending_remote(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("c", dataset="ds2")])
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1", "ds2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._pending_remote = {"c": [("X", "q")], "a": [("Y", "r")]}
+    win._open_datasets = ["ds1"]
+    r._on_open_datasets_changed()
+    assert "c" not in chat._pending_remote
+    assert chat._pending_remote.get("a") == [("Y", "r")]
+    win._open_datasets = ["ds1", "ds2"]
+    r._on_open_datasets_changed()
+    assert "c" not in chat._pending_remote
+    r.stop()
+
+
+def test_remote_turn_allowed(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("c", dataset="ds2"), _sess("z")])
+    win = FakeWindow(chat, dataset="ds1", open_datasets=["ds1", "ds2"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    assert chat.remote_gate == r._remote_turn_allowed
+    assert r._remote_turn_allowed("a") is True           # before start: not a meeting
+    r.set_session_optout(visible={"z"}, checked=set())
+    r.meeting_start(3600)
+    assert r._remote_turn_allowed("a") is True
+    assert r._remote_turn_allowed("z") is False          # not published
+    win._open_datasets = ["ds1"]
+    assert r._remote_turn_allowed("c") is False          # closed dataset
+    r.stop()
+    assert r._remote_turn_allowed("c") is True           # after stop: not a meeting
+
+
+def test_dataset_none_chat_not_published_even_after_adopt(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("n", dataset=None)],
+                    messages={"n": [FakeMsg("user", "private q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "n" not in r.published_session_ids()
+    assert "n" in r._session_known
+    chat._summaries = [_sess("a"), _sess_a("n", dataset="ds1")]
+    r._worker._outbox.clear()
+    r._last_sessions_json = None
+    r._on_capture_tick()
+    assert all("n" not in ids for ids in _sess_ids_in_puts(r))
+    assert "n" not in _backlog_sids(r)
+    r.stop()
+
+
+def test_blank_chat_shared_after_adopt_when_auto_share_on(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("b", dataset=None)])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "b" not in r.published_session_ids()
+    assert "b" not in r._session_known
+    assert "b" not in r._meeting_start_ids
+    chat._summaries = [_sess("a"), _sess_a("b", dataset="ds1")]
+    chat._messages["b"] = [FakeMsg("user", "first q")]
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    assert "b" in _sess_ids_in_puts(r)[-1]
+    assert "b" in _backlog_sids(r)
+    r.stop()
+
+
+def test_blank_chat_not_shared_after_adopt_when_auto_share_off(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("b", dataset=None)])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": False})
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries = [_sess("a"), _sess_a("b", dataset="ds1")]
+    chat._messages["b"] = [FakeMsg("user", "first q")]
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    assert all("b" not in ids for ids in _sess_ids_in_puts(r))
+    assert "b" in r._session_known
+    r.stop()
+
+
+def test_dataset_none_history_chat_survives_restart_as_optout(qapp, monkeypatch):
+    chat = FakeChat([_sess("a"), _sess_a("n", dataset=None)],
+                    messages={"n": [FakeMsg("user", "q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "n" in r.session_optout()
+    chat._summaries = [_sess("a"), _sess_a("n", dataset="ds1")]
+    r.stop()
+    r.meeting_start(3600)
+    assert "n" not in r.published_session_ids()
+    r.stop()
+
+
+def test_classify_on_auto_share_off_to_on_snapshot(qapp, monkeypatch):
+    chat = FakeChat([_sess("a")], messages={"n": [FakeMsg("user", "q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": False})
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_sess_a("n", dataset=None))   # no absorb in between
+    r.set_auto_share_new_sessions(True)
+    assert "n" in r.session_optout()
+    chat._summaries = [_sess("a"), _sess_a("n", dataset="ds1")]
+    r.stop()
+    r.meeting_start(3600)
+    assert "n" not in r.published_session_ids()
+    r.stop()
+
+
+def _fork(sid, parent, dataset="ds1"):
+    d = _sess_a(sid, dataset=dataset)
+    d["forked_from"] = parent
+    return d
+
+
+def _fork_of_optout_setup(monkeypatch):
+    chat = FakeChat([_sess_a("c")], messages={"c": [FakeMsg("user", "secret")],
+                                              "f": [FakeMsg("user", "secret")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    r.set_session_optout(visible={"c"}, checked=set())
+    chat._summaries.append(_fork("f", "c"))
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    return chat, r
+
+
+def test_fork_of_optout_parent_stays_private(qapp, monkeypatch):
+    chat, r = _fork_of_optout_setup(monkeypatch)
+    assert "f" not in r.published_session_ids()
+    assert "f" in r.session_optout()
+    assert "f" in r._session_known
+    assert all("f" not in ids for ids in _sess_ids_in_puts(r))
+    assert "f" not in _backlog_sids(r)
+    r.stop()
+
+
+def test_fork_explicitly_shared_survives_restart(qapp, monkeypatch):
+    chat, r = _fork_of_optout_setup(monkeypatch)
+    r.set_session_optout(visible={"f"}, checked={"f"})   # host checks f
+    r.stop()
+    r.meeting_start(3600)
+    assert "f" in r.published_session_ids()
+    assert "c" not in r.published_session_ids()
+    r.stop()
+    r.meeting_start(3600)
+    assert "f" in r.published_session_ids()               # not re-inherited
+    r.stop()
+
+
+def test_fork_of_published_chat_is_shared(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("c")], messages={"f": [FakeMsg("user", "q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_fork("f", "c"))
+    r._on_capture_tick()
+    assert "f" in r.published_session_ids()
+    assert "f" in _backlog_sids(r)
+    r.stop()
+
+
+def test_fork_of_deleted_public_parent_is_shared(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("p")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries = [_sess_a("a"), _fork("f", "p")]
+    r._on_capture_tick()
+    assert "f" in r.published_session_ids()
+    r.stop()
+
+
+def test_fork_of_archived_parent_is_shared(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("p")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries = [_sess_a("a"), _sess_a("p", archived=True)]
+    r._on_capture_tick()
+    chat._summaries.append(_fork("f", "p"))
+    r._on_capture_tick()
+    assert "f" in r.published_session_ids()
+    r.stop()
+
+
+def test_fork_of_optout_then_deleted_parent_stays_private(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("c")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    r.set_session_optout(visible={"c"}, checked=set())
+    chat._summaries = [_sess_a("a")]
+    r._on_capture_tick()
+    chat._summaries.append(_fork("f", "c"))
+    r._on_capture_tick()
+    assert "f" not in r.published_session_ids()
+    assert "f" in r.session_optout()
+    r.stop()
+
+
+def test_fork_of_dataset_none_history_chat_stays_private(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a")], messages={"n": [FakeMsg("user", "q")],
+                                              "f": [FakeMsg("user", "q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    # n and f appear in the same tick, the fork listed first
+    chat._summaries += [_fork("f", "n"), _sess_a("n", dataset=None)]
+    r._on_capture_tick()
+    assert "f" not in r.published_session_ids()
+    assert {"n", "f"} <= r.session_optout()
+    r.stop()
+
+
+def test_fork_inheritance_order_independent(qapp, monkeypatch):
+    for order in (("g", "f"), ("f", "g")):
+        chat = FakeChat([_sess_a("c")])
+        win = FakeWindow(chat, dataset="ds1")
+        mr, r = _make_relay(monkeypatch, win)
+        _urlopen_ok(mr, monkeypatch)
+        r.meeting_start(3600)
+        r.set_session_optout(visible={"c"}, checked=set())
+        forks = {"f": _fork("f", "c"), "g": _fork("g", "f")}
+        chat._summaries += [forks[k] for k in order]
+        r._on_capture_tick()
+        assert not ({"f", "g"} & r.published_session_ids()), order
+        assert {"f", "g"} <= r.session_optout(), order
+        r.stop()
+
+
+def test_fork_of_parent_unpublished_by_auto_share_off_not_inherited(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("c")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win, ui_prefs={"auto_share_new_sessions": False})
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    r.set_session_optout(visible={"c"}, checked=set())
+    chat._summaries.append(_sess_a("p"))
+    r._on_capture_tick()
+    assert "p" not in r.published_session_ids() and "p" not in r.session_optout()
+    chat._summaries += [_fork("q", "p"), _fork("f", "c")]
+    r._on_capture_tick()
+    assert "q" not in r.session_optout()
+    assert "f" in r.session_optout()
+    r.stop()
+    r.meeting_start(3600)
+    assert {"p", "q"} <= r.published_session_ids()
+    assert "f" not in r.published_session_ids()
+    assert "c" not in r.published_session_ids()
+    r.stop()
+
+
+def test_share_window_pre_start_row_reflects_fork_inheritance(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("c")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    sw = _share_window(win, r)
+    sw._sess_boxes["c"].setChecked(False)
+    chat._summaries.append(_fork("f", "c"))
+    sw._refresh_lists()
+    assert not sw._sess_boxes["f"].isChecked()
+    r.meeting_start(3600)
+    assert "f" not in r.published_session_ids()
+    r.stop()
+
+
+def test_scope_puts_carry_increasing_version(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a")])
+    win = FakeWindow(chat, dataset="ds1", tabs=["t1"])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_sess_a("b"))
+    r._on_capture_tick()
+    win._tabs = ["t1", "t2"]
+    r._on_capture_tick()
+    r.set_published_sessions({"a"})
+    r._on_capture_tick()
+    vers = [i["ver"] for i in r._worker._outbox if i["kind"] in ("sessions", "tabs")]
+    assert len(vers) >= 4
+    assert all(a < b for a, b in zip(vers, vers[1:]))
+    top = max(vers)
+    r._on_sendfail("sessions")
+    r._on_capture_tick()
+    last = _kinds(r, "sessions")[-1]
+    assert last["ver"] > top
+    r.stop()
+
+
+def test_send_scope_put_appends_version(qapp):
+    import meeting.relay as mr
+    w = mr._RelayWorker("http://x", "k", "ch")
+    calls = []
+
+    def fake_req(method, path, data=None, is_png=False):
+        calls.append((method, path))
+        return FakeResp(b"{}")
+
+    w._req = fake_req
+    w._send({"kind": "sessions", "data": [], "ver": 7})
+    w._send({"kind": "sessions", "data": []})
+    w._send({"kind": "tabs", "data": {}, "ver": 8})
+    w._send({"kind": "tabs", "data": {}})
+    assert calls == [("PUT", "/sessions/ch?v=7"), ("PUT", "/sessions/ch"),
+                     ("PUT", "/tabs/ch?v=8"), ("PUT", "/tabs/ch")]
+
+
+def test_placeholder_tab_not_shared(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, dataset="ds1",
+                     tab_objs=[("(empty)", "ds1", True), ("t1", "ds1")])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert ("ds1", "(empty)") not in r.published_tabs()
+    assert ("ds1", "t1") in r.published_tabs()
+    r.stop()
+
+
+def test_share_window_lists_only_open_dataset_chats(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("c", dataset="dsClosed"),
+                     _sess_a("n", dataset=None)])
+    win = FakeWindow(chat, dataset="ds1",
+                     tab_objs=[("t1", "ds1"), ("v", None), ("(empty)", "ds1", True),
+                               ("tc", "dsClosed")],
+                     open_datasets=["ds1"])
+    mr, r = _make_relay(monkeypatch, win)
+    sw = _share_window(win, r)
+    assert set(sw._sess_boxes) == {"a"}
+    assert set(sw._tab_boxes) == {("ds1", "t1")}
+
+
+# ---- Issue #107 B-10: tunnel failure reason ----
+
+def test_last_tunnel_error_lifecycle(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+
+    def fail(self, port, **kw):
+        raise RuntimeError("CLOUDFLARE_TUNNEL_NAME not set")
+
+    want = "RuntimeError: CLOUDFLARE_TUNNEL_NAME not set"
+    monkeypatch.setattr(mr.Tunnel, "start", fail)
+    r.meeting_start(3600)                                  # non-LAN → stops
+    assert r.share_status() == "tunnel_failed"
+    assert r.last_tunnel_error() == want
+    monkeypatch.setattr(mr.Tunnel, "start", lambda self, port, **kw: _FAKE_TUNNEL_URL)
+    r.meeting_start(3600)
+    assert r.last_tunnel_error() == ""                     # cleared by meeting_start
+    r.stop()
+
+    monkeypatch.setattr(mr.Tunnel, "start", fail)
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    assert r.share_status() == "external_unavailable"
+    assert r.last_tunnel_error() == want
+    r.stop()
+    assert r.last_tunnel_error() == ""                     # cleared by stop()
+    r.meeting_start(3600, lan=True, host_ip="192.168.1.50")
+    assert r.last_tunnel_error() == want
+    r._on_state("expired")
+    assert r.last_tunnel_error() == ""                     # cleared by expiry
+    r.stop()
+
+
+def test_share_window_logs_tunnel_reason(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+
+    def fail(self, port, **kw):
+        raise RuntimeError("cloudflared not found")
+
+    monkeypatch.setattr(mr.Tunnel, "start", fail)
+    r.meeting_start(3600)
+    sw = _share_window(win, r)
+    line = tr("meeting.tunnel.reason", error="RuntimeError: cloudflared not found")
+    assert sw._log.toPlainText().count(line) == 1
+
+
+# ---- Issue #107 B-27 ----
+
+def test_read_view_max_mp_invalid_falls_back(qapp, monkeypatch, caplog):
+    import meeting.relay as mr
+    for raw in ("abc", "0", "-1", "nan", "inf"):
+        monkeypatch.setenv("RELAY_VIEW_MAX_MP", raw)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="meeting.relay"):
+            assert mr._read_view_max_mp() == 8.0, raw
+        assert any("RELAY_VIEW_MAX_MP" in rec.getMessage() for rec in caplog.records), raw
+    monkeypatch.setenv("RELAY_VIEW_MAX_MP", "")
+    assert mr._read_view_max_mp() == 8.0
+    monkeypatch.setenv("RELAY_VIEW_MAX_MP", "4")
+    assert mr._read_view_max_mp() == 4.0
+
+
+def test_stop_drops_pending_remote(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._pending_remote = {"s1": [("X", "q")]}
+    r.stop()
+    assert chat._pending_remote == {}
+
+
+def test_expired_drops_pending_remote(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._pending_remote = {"s1": [("X", "q")]}
+    r._on_state("expired")
+    assert chat._pending_remote == {}
+    r.stop()
+
+
+def test_remote_message_dropped_when_not_sharing(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    r._published_session_ids = {"s1"}
+    r._sharing = False
+    r._on_remote_message("s1", "Bob", "hi")
+    assert chat.injected == []
+
+
+def test_stale_worker_signals_ignored_after_restart(qapp, monkeypatch):
+    chat = FakeChat([_sess("s1")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    g1 = r._meeting_gen
+    r.stop()
+    r.meeting_start(3600)
+    r._on_worker_inbound(g1, "s1", "Bob", "hi")
+    assert chat.injected == []
+    r._on_worker_new_session(g1, "ds1", "Bob")
+    assert chat.created == []
+    r._on_worker_state(g1, "expired")
+    assert r.is_sharing()
+    g2 = r._meeting_gen
+    r._on_worker_inbound(g2, "s1", "Bob", "hi")
+    assert chat.injected == [("hi", "Bob", "s1")]
+    r._on_worker_new_session(g2, "ds1", "Bob")
+    assert chat.created == ["ds1"]
+    r._on_worker_state(g2, "expired")
+    assert not r.is_sharing()
+    r.stop()
+
+
+def test_lan_start_without_host_falls_back_to_loopback(qapp, monkeypatch, caplog):
+    monkeypatch.delenv("RELAY_LAN_HOST", raising=False)
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _local_relay(monkeypatch, win)
+    _lan_urlopen(mr, monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="meeting.relay"):
+        r.meeting_start(3600, lan=True, host_ip="")
+    assert r.is_sharing()
+    assert r._local_server.bind_host == "127.0.0.1"
+    assert r.lan_base_url() == ""
+    assert any("no host IP" in rec.getMessage() for rec in caplog.records)
+    r.stop()
+
+
+def test_meeting_start_without_admin_key_raises(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    r._admin_key = ""
+    calls = []
+    monkeypatch.setattr(mr.urllib.request, "urlopen",
+                        lambda req, timeout=None: calls.append(req))
+    with pytest.raises(RuntimeError):
+        r.meeting_start(3600)
+    assert calls == []
+    assert r._local_server is None
+    assert not r.is_sharing()
+
+
+def test_ttl_sec_and_period_label(qapp, monkeypatch):
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(7200)
+    assert r.ttl_sec() == 7200
+    sw = _share_window(win, r)
+    sw._update_remaining()
+    assert "2h00m" in sw._remaining_label.text()
     r.stop()

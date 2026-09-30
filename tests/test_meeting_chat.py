@@ -202,3 +202,64 @@ def test_delete_clears_pending(qapp, widget, monkeypatch):
                         lambda *a, **k: QMessageBox.StandardButton.Yes)
     widget._on_delete_session(idx)
     assert B.id not in widget._pending_remote
+
+
+# ---- Issue #107 ----
+
+def test_fork_records_parent_in_summaries(widget):
+    from llm_backend.base import Message
+    src = widget._active
+    src.messages.append(Message(role="user", content="q"))
+    src.messages.append(Message(role="assistant", content="a"))
+    widget._fork_from(src, cut=2, prefill=None)
+    new = widget._active
+    assert new is not src
+    rows = {r["id"]: r for r in widget.session_summaries()}
+    assert rows[new.id]["forked_from"] == src.id
+    assert rows[src.id]["forked_from"] is None
+
+
+def _mark_busy(widget, sess):
+    from gui.chat import _Turn
+    from PySide6.QtCore import QTimer
+
+    class B:
+        name = "mock"
+        last_usage = None
+
+    turn = _Turn(sess, B(), object(), QTimer(widget))
+    turn.buffer = ""
+    widget._turns[sess.id] = turn
+
+
+def test_drain_respects_remote_gate(qapp, widget):
+    sess = widget._active
+    widget.set_remote_gate(lambda sid: False)
+    _mark_busy(widget, sess)
+    widget.inject_remote_message("q1", "X", session_id=sess.id)
+    assert widget._pending_remote.get(sess.id) == [("X", "q1")]
+    widget._on_done(sess.id)
+    assert sess.id not in widget._pending_remote
+    assert sess.id not in widget._turns          # gate closed → no new turn
+
+    widget.set_remote_gate(lambda sid: True)
+    _mark_busy(widget, sess)
+    widget.inject_remote_message("q2", "X", session_id=sess.id)
+    widget._on_done(sess.id)
+    assert sess.id in widget._turns              # gate open → drained as before
+    _drain(qapp, widget)
+
+
+def test_pending_remote_cap(qapp, widget, caplog):
+    import logging
+    from gui.chat import _MAX_PENDING_REMOTE
+    sess = widget._active
+    _mark_busy(widget, sess)
+    with caplog.at_level(logging.WARNING, logger="gui.chat"):
+        for i in range(_MAX_PENDING_REMOTE + 1):
+            widget.inject_remote_message("q%d" % i, "X", session_id=sess.id)
+    assert _MAX_PENDING_REMOTE == 20
+    assert len(widget._pending_remote[sess.id]) == 20
+    assert any("pending queue full" in r.getMessage() for r in caplog.records)
+    widget._pending_remote.pop(sess.id, None)
+    widget._turns.pop(sess.id, None)

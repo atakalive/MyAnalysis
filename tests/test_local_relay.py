@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 
 import pytest
 
@@ -853,8 +854,18 @@ def test_newsession_since_cursor(clock):
     assert {r["name"] for r in _json(r2)["requests"]} == {"n2"}
 
 
+def _stepping_mono():
+    """A rate-limit clock that advances 1 s per call (keeps buckets refilled)."""
+    t = {"v": 0.0}
+
+    def mono():
+        t["v"] += 1.0
+        return t["v"]
+    return mono
+
+
 def test_newsession_queue_cap(clock):
-    st = RelayState(ADMIN)
+    st = RelayState(ADMIN, mono=_stepping_mono())
     _new_channel(st)
     total = lr.MAX_NEW_SESSIONS + 5
     for i in range(total):
@@ -879,3 +890,433 @@ def test_newsession_missing_key_channel(clock):
     status, _, p2 = _call(st, "GET", "/newsessions/ch1", _admin_h())
     assert status == 200
     assert _json(p2)["requests"] == []
+
+
+# ---- Issue #107 B-7: auth before body, size / rate / connection limits ----
+
+def _route_path(key):
+    method, head, n = key
+    if head == "admin":
+        return "/admin/channel" + ("/x" if n == 3 else "")
+    return "/" + head + ("/x" if n == 2 else "/x/y")
+
+
+def test_route_auth_table_covers_routes(clock):
+    st = RelayState(ADMIN)
+    assert len(lr._ROUTE_AUTH) == 17
+    for key, (kind, _limit) in lr._ROUTE_AUTH.items():
+        method = key[0]
+        path = _route_path(key)
+        early, _ = st.precheck(method, path, {})
+        want = 401 if kind == "admin" else 410
+        assert early is not None and early[0] == want, key
+        status, _, _ = _call(st, method, path, {}, b"")
+        assert status == want, key
+
+
+def test_admin_body_not_capped(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    early, cap = st.precheck("PUT", "/backlog/ch1/s1", _admin_h())
+    assert early is None and cap is None
+    big = _jbody([{"text": "x" * (2 * 1024 * 1024), "role": "user"}])
+    status, _, _ = _call(st, "PUT", "/backlog/ch1/s1", _admin_h(), big)
+    assert status == 200
+
+
+def test_precheck_guest_cap(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    early, cap = st.precheck("POST", "/msg/ch1/s1", _guest_h())
+    assert early is None and cap == lr.GUEST_BODY_MAX
+    early, cap = st.precheck("GET", "/poll/ch1/s1", _guest_h())
+    assert early is None and cap == 0
+    assert st.precheck("OPTIONS", "/msg/ch1/s1", {}) == (None, 0)
+    assert st.precheck("GET", "/", {}) == (None, 0)
+
+
+def test_msg_text_too_long_413(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(),
+                         _jbody({"text": "a" * (lr.MSG_TEXT_MAX + 1)}))
+    assert status == 413 and _json(p)["error"] == "text too long"
+    status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(),
+                         _jbody({"text": "a" * lr.MSG_TEXT_MAX}))
+    assert status == 200
+
+
+def test_msg_name_truncated(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _publish_session(st)
+    _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "hi", "name": "n" * 100}))
+    assert st._ch["ch1"]["in_msgs"][-1]["name"] == "n" * lr.NAME_MAX
+
+
+def test_newsession_name_truncated(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "POST", "/newsession/ch1?ds=dsA", _guest_h(), _jbody({"name": "n" * 100}))
+    assert st._ch["ch1"]["new_sessions"][-1]["name"] == "n" * lr.NAME_MAX
+
+
+def test_presence_fields_truncated_and_capped(clock):
+    st = RelayState(ADMIN, mono=_stepping_mono())
+    _new_channel(st)
+    _call(st, "POST", "/presence/ch1", _guest_h(), _jbody({
+        "pid": "p" * 300, "name": "n" * 100, "sid": "s" * 300,
+        "tab": "t" * 300, "ds": "d" * 300}))
+    pres = st._ch["ch1"]["presence"]
+    (entry,) = pres.values()
+    assert entry["pid"] == "p" * lr.PRESENCE_FIELD_MAX
+    assert entry["name"] == "n" * lr.NAME_MAX
+    assert entry["sid"] == "s" * lr.PRESENCE_FIELD_MAX
+    assert entry["tab"] == "t" * lr.PRESENCE_FIELD_MAX
+    assert entry["ds"] == "d" * lr.PRESENCE_FIELD_MAX
+    for i in range(lr.MAX_PRESENCE + 1):
+        status, _, _ = _call(st, "POST", "/presence/ch1", _guest_h(), _jbody({"pid": "q%d" % i}))
+        assert status == 200
+        assert len(pres) <= lr.MAX_PRESENCE
+    assert "q%d" % lr.MAX_PRESENCE in pres       # newest kept
+
+
+def test_in_msgs_capped(clock):
+    st = RelayState(ADMIN, mono=_stepping_mono())
+    _new_channel(st)
+    _publish_session(st)
+    for i in range(lr.MAX_IN_MSGS + 5):
+        status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "m%d" % i}))
+        assert status == 200
+    msgs = st._ch["ch1"]["in_msgs"]
+    assert len(msgs) == lr.MAX_IN_MSGS
+    texts = [m["text"] for m in msgs]
+    assert "m0" not in texts and "m4" not in texts and "m5" in texts
+
+
+def test_rate_limit_429_and_refill(clock):
+    now = {"v": 100.0}
+    st = RelayState(ADMIN, mono=lambda: now["v"])
+    _new_channel(st)
+    _publish_session(st)
+    for i in range(20):
+        status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
+        assert status == 200, i
+    status, _, p = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
+    assert status == 429 and _json(p)["error"] == "rate limited"
+    now["v"] += 1.0
+    status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "x"}))
+    assert status == 200
+
+
+def test_rate_limit_buckets_dropped_with_channel(clock):
+    now = {"v": 100.0}
+    st = RelayState(ADMIN, mono=lambda: now["v"])
+    _new_channel(st)
+    _call(st, "POST", "/newsession/ch1", _guest_h(), _jbody({"name": "b"}))
+    assert any(k[0] == "ch1" for k in st._buckets)
+    _call(st, "DELETE", "/admin/channel/ch1", _admin_h())
+    assert not any(k[0] == "ch1" for k in st._buckets)
+
+
+def test_rate_ok_tolerates_missing_fields(clock):
+    st = RelayState(ADMIN)
+    del st._buckets
+    del st._mono
+    assert st._rate_ok("ch1", "msg") is True
+
+
+# ---- Issue #107 B-6: versioned scope PUTs ----
+
+def test_scope_put_rejects_stale_version(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    status, _, _ = _call(st, "PUT", "/sessions/ch1?v=2", _admin_h(), _jbody([]))
+    assert status == 200
+    status, _, p = _call(st, "PUT", "/sessions/ch1?v=1", _admin_h(),
+                         _jbody([{"id": "s1", "title": "T", "busy": False}]))
+    assert status == 200 and _json(p) == {"ok": True, "stale": True}
+    assert st._ch["ch1"]["sessions"] == []
+    status, _, _ = _call(st, "POST", "/msg/ch1/s1", _guest_h(), _jbody({"text": "hi"}))
+    assert status == 403
+    _, _, p = _call(st, "GET", "/history/ch1/s1", _guest_h())
+    assert _json(p)["messages"] == []
+
+    tabs_v2 = {"active_dataset": None, "datasets": [], "tabs_by_dataset": {}}
+    tabs_v1 = {"active_dataset": "ds1", "datasets": ["ds1"],
+               "tabs_by_dataset": {"ds1": ["t1"]}}
+    status, _, _ = _call(st, "PUT", "/tabs/ch1?v=2", _admin_h(), _jbody(tabs_v2))
+    assert status == 200
+    status, _, p = _call(st, "PUT", "/tabs/ch1?v=1", _admin_h(), _jbody(tabs_v1))
+    assert status == 200 and _json(p)["stale"] is True
+    status, _, _ = _call(st, "GET", "/view/ch1/t1?ds=ds1", _guest_h())
+    assert status == 403
+
+
+def test_scope_put_bad_version_400(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    for v in ("abc", "-1", "１"):
+        q = urllib.parse.quote(v)
+        status, _, p = _call(st, "PUT", f"/sessions/ch1?v={q}", _admin_h(), _jbody([]))
+        assert status == 400 and _json(p)["error"] == "bad version", v
+        status, _, _ = _call(st, "PUT", f"/tabs/ch1?v={q}", _admin_h(), _jbody([]))
+        assert status == 400, v
+
+
+def test_scope_put_without_version_applies(clock):
+    st = RelayState(ADMIN)
+    _new_channel(st)
+    _call(st, "PUT", "/sessions/ch1?v=5", _admin_h(), _jbody([]))
+    status, _, _ = _call(st, "PUT", "/sessions/ch1", _admin_h(), _jbody([{"id": "s1"}]))
+    assert status == 200
+    assert st._ch["ch1"]["sessions"] == [{"id": "s1"}]
+    _call(st, "PUT", "/tabs/ch1?v=5", _admin_h(), _jbody(["t1"]))
+    _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody(["t2"]))
+    assert st._ch["ch1"]["tabs_by_ds"][""] == ["t2"]
+
+
+# ---- Issue #107 B-7: real-socket limits ----
+
+def _mk_live_channel(srv, ch="ch1", sid="s1"):
+    st = srv.state
+    _new_channel(st, ch=ch)
+    _publish_session(st, ch=ch, sid=sid)
+
+
+def _raw_status(port, head: bytes, body: bytes = b"", *, shut_wr=False, timeout=5.0):
+    """Send raw bytes; return the response status code (int) or None if cut."""
+    import socket
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    try:
+        s.sendall(head + body)
+        if shut_wr:
+            s.shutdown(socket.SHUT_WR)
+        buf = b""
+        while b"\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        if not buf:
+            return None
+        return int(buf.split(b" ", 2)[1])
+    finally:
+        s.close()
+
+
+def _head(method, path, headers):
+    lines = [f"{method} {path} HTTP/1.1", "Host: x"] + [f"{k}: {v}" for k, v in headers.items()]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+def test_socket_unauth_huge_content_length_rejected_without_body():
+    srv = lr.start_server(ADMIN)
+    try:
+        h = {"Content-Length": "1073741824"}
+        assert _raw_status(srv.port, _head("POST", "/msg/x/y", h)) == 410
+        assert _raw_status(srv.port, _head("POST", "/out/x/y", h)) == 401
+    finally:
+        srv.shutdown()
+
+
+def test_socket_guest_oversize_413():
+    srv = lr.start_server(ADMIN)
+    try:
+        _mk_live_channel(srv)
+        h = {"Authorization": "Bearer " + SECRET,
+             "Content-Length": str(lr.GUEST_BODY_MAX + 1)}
+        assert _raw_status(srv.port, _head("POST", "/msg/ch1/s1", h)) == 413
+    finally:
+        srv.shutdown()
+
+
+def _post_json(port, path, body: bytes, auth):
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        c.request("POST", path, body=body,
+                  headers={"Authorization": "Bearer " + auth,
+                           "Content-Type": "application/json"})
+        r = c.getresponse()
+        return r.status, r.read()
+    finally:
+        c.close()
+
+
+def test_socket_msg_16000_chars_accepted():
+    srv = lr.start_server(ADMIN)
+    try:
+        _mk_live_channel(srv)
+        for t, want in (("\x01" * 16000, 200), ("あ" * 16000, 200), ("a" * 16001, 413)):
+            body = json.dumps({"text": t, "name": "g" * 64}, ensure_ascii=False).encode("utf-8")
+            status, payload = _post_json(srv.port, "/msg/ch1/s1", body, SECRET)
+            assert status == want, (len(body), payload)
+        assert len(json.dumps({"text": "\x01" * 16000}, ensure_ascii=False)) > 96000
+    finally:
+        srv.shutdown()
+
+
+def test_socket_guest_envelope_boundary():
+    srv = lr.start_server(ADMIN)
+    try:
+        _mk_live_channel(srv)
+        base = len(json.dumps({"text": "hi", "name": ""}).encode("utf-8"))
+        n = lr.GUEST_BODY_MAX - base
+        body = json.dumps({"text": "hi", "name": "g" * n}).encode("utf-8")
+        assert len(body) == lr.GUEST_BODY_MAX
+        status, _ = _post_json(srv.port, "/msg/ch1/s1", body, SECRET)
+        assert status == 200
+        assert srv.state._ch["ch1"]["in_msgs"][-1]["name"] == "g" * lr.NAME_MAX
+        h = {"Authorization": "Bearer " + SECRET,
+             "Content-Length": str(lr.GUEST_BODY_MAX + 1)}
+        assert _raw_status(srv.port, _head("POST", "/msg/ch1/s1", h)) == 413
+    finally:
+        srv.shutdown()
+
+
+def test_socket_bad_content_length_400():
+    srv = lr.start_server(ADMIN)
+    try:
+        _mk_live_channel(srv)
+        for bad in ("abc", "-5"):
+            h = {"Authorization": "Bearer " + SECRET, "Content-Length": bad}
+            assert _raw_status(srv.port, _head("POST", "/msg/ch1/s1", h)) == 400, bad
+    finally:
+        srv.shutdown()
+
+
+def test_socket_short_body_400():
+    srv = lr.start_server(ADMIN)
+    try:
+        st = srv.state
+        _new_channel(st)
+        _call(st, "PUT", "/tabs/ch1", _admin_h(), _jbody(
+            {"active_dataset": "ds1", "datasets": ["ds1"], "tabs_by_dataset": {"ds1": ["t"]}}))
+        h = {"Authorization": "Bearer " + ADMIN, "Content-Length": "10"}
+        status = _raw_status(srv.port, _head("PUT", "/view/ch1/t?ds=ds1", h), b"12345",
+                             shut_wr=True)
+        assert status == 400
+        assert "t" not in st._ch["ch1"]["views_by_ds"].get("ds1", {})
+    finally:
+        srv.shutdown()
+
+
+def _cut_within(sock, feed: bytes | None, limit: float) -> bool:
+    """Trickle `feed` one byte per 0.1 s; True if the server cuts us within `limit`."""
+    import select
+    import time as _t
+    end = _t.monotonic() + limit
+    i = 0
+    while _t.monotonic() < end:
+        if feed is not None:
+            try:
+                sock.send(feed[i % len(feed):i % len(feed) + 1])
+            except OSError:
+                return True
+            i += 1
+        r, _, _ = select.select([sock], [], [], 0.1)
+        if r:
+            try:
+                if sock.recv(4096) == b"":
+                    return True
+            except OSError:
+                return True
+    return False
+
+
+def test_socket_slow_header_cut_by_deadline(monkeypatch):
+    import socket
+    monkeypatch.setattr(lr, "REQUEST_DEADLINE_SEC", 0.5)
+    srv = lr.start_server(ADMIN)
+    try:
+        s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        try:
+            s.sendall(b"POST /msg/x/y HTTP/1.1\r\n")
+            assert _cut_within(s, b"X-Pad-aaaaaaaaaaaaaaaa", 2.0)
+        finally:
+            s.close()
+    finally:
+        srv.shutdown()
+
+
+def test_socket_slow_body_cut_by_deadline(monkeypatch):
+    import socket
+    monkeypatch.setattr(lr, "REQUEST_DEADLINE_SEC", 0.5)
+    srv = lr.start_server(ADMIN)
+    try:
+        s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        try:
+            s.sendall(_head("POST", "/msg/x/y", {"Content-Length": "100"}))
+            assert _cut_within(s, b"z", 2.0)
+        finally:
+            s.close()
+    finally:
+        srv.shutdown()
+
+
+def _get_root_200_within(port, limit=2.0) -> bool:
+    import time as _t
+    end = _t.monotonic() + limit
+    while _t.monotonic() < end:
+        try:
+            if _raw_status(port, _head("GET", "/", {}), timeout=1.0) == 200:
+                return True
+        except OSError:
+            pass
+        _t.sleep(0.05)
+    return False
+
+
+def test_socket_connection_cap(monkeypatch, tmp_path):
+    import socket
+    html = tmp_path / "chatdock.html"
+    html.write_text("<html>hi</html>", encoding="utf-8")
+    monkeypatch.setattr(lr, "MAX_CONNECTIONS", 2)
+    monkeypatch.setattr(lr, "REQUEST_DEADLINE_SEC", 5.0)
+    srv = lr.start_server(ADMIN, html_path=html)
+    try:
+        idle = [socket.create_connection(("127.0.0.1", srv.port), timeout=5) for _ in range(2)]
+        try:
+            third = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            try:
+                assert _cut_within(third, None, 1.0)
+            finally:
+                third.close()
+        finally:
+            for s in idle:
+                s.close()
+        assert _get_root_200_within(srv.port)
+    finally:
+        srv.shutdown()
+
+
+def test_socket_deadline_cuts_socket_not_handler(monkeypatch, tmp_path):
+    import socket
+    html = tmp_path / "chatdock.html"
+    html.write_text("<html>hi</html>", encoding="utf-8")
+    monkeypatch.setattr(lr, "MAX_CONNECTIONS", 1)
+    monkeypatch.setattr(lr, "REQUEST_DEADLINE_SEC", 0.5)
+    srv = lr.start_server(ADMIN, html_path=html)
+    try:
+        _mk_live_channel(srv)
+        lock = srv.state._lock
+        lock.acquire()
+        try:
+            a = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            try:
+                a.sendall(_head("GET", "/poll/ch1/s1", {"Authorization": "Bearer " + SECRET}))
+                assert _cut_within(a, None, 2.0)          # socket cut while precheck waits
+            finally:
+                a.close()
+            b = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            try:
+                assert _cut_within(b, None, 1.0)          # slot still held by A's handler
+            finally:
+                b.close()
+        finally:
+            lock.release()
+        assert _get_root_200_within(srv.port)
+    finally:
+        srv.shutdown()

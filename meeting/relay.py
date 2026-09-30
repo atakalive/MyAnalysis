@@ -26,6 +26,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -57,7 +58,22 @@ _FAIL_THRESHOLD = 5
 # axis (and thus legible labels) instead of having the short axis crushed. A hard
 # per-edge ceiling guards browser max-texture/decode limits; a byte cap bounds
 # host+relay memory. RELAY_VIEW_MAX_MP lets a thin-uplink host dial the area down.
-_VIEW_MAX_MEGAPIXELS = float(os.environ.get("RELAY_VIEW_MAX_MP", "8") or 8)
+def _read_view_max_mp() -> float:
+    # 不正な値で import（＝アプリの起動）ごと落とさない（Issue #107 B-27(1)）。
+    raw = os.environ.get("RELAY_VIEW_MAX_MP", "").strip()
+    if not raw:
+        return 8.0
+    try:
+        v = float(raw)
+    except ValueError:
+        v = math.nan
+    if not math.isfinite(v) or v <= 0:
+        _log.warning("RELAY_VIEW_MAX_MP=%r is not a positive number; using 8", raw)
+        return 8.0
+    return v
+
+
+_VIEW_MAX_MEGAPIXELS = _read_view_max_mp()
 _VIEW_MAX_EDGE = 8192
 _VIEW_MAX_PNG_BYTES = 6 * 1024 * 1024
 # Min seconds between partial /out posts per session while an assistant streams.
@@ -95,15 +111,18 @@ def _qimage_digest(img: "QImage") -> bytes | None:
 class _RelayWorker(QThread):
     """Continuous network I/O for one channel. All urllib has timeout=5.0."""
 
-    sig_inbound = Signal(str, str, str)   # (sid, name, text)  — from in: only
-    sig_new_session = Signal(str, str)     # (ds, name) — guest-requested new chat (Issue #81)
-    sig_presence = Signal(object)         # list[{pid,name,sid,tab,last}]
-    sig_state = Signal(str)               # "expired" | "disconnected" | "ok"
-    sig_sendfail = Signal(str, str, str)  # (kind, ds, tab) of a dropped outbox item (no retry)
+    # Every signal leads with the meeting generation (Issue #107 B-27(2)) so
+    # MeetingRelay can drop queued deliveries from a stopped meeting.
+    sig_inbound = Signal(int, str, str, str)   # (gen, sid, name, text)  — from in: only
+    sig_new_session = Signal(int, str, str)     # (gen, ds, name) — guest-requested new chat (Issue #81)
+    sig_presence = Signal(int, object)         # (gen, list[{pid,name,sid,tab,last}])
+    sig_state = Signal(int, str)               # (gen, "expired" | "disconnected" | "ok")
+    sig_sendfail = Signal(int, str, str, str)  # (gen, kind, ds, tab) of a dropped outbox item (no retry)
 
     def __init__(self, base_url: str, admin_key: str, channel: str,
-                 poll_ms: int = 3000, parent=None):
+                 poll_ms: int = 3000, parent=None, *, gen: int = 0):
         super().__init__(parent)
+        self._gen = gen
         self._base = base_url.rstrip("/")
         self._admin = admin_key
         self._ch = channel
@@ -182,16 +201,16 @@ class _RelayWorker(QThread):
         self._fail_streak = 0
         if self._disconnected:
             self._disconnected = False
-            self.sig_state.emit("ok")
+            self.sig_state.emit(self._gen, "ok")
 
     def _note_fail(self) -> None:
         self._fail_streak += 1
         if self._fail_streak >= _FAIL_THRESHOLD and not self._disconnected:
             self._disconnected = True
-            self.sig_state.emit("disconnected")
+            self.sig_state.emit(self._gen, "disconnected")
 
     def _emit_expired(self) -> None:
-        self.sig_state.emit("expired")
+        self.sig_state.emit(self._gen, "expired")
         self.requestInterruption()
 
     def _drain_outbox(self) -> None:
@@ -210,9 +229,11 @@ class _RelayWorker(QThread):
             elif kind == "backlog":
                 resp = self._req("PUT", f"/backlog/{_q(self._ch)}/{_q(item['sid'])}", data=item["data"])
             elif kind == "sessions":
-                resp = self._req("PUT", f"/sessions/{_q(self._ch)}", data=item["data"])
+                resp = self._req("PUT", f"/sessions/{_q(self._ch)}{self._ver_query(item)}",
+                                 data=item["data"])
             elif kind == "tabs":
-                resp = self._req("PUT", f"/tabs/{_q(self._ch)}", data=item["data"])
+                resp = self._req("PUT", f"/tabs/{_q(self._ch)}{self._ver_query(item)}",
+                                 data=item["data"])
             elif kind == "view":
                 resp = self._req("PUT", f"/view/{_q(self._ch)}/{_q(item['tab'])}"
                                  f"?ds={_q(item.get('ds') or '')}",
@@ -229,12 +250,18 @@ class _RelayWorker(QThread):
                 self._emit_expired()
             else:
                 self._note_fail()
-                self.sig_sendfail.emit(str(kind or ""), str(item.get("ds") or ""),
+                self.sig_sendfail.emit(self._gen, str(kind or ""), str(item.get("ds") or ""),
                                        str(item.get("tab") or ""))
         except Exception:
             self._note_fail()
-            self.sig_sendfail.emit(str(kind or ""), str(item.get("ds") or ""),
+            self.sig_sendfail.emit(self._gen, str(kind or ""), str(item.get("ds") or ""),
                                    str(item.get("tab") or ""))
+
+    @staticmethod
+    def _ver_query(item: dict) -> str:
+        # Scope PUTs carry a monotonic version so the relay never applies an older
+        # (e.g. timed-out, late-landing) sessions/tabs PUT over a newer one (Issue #107).
+        return f"?v={int(item['ver'])}" if "ver" in item else ""
 
     def _do_inbound(self) -> None:
         try:
@@ -266,7 +293,7 @@ class _RelayWorker(QThread):
             if not mid or mid in self._seen:
                 continue
             self._seen.add(mid)
-            self.sig_inbound.emit(str(m.get("sid", "")), str(m.get("name", "")),
+            self.sig_inbound.emit(self._gen, str(m.get("sid", "")), str(m.get("name", "")),
                                   str(m.get("text", "")))
             ts = self._mid_ts(mid)
             if ts > self._latest_seen_ts:
@@ -313,7 +340,7 @@ class _RelayWorker(QThread):
             if not mid or mid in self._ns_seen:
                 continue
             self._ns_seen.add(mid)
-            self.sig_new_session.emit(str(m.get("ds", "")), str(m.get("name", "")))
+            self.sig_new_session.emit(self._gen, str(m.get("ds", "")), str(m.get("name", "")))
             ts = self._mid_ts(mid)
             if ts > self._ns_latest_seen_ts:
                 self._ns_latest_seen_ts = ts
@@ -355,7 +382,7 @@ class _RelayWorker(QThread):
             with res:
                 data = json.loads(res.read().decode("utf-8"))
             if isinstance(data, list):
-                self.sig_presence.emit(data)
+                self.sig_presence.emit(self._gen, data)
             self._note_ok()
         except Exception:
             self._note_fail()
@@ -380,7 +407,7 @@ class _TunnelStarter(QThread):
             url = self._tunnel.start(self._port)
             self.sig_ready.emit(self._gen, url)
         except Exception as e:
-            self.sig_failed.emit(self._gen, repr(e))
+            self.sig_failed.emit(self._gen, f"{type(e).__name__}: {e}")
 
 
 class MeetingRelay(QObject):
@@ -413,6 +440,12 @@ class MeetingRelay(QObject):
         # so a bare name would collide across datasets (dsA/dsB "overview").
         self._published_tabs: set[tuple[str, str]] = set()
         self._tab_known: set[tuple[str, str]] = set()
+        # Host opt-outs that survive stop/start (Issue #107 B-5). Memory only: they
+        # live as long as this MeetingRelay instance (app exit / Tier 3 rebuild).
+        self._session_optout: set[str] = set()
+        self._tab_optout: set[tuple[str, str]] = set()
+        # Forks whose inherit-privacy decision is already made (B-6 fix 13).
+        self._fork_decided: set[str] = set()
         # Auto-share new chat sessions (Issue #48): default on, persisted in ui_prefs.json.
         from llm_bridge.paths import read_ui_pref
         pref = read_ui_pref("auto_share_new_sessions", True)
@@ -440,6 +473,10 @@ class MeetingRelay(QObject):
         self._tunnel_starter: _TunnelStarter | None = None
         self._gen = 0                   # tunnel-start generation (stale-signal guard)
         self._last_tunnel_failed = False
+        self._last_tunnel_error = ""    # reason of the last tunnel-start failure (B-10)
+        self._scope_ver = 0             # version of sessions/tabs PUTs (B-6 fix 12)
+        self._meeting_gen = 0           # worker-signal generation (B-27(2))
+        self._ttl_sec = 0               # TTL of the running meeting (B-27(5))
         self._lan = False        # LAN リンクを出すか（非同期スロットが参照するので永続化）
         self._lan_host = ""      # LAN URL のホスト（ユーザ入力 or RELAY_LAN_HOST env or 検出 IP）
 
@@ -455,6 +492,12 @@ class MeetingRelay(QObject):
             cw.messageAdded.connect(self._on_message_added)
         if cw is not None and hasattr(cw, "messageStreaming"):
             cw.messageStreaming.connect(self._on_message_streaming)
+        if cw is not None and callable(getattr(cw, "set_remote_gate", None)):
+            cw.set_remote_gate(self._remote_turn_allowed)
+        # Follow dataset open/close immediately (Issue #107 B-6 fix 10).
+        sig = getattr(window, "open_datasets_changed", None)
+        if sig is not None and hasattr(sig, "connect"):
+            sig.connect(self._on_open_datasets_changed)
 
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(1000)
@@ -467,6 +510,12 @@ class MeetingRelay(QObject):
 
     def expires_at(self) -> int:
         return self._expires_at
+
+    def ttl_sec(self) -> int:
+        return getattr(self, "_ttl_sec", 0)
+
+    def last_tunnel_error(self) -> str:
+        return getattr(self, "_last_tunnel_error", "")
 
     @property
     def host_name(self) -> str:
@@ -552,6 +601,119 @@ class MeetingRelay(QObject):
         self._tab_known |= new | removed
         self._published_tabs = new
 
+    def session_optout(self) -> set[str]:
+        return set(getattr(self, "_session_optout", set()))
+
+    def tab_optout(self) -> set[tuple[str, str]]:
+        return set(getattr(self, "_tab_optout", set()))
+
+    def set_session_optout(self, visible, checked) -> None:
+        """共有ウィンドウに表示中の行（visible）のうち、チェックの外れたものを opt-out にする。
+        表示していない id の opt-out 状態は変えない。checked のうち visible に無い要素は無視する。
+
+        共有中かどうかに関係なく動く（Issue #107 B-5）。opt-out は停止・開始を跨いで残り、
+        meeting_start と吸収（absorb_new_*）が公開集合から除く。寿命はこの MeetingRelay の
+        インスタンスが生きている間だけ（メモリ上のみ。アプリの終了と、hot reload の Tier 3
+        再構築で窓を作り直すときに消える）。"""
+        v, c = set(visible), set(checked)
+        cur = getattr(self, "_session_optout", set())
+        self._session_optout = (cur - v) | (v - c)
+
+    def set_tab_optout(self, visible, checked) -> None:
+        """set_session_optout のタブ版（キーは (dataset, name)）。"""
+        v, c = set(visible), set(checked)
+        cur = getattr(self, "_tab_optout", set())
+        self._tab_optout = (cur - v) | (v - c)
+
+    def ds_shared(self, ds) -> bool:
+        """共有されるのは開いているデータセットのチャットとタブだけ（Issue #107 B-6）。"""
+        if ds is None:
+            return False
+        getter = getattr(self._window, "open_dataset_names", None)
+        if not callable(getter):
+            return False
+        return ds in getter()
+
+    def _session_dataset(self, sid: str):
+        cw = self._window.chat_widget() if hasattr(self._window, "chat_widget") else None
+        get = getattr(cw, "_session_by_id", None)
+        sess = get(sid) if callable(get) else None
+        return None if sess is None else getattr(sess, "dataset", None)
+
+    def _session_has_history(self, sid: str) -> bool:
+        cw = self._window.chat_widget() if hasattr(self._window, "chat_widget") else None
+        has = getattr(cw, "session_has_history", None)
+        return bool(has(sid)) if callable(has) else False
+
+    def _sid_shared(self, sid: str) -> bool:
+        """公開集合にあり、かつ開いているデータセットのチャットか（ゲストから受ける側の判定）。"""
+        return sid in self._published_session_ids and self.ds_shared(self._session_dataset(sid))
+
+    def _sid_out_ok(self, sid: str) -> bool:
+        """ホストの発言をリレーへ送ってよいか（送る側の判定）。
+
+        公開集合にあり、開いているデータセットのチャットなら送る。閉じている間も、この会議で
+        一度 backlog を送ったチャット（_backfilled_ids）は送り続ける: リレーは sessions PUT に
+        無い sid への /poll・/history を _session_scope_ok で拒否するのでゲストには見えず、
+        開き直したときに履歴が途切れない（backlog は開始時点の全文、以降は live out で補う、
+        という既存の前提を保つ）。まだ backlog を送っていないチャットは送らない（開き直した後の
+        tick で全文を backlog として送るので、ここで送ると重複する）。"""
+        if sid not in self._published_session_ids:
+            return False
+        if sid in getattr(self, "_backfilled_ids", set()):
+            return True
+        return self.ds_shared(self._session_dataset(sid))
+
+    def classify_private_sessions(self, summaries) -> None:
+        """規則で非公開にするチャットを opt-out に記録する（Issue #107 B-6 修正 9・13）。
+        - dataset 未設定で履歴があるチャット
+        - opt-out された親から分岐したチャット（推移的。分岐ごとに 1 回だけ決める）"""
+        optout = self.__dict__.setdefault("_session_optout", set())
+        decided = self.__dict__.setdefault("_fork_decided", set())
+        for s in summaries:
+            if s.get("dataset") is None and self._session_has_history(s["id"]):
+                optout.add(s["id"])
+        forks = [s for s in summaries if s.get("forked_from") and s["id"] not in decided]
+        changed = True
+        while changed:                      # 親子の並び順に依存しないよう、変化が無くなるまで回す
+            changed = False
+            for s in list(forks):
+                if s["forked_from"] in optout:
+                    optout.add(s["id"])
+                    decided.add(s["id"])
+                    forks.remove(s)
+                    changed = True
+        decided.update(s["id"] for s in forks)   # 親が明示的に非公開でない分岐は、継承しないと確定
+
+    def _drop_unshared_pending(self) -> None:
+        """公開範囲の外のチャットへの保留中のゲスト発言を捨てる（B-6 修正 11）。"""
+        cw = self._window.chat_widget() if hasattr(self._window, "chat_widget") else None
+        pend = getattr(cw, "_pending_remote", None)
+        if isinstance(pend, dict):
+            for sid in [s for s in pend if not self._sid_shared(s)]:
+                pend.pop(sid, None)
+
+    def _drop_pending_remote(self) -> None:
+        """保留中のゲスト発言を全部捨てる（会議の停止・失効時。B-27(2)）。"""
+        cw = self._window.chat_widget() if hasattr(self._window, "chat_widget") else None
+        pend = getattr(cw, "_pending_remote", None)
+        if isinstance(pend, dict):
+            pend.clear()
+
+    def _remote_turn_allowed(self, sid: str) -> bool:
+        # 会議外は通す: CLI の chat-inject（llm_bridge/__init__.py）も同じ
+        # _pending_remote を使うため。会議終了時のゲスト発言は stop()/expired の
+        # _drop_pending_remote で捨て済みで、その後のゲスト発言は _sharing の確認と
+        # 会議世代（B-27(2)）で入らない。
+        return (not self._sharing) or self._sid_shared(sid)
+
+    def _on_open_datasets_changed(self) -> None:
+        # データセットの開閉にその場で追従する（B-6 修正 10）: 閉じたデータセットを除いた
+        # sessions/tabs PUT をすぐ積み、保留中のゲスト発言を捨てる。
+        if not self._sharing or self._worker is None:
+            return
+        self._on_capture_tick()
+
     def _active_dataset(self):
         """The window's currently-selected dataset (meeting publish scope, B5)."""
         return getattr(self._window, "current_dataset", None)
@@ -560,55 +722,29 @@ class MeetingRelay(QObject):
         return (getattr(tab, "session_spec", None) or {}).get("dataset")
 
     def _all_ds_tab_pairs(self) -> set[tuple[str, str]]:
-        """(ds-key, tab-name) pairs for EVERY open dataset (Issue #78). ds None is
-        coerced to "" (null group). Names are None-safe (a non-name tab is skipped).
+        """(ds, tab-name) pairs for EVERY open dataset (Issue #78). The None group
+        and placeholder tabs are not included (Issue #107 B-6). Names are None-safe
+        (a non-name tab is skipped).
         This is the all-DS successor to the pre-#78 active-dataset-only helper."""
         out: set[tuple[str, str]] = set()
         for tab in self._window.tabs():
             n = getattr(tab, "name", None)
-            if n is None:
+            if n is None or getattr(tab, "is_placeholder", False):
                 continue
             ds = self._tab_dataset(tab)
-            out.add(("" if ds is None else ds, n))
+            if not self.ds_shared(ds):
+                continue
+            out.add((ds, n))
         return out
 
-    def _shareable_ds_keys(self, sessions) -> list[str]:
-        """DS wire keys a guest can see, in guest DS-bar order ("" = null group).
+    def _shareable_ds_keys(self) -> list[str]:
+        """ゲストの DS チップ＝開いているデータセット（表示順）。
 
-        SSOT for the two callers that MUST agree (Issue #81): _on_capture_tick
-        publishes this list as `datasets` (the guest's clickable DS chips), and
-        _on_new_session_request accepts a "+" only for a key in it. If they drift,
-        a guest can click a chip the host then silently redirects elsewhere.
-
-        Order: open datasets, then extras contributed by `sessions`, then by
-        published tabs. Only the TAB-DERIVED TAIL is unstable: `_published_tabs`
-        is a set, so its iteration order varies with PYTHONHASHSEED. The
-        open-dataset prefix (window._groups is an insertion-ordered dict = display
-        order) and the session-derived middle (`sessions` is a list) are both
-        deterministic. That tail instability is a pre-existing property of the
-        inline code this replaces — just don't write a test that compares that
-        tail verbatim with more than one key in it.
-        The last two sources matter because `close_dataset` is
-        "close != forget": a closed dataset's chats stay in ChatWidget._sessions
-        and its (ds, name) pairs stay in _published_tabs (only an explicit
-        set_published_tabs opt-out removes them), so its chip keeps showing.
-
-        `sessions` is the PUBLISHED session subset — an opted-out session's dataset
-        contributes no chip, so it must not widen the accepted set either.
-
-        getattr on open_dataset_keys tolerates a pre-#78 window double; the old
-        inline form raised there and _on_capture_tick swallowed the whole tick.
+        _on_capture_tick（`datasets` として送る）と _on_new_session_request（新規
+        チャットの作成先として受け付ける）の両方がこれを使う（Issue #81 / #107）。
         """
-        getter = getattr(self._window, "open_dataset_keys", None)
-        keys = list(getter()) if callable(getter) else []
-        for s in sessions:
-            k = "" if s.get("dataset") is None else s["dataset"]
-            if k not in keys:
-                keys.append(k)
-        for (ds_key, _name) in self._published_tabs:
-            if ds_key not in keys:
-                keys.append(ds_key)
-        return keys
+        getter = getattr(self._window, "open_dataset_names", None)
+        return list(getter()) if callable(getter) else []
 
     def absorb_new_tabs(self) -> list[tuple[str, str]]:
         """Auto-share tabs that appeared after the meeting started, across ALL open
@@ -622,7 +758,10 @@ class MeetingRelay(QObject):
         """
         if not self._sharing:
             return []
-        new = [p for p in self._all_ds_tab_pairs() if p not in self._tab_known]
+        # opt-out したタブは開始時に閉じていて known に無くても吸収しない（B-5 (2b)）。
+        optout = getattr(self, "_tab_optout", set())
+        new = [p for p in self._all_ds_tab_pairs()
+               if p not in self._tab_known and p not in optout]
         if new:
             self._published_tabs.update(new)
             self._tab_known.update(new)
@@ -650,7 +789,16 @@ class MeetingRelay(QObject):
         if turning_on and self._sharing:
             cw = self._window.chat_widget()
             if cw is not None:
-                self._session_known.update(s["id"] for s in cw.session_summaries())
+                summaries = cw.session_summaries()
+                # 規則による非公開（B-6 修正 9・13）を known の確定より先に記録する。
+                self.classify_private_sessions(summaries)
+                # 空チャット（dataset 未設定・履歴なし）は dataset が付いた時点で「新規」
+                # として扱うので known に入れない（B-6 修正 9）。
+                self._session_known.update(
+                    s["id"] for s in summaries
+                    if not (s.get("dataset") is None
+                            and not self._session_has_history(s["id"]))
+                )
         self._auto_share_new_sessions = enabled
         update_ui_pref("auto_share_new_sessions", enabled)
 
@@ -689,16 +837,27 @@ class MeetingRelay(QObject):
         # Decide (mark observed / auto-publish) sessions across ALL open datasets
         # (Issue #78): every open DS is default-shared, so a new session in any DS
         # auto-joins. Explicit deselection persists via _session_known.
-        new = [s for s in summaries if s["id"] not in self._session_known]
+        # A blank chat (dataset None, no history) stays undecided until it gets a
+        # dataset (Issue #107 B-6 fix 9).
+        new = [s for s in summaries
+               if s["id"] not in self._session_known
+               and not (s.get("dataset") is None
+                        and not self._session_has_history(s["id"]))]
         if not new:
             return []
         # always mark observed (privacy invariant, Issue #48): a session created
         # while the auto-share toggle was OFF stays known → not retroactively
         # published on OFF→ON.
         self._session_known.update(s["id"] for s in new)
+        # Rule-based privacy (dataset-less chat with history, fork of an opted-out
+        # chat) is recorded as opt-out even while the toggle is off (B-6 fix 9/13).
+        self.classify_private_sessions(summaries)
         if not self._auto_share_new_sessions:
             return []                            # toggle off: known but NOT published
-        to_pub = [s["id"] for s in new if not s.get("archived")]
+        optout = self._session_optout
+        to_pub = [s["id"] for s in new
+                  if not s.get("archived") and s["id"] not in optout
+                  and s.get("dataset") is not None]
         self._published_session_ids.update(to_pub)
         return to_pub
 
@@ -759,20 +918,26 @@ class MeetingRelay(QObject):
         """Create the channel, start the worker + capture timer; deliver the token
         asynchronously via ``tokenReady`` (the tunnel URL resolves off-thread).
 
-        The default published set is EVERY open dataset's sessions/tabs at start
-        time (Issue #78: guests independently browse and drive any dataset, so the
-        host default-shares all of them). ``_session_known``/``_tab_known`` seed
-        from all open datasets too. Explicit per-item deselection makes an item
-        private and persists across dataset switches (deselected items stay in
-        ``_known`` and are not re-absorbed). Sessions/tabs opened mid-meeting in
-        any dataset auto-absorb (default-shared) on the next capture tick.
+        The default published set is every chat not opted out (except dataset-less
+        ones) and every open dataset's tabs not opted out (Issue #78 / #107). Guests
+        only see what belongs to an OPEN dataset: ``ds_shared`` is checked at every
+        send/receive point, so the published sets hold the host's intent, not the
+        open/closed state. Opt-outs (``_session_optout``/``_tab_optout``) survive
+        stop/start. Explicit per-item deselection makes an item private and persists
+        across dataset switches (deselected items stay in ``_known`` and are not
+        re-absorbed). Sessions/tabs opened mid-meeting in any dataset auto-absorb
+        (default-shared) on the next capture tick.
 
         No ``self`` state is mutated until the ``admin/channel`` POST succeeds, so
         a POST failure propagates cleanly with ``_sharing`` still False.
         """
         if self._sharing:
             return   # re-entrancy guard: don't clobber a live tunnel starter / channel
+        if not self._admin_key:
+            # CLI の meeting-start も 401 にせず分かるエラーで止める（B-27(4)）。
+            raise RuntimeError(tr("meeting.not_configured"))
         self._last_tunnel_failed = False
+        self._last_tunnel_error = ""
 
         ttl = max(3600, min(86400, int(ttl_sec)))
         ch = secrets.token_hex(8)
@@ -780,11 +945,17 @@ class MeetingRelay(QObject):
         secret_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
         # base_url: the only `self` writes before the POST (the POST needs them).
-        self._lan = bool(lan)
         # GUI は IP 欄で host_ip を渡す。CLI 単独起動は host_ip=None なので
         # RELAY_LAN_HOST env にフォールバック（無いと CLI の lan=True は lan_host
         # 空 → lan_base_url()/lan_link() が空になり LAN リンクが死ぬ）。
-        self._lan_host = (host_ip or "").strip() or os.environ.get("RELAY_LAN_HOST", "").strip()
+        lan_host = (host_ip or "").strip() or os.environ.get("RELAY_LAN_HOST", "").strip()
+        lan_on = bool(lan)
+        if lan_on and not lan_host:
+            # 0.0.0.0 で待ち受けるのにリンクが出ない状態を作らない（B-27(3)）。
+            _log.warning("LAN link requested but no host IP is set; starting without the LAN link")
+            lan_on = False
+        self._lan = lan_on
+        self._lan_host = lan_host
         self._guest_base_url = ""          # 再共有で旧外部 URL を残さない (reviewer P2-4)
         desired = "0.0.0.0" if self._lan else "127.0.0.1"
         req_port = self._lan_req_port() if self._lan else 0
@@ -818,41 +989,57 @@ class MeetingRelay(QObject):
 
         # POST succeeded → now commit the sharing state.
         self._expires_at = int(data.get("expires_at", 0) or 0)
+        self._ttl_sec = ttl
         cw = self._window.chat_widget()
         summaries = cw.session_summaries() if cw is not None else []
-        # Publish AND "know" EVERY open dataset's sessions/tabs (Issue #78:
-        # default-share all open datasets so guests can browse/drive any of them;
-        # explicit opt-out is the only thing that makes an item private).
+        # Publish AND "know" every chat/tab the host has not opted out (Issue #78:
+        # default-share so guests can browse/drive any open dataset; Issue #107:
+        # opt-outs survive stop/start, and guests only see OPEN datasets — the
+        # ds_shared check sits at every send/receive point, not in these sets).
         # absorb_new_tabs/absorb_new_sessions decide all open datasets too, so an
         # item opened mid-meeting in any dataset auto-absorbs on the next tick.
         all_ids = {s["id"] for s in summaries}
-        self._published_session_ids = {s["id"] for s in summaries if not s.get("archived")}
+        # 規則で非公開にするもの（B-6 修正 9・13）を opt-out に記録してから公開集合を決める
+        self.classify_private_sessions(summaries)
+        optout = self._session_optout
+        self._published_session_ids = {
+            s["id"] for s in summaries
+            if not s.get("archived") and s["id"] not in optout
+            and s.get("dataset") is not None
+        }
         self._backfilled_ids = set()   # fresh channel → re-stage backlog per session
         # 開始時に存在した全 id（archived 含む）。_meeting_start_ids は published 由来に
         # せず all_ids 由来にする — meeting_share の has_new「新規」判定が「開始時に存在した
         # もの全部」を意味論として要求するため（archived を落とすと開始時アーカイブ済みの
         # 解除が「新規」と誤判定される）。
-        self._meeting_start_ids = set(all_ids)
-        self._session_known = set(all_ids)
+        # 空チャット（dataset 未設定・履歴なし）は未決のまま残す（B-6 修正 9）
+        undecided = {
+            s["id"] for s in summaries
+            if s.get("dataset") is None and not self._session_has_history(s["id"])
+        }
+        self._meeting_start_ids = set(all_ids) - undecided
+        self._session_known = set(all_ids) - undecided
         all_pairs = self._all_ds_tab_pairs()
-        self._published_tabs = set(all_pairs)
+        self._published_tabs = set(all_pairs) - getattr(self, "_tab_optout", set())
         self._tab_known = set(all_pairs)
         self._channel = ch
         self._secret = secret
         self._sharing = True
         self._last_sessions_json = None
+        self._scope_ver = 0
         self._last_tabs_json = None
         self._watched_ds_until = {}
         self._view_hashes = {}
         self._view_cachekeys = {}
 
+        self._meeting_gen += 1
         self._worker = _RelayWorker(self._host_base_url, self._admin_key, ch,
-                                    poll_ms=self._poll_ms)
-        self._worker.sig_inbound.connect(self._on_remote_message)
-        self._worker.sig_new_session.connect(self._on_new_session_request)
-        self._worker.sig_presence.connect(self._on_participants)
-        self._worker.sig_state.connect(self._on_state)
-        self._worker.sig_sendfail.connect(self._on_sendfail)
+                                    poll_ms=self._poll_ms, gen=self._meeting_gen)
+        self._worker.sig_inbound.connect(self._on_worker_inbound)
+        self._worker.sig_new_session.connect(self._on_worker_new_session)
+        self._worker.sig_presence.connect(self._on_worker_presence)
+        self._worker.sig_state.connect(self._on_worker_state)
+        self._worker.sig_sendfail.connect(self._on_worker_sendfail)
         self._worker.start()
         self._capture_timer.start()
         # Push the initial snapshots immediately (don't wait for the first tick).
@@ -877,9 +1064,11 @@ class MeetingRelay(QObject):
     def _on_tunnel_failed(self, gen: int, msg: str) -> None:
         if gen != self._gen:
             return
+        _log.warning("tunnel failed to start: %s", msg)
         if self._lan and self.lan_base_url():
             # LAN 会議は生かす。外部リンクだけ失う。
             self._last_tunnel_failed = True
+            self._last_tunnel_error = msg
             self._guest_base_url = ""          # 外部トークンの供給源をクリア
             t = self._tunnel
             if t is not None:
@@ -899,6 +1088,7 @@ class MeetingRelay(QObject):
         # renders idle, not a stale "starting".
         self.meeting_stop()
         self._last_tunnel_failed = True
+        self._last_tunnel_error = msg      # after meeting_stop(): stop() clears it
         self.channelStateChanged.emit("tunnel_failed")
 
     def meeting_stop(self) -> None:
@@ -918,6 +1108,9 @@ class MeetingRelay(QObject):
     def stop(self) -> None:
         """Idempotent. requestInterruption() + wait(); never force-kills threads."""
         self._sharing = False
+        # 未実行のゲスト発言を捨て、旧会議のキュー済みシグナルを無効にする（B-27(2)）。
+        self._drop_pending_remote()
+        self._meeting_gen += 1
         self._gen += 1                 # invalidate in-flight tunnel-starter signals
         self._capture_timer.stop()
         w = self._worker
@@ -941,6 +1134,7 @@ class MeetingRelay(QObject):
         self._guest_base_url = ""
         self._fold_public_server()
         self._last_tunnel_failed = False
+        self._last_tunnel_error = ""
         # loopback サーバは app-scoped で再利用、0.0.0.0 サーバは共有中のみ
         # （stop/expired/start 失敗で _fold_public_server が畳む）。
 
@@ -956,10 +1150,36 @@ class MeetingRelay(QObject):
     def _on_state(self, state: str) -> None:
         if state == "expired":
             self._sharing = False
+            self._drop_pending_remote()       # 未実行のゲスト発言を捨てる（B-27(2)）
+            self._meeting_gen += 1            # 旧会議のキュー済みシグナルを無効にする
             self._capture_timer.stop()
             self._fold_public_server()        # TTL 失効でも 0.0.0.0 を残さない (reviewer R2 P1)
             self._last_tunnel_failed = False  # TTL 失効は「失敗」でない→idle 表示 (reviewer R3 P2-2)
+            self._last_tunnel_error = ""
         self.channelStateChanged.emit(state)
+
+    # Worker signals carry the meeting generation (B-27(2)): a delivery already
+    # queued by a stopped meeting's worker must not reach the next meeting.
+
+    def _on_worker_inbound(self, gen: int, sid: str, name: str, text: str) -> None:
+        if gen == self._meeting_gen:
+            self._on_remote_message(sid, name, text)
+
+    def _on_worker_new_session(self, gen: int, ds: str, name: str) -> None:
+        if gen == self._meeting_gen:
+            self._on_new_session_request(ds, name)
+
+    def _on_worker_presence(self, gen: int, data) -> None:
+        if gen == self._meeting_gen:
+            self._on_participants(data)
+
+    def _on_worker_state(self, gen: int, state: str) -> None:
+        if gen == self._meeting_gen:
+            self._on_state(state)
+
+    def _on_worker_sendfail(self, gen: int, kind: str, ds: str = "", tab: str = "") -> None:
+        if gen == self._meeting_gen:
+            self._on_sendfail(kind, ds, tab)
 
     def _on_participants(self, data) -> None:
         self._participants = data if isinstance(data, list) else []
@@ -980,10 +1200,11 @@ class MeetingRelay(QObject):
     def _on_remote_message(self, sid: str, name: str, text: str) -> None:
         # in: receive gate — symmetric to the out: send gate. A guest may POST to a
         # just-opted-out sid before the opt-out reaches it; drop it here so a private
-        # session never drives the agent (tool-operation rights). Gated on _published_session_ids only:
-        # all open DSs are shared now (Issue #78), so a guest may legitimately
-        # inject into a background-DS session.
-        if sid not in self._published_session_ids:
+        # session never drives the agent (tool-operation rights). Gated on the
+        # published set AND an open dataset (Issue #107 B-6): a guest may inject into
+        # a background open DS's session, never into a closed one's. Not sharing
+        # (stopped / expired) → dropped too (B-27(2)).
+        if not self._sharing or not self._sid_shared(sid):
             return
         cw = self._window.chat_widget()
         if cw is not None:
@@ -999,11 +1220,9 @@ class MeetingRelay(QObject):
 
         Accepted DS set = exactly the chips a guest can see, i.e. what
         _on_capture_tick publishes as `datasets` — both go through
-        _shareable_ds_keys() with the same (published) session subset, so the two
-        can never drift apart. A key outside that set falls back to the host's
-        current dataset and is logged at WARNING with BOTH the requested and the
-        actual ds (an INFO line carrying only the rewritten value would erase the
-        fact that a fallback happened).
+        _shareable_ds_keys() (the open datasets), so the two can never drift apart.
+        A request for a dataset that is not open is logged at WARNING and dropped
+        (Issue #107 B-6; the guest's pending reservation then times out).
 
         The null group ("") is never a creation target (see the Issue's
         "null グループを作成対象から外す"): such a session is skipped by
@@ -1027,30 +1246,18 @@ class MeetingRelay(QObject):
             # ("the null group is not a creatable target") で拾う。隣接リテラルは
             # コンパイル時に連結されるので折り返し位置は自由だが、境界の空白を
             # 落とすと文言が変わってテストが落ちる。テスト18 が拾う
-            # "the host has no current dataset to fall back to" も同じ制約。
+            # "is not an open dataset" も同じ制約。
             _log.warning(
                 "guest %r new-chat request dropped: "
                 "the null group is not a creatable target "
                 "(such a session is never persisted)", name,
             )
             return
-        summaries = cw.session_summaries()
-        pub = [s for s in summaries
-               if s["id"] in self._published_session_ids and not s.get("archived")]
-        allowed = {k for k in self._shareable_ds_keys(pub) if k}
-        if ds not in allowed:
-            cur = self._active_dataset()
-            if cur is None:
-                _log.warning(
-                    "guest %r new-chat request dropped: ds=%r is not shareable and "
-                    "the host has no current dataset to fall back to", name, ds,
-                )
-                return
+        if ds not in self._shareable_ds_keys():
             _log.warning(
-                "guest %r new-chat request: ds=%r is not shareable, creating in %r "
-                "instead", name, ds, cur,
+                "guest %r new-chat request dropped: ds=%r is not an open dataset", name, ds,
             )
-            ds = cur
+            return
         sid = create(dataset=ds)
         if not sid:
             return
@@ -1076,11 +1283,10 @@ class MeetingRelay(QObject):
         last_pub = getattr(self, "_stream_last_pub", None)
         if last_pub is not None:
             last_pub.pop(sid, None)
-        # out: send only host-local messages of a published session. All open DSs
-        # are shared now (Issue #78), so the gate is _published_session_ids only;
+        # out: send only host-local messages of a published session of an open
+        # dataset (or one already backfilled this meeting — see _sid_out_ok);
         # stream_id pop above runs regardless of the gate.
-        if not (self._sharing and origin == "local"
-                and sid in self._published_session_ids):
+        if not (self._sharing and origin == "local" and self._sid_out_ok(sid)):
             return
         if not content or not content.strip():
             return
@@ -1100,12 +1306,11 @@ class MeetingRelay(QObject):
     def _on_message_streaming(self, sid: str, content: str, origin: str,
                               stream_id: str) -> None:
         # Live partial of an in-flight assistant turn — same out: gate as
-        # _on_message_added (published only, Issue #78), throttled to
+        # _on_message_added (_sid_out_ok, Issue #107), throttled to
         # _STREAM_MIN_INTERVAL per session so a fast token stream doesn't flood the
         # relay. The final full text still arrives via _on_message_added, so a
         # throttled-away partial is loss-free.
-        if not (self._sharing and origin == "local"
-                and sid in self._published_session_ids):
+        if not (self._sharing and origin == "local" and self._sid_out_ok(sid)):
             return
         if not content or not content.strip() or not stream_id:
             return
@@ -1209,23 +1414,34 @@ class MeetingRelay(QObject):
             # recreate it so backfill still runs (next tick) without a fresh meeting.
             if not hasattr(self, "_backfilled_ids"):
                 self._backfilled_ids = set()
+            # Only chats of an OPEN dataset are shared (Issue #107 B-6): a closed
+            # dataset's transcript is staged once it is reopened.
+            open_ids = {s["id"] for s in summaries if self.ds_shared(s.get("dataset"))}
             if cw is not None:
-                for sid in list(self._published_session_ids - self._backfilled_ids - archived_ids):
+                for sid in list((self._published_session_ids - self._backfilled_ids
+                                 - archived_ids) & open_ids):
                     self._backfill_session(sid, cw)
                     self._backfilled_ids.add(sid)
-            # Each session carries its dataset (str or None) so guests can bucket
-            # the flat all-DS session list by DS (invariant: every session has the
-            # key; session_summaries() always provides `dataset`).
+            # Guest messages queued for chats now outside the scope are dropped (B-6).
+            self._drop_unshared_pending()
+            # Each session carries its dataset so guests can bucket the flat all-DS
+            # session list by DS (invariant: every session has the key;
+            # session_summaries() always provides `dataset`).
             pub = [
                 {"id": s["id"], "title": s["title"], "busy": s["busy"],
                  "dataset": s.get("dataset")}
                 for s in summaries
                 if s["id"] in self._published_session_ids and not s.get("archived")
+                and self.ds_shared(s.get("dataset"))
             ]
             sj = json.dumps(pub, sort_keys=True, ensure_ascii=False)
             if sj != self._last_sessions_json:
                 self._last_sessions_json = sj
-                self._worker.enqueue({"kind": "sessions", "data": pub})
+                # Monotonic scope version (shared with tabs) so the relay never
+                # re-applies an older PUT over a newer one (B-6 fix 12).
+                self._scope_ver = getattr(self, "_scope_ver", 0) + 1
+                self._worker.enqueue({"kind": "sessions", "data": pub,
+                                      "ver": self._scope_ver})
 
             # Tabs: new tabs auto-join across ALL open datasets. Names live per-DS
             # in tabs_by_dataset (same-named tabs in different datasets stay
@@ -1237,6 +1453,8 @@ class MeetingRelay(QObject):
                 if name is None:
                     continue
                 tds = self._tab_dataset(tab)
+                if not self.ds_shared(tds):
+                    continue
                 ds_key = "" if tds is None else tds
                 if (ds_key, name) not in self._published_tabs:
                     continue
@@ -1247,14 +1465,22 @@ class MeetingRelay(QObject):
             # datasets = the guest's clickable DS chips. Computed by
             # _shareable_ds_keys so _on_new_session_request accepts exactly those
             # chips (Issue #81) — the two must never drift apart.
-            datasets = self._shareable_ds_keys(pub)
+            datasets = self._shareable_ds_keys()
+            # The relay drops views of datasets that leave `datasets`; forget their
+            # dedupe entries too, or an unchanged figure would never be re-sent after
+            # the dataset is reopened (Issue #107 B-6).
+            for cache in (self._view_hashes, self._view_cachekeys):
+                for k in [k for k in cache if k[0] not in datasets]:
+                    cache.pop(k, None)
 
             tabs_payload = {"active_dataset": cur, "datasets": datasets,
                             "tabs_by_dataset": tabs_by_dataset}
             tj = json.dumps(tabs_payload, sort_keys=True, ensure_ascii=False)
             if tj != self._last_tabs_json:
                 self._last_tabs_json = tj
-                self._worker.enqueue({"kind": "tabs", "data": tabs_payload})
+                self._scope_ver = getattr(self, "_scope_ver", 0) + 1
+                self._worker.enqueue({"kind": "tabs", "data": tabs_payload,
+                                      "ver": self._scope_ver})
 
             # Views (demand-driven, Issue #78): render the active DS always, plus
             # DSs a guest is currently watching (presence-derived, warm-graced),
@@ -1275,6 +1501,8 @@ class MeetingRelay(QObject):
                 if name is None:
                     continue
                 tds = self._tab_dataset(tab)
+                if not self.ds_shared(tds):
+                    continue
                 ds_key = "" if tds is None else tds
                 if (ds_key, name) not in self._published_tabs:
                     continue

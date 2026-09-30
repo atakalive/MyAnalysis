@@ -122,15 +122,17 @@ https のページ（外部リンクのページや任意の静的配置）に�
 
 - **(a)** `0.0.0.0` はグローバル IP を持つホストではネットワークの firewall 次第で**インターネットからも到達し得る**
   （VPN 等の仮想アダプタや他 NIC にも露出）。門番は per-meeting secret（`token_urlsafe(32)`）＋ admin_key ＋ TTL ＋
-  heartbeat-grace。**public バインドは共有中のみ**（`stop`/`expired`/`start` 失敗の全経路で畳む）。
+  heartbeat-grace。加えて、本体の読み込みより先に認証、ゲストの要求のサイズとレートの制限、1 接続の総時間と
+  同時接続数の上限（接続数は認証の前に数えるので、LAN 公開中は同じネットワークの誰でも接続枠を埋められる）。
+  **public バインドは共有中のみ**（`stop`/`expired`/`start` 失敗の全経路で畳む）。
 - **(b)** LAN は平文 http なので secret はローカルネットワーク上で平文で流れる（配布はフルリンクのみ）。
 - **(c)** ゲストは HTTPS-Only を切って http フルリンクで開く（企業ポリシーで ON 固定だと開けない）。
 - **(d)** Windows Firewall は inbound を**プログラム単位（`pythonw.exe`）で許可 + ephemeral ポート**推奨。
 
 ## トラブルシュート
 
-- **「トンネル起動に失敗しました」**（cloudflared）→ 共有ウィンドウには詳細な原因は出ない。
-  `cloudflared tunnel run <name>` を手で実行するとエラーが確認できる。よくある原因:
+- **「トンネル起動に失敗しました」**（cloudflared）→ 共有ウィンドウのログ欄に原因が出る。
+  さらに詳しくは `cloudflared tunnel run <name>` を手で実行するとエラーが確認できる。よくある原因:
   - cloudflared が見つからない → `winget install cloudflare.cloudflared` 後、新しいシェルで再試行。別パスなら `CLOUDFLARED_BIN`。
   - `CLOUDFLARE_TUNNEL_NAME/HOSTNAME` 未設定 → `.env` を確認。GUI を再起動したか（`.env` は起動時に一度だけ読まれる）。
   - 登録がタイムアウトする → 認証情報/ネットワーク不良。

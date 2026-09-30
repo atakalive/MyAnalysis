@@ -632,13 +632,6 @@ class ToolWindow(QMainWindow):
         """
         return [ds for ds in self._groups if ds is not None]
 
-    def open_dataset_keys(self) -> list[str]:
-        """Wire keys of ALL open dataset groups in display order, including the
-        None/(empty) group as "" (Issue #78 meeting relay). Unlike
-        open_dataset_names() (which drops the None group), this coerces None → ""
-        and keeps it, so a dataset-less group is still addressable by guests."""
-        return ["" if ds is None else ds for ds in self._groups]
-
     def set_active_dataset(self, name: str) -> bool:
         """Bring dataset *name* to the front. False if it is not open."""
         if name not in self.open_dataset_names():

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -55,6 +56,10 @@ _SYSTEM_PROMPT = (
 
 
 _MAX_TOOL_TURNS = 8
+# ビジーなセッションに積めるゲスト発言の上限（Issue #107 B-7）。超えた分は捨てる。
+_MAX_PENDING_REMOTE = 20
+
+_logger = logging.getLogger(__name__)
 
 # Braille spinner frames for the "waiting" indicator.
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -430,6 +435,11 @@ class ChatWidget(QWidget):
         # Remote (guest) messages that arrived while a session was busy, queued
         # FIFO per session id and drained on turn completion (_on_done/_on_failed).
         self._pending_remote: dict[str, list] = {}
+        # 会議の公開範囲ゲート（Issue #107 B-6）。relay が set_remote_gate で渡す。
+        # 保留中のゲスト発言を実行する直前に sid を確かめる。None は常に通す。
+        self._remote_gate: Callable[[str], bool] | None = None
+        # 分岐した子の id → 親の id（Issue #107 B-6）。メモリ上だけで保存しない。
+        self._fork_parent: dict[str, str] = {}
         self._tool_display_default = _load_tool_display()
         self._persona_default = _load_persona_default()
 
@@ -1373,6 +1383,7 @@ class ChatWidget(QWidget):
         else:
             title = src.title + suffix
         new = chat_store.fork_session(src, cut, title=title)
+        self._fork_parent[new.id] = src.id
         # 可視性保証: scratch(None) の最初のユーザー発言編集で履歴なしタブが
         # _visible_sessions に隠れ _active が非表示を指す不整合を防ぐ。
         new.dataset = src.dataset if src.dataset is not None else self._current_dataset
@@ -1767,7 +1778,12 @@ class ChatWidget(QWidget):
             text=text,
         )
         if sess.id in self._turns:
-            self._pending_remote.setdefault(sess.id, []).append((sender, text))
+            queue = self._pending_remote.setdefault(sess.id, [])
+            if len(queue) >= _MAX_PENDING_REMOTE:
+                _logger.warning(
+                    "remote message dropped: pending queue full (session %s)", sess.id)
+                return
+            queue.append((sender, text))
             return
         self._start_turn(sess, inj_text, "remote")
 
@@ -1828,13 +1844,30 @@ class ChatWidget(QWidget):
         return [
             {"id": s.id, "title": self._display_title(s),
              "busy": s.id in self._turns, "dataset": s.dataset,
-             "archived": _is_archived(s)}
+             "archived": _is_archived(s),
+             "forked_from": self._fork_parent.get(s.id)}
             for s in self.sessions_for_persistence()
         ]
+
+    def set_remote_gate(self, gate: "Callable[[str], bool] | None") -> None:
+        """保留中のゲスト発言を実行してよいかを sid で判定する関数を設定する
+        （Issue #107 B-6。meeting relay が渡す）。None で解除。"""
+        self._remote_gate = gate
+
+    def session_has_history(self, sid: str) -> bool:
+        """sid のセッションが system 以外の発言を持つか（meeting relay 用）。"""
+        sess = self._session_by_id(sid)
+        return sess is not None and self._has_history(sess)
 
     def _drain_pending_remote(self, sid: str) -> None:
         """Pop one queued remote message for `sid` and start it (FIFO). Called at
         the tail of _on_done/_on_failed, after `_turns.pop(sid)`."""
+        # 保留中の発言は _on_remote_message を通らないので、実行の直前にも会議の
+        # 公開範囲かを確かめる（Issue #107 B-6）。範囲外ならキューごと捨てる。
+        gate = getattr(self, "_remote_gate", None)
+        if gate is not None and not gate(sid):
+            self._pending_remote.pop(sid, None)
+            return
         pend = self._pending_remote.get(sid)
         if not pend:
             return
