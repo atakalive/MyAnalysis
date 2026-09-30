@@ -39,8 +39,9 @@ def test_mount_safe_edits_names_the_three_verbs():
 def test_rule_names_the_general_text_writer():
     """save_text は work_dir へ任意拡張子のファイルを書く唯一の正規経路。
 
-    マウント上ではエージェントの Write/Edit が PreToolUse hook で機械的に拒否される
-    ので、これが載っていないとエージェントはメモもレポートも書けなくなる。
+    マウント上ではエージェントに Write/Edit で直接書かせない（claude エンジンは
+    PreToolUse hook で機械的に拒否し、codex / pi はプロンプトの指示だけ）ので、
+    これが載っていないとエージェントはメモもレポートも書けなくなる。
     """
     assert "save_text" in NO_LOCAL_PERSISTENCE
     assert "save_text" in MOUNT_SAFE_EDITS

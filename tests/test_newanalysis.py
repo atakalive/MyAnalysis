@@ -55,11 +55,11 @@ def test_generated_files_are_utf8(fake_roots):
 
 
 def test_dataset_embedded(fake_roots, tmp_path):
-    gen.main(["demo_probe", "--dataset", "dataset_a"])
+    gen.main(["demo_probe", "--dataset", "my_dataset"])
     text = (
-        tmp_path / "dataset_a" / "analyses" / "demo_probe" / "analysis.py"
+        tmp_path / "my_dataset" / "analyses" / "demo_probe" / "analysis.py"
     ).read_text(encoding="utf-8")
-    assert 'DATASET = "dataset_a"' in text
+    assert 'DATASET = "my_dataset"' in text
 
 
 # ---- runnable-empty (export 経路) ----
@@ -193,7 +193,7 @@ def test_create_analysis_duplicate_raises(fake_roots):
 def test_validate_identifier_name_ok():
     from common.paths import validate_identifier_name
 
-    validate_identifier_name("dataset_a")
+    validate_identifier_name("my_dataset_240101")
     validate_identifier_name("con", check_reserved=False)
 
 
@@ -223,7 +223,7 @@ def test_validate_identifier_name_denylist(name):
     "name",
     [
         "Bad", "9x", "_x", "a-b",
-        "dataset_l", "analysis_c", "ピークシフター_000000", "a:b",
+        "240101_test", "AB_mixed_case", "サンプル_240101", "a:b",
     ],
 )
 def test_validate_identifier_name_allows(name):

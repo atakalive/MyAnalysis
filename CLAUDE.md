@@ -8,7 +8,7 @@ Experimental measurement data analysis project (Python). Data lives **outside th
 
 ## Data access — always go through `config.py`
 
-Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. The registry maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Host keys are uppercase; lookup normalises via `.upper()`.
+Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. The registry maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Lookup uppercases this PC's hostname (`socket.gethostname().upper()`) and matches it exactly against the host keys; the keys themselves are not normalised, so they must be uppercase. `register_dataset` (CLI `register-dataset` and the GUI) uppercases the host before writing; a lowercase key hand-written into `datasets.local.json` never matches.
 
 The registration data itself is **not in code**: it lives in `datasets.local.json` at the repo root (Git-ignored; storage implemented by [dataset_registry.py](dataset_registry.py)), and [config.py](config.py) is the access API (`DATASETS`, `get_dataset_dir`, `register_dataset`, `reload_datasets`). A fresh checkout has no registry file and starts empty.
 
@@ -16,14 +16,12 @@ The registration data itself is **not in code**: it lives in `datasets.local.jso
 
 ```python
 from config import get_dataset_dir
-path = get_dataset_dir("dataset_a")
+path = get_dataset_dir("my_dataset")
 ```
 
 When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods write `datasets.local.json` under a lock (verified `atomic_write_text`). **Never edit `config.py` to register a dataset.** CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録も登録後に `open-dataset` verb でそのデータセットを開く（File → データセットを開く… と同じ経路。保存済みのタブ構成・チャットがあれば復元する。open-dataset が未登録の素の ToolWindow では開かない）。登録の削除は File → データセットを開く… の「登録を削除」（`config.unregister_dataset`。登録簿からのみ外し DS フォルダには触れない。開いていれば先に閉じる）。R2 同期（[config_share.py](config_share.py)）の登録簿マージは union・非破壊なので、削除は明示的な tombstone（ローカル状態と bundle の `deleted`、bundle schema 2）でだけ伝播する — tombstone を経ずに登録簿から消しても次回 sync で remote から復活する。自動同期は、GUI 起動時と CLI `register-dataset` の後が `config_share.try_sync`（双方向）、GUI での登録・登録削除の直後が `config_share.try_push`（送信のみ。`gui/config_push.py` の `ConfigPusher` がデーモンスレッドで実行し GUI スレッドを塞がない。push ロックで直列化。GUI からのバックグラウンド pull はしない）。 Hand-editing `datasets.local.json` is also supported (plain UTF-8 JSON, `{dataset: {HOST: path}}`); JSON has no comments, and key order is not a contract. A corrupt registry raises `RegistryError` instead of degrading to an empty config. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at the register CLI / `datasets.local.json`.
 
 旧構成（`config.py` 内の `DATASETS` リテラル）からの移行は `python -m devtools.migrate_dataset_registry --source <旧 config.py> [--output <registry.json>] [--dry-run]`（旧ファイルを実行せず `ast.literal_eval` で読む。既存の異なる登録簿は上書きしない）。
-
-Dataset directories contain session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 
 ### Per-dataset settings — `myanalysis.toml`
 
@@ -50,14 +48,14 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 ## Git workflow
 
 **`main` ブランチに直接コミットする。feature ブランチを切ってはならない。**
-このリポジトリは `dev` ブランチを持たない `main` 直接運用。review tool の automerge も main に対して動作する。`feat/issue-N-xxx` 等のブランチを作ると automerge 後にゴミとして残る。
+このリポジトリは `dev` ブランチを持たない `main` 直接運用。
 
 ## Repo conventions
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
 - `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
-- Private repo on GitLab (`git@gitlab.com:atakalive/MyAnalysis.git`). Dataset registration (per-host paths) now lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
+- Dataset registration (per-host paths) lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
 
 ## LLM backends — `llm_backend/`
@@ -295,9 +293,9 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
 - バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と両バックエンドが設定）。
   マウント上の `.py` を import すると CPython が `__pycache__/*.pyc` を tmp+rename で書き、
   同じ失敗経路に乗る（実測で rename 失敗の 16%）。
-- **チャットエージェントの `Write`/`Edit` はマウント上で機械的に拒否される**（PreToolUse hook →
-  `python -m llm_bridge guard-write`）。エージェントのツールは我々の chokepoint を通らないため。
-  拒否時は安全な経路（`save_text` / `save_code` / `save_fig` と draft→apply verb）が案内される。
+- **claude エンジンでは、チャットエージェントの `Write`/`Edit` がマウント上で機械的に拒否される**（PreToolUse hook →
+  `python -m llm_bridge guard-write`。codex / pi にこの hook は無く、プロンプト `MOUNT_SAFE_EDITS` の指示だけ）。エージェントのツールは我々の chokepoint を通らないため。
+  claude で拒否されたときは安全な経路（`save_text` / `save_code` / `save_fig` と draft→apply verb）が案内される。
   例外は `analysis.draft.py` — draft は Write/Edit を許可する（`apply-analysis` が strip /
   `ast.parse` / `build_tab` 束縛の 3 ゲートを通してからしか昇格させないので、draft が
   0 バイト化しても `analysis.py` に伝播しない）。hook は内部エラー時に必ず fail-open する。
@@ -325,7 +323,7 @@ LLM agents analyse data via code execution + CLI, not just GUI remote control.
 `notes.md.py` が出来ていた。`save_fig` の label も同様),
 `save_text(name, relpath, content)` (saves to `<work_dir>/<relpath>` — 任意の拡張子と
 サブディレクトリを受ける汎用テキスト書込。`.md`/`.csv`/`.json`/`.txt` はこれで書く。マウント上では
-エージェントの Write/Edit が hook で拒否されるので、これが唯一の正規経路),
+エージェントに Write/Edit で直接書かせない（claude は hook で拒否、codex / pi はプロンプトの指示だけ）ので、これが唯一の正規経路),
 `dataset_summary(name)` (データセット直下の実構成＝subdirs と代表 CSV の columns/rows を歩いて報告する
 “まず見る”ステップ). Output goes to the
 dataset's `work_dir` (default `<dataset_dir>/_work`, set in `myanalysis.toml`); the
@@ -412,4 +410,4 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
 
 ## State
 
-Greenfield as of 2026-05-27 — no build system or package layout yet (no pyproject.toml, loose-directory layout); dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.
+No build system or package layout (no pyproject.toml; loose-directory layout); dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.

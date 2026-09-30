@@ -24,7 +24,7 @@ def main() -> None:
     )
     parser.add_argument("dataset", help="dataset name (config.DATASETS key)")
     parser.add_argument(
-        "name", help="analysis directory name (e.g. example_analysis)"
+        "name", help="analysis directory name (e.g. my_analysis)"
     )
     args = parser.parse_args()
     dataset: str = args.dataset

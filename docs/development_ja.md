@@ -242,7 +242,6 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `newanalysis/` | `python -m newanalysis <name> --dataset <ds>`（解析の雛形生成） |
 | `i18n/` | `en.toml` / `ja.toml` |
 | `.pi/skills/myanalysis-bridge/` | pi 用のスキル（`SKILL.md`） |
-| `plans/` | 初期の設計メモ。**現在のコードとは一致しない**ので仕様として読まない |
 | `tests/` | pytest |
 
 ---
@@ -571,7 +570,6 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 
 | 項目 | 内容 |
 |---|---|
-| `plans/` が古い | 初期の設計メモで、現在の API と一致しない（例: 存在しない `toggle-chat-visible` verb や `common.paths.state_dir`）。仕様として読まない |
 | 使われていない API | `AnalysisTab.connect_state()` / `current_state()` は互換のため残している（`llm_bridge` は読まない。リポジトリ外の解析コードから呼ばれている可能性があるため削除しない） |
 | 書込ガードが claude だけ | PreToolUse hook による同期ドライブへの Write/Edit の拒否は claude バックエンドにしか無い。codex / pi はプロンプトの指示だけ |
 | `devtools/hotreload.py` の import | トップレベルで `dataset_config` と `common.paths.repo_root` を import しており、`_m()` の約束事（[§7](#7-ホットリロード)）に反する。`app` の後もパージ前のモジュールを参照し続ける |

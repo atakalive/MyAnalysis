@@ -241,7 +241,7 @@ class _RelayWorker(QThread):
             else:
                 return
             # Drain the body and close: release the socket/FD promptly (1s capture
-            # cadence) and let urllib reuse the connection (Keep-Alive). reviewer R1.
+            # cadence) and let urllib reuse the connection (Keep-Alive).
             with resp:
                 resp.read()
             self._note_ok()
@@ -360,7 +360,7 @@ class _RelayWorker(QThread):
             return
         self._last_hb = now
         try:
-            # read()+close via context manager: release FD + allow Keep-Alive. reviewer R1.
+            # read()+close via context manager: release FD + allow Keep-Alive.
             with self._req("PUT", f"/heartbeat/{_q(self._ch)}") as r:
                 r.read()
             self._note_ok()
@@ -573,7 +573,7 @@ class MeetingRelay(QObject):
         # out) as "known" so a hidden dataset's session that was explicitly
         # deselected is NOT treated as an undecided-new item and re-absorbed
         # (default-shared) on a later dataset switch — "explicit deselection
-        # persists across switches" (Issue #51 / reviewer code P2 R3). hasattr guard:
+        # persists across switches" (Issue #51). hasattr guard:
         # a mid-meeting hot-reload can patch this onto an instance predating
         # _session_known.
         if not hasattr(self, "_session_known"):
@@ -589,7 +589,7 @@ class MeetingRelay(QObject):
                     pend.pop(sid, None)
 
     def set_published_tabs(self, pairs: "set[tuple[str, str]] | list[tuple[str, str]]") -> None:
-        # Symmetric to set_published_sessions (Issue #51 / reviewer code P2 R3):
+        # Symmetric to set_published_sessions (Issue #51):
         # record every explicitly-decided (dataset, name) tab (published OR
         # deselected) as known so a deselected tab is not re-absorbed
         # (default-shared) on a later capture tick. Since Issue #78 all open
@@ -776,7 +776,7 @@ class MeetingRelay(QObject):
         enabled = bool(enabled)
         if not hasattr(self, "_session_known"):
             self._session_known = set(self._published_session_ids)
-        # Atomic OFF→ON transition (Issue #48 P1, reviewer R2): snapshot ALL
+        # Atomic OFF→ON transition (Issue #48): snapshot ALL
         # currently-existing session ids into _session_known BEFORE flipping the
         # flag on. This must NOT depend on a capture/refresh tick having already
         # observed them — the toggle can be flipped within the same second a
@@ -873,8 +873,8 @@ class MeetingRelay(QObject):
         # LAN リンクは「共有中 かつ ローカルサーバが実際に public(0.0.0.0) bind」の
         # ときだけ有効。これが無いと、LAN 再バインド失敗（自己衝突）後に _local_server が
         # 旧 loopback のまま・_lan=True・_lan_host 入り・stale な _channel/_secret 残存で
-        # lan_link() が http://<LAN IP>:<loopback port>/#token=... の壊れたリンクを返し得る
-        # （reviewer R3 P2-1）。ポートは実 bind された _local_server.port から作る。
+        # lan_link() が http://<LAN IP>:<loopback port>/#token=... の壊れたリンクを返し得る。
+        # ポートは実 bind された _local_server.port から作る。
         if not (self._sharing and self._lan and self._lan_host
                 and self._local_server is not None
                 and getattr(self._local_server, "bind_host", "127.0.0.1") != "127.0.0.1"):
@@ -956,14 +956,14 @@ class MeetingRelay(QObject):
             lan_on = False
         self._lan = lan_on
         self._lan_host = lan_host
-        self._guest_base_url = ""          # 再共有で旧外部 URL を残さない (reviewer P2-4)
+        self._guest_base_url = ""          # 再共有で旧外部 URL を残さない
         desired = "0.0.0.0" if self._lan else "127.0.0.1"
         req_port = self._lan_req_port() if self._lan else 0
         if self._local_server is None:
             self._local_server = local_relay.start_server(
                 self._admin_key, bind_host=desired, port=req_port)
         elif getattr(self._local_server, "bind_host", "127.0.0.1") != desired:
-            # 新サーバ生成が「成功してから」旧サーバを畳む (reviewer P2-4)。逆順だと
+            # 新サーバ生成が「成功してから」旧サーバを畳む。逆順だと
             # start_server が例外を投げたとき app-scoped 旧 loopback サーバを破棄済みで
             # _local_server が死サーバを指し、次回 loopback 共有が死サーバへ POST する。
             new_server = local_relay.start_server(
@@ -1153,8 +1153,8 @@ class MeetingRelay(QObject):
             self._drop_pending_remote()       # 未実行のゲスト発言を捨てる（B-27(2)）
             self._meeting_gen += 1            # 旧会議のキュー済みシグナルを無効にする
             self._capture_timer.stop()
-            self._fold_public_server()        # TTL 失効でも 0.0.0.0 を残さない (reviewer R2 P1)
-            self._last_tunnel_failed = False  # TTL 失効は「失敗」でない→idle 表示 (reviewer R3 P2-2)
+            self._fold_public_server()        # TTL 失効でも 0.0.0.0 を残さない
+            self._last_tunnel_failed = False  # TTL 失効は「失敗」でない→idle 表示
             self._last_tunnel_error = ""
         self.channelStateChanged.emit(state)
 

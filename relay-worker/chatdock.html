@@ -770,12 +770,12 @@ async function poll(reanchor = false) {
   if (pollTimer) clearTimeout(pollTimer);
   // Generation token: only the newest poll() updates UI / reschedules. A direct
   // poll(true) that overtakes an in-flight poll bumps pollGen; the older run
-  // returns after its await without rendering or rescheduling (reviewer P2-3).
+  // returns after its await without rendering or rescheduling.
   const myGen = ++pollGen;
   // Bootstrap: before a session is selected (curSid === null), poll with a sentinel
   // sid ("_") so the Worker still returns sessions/tabs/alive (messages empty for an
   // unknown sid). renderSessions() then selects the first session and re-polls.
-  // Without this, the old `!curSid` early-return deadlocked first entry. reviewer code R1 P1.
+  // Without this, the old `!curSid` early-return deadlocked first entry.
   const bootstrap = !curSid;
   const sidPath = curSid || "_";
   try {
@@ -827,7 +827,7 @@ async function poll(reanchor = false) {
     // renderSessions may call selectSession() (re-select / auto-select), which
     // issues its own poll(false) and bumps pollGen. If so, abandon the rest of
     // this poll: the response's messages belong to the OLD sid and must not be
-    // applied to the swapped `cur` (reviewer R2 P1). finally won't reschedule
+    // applied to the swapped `cur`. finally won't reschedule
     // (myGen !== pollGen), and the newer poll owns render/reschedule.
     if (myGen !== pollGen) return;
     renderTabs(data.tabs || []);
@@ -836,7 +836,7 @@ async function poll(reanchor = false) {
     // switch never flashes the notice / disables send for one cycle. A genuine
     // opt-out shows one poll (~3s) later than before, which was already racy.
     // Scope `sids` to the CURRENT dataset so a lingering old-DS sid can't keep
-    // send enabled after a switch (reviewer P1).
+    // send enabled after a switch.
     const sids = (data.sessions || [])
       .filter((s) => (s.dataset ?? "") === (curDs ?? ""))
       .map((s) => s.id);
@@ -893,7 +893,7 @@ function schedulePoll() {
   // ever exists. Without this, the bootstrap poll's schedulePoll() and the
   // selectSession()->poll(true) schedulePoll() both leave a timer, and every
   // session switch accumulates another (N+1 loops), breaking the "single
-  // unified poll" cost invariant. reviewer/reviewer code R2.
+  // unified poll" cost invariant.
   if (pollTimer) clearTimeout(pollTimer);
   pollInterval = Math.min(POLL_MAX, Math.max(POLL_MIN, pollInterval));
   pollTimer = setTimeout(() => poll(false), pollInterval);
@@ -1259,7 +1259,7 @@ async function fetchView(targetVer) {
     if (r.status === 204 || !r.ok || !r.data) return; // transient: don't advance appliedVv → next poll retries
     const url = URL.createObjectURL(r.data);
     // Wait for decode. A corrupt/empty PNG fires onerror and we leave appliedVv
-    // unadvanced (reviewer P2) so the view doesn't stick on a broken frame.
+    // unadvanced so the view doesn't stick on a broken frame.
     const decoded = await new Promise((resolve) => {
       const probe = new Image();
       probe.onload = () => resolve(true);
@@ -1276,7 +1276,7 @@ async function fetchView(targetVer) {
     const old = img.dataset.url;
     img.src = url;                                     // already decoded → instant paint
     img.dataset.url = url;
-    if (old) URL.revokeObjectURL(old);                // revoke old URL synchronously (no onload race; reviewer P2-2)
+    if (old) URL.revokeObjectURL(old);                // revoke old URL synchronously (no onload race)
     appliedVv[tab] = ver;                             // advance only on a painted frame
     document.getElementById("viewEmpty").style.display = "none";
   } catch (e) { /* transient: appliedVv unadvanced → next poll retries */ }
@@ -1753,7 +1753,7 @@ async function runSelfTest() {
             taEl.value === "draft-A" && draftByDs["dsB"] === "draft-B");
       taEl.value = "";
 
-      // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査（reviewer P2）:
+      // 9e/9f/9g. poll/presence の安全弁を api/schedulePoll を stub 化して検査:
       // bootstrap での ds 省略・0セッションDSでの送信無効化・現DSスコープの opt-out。
       const _api = api, _sched = schedulePoll;
       let capUrl = null, capBody = null;

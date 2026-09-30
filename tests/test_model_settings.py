@@ -171,7 +171,7 @@ class TestOpenAIResolution:
 
 
 def test_model_config_corrupt_returns_empty(tmp_path, monkeypatch):
-    # reviewer code P2: corrupt (hand-edited) models.toml must not crash at read time.
+    # Corrupt (hand-edited) models.toml must not crash at read time.
     (tmp_path / "models.toml").write_text("[[[not valid toml", encoding="utf-8")
     monkeypatch.setattr(ms, "repo_root", lambda: tmp_path)
     ms.model_config.cache_clear()

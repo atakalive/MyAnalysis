@@ -149,8 +149,9 @@ def save_text(name: str, relpath: str, content: str) -> Path:
     """任意のテキストファイルを <dataset work_dir>/<relpath> に保存し、パスを返す。
 
     save_code が .py 専用なのに対し、こちらは拡張子を問わない汎用の書込口。メモ・
-    レポート・派生 CSV/JSON はこれで書く。同期マウント上ではエージェントの Write/Edit が
-    PreToolUse hook（llm_bridge/guard_write.py）で機械的に拒否されるので、これが
+    レポート・派生 CSV/JSON はこれで書く。同期マウント上のファイルをエージェントの
+    Write/Edit で直接書かせない（claude エンジンは PreToolUse hook（llm_bridge/guard_write.py）
+    で機械的に拒否し、codex / pi はプロンプトの指示だけ）ので、これが
     work_dir へ任意のファイルを置く唯一の正規経路になる。
 
     relpath はサブディレクトリを含んでよい相対パス（例 "summary.md",

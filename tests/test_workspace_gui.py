@@ -158,7 +158,7 @@ def test_restore_last_session_additive(win, tmp_path, monkeypatch):
 
 
 def test_add_tab_new_path_syncs_current_dataset(win, tmp_path, monkeypatch):
-    """reviewer code P1: the NEW-tab path of add-tab must sync current_dataset,
+    """The NEW-tab path of add-tab must sync current_dataset,
     like the idempotent path and _show. Without it, window.add_tab only does
     _ensure_group+addTab (Qt auto-selects the first group's tab as active) while
     current_dataset stays None → active.json publishes dataset:null with

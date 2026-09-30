@@ -130,7 +130,7 @@ def test_reject_stops_live_worker(monkeypatch, parent_widget):
 
 
 def test_ping_locks_selection_until_result(monkeypatch, parent_widget):
-    # reviewer code P1: while a ping is in flight, selection + Apply are locked so a
+    # While a ping is in flight, selection + Apply are locked so a
     # result can never be shown against a different selection.
     import gui.backend_selector_dialog as mod
     from PySide6.QtWidgets import QDialogButtonBox
@@ -154,7 +154,7 @@ def test_ping_locks_selection_until_result(monkeypatch, parent_widget):
 
 
 def test_apply_io_error_shows_message(monkeypatch, parent_widget):
-    # reviewer code P2: apply_selection can raise OSError (IO) too — it must surface
+    # apply_selection can raise OSError (IO) too — it must surface
     # as a message, not an uncaught Qt slot exception.
     import gui.backend_selector_dialog as mod
     from PySide6.QtWidgets import QDialog

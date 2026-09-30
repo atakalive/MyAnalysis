@@ -563,12 +563,12 @@ def test_validate_name_accepts(name):
 def test_list_datasets_cli(monkeypatch, capsys):
     monkeypatch.setattr(
         "config.DATASETS",
-        {"zeta": {}, "alpha": {}, "dataset_a": {}},
+        {"zeta": {}, "alpha": {}, "my_dataset": {}},
     )
     rc = bridge_main.main(["list-datasets"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert out.splitlines() == ["alpha", "dataset_a", "zeta"]
+    assert out.splitlines() == ["alpha", "my_dataset", "zeta"]
 
 
 # ---- CLI: list-analyses excludes underscore-prefixed dirs ----

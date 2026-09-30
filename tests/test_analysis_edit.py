@@ -53,7 +53,7 @@ def test_draft_creates_draft_and_prints_followup(ds, capsys):
     assert draft.is_file()
     assert draft.read_text(encoding="utf-8") == _GOOD
     assert str(draft) in out                       # absolute draft path printed
-    # --dataset=<ds> 形 + positional は `--` の後（option 誤認防止・reviewer code P2）
+    # --dataset=<ds> 形 + positional は `--` の後（option 誤認防止）
     assert f"apply-analysis --dataset={DS} -- {NAME}" in out
 
 
@@ -71,7 +71,7 @@ def test_draft_empty_analysis_points_at_recover(ds):
 
 
 def test_draft_followup_command_is_shell_quoted(ds, capsys):
-    """reviewer code P1: 名前にシェルメタ文字が入っても出力コマンドが安全に quote される。
+    """名前にシェルメタ文字が入っても出力コマンドが安全に quote される。
 
     ';' は validate_identifier_name を通る（禁止文字は <>:"|?* と区切り/制御のみ）が
     shell では危険。follow-up の apply/set-active-dataset/reload 全トークンで確認する。
@@ -92,7 +92,7 @@ def test_draft_followup_command_is_shell_quoted(ds, capsys):
 
 
 def test_guidance_safe_for_option_looking_names(ds, capsys):
-    """reviewer code P2 R2: 先頭ハイフンの有効名（-x）でも案内コマンドが壊れない。
+    """先頭ハイフンの有効名（-x）でも案内コマンドが壊れない。
 
     validate_identifier_name は先頭ハイフンを拒否しないので `-x` は有効。旧形
     `apply-analysis -x --dataset ds` は argparse が -x を option 誤認して失敗する。
@@ -257,7 +257,7 @@ def test_recover_refuses_non_empty_analysis(ds):
 
 
 def test_recover_refuses_whitespace_only_analysis(ds):
-    """byte-exact: 空白のみでも 1 バイト中身があれば上書きしない（reviewer P1）。"""
+    """byte-exact: 空白のみでも 1 バイト中身があれば上書きしない。"""
     af = _write_analysis(ds, source="   \n")
     _bak_path(af).write_text(_GOOD, encoding="utf-8")
     with pytest.raises(SystemExit) as ei:
@@ -308,7 +308,7 @@ def test_cli_unresolved_dataset_errors(monkeypatch, tmp_path):
     ("async def build_tab(p, d):\n    pass\n", True),
     ("build_tab = _impl\n", True),
     ("build_tab: object = None\n", True),
-    # annotation-only: no value → only __annotations__, no module attr (reviewer P2)
+    # annotation-only: no value → only __annotations__, no module attr
     ("build_tab: object\n", False),
     ("from m import build_tab\n", True),
     ("import m as build_tab\n", True),

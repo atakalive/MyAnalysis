@@ -515,7 +515,7 @@ def test_tier2_sync_failure_does_not_update_bak(window, probe_analysis):
 def test_tier2_reload_rejects_non_analysis_tab(window, qapp, tmp_path):
     """同名の figure/viewer タブを解析として reload しない (kind ガード)。
 
-    reviewer P2 (code review): reload_tab が old_tab の kind を見ないと、同名 viewer を
+    reload_tab が old_tab の kind を見ないと、同名 viewer を
     解析タブへ置き換え得る。kind!=analysis のタブは reload-tab-error で fail-fast。
     """
     from PIL import Image

@@ -45,11 +45,11 @@ def test_analysis_py_gets_draft_apply_guidance(monkeypatch):
     """analysis.py だけは draft→apply の具体コマンドを案内する。"""
     rc, res = _run(monkeypatch, {
         "tool_name": "Edit",
-        "tool_input": {"file_path": r"G:\data\ds\analyses\cov3\analysis.py"},
+        "tool_input": {"file_path": "G:/data/ds/analyses/my_analysis/analysis.py"},
     }, fragile=True)
     reason = res["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "draft-analysis cov3" in reason
-    assert "apply-analysis cov3" in reason
+    assert "draft-analysis my_analysis" in reason
+    assert "apply-analysis my_analysis" in reason
 
 
 def test_non_py_write_is_pointed_at_save_text(monkeypatch):
@@ -76,7 +76,7 @@ def test_allows_editing_the_draft(monkeypatch):
     rc, res = _run(monkeypatch, {
         "tool_name": "Edit",
         "tool_input": {
-            "file_path": r"G:\data\ds\_work\analyses\cov3\analysis.draft.py"},
+            "file_path": "G:/data/ds/_work/analyses/my_analysis/analysis.draft.py"},
     }, fragile=True)
     assert rc == 0 and res is None       # 出力なし = 許可
 
@@ -85,7 +85,7 @@ def test_still_denies_the_canonical_analysis_py(monkeypatch):
     """draft の許可が本体 analysis.py まで緩めていないこと。"""
     rc, res = _run(monkeypatch, {
         "tool_name": "Edit",
-        "tool_input": {"file_path": r"G:\data\ds\analyses\cov3\analysis.py"},
+        "tool_input": {"file_path": "G:/data/ds/analyses/my_analysis/analysis.py"},
     }, fragile=True)
     assert res["hookSpecificOutput"]["permissionDecision"] == "deny"
 

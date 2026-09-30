@@ -624,7 +624,7 @@ class ChatWidget(QWidget):
         A turn generating in a *hidden* dataset changes dataset_busy() for that
         dataset, but the window only refreshes switcher badges on dataset/tab
         switch — so a background dataset's ● would go stale until the next switch
-        (Issue #51 reviewer code P2-2). Push a refresh from each turn-state
+        (Issue #51). Push a refresh from each turn-state
         transition instead. Guarded: the window may be a headless/test double
         without the switcher (single-dataset / pre-#51 windows)."""
         w = self._window
@@ -1979,7 +1979,7 @@ class ChatWidget(QWidget):
         # Relay the failed turn to guests too (bidirectional requirement): emit the
         # partial buffer + error so the relay's origin=="local" gate forwards it to
         # out:. Always emit (even on empty buffer) so the guest isn't left hanging
-        # with only a vanished busy indicator. reviewer code R1 P2-2.
+        # with only a vanished busy indicator.
         self.messageAdded.emit(sess.id, "assistant", (turn.buffer or "") + error_text, "local")
         if sid == self._active.id:
             self._live_timer.stop()           # アクティブ完了 → 保留 flush は不要
@@ -2133,7 +2133,7 @@ class ChatWidget(QWidget):
         cursor.removeSelectedText()
         # 完了時パスは _log.clear() 後の fresh な既定ブロックへ描く。ライブは anchor ブロックを
         # flush 間で再利用するので、char だけでなく block 書式も既定へ戻し、前回 flush の
-        # 見出し/リスト/コードブロック書式の残留を断つ（「ライブ==完了」保証。reviewer/reviewer 指摘）。
+        # 見出し/リスト/コードブロック書式の残留を断つ（「ライブ==完了」保証）。
         cursor.setBlockFormat(QTextBlockFormat())
         cursor.setCharFormat(QTextCharFormat())
         if body.strip():

@@ -24,11 +24,10 @@ primary（直前に読んだ）だけが失敗し `.bak` が成功するため�
 
 ## 判定方法（Windows）
 
-`GetVolumeInformationW` の **ファイルシステム名**だけで判定する。実測値:
+`GetVolumeInformationW` の **ファイルシステム名**だけで判定する。実測値（ドライブ文字は一例）:
 
     'C:\\'  fs='NTFS'         drivetype=3 (DRIVE_FIXED)
     'M:\\'  fs='FUSE-rclone'  drivetype=3 (DRIVE_FIXED)   ← rclone マウント
-    'D:\\'  fs='NTFS'         drivetype=3 (DRIVE_FIXED)
 
 **`GetDriveTypeW` は使ってはならない**: WinFsp のディスクは `DRIVE_FIXED` を返し、ローカル
 NTFS と区別できない（上の実測どおり M: と C: が同じ値）。DRIVE_REMOTE 判定は空振りする。

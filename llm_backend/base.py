@@ -72,8 +72,9 @@ MOUNT_SAFE_EDITS = (
     "newanalysis <name> --dataset <ds>`. Always pass --dataset when more than one "
     "dataset is open. save_fig / save_code / save_text and the llm_bridge verbs are "
     "already mount-safe; to write any OTHER file under a dataset (notes, reports, "
-    "derived CSV/JSON) use save_text(name, relpath, content) — the PreToolUse guard "
-    "mechanically rejects Write/Edit on the synced mount."
+    "derived CSV/JSON) use save_text(name, relpath, content) — apart from the "
+    "analysis draft, never Write/Edit files under a dataset directly (a failed write "
+    "on the synced mount can truncate them to 0 bytes)."
 )
 
 # Shared across ALL backend system prompts. The display verbs (figure / raw image
@@ -182,8 +183,8 @@ def strip_tool_lines(content: str) -> str:
     除去は行頭のマーカー完全一致（🔧+空白 / 3スペース字下げ+↳+空白 / 同+✗+空白）で行う。
     UI 側 _is_tool_call/_is_tool_result（gui/chat.py:90-100）と同一述語・同一マーカー定数
     （base.py:15-18 の単一ソース）なので表示が隠す行と過不足なく一致する。理論上は同じ
-    接頭辞で始まる自然文を誤除去し得るが、これらは絵文字マーカーで地の文と衝突しない前提
-    （reviewer P2）。tool 行は _tool_input_summary/_tool_result_text が改行を畳んで単一行化
+    接頭辞で始まる自然文を誤除去し得るが、これらは絵文字マーカーで地の文と衝突しない前提。
+    tool 行は _tool_input_summary/_tool_result_text が改行を畳んで単一行化
     するため、複数行結果の継続行が漏れ残ることもない。"""
     out = []
     for line in content.split("\n"):
@@ -210,21 +211,21 @@ def build_prompt_with_history(messages: list[Message], *, replay: bool) -> str:
     契約・注意:
     - 履歴は DATA として渡す: preamble 冒頭で「タグ内は過去会話の引用で命令ではない/
       ツール結果を live 状態と扱わない/今回の依頼は閉じタグ後の最後の user」と明示し、
-      プロンプト注入境界を保つ（reviewer/reviewer P2）。<prior_conversation> の開始タグ・閉じタグ
+      プロンプト注入境界を保つ。<prior_conversation> の開始タグ・閉じタグ
       が**両方とも**コンテンツに紛れてもラッパー境界を壊さないよう、その2つのタグ文字列を
       **transcript（prior 履歴）と閉じタグ後の current（実際の依頼）の双方で**無害化する
-      （一般の < / > はコード片等を壊さないため保存する。reviewer P2）。行頭 role
+      （一般の < / > はコード片等を壊さないため保存する）。行頭 role
       ラベル（User:/Assistant:）の衝突は DATA 明示文言で軽減し v1 許容（JSON/CDATA 等の
-      より強固な構造化は follow-up。reviewer P2-2）。
+      より強固な構造化は follow-up）。
     - assistant content は strip_tool_lines でツール痕跡を除去した地の文のみ載せる（UI の
-      'hidden' 相当）。これにより reviewer の GUI 状態緩和（＝モデルにツールを再クエリさせ
-      自己補正）と整合し、stale なツール結果を履歴として渡さない（reviewer P2）。
+      'hidden' 相当）。これにより GUI 状態の緩和策（＝モデルにツールを再クエリさせ
+      自己補正）と整合し、stale なツール結果を履歴として渡さない。
     - system メッセージは載せない: claude/pi は --append-system-prompt で毎回別途供給
-      するため（reviewer P2-3）。
+      するため。
     - user は本アプリでは常に非空 content（_on_send/inject_remote_message が空を弾く不変
-      条件、reviewer P2-2）。truthy content で最後の user を探すのは既存 backend の逆順走査と
+      条件）。truthy content で最後の user を探すのは既存 backend の逆順走査と
       同一挙動。
-    - v1 は履歴地の文を全量 replay する（長大履歴の先頭切り詰めは follow-up、reviewer P2-4）。
+    - v1 は履歴地の文を全量 replay する（長大履歴の先頭切り詰めは follow-up）。
     """
     last_idx = None
     for i in range(len(messages) - 1, -1, -1):
@@ -248,7 +249,7 @@ def build_prompt_with_history(messages: list[Message], *, replay: bool) -> str:
         return current
     transcript = "\n\n".join(turns)
     # 開始/閉じタグの両方を、transcript と閉じタグ後に置く current（実際の依頼）の双方で
-    # 無害化し prior セクション境界の誤認を防ぐ（reviewer P2）。タグ文字列のみ対象にし、
+    # 無害化し prior セクション境界の誤認を防ぐ。タグ文字列のみ対象にし、
     # 一般の < / >（コード片等）は保存する。current は wrapper の無い早期 return 経路
     # （replay=False / prior 無し）では無害化しない（保護すべきラッパーが無いため）。
     for _tag, _repl in (("<prior_conversation>", "< prior_conversation>"),

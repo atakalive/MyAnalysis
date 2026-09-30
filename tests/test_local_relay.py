@@ -591,7 +591,7 @@ def test_not_found(clock):
 
 
 # 17. non-dict / null JSON bodies (the reference Worker SSOT: parse error -> 400, valid
-#     non-object -> coerced default, never 500). (reviewer code P2)
+#     non-object -> coerced default, never 500).
 def test_nondict_json_bodies(clock):
     st = RelayState(ADMIN)
     _new_channel(st)
@@ -614,7 +614,6 @@ def test_nondict_json_bodies(clock):
 
 
 # 18. orphan (metadata-less) channel reaping + read routes don't create channels.
-#     (reviewer code P2)
 def test_orphan_channel_reaped_and_reads_dont_create(clock):
     st = RelayState(ADMIN)
     # read on a non-existent channel must NOT create it (the reference Worker never creates on read)

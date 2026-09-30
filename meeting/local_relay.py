@@ -12,7 +12,7 @@ error bodies. Since the dataset layer (Issue #51 follow-up) the protocol added
 (``active_dataset`` field) and ``GET /history`` (``has_more`` on unpublished sids).
 
 Two routes are local-relay-only extensions (the runtime is this module; the HTML
-is served by GitLab Pages + this server):
+is served by this server at GET /; the GitLab Pages copy is optional):
   PUT /backlog/{ch}/{sid}   (admin)  — stage a session's pre-meeting transcript
   GET /history/{ch}/{sid}   (guest)  — backward, turn-paginated history fetch
 Together they let a guest fetch the full chat history (incl. before sharing
@@ -264,7 +264,7 @@ class RelayState:
         # admin write (or pre-meta GET) can resurrect a popped channel with empty
         # meta; a normal channel always sets meta right after POST /admin/channel, so
         # an empty-meta + stale-hb channel is an orphan and safe to reap. Without (b)
-        # such channels would never be evicted (empty meta is falsy). (reviewer P2)
+        # such channels would never be evicted (empty meta is falsy).
         for ch in list(self._ch):
             cs = self._ch[ch]
             meta = cs.get("meta")
@@ -587,7 +587,7 @@ class RelayState:
 
         # GET /inbound/{ch}?since= (host) — in: only, all sid.
         # Read routes use _ch.get (NOT _ensure_channel): the reference Worker never creates KV
-        # on a read, and creating an empty channel here would leak orphans. (reviewer P2)
+        # on a read, and creating an empty channel here would leak orphans.
         if seg[:1] == ["inbound"] and len(seg) == 2 and method == "GET":
             if not self._is_admin(headers):
                 return self._json({"error": "unauthorized"}, 401)

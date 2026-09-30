@@ -515,7 +515,7 @@ def test_session_nested_split_ratios_restored(qapp, win, pngs):
 
 @pytest.mark.parametrize("shown", [True, False])
 def test_new_panel_visible_without_event_processing(qapp, win, pngs, tifs, shown):
-    """配置直後の可視状態はイベント処理を待たずに確定している（reviewer code R1 P1）。
+    """配置直後の可視状態はイベント処理を待たずに確定している。
 
     表示中の葉へ addWidget した子は Qt がキュー経由で show するため、明示表示
     しないと processEvents まで isHidden()==True のまま bridge_panels/保存から漏れ、

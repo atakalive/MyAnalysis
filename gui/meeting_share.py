@@ -243,7 +243,7 @@ class MeetingShareWindow(QWidget):
             self._log_line(tr("meeting.start_failed", error=repr(e)))
             return
         # LAN が有効なら実際の ip:port をログ表示（固定ポート要求が typo 等で ephemeral
-        # 化した場合に「要求ポートで無い」ことを可視化する。reviewer R2 P2-2）。
+        # 化した場合に「要求ポートで無い」ことを可視化する）。
         lan_base = self._relay.lan_base_url()
         if lan_base:
             self._log_line(tr("meeting.lan.ready", url=lan_base))
@@ -606,7 +606,7 @@ class MeetingShareWindow(QWidget):
 
     def _update_state_label(self) -> None:
         # relay.share_status() を SSOT にする（_token/_lan_link の有無から派生させると
-        # external_unavailable が "sharing" に上書きされる。reviewer P1-1）。
+        # external_unavailable が "sharing" に上書きされる）。
         st = self._relay.share_status()
         label_key = {
             "sharing": "meeting.state.sharing",

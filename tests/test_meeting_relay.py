@@ -908,7 +908,7 @@ def test_session_auto_share(qapp, monkeypatch):
 
 
 def test_deselect_hidden_session_persists_across_switch(qapp, monkeypatch):
-    """Issue #51 / reviewer code P2 R3: a hidden dataset's session that the host
+    """Issue #51: a hidden dataset's session that the host
     explicitly deselected stays deselected after switching to that dataset.
     set_published_sessions records the opted-out id in _session_known so a later
     absorb_new_sessions does not treat it as undecided-new and re-share it."""
@@ -975,7 +975,7 @@ def test_session_auto_share_off_then_on_no_retroactive(qapp, monkeypatch):
 
 
 def test_session_auto_share_off_to_on_unobserved(qapp, monkeypatch):
-    # reviewer R2 P1: flip OFF→ON BEFORE any capture/refresh tick observes a session
+    # Flip OFF→ON BEFORE any capture/refresh tick observes a session
     # created while OFF. set_auto_share_new_sessions must snapshot existing ids
     # into _session_known atomically before enabling, so the first absorb after
     # the flip does NOT publish that session.

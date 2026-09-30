@@ -475,7 +475,7 @@ def _read_for_patch(dataset: str) -> dict:
 
     以前はここが `meta or {}` で、`durable_read_json` の status を捨てていた。同期マウントで
     読取が一瞬失敗する（実測 407 回）と空 dict から 2 キーだけを書き、**primary と .bak の
-    両方**を潰していた（実際に dataset_h の meta.json が 15 キー → 2 キーに縮退した）。
+    両方**を潰していた（実際に、あるデータセットの meta.json が 15 キー → 2 キーに縮退した）。
     'absent'（本当に無い）のときだけ新規作成を許す。
     """
     status, meta = durable_read_json(_meta_path(dataset))

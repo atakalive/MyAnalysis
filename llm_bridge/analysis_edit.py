@@ -38,7 +38,7 @@ def _safe_cmd(prefix: str, dataset: str, name: str) -> str:
 
     validate_identifier_name accepts ``;`` ``$()`` etc. (shell-unsafe) *and*
     leading hyphens, so a name/dataset like ``-x`` would otherwise be parsed by
-    argparse as an option in ``<verb> -x --dataset ds`` (reviewer code P1 + P2).
+    argparse as an option in ``<verb> -x --dataset ds``.
     Fix on both axes: emit ``--dataset=<value>`` as one shlex-quoted token (the
     ``=`` form binds a leading-hyphen value literally) and place the positional
     ``name`` after ``--`` (end-of-options) so it is never read as a flag.
@@ -69,7 +69,7 @@ def _defines_build_tab(tree: ast.Module) -> bool:
         elif isinstance(node, ast.AnnAssign):
             # annotation-only (`build_tab: T` without `= value`) only touches
             # __annotations__ at runtime and does NOT create mod.build_tab, so
-            # it must not count as a binding (mirrors hasattr — reviewer code P2).
+            # it must not count as a binding (mirrors hasattr).
             if (node.value is not None
                     and isinstance(node.target, ast.Name)
                     and node.target.id == _BUILD_TAB):
@@ -106,7 +106,7 @@ def draft_analysis(dataset: str, name: str) -> None:
     atomic_write_text(draft, source)
     print(str(draft))
     # reload は dataset を受け取らず active dataset のタブを対象にするので、
-    # 同名衝突を避けるため set-active-dataset を前置する（reviewer R2 P2）。window の
+    # 同名衝突を避けるため set-active-dataset を前置する。window の
     # k=v トークン（name=/target=）は先頭が英字なので option 誤認せず、値だけ quote。
     print(
         f"edit the file above, then promote it: "
@@ -133,7 +133,7 @@ def apply_analysis(dataset: str, name: str) -> None:
     # read_text（universal newline）で読む＝改行を '\n' に正規化してから
     # atomic_write_text（newline=None）で書き直すので二重CRにならない。
     # 空・非UTF-8・一時的な read 不能は 0.05s ×3 リトライで VFS 同期ラグを吸収し、
-    # リトライアウトしたときだけエラーにする（reviewer/reviewer P2）。
+    # リトライアウトしたときだけエラーにする。
     source = None
     for attempt in range(3):
         try:
@@ -156,7 +156,7 @@ def apply_analysis(dataset: str, name: str) -> None:
         tree = ast.parse(source, str(af))
     except SyntaxError as e:
         raise SystemExit(f"error: syntax {e.filename}:{e.lineno}: {e.msg}")
-    if not _defines_build_tab(tree):   # 必須の build_tab 束縛不在は fail-fast（reviewer P1）
+    if not _defines_build_tab(tree):   # 必須の build_tab 束縛不在は fail-fast
         raise SystemExit(
             "error: draft does not bind a top-level `build_tab` (checked def / "
             "async def / assignment / import forms); an analysis module must "
@@ -166,7 +166,7 @@ def apply_analysis(dataset: str, name: str) -> None:
     af.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(af, source)   # 昇格。draft は残す（次の反復は Edit → apply）。
     print(f"applied: {af}")
-    # reload は active dataset のタブが対象なので set-active-dataset を前置（reviewer R2 P2）。
+    # reload は active dataset のタブが対象なので set-active-dataset を前置。
     print(
         f"reload:  python -m llm_bridge window set-active-dataset "
         f"{shlex.quote(f'name={dataset}')} --wait && "
@@ -186,7 +186,7 @@ def recover_analysis(dataset: str, name: str) -> None:
             f"error: {af} is present but unreadable ({e}); it may be mid-sync — "
             f"retry later; not overwriting"
         )
-    if current:   # byte-exact: 1 バイトでも中身（空白含む）があれば上書きしない（reviewer P1）
+    if current:   # byte-exact: 1 バイトでも中身（空白含む）があれば上書きしない
         raise SystemExit(
             f"error: {af} is not empty; refusing to overwrite (recover only "
             f"restores a 0-byte or absent analysis.py)"
@@ -204,9 +204,9 @@ def recover_analysis(dataset: str, name: str) -> None:
         raise SystemExit(f"error: backup {bp} is empty; cannot recover")
     af.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(af, bak_text)
-    # stale draft を消して draft↔analysis.py の乖離を断つ（reviewer P2 経路 a）:
+    # stale draft を消して draft↔analysis.py の乖離を断つ:
     # 消さないと、回復済み analysis.py を古い draft で apply して再破棄する事故が起きる。
-    # 削除は成功/未存在/失敗を区別して出力（"removed" 固定表示は安全状態の誤認を招く=reviewer R2 P2）。
+    # 削除は成功/未存在/失敗を区別して出力（"removed" 固定表示は安全状態の誤認を招く）。
     draft_note = None
     try:
         stale = dataset_config.analysis_out_dir(dataset, name, create=False) \

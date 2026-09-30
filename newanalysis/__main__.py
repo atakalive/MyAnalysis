@@ -3,7 +3,7 @@
 使用法:
     python -m newanalysis <name> --dataset <key>
 
-`<dataset_dir>/analyses/<name>/` を作成し、#13 で確立した標準パターン
+`<dataset_dir>/analyses/<name>/` を作成し、標準パターン
 (build_export_figs + 注釈ハンドラ + connect_annotations + attach_tab) を内包する
 `analysis.py` と `README.md` を書き出す。生成物は同期ドライブ側に置かれ、
 リポジトリへのコミット対象外。
@@ -101,7 +101,7 @@ def build_tab(parent: QWidget | None, data: dict[str, Any]) -> AnalysisTab:
 
     tab = AnalysisTab(name=NAME, parent=parent)
     # パネルキーはタブ内で一意であること。
-    # 複数パネルの配置例は example 実装を参照。
+    # 複数パネルの配置は MyAnalysis の docs/analysis_module_ja.md（AnalysisTab.add_panel）を参照。
     tab.add_panel("main", QLabel("TODO: パネルを実装"), "left")
 
     def _get_state() -> dict:

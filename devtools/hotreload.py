@@ -688,7 +688,7 @@ class HotReloader:
         Only keys with an existing baseline (registered at tab-open time via
         mark_analysis_clean) are considered — baselines are never seeded
         implicitly here, so an analysis edited after it was opened reports on the
-        first reload (reviewer P1 R3).
+        first reload.
         """
         current = self._scan_analyses(open_pairs)
         return sorted(

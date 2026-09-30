@@ -105,7 +105,7 @@ def test_double_click_accepts(qapp, patch_picker):
 
 def test_refresh_runs_heavy_on_worker_thread(qapp, patch_picker, monkeypatch):
     # [更新] must route the HEAVY rebuild through the background worker — never
-    # run compute_meta's os.walk inline on the GUI thread (reviewer/reviewer P1).
+    # run compute_meta's os.walk inline on the GUI thread.
     import threading
 
     from gui import open_dataset_dialog as mod

@@ -140,7 +140,7 @@ def test_add_tab_same_name_same_dataset_focuses(monkeypatch, tmp_path):
 
 def test_add_tab_same_name_figure_viewer_raises(monkeypatch, tmp_path):
     """同じ dataset に同名の figure viewer があると、解析タブは fail-fast する
-    (viewer を解析と取り違えて focus しない)。reviewer P2 code review。"""
+    (viewer を解析と取り違えて focus しない)。"""
     monkeypatch.setattr("config.get_dataset_dir", lambda ds: tmp_path / ds)
     d = tmp_path / "dsA" / "analyses" / "demo"
     d.mkdir(parents=True)

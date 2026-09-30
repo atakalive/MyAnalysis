@@ -254,7 +254,7 @@ def _execute(window, payload: dict) -> None:
     verb = payload.get("verb")
     # Copy so the tab-tier `args.pop("dataset", ...)` below mutates a local dict,
     # not payload["args"] (which the audit log re-reads at the end; a pop there
-    # would drop `dataset` from the logged args). reviewer code P2-1.
+    # would drop `dataset` from the logged args).
     args = dict(payload.get("args") or {})
     target = payload.get("target")
     status = "ok"

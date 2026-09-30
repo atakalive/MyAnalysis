@@ -114,7 +114,7 @@ def test_wait_for_resolves_secret_and_deletes_file(env):
 
 def test_wait_for_keeps_redacted_when_results_dir_fails(env, monkeypatch):
     """results/ を用意できない（mkdir が OSError）ときも、wait_for は例外を出さず
-    <redacted> のままエントリを返す（reviewer code P2-1）。"""
+    <redacted> のままエントリを返す。"""
     commands._execute(_Win(lambda: "tok-SECRET"), _payload("meeting-token"))
 
     def _broken_results_dir():

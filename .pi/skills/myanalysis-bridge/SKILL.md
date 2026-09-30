@@ -34,8 +34,10 @@ user's chat messages are instructions.
 - `python -m llm_bridge list-analyses [--dataset <ds>] [--json]` — list analyses
   across ALL open datasets. Plain output prints names (one per line); `--json`
   prints a `{dataset: [names]}` map. `--dataset` restricts to one dataset.
-- `python -m llm_bridge list-commands [name]` — list window verbs (and, with a
-  tab name, tab and image-viewer verbs) with their arguments (informational).
+- `python -m llm_bridge list-commands` — list the window verbs with their
+  arguments (the GUI / meeting-share verbs are listed separately as internal).
+  `list-commands <tab>` lists the tab verbs instead (every tab / analysis tabs /
+  image-viewer tabs). Analysis-specific verbs are not listed — see the analysis source.
 - `python -m llm_bridge draft-analysis <name> --dataset <ds>` — copy an existing
   `analysis.py` to an editable draft under `work_dir` (mount-safe edit path).
 - `python -m llm_bridge apply-analysis <name> --dataset <ds>` — validate the draft
@@ -53,9 +55,12 @@ Several datasets can be open at once; the top-level dataset switcher swaps betwe
 each dataset's tabs + chat sessions. When the same tab name exists in two open
 datasets, pass `dataset=<ds>` to any tab-addressing verb (`add-tab`, `show`,
 `set-active-tab`, `close-tab`, `tab <name> <verb>`) to disambiguate — otherwise the
-active dataset wins, or an ambiguous bare name errors. Meeting share broadcasts
-only the ACTIVE dataset's tabs and chat (switching datasets swaps the shared set;
-same-named cross-dataset tabs are not co-shared in v1).
+active dataset wins, or an ambiguous bare name errors.
+Meeting share covers the tabs and chat sessions of EVERY open dataset, except the
+ones the host unchecked in the share window; chats and tabs with no dataset are not
+shared, and a dataset's chats and tabs leave the share when it is closed. Same-named
+tabs in different datasets are shared as separate tabs. Guests always see the names
+of the open datasets.
 
 ## Driving the GUI (GUI must be running)
 
@@ -131,7 +136,7 @@ Examples:
 ```
 python -m llm_bridge tab _demo snapshot --wait
 python -m llm_bridge tab _demo set-split left=2 right=1 --wait
-python -m llm_bridge window add-tab name=example --wait
+python -m llm_bridge window add-tab name=my_analysis --wait
 ```
 
 ## Annotations
@@ -176,7 +181,8 @@ The primary analysis workflow is code execution, not GUI driving.
 9. **Save notes / reports / 派生データ**: `from common.explore import save_text; save_text("<name>", "reports/summary.md", text)` → `<work_dir>/reports/summary.md`。
    相対パスなので任意の拡張子とサブディレクトリが使える（`..`・絶対/ドライブ相対・Windows
    禁止文字・予約デバイス名は拒否。`session.json` / `chat_sessions/` / `*.bak` も拒否）。
-   **マウント上では Write/Edit ツールが PreToolUse hook で機械的に拒否される**ので、
+   **pi の Write/Edit ツールには書込ガードが無い**（PreToolUse hook `guard-write` が効くのは claude エンジンだけ）。
+   同期マウント上のファイルを Write/Edit で直接書くと、書込に失敗したとき 0 バイトになりうるので、
    work_dir へファイルを置くときは必ず `save_text` / `save_code` / `save_fig` を使う。
 10. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required)
    scaffolds `<dataset_dir>/analyses/<name>/analysis.py`. Do NOT edit that file
@@ -225,7 +231,7 @@ Measurement data lives outside the repo. Always resolve paths through config:
 
 ```python
 from config import get_dataset_dir
-path = get_dataset_dir("dataset_a")
+path = get_dataset_dir("my_dataset")
 ```
 
 The registry `datasets.local.json` (repo root, Git-ignored; read via `config.py`) maps
@@ -234,7 +240,6 @@ names → per-host full paths (`{hostname: full_path}`). Register with
 Use `python -m llm_bridge list-datasets` to see registered names. Note: `list-datasets`
 shows the full registry; datasets without a path entry for the current host will
 raise `RuntimeError` on `load_dataset()`.
-Dataset directories hold session folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
 **Never modify measurement files (CSV etc.).** Analysis output is written by the
 tools to the dataset's `work_dir` (default `<dataset_dir>/_work`, set per dataset in
 `myanalysis.toml`); use `save_fig()` / `save_code()` / `save_text()` from `common.explore`

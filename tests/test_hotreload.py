@@ -301,7 +301,7 @@ def test_on_reload_reregisters_window_verbs():
 
 
 # ---------------------------------------------------------------------------
-# Analysis baseline: (dataset, name) keying + tab-open baseline (reviewer P1 R3)
+# Analysis baseline: (dataset, name) keying + tab-open baseline
 # ---------------------------------------------------------------------------
 
 
@@ -319,14 +319,14 @@ def test_changed_analyses_baseline_on_open(monkeypatch, tmp_path):
     pairs = {(ds, name)}
 
     # Before any baseline is registered, an open analysis is never reported
-    # (no false "changed" at startup; reviewer P1 / reviewer P2-1).
+    # (no false "changed" at startup).
     assert hr.changed_analyses(pairs) == []
 
     # Tab-open registers a clean baseline.
     hr.mark_analysis_clean(ds, name)
     assert hr.changed_analyses(pairs) == []
 
-    # Edit after open → reported on the first reload (reviewer P1 R3).
+    # Edit after open → reported on the first reload.
     af.write_text("V = 2\n", encoding="utf-8")
     assert hr.changed_analyses(pairs) == [(ds, name)]
 

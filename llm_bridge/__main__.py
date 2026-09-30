@@ -550,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
             fn(ds, args.name)
         except (OSError, ValueError, KeyError, RuntimeError) as e:
             # 未捕捉の書き込み系例外（atomic_write_text/mkdir/analysis_out_dir(create=True)
-            # の OSError 等）を agent-facing な SystemExit に正規化（reviewer R2 P2）。
+            # の OSError 等）を agent-facing な SystemExit に正規化。
             # 対象がまさに同期マウントの書き込み失敗なので traceback を面に出さない。
             raise SystemExit(f"error: {e}")
         return 0

@@ -533,7 +533,7 @@ def test_open_dataset_nonexistent_dir_returns_error(ds_env, monkeypatch):
     assert win.noted_datasets == []
 
 
-# ---- active_tab focus dataset-match guard (reviewer P1 R2) ----
+# ---- active_tab focus dataset-match guard ----
 
 class _FocusWindow(_DispatchWindow):
     """Window whose add-tab simulates the same-name cross-dataset collision and
@@ -556,7 +556,7 @@ class _FocusWindow(_DispatchWindow):
 
 def test_open_dataset_active_tab_focus_dataset_guard(ds_env):
     """dsA/demo が開いている状態で dsB を開くと、衝突で dsB/demo は skip され、
-    かつ active_tab 復元が dsA/demo を誤 focus しない（reviewer P1 R2）。"""
+    かつ active_tab 復元が dsA/demo を誤 focus しない。"""
     session._touched.clear()
     payload = {
         "version": 1, "dataset": "ds_b", "active_tab": "demo",
@@ -1634,7 +1634,7 @@ def test_chat_local_reorder_loses_to_disk_content_change(ds_env):
 def test_chat_same_updated_other_body_not_clobbered_by_reorder(ds_env):
     """時計が baseline より遅れた 2 台は、どちらも max(time, T + 1e-3) で同じ updated を作る。
     他の PC が後から同じ updated・別の本文で保存した版を、手元の並べ替えの保存で
-    書き戻さない（内容の同一性は updated でなく指紋で見る。reviewer code R1 P0）。"""
+    書き戻さない（内容の同一性は updated でなく指紋で見る）。"""
     session._touched.clear()
     work_dir, a, b = _two_written()
     t1 = a.updated + 1e-3                       # 両 PC が作る同じ updated

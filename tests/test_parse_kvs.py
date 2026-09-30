@@ -15,7 +15,7 @@ from llm_bridge.__main__ import _parse_kvs
     ("kv", "key", "expected"),
     [
         # 文字列キー
-        ("name=000000", "name", "000000"),
+        ("name=123456", "name", "123456"),
         ("dataset=1.5", "dataset", "1.5"),
         ("session=123e4", "session", "123e4"),
         ("text=1e3", "text", "1e3"),

@@ -234,7 +234,7 @@ def test_apply_config_fail_unlinks_absent_models(apply_env, monkeypatch):
 
 
 def test_apply_config_fail_rollback_preserves_crlf(apply_env, monkeypatch):
-    # reviewer/reviewer code P2: the pre-apply snapshot must keep CRLF verbatim so the
+    # The pre-apply snapshot must keep CRLF verbatim so the
     # rollback is byte-exact (Path.read_text would collapse CRLF→LF).
     apply_env.cfg_p.write_text(
         '[backend]\nname = "claude"\n\n[claude_code]\nbin = ""\n', encoding="utf-8"
@@ -342,7 +342,7 @@ def test_apply_env_untouched_when_unset(apply_env, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# i18n resolution for catalog keys (reviewer P2-1)                            #
+# i18n resolution for catalog keys                                            #
 # --------------------------------------------------------------------------- #
 
 def test_engine_label_keys_and_dialog_keys_resolve():

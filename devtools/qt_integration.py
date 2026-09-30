@@ -418,7 +418,7 @@ class HotReloadController(QObject):
         self._reloader.mark_analysis_clean(dataset, name)
         # 最後まで成立した成功経路でのみ last-good を .bak に退避（best-effort）。
         # suppress を Exception まで広げるのは、パス再解決含むスナップショットが reload
-        # 本体（既にタブ差し替え済み）の成功を巻き添えにしないため（reviewer R2 P2）。
+        # 本体（既にタブ差し替え済み）の成功を巻き添えにしないため。
         try:
             _m("common.paths").backup_text_if_changed(af, source)
         except Exception:   # noqa: BLE001 — best-effort; never break a successful reload

@@ -1141,8 +1141,8 @@ def open_dataset(window, dataset: str) -> str:
                             if layout and t is not None and hasattr(t, "apply_layout"):
                                 t.apply_layout(layout)
                         elif layout and t is not None and hasattr(t, "move_panel"):
-                            # 単一 viewer: 記録側へ viewer を移設して配置を収束させる
-                            # （reviewer round3 P1）。両可視+image2 なしもここで side=left・
+                            # 単一 viewer: 記録側へ viewer を移設して配置を収束させる。
+                            # 両可視+image2 なしもここで side=left・
                             # 逆ペイン hide で自動的に単一へ畳まれる（A-1 相当）。旧
                             # session=layout 無しは既存側のまま＝回帰なし。
                             side = "right" if layout.get("left_hidden") else "left"
@@ -1159,9 +1159,9 @@ def open_dataset(window, dataset: str) -> str:
             active_tab = sess.get("active_tab")
             if active_tab is not None:
                 # 開いた dataset に属するタブのときだけ focus する（同名衝突で別
-                # dataset の同名タブを誤 focus しないため。reviewer P1 R2）。
-                # ⚠️ 存在チェックの next() も (dataset, name) で照合する（reviewer code
-                # P2）。bare name だと先に開いた別 dataset の同名タブに当たり、対象
+                # dataset の同名タブを誤 focus しないため）。
+                # ⚠️ 存在チェックの next() も (dataset, name) で照合する。
+                # bare name だと先に開いた別 dataset の同名タブに当たり、対象
                 # dataset 内に active_tab があっても t_ds != dataset で復元されない。
                 t = next(
                     (t for t in window.tabs()
@@ -1172,7 +1172,7 @@ def open_dataset(window, dataset: str) -> str:
                 )
                 if t is not None:
                     # Explicit dataset= so a same-named tab in another dataset is
-                    # never focused instead (B4 / reviewer P2-e).
+                    # never focused instead (B4).
                     try:
                         window.set_active_tab(active_tab, dataset=dataset)
                     except TypeError:

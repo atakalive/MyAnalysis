@@ -163,7 +163,7 @@ def _build_analysis(parent, dataset, name: str):
             bak_ok = False
         if bak_ok:
             # --dataset=<token> + `--` 前置で、シェルメタ文字と先頭ハイフンの
-            # 有効名の両方に耐える agent-facing コマンドにする（reviewer code P1/P2）。
+            # 有効名の両方に耐える agent-facing コマンドにする。
             recover_cmd = (
                 f"python -m llm_bridge recover-analysis "
                 f"{shlex.quote(f'--dataset={dataset}')} -- {shlex.quote(name)}"
@@ -289,7 +289,7 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         if spec and spec.get("dataset"):
             session.note_dataset(spec["dataset"])
         # ホットリロード baseline をこの時点の SHA で登録（add-tab・session 復元の
-        # 両方をカバー）。タブは既に add 済みなので best-effort（reviewer P2 R4）。
+        # 両方をカバー）。タブは既に add 済みなので best-effort。
         hr = getattr(window, "_hotreload", None)
         if hr is not None and hasattr(hr, "note_analysis_opened"):
             try:
@@ -299,7 +299,7 @@ def _make_add_tab_handler(window) -> Callable[..., str]:
         # 最後まで成立した成功経路でのみ last-good を .bak に退避（best-effort）。
         # suppress は Exception まで広げる: パス再解決（dataset_config.analysis_file は
         # KeyError/RuntimeError もあり得る）含め、この副作用が add-tab の成功を巻き添えに
-        # しないため（reviewer R2 P2）。純粋な副作用なので fail-open が正。
+        # しないため。純粋な副作用なので fail-open が正。
         with contextlib.suppress(Exception):
             backup_text_if_changed(
                 dataset_config.analysis_file(dataset, name), source
@@ -557,7 +557,7 @@ def _make_show_handler(window: "ToolWindow") -> Callable[..., str]:
         # activate, the currentChanged it fires sees the NEW session_spec
         # (avoiding a stale dataset push to the chat widget). Resolving by
         # (dataset, name) keeps a same-named viewer in another dataset from being
-        # absorbed/overwritten (Issue #51 A1b / #26 reviewer R4).
+        # absorbed/overwritten (Issue #51 A1b / #26).
         existing = _find_in_dataset(window, name, dataset)
         if existing is not None:
             tab = existing

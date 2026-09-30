@@ -523,7 +523,7 @@ def test_simplify_t7_degenerate_run_results_only():
 
 
 def test_load_tool_display_invalid_types_never_raise(monkeypatch):
-    """reviewer P1: a hand-edited / corrupt ui_prefs `tool_display` of any type —
+    """A hand-edited / corrupt ui_prefs `tool_display` of any type —
     including unhashable JSON array/object — must normalize to 'full' without
     raising (the helper's contract is 'Must never raise')."""
     import llm_bridge.paths as paths
@@ -1450,8 +1450,7 @@ def test_render_session_emits_chataction_anchors(widget):
     """生成側の突合: _render_session が user 行に chataction:edit:<i>、本文あり
     assistant 行に chataction:fork:<j> を正しい index で描くこと。クリック側テスト
     (test_anchor_clicked_routes_chataction) は QUrl を直接 emit して _append_block/
-    _render_session を迂回するため、生成 href 書式がパーサとずれても緑になる盲点を塞ぐ
-    (reviewer P2)。"""
+    _render_session を迂回するため、生成 href 書式がパーサとずれても緑になる盲点を塞ぐ。"""
     src = _make_active_with_messages(widget, dataset="ds")
     widget._render_session(src)
     html = widget._log.toHtml()
