@@ -385,6 +385,8 @@ def test_open_dataset_unreadable_session(ds_env):
     assert (work_dir / "session.json").read_text(encoding="utf-8") == ""
     assert "ds_a" not in session._touched
     assert win.noted_datasets == ["ds_a"]
+    assert "ds_a" in session._unreadable
+    assert "ds_a" not in session._restored
 
 
 def test_open_dataset_all_figures_missing_no_touched(ds_env):
@@ -1125,3 +1127,760 @@ def test_tree_to_entry_empty_not_saved(tmp_path):
 
     spec = {"kind": "image", "name": "q", "dataset": "d", "image": "x"}
     assert session._spec_to_tab(spec, tmp_path, _T()) is None
+
+
+# ==== Issue #106: 保存経路でデータを消さない ====
+
+import copy  # noqa: E402
+
+from common import paths as common_paths  # noqa: E402
+from llm_backend.base import Message  # noqa: E402
+from llm_bridge import chat_store  # noqa: E402
+
+
+def _fig_tab(ds_env, ds="ds_a", name="fa"):
+    spec = {"kind": "figure", "name": name, "dataset": ds,
+            "figure": str(ds_env[ds] / "_work" / f"{name}.png")}
+    return _FakeTab(name, spec)
+
+
+def _payload(ds="ds_a", names=("old",)):
+    return {
+        "version": 1, "dataset": ds, "active_tab": None,
+        "tabs": [{"name": n, "kind": "figure", "figure": f"figures/{n}.png"}
+                 for n in names],
+    }
+
+
+def _snap(work_dir):
+    target = work_dir / "session.json"
+    return tuple(
+        p.read_bytes() if p.exists() else None
+        for p in (target, common_paths.bak_path(target))
+    )
+
+
+# ---- A-1 ----
+
+def test_save_all_skips_existing_session_of_unopened_dataset(ds_env):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    work_dir = dataset_config.get_work_dir("ds_a")
+    before = _snap(work_dir)
+    assert None not in before
+    win = _FakeWindow([_fig_tab(ds_env)])
+    saved, failed = session.save_all(win)
+    assert _snap(work_dir) == before
+    assert saved == []
+    assert failed == []
+    assert session.skipped_datasets() == {"ds_a": "not-opened"}
+    assert win.dirty_cleared is True
+
+
+def test_save_all_skips_when_only_bak_exists(ds_env):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    work_dir = dataset_config.get_work_dir("ds_a")
+    (work_dir / "session.json").unlink()
+    before = _snap(work_dir)
+    session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert _snap(work_dir) == before
+    assert not (work_dir / "session.json").exists()
+    assert session.skipped_datasets() == {"ds_a": "not-opened"}
+
+
+def test_save_all_new_dataset_written_and_stays_writable(ds_env):
+    session._touched.clear()
+    saved, _ = session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert saved == ["ds_a"]
+    win2 = _FakeWindow([_fig_tab(ds_env), _fig_tab(ds_env, name="fb")])
+    saved, failed = session.save_all(win2)
+    assert saved == ["ds_a"] and failed == []
+    assert len(session.read_session("ds_a")["tabs"]) == 2
+
+
+def test_save_all_writes_after_open_dataset(ds_env):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    session.open_dataset(_DispatchWindow(), "ds_a")
+    saved, failed = session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert saved == ["ds_a"] and failed == []
+    assert [t["name"] for t in session.read_session("ds_a")["tabs"]] == ["fa"]
+
+
+def _move_ds_a(ds_env, tmp_path):
+    new_dir = tmp_path / "ds_a_moved"
+    new_dir.mkdir()
+    ds_env["ds_a"] = new_dir
+    return dataset_config.get_work_dir("ds_a")
+
+
+def test_save_all_skips_when_work_dir_changed_after_open(ds_env, tmp_path):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    session.open_dataset(_DispatchWindow(), "ds_a")
+    wd_b = _move_ds_a(ds_env, tmp_path)
+    session.write_session("ds_a", _payload(names=("other",)))
+    before = _snap(wd_b)
+    saved, failed = session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert _snap(wd_b) == before
+    assert saved == [] and failed == []
+    assert session.skipped_datasets() == {"ds_a": "work-dir-changed"}
+
+
+def test_save_all_writes_when_work_dir_changed_to_empty(ds_env, tmp_path):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    session.open_dataset(_DispatchWindow(), "ds_a")
+    wd_b = _move_ds_a(ds_env, tmp_path)
+    saved, failed = session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert saved == ["ds_a"] and failed == []
+    assert (wd_b / "session.json").exists()
+    assert session._restored["ds_a"] == session._norm_dir(wd_b)
+
+
+def _split_work_dir(monkeypatch, tmp_path):
+    """get_work_dir: 1 回目は A（session.json 無し）、2 回目以降は B（session.json 有り）。"""
+    wd_a = tmp_path / "wd_A"
+    wd_b = tmp_path / "wd_B"
+    wd_a.mkdir()
+    wd_b.mkdir()
+    session._write_session_at(wd_b, "ds_a", _payload(names=("b",)))
+    calls = []
+
+    def fake(name, create=True):
+        calls.append(name)
+        return wd_a if len(calls) == 1 else wd_b
+
+    monkeypatch.setattr(dataset_config, "get_work_dir", fake)
+    return wd_a, wd_b
+
+
+def test_save_all_writes_to_single_resolved_work_dir(ds_env, monkeypatch, tmp_path):
+    session._touched.clear()
+    wd_a, wd_b = _split_work_dir(monkeypatch, tmp_path)
+    before = _snap(wd_b)
+    saved, failed = session.save_all(_FakeWindow([_fig_tab(ds_env)]))
+    assert saved == ["ds_a"] and failed == []
+    assert (wd_a / "session.json").exists()
+    assert _snap(wd_b) == before
+
+
+def test_save_dataset_writes_to_single_resolved_work_dir(ds_env, monkeypatch, tmp_path):
+    session._touched.clear()
+    wd_a, wd_b = _split_work_dir(monkeypatch, tmp_path)
+    before = _snap(wd_b)
+    assert session.save_dataset(_FakeWindow([_fig_tab(ds_env)]), "ds_a") is True
+    assert (wd_a / "session.json").exists()
+    assert _snap(wd_b) == before
+
+
+def test_open_dataset_resolves_work_dir_once(ds_env, monkeypatch):
+    session._touched.clear()
+    session.write_session("ds_a", _payload(names=()))
+    work_dir = dataset_config.get_work_dir("ds_a")
+    orig = session._resolve_work_dir_readonly
+    calls = []
+
+    def once(name):
+        calls.append(name)
+        if len(calls) == 1:
+            return orig(name)
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(session, "_resolve_work_dir_readonly", once)
+    result = session.open_dataset(_DispatchWindow(), "ds_a")
+    assert not result.startswith("no-session:")
+    assert session._restored["ds_a"] == session._norm_dir(work_dir)
+
+
+def test_save_dataset_skips_existing_session_of_unopened_dataset(ds_env):
+    session._touched.clear()
+    session.write_session("ds_a", _payload())
+    work_dir = dataset_config.get_work_dir("ds_a")
+    before = _snap(work_dir)
+    assert session.save_dataset(_FakeWindow([_fig_tab(ds_env)]), "ds_a") is True
+    assert _snap(work_dir) == before
+
+
+def test_forget_dataset_clears_restored(ds_env):
+    session._touched.clear()
+    session.open_dataset(_DispatchWindow(), "ds_a")
+    assert "ds_a" in session._restored
+    session.forget_dataset("ds_a")
+    assert "ds_a" not in session._restored
+
+
+# ---- A-4 ----
+
+def _open_unreadable(ds="ds_a"):
+    work_dir = dataset_config.get_work_dir(ds)
+    (work_dir / "session.json").write_text("", encoding="utf-8")
+    assert session.open_dataset(_DispatchWindow(), ds) == f"unreadable-session:{ds}"
+    return work_dir
+
+
+def test_unreadable_session_not_overwritten_until_cleared(ds_env):
+    session._touched.clear()
+    work_dir = _open_unreadable()
+    win = _FakeWindow([_fig_tab(ds_env)])
+    saved, failed = session.save_all(win)
+    assert (work_dir / "session.json").read_text(encoding="utf-8") == ""
+    assert session.skipped_datasets() == {"ds_a": "unreadable"}
+    assert failed == [] and saved == []
+    session.clear_unreadable("ds_a")
+    saved, failed = session.save_all(win)
+    assert saved == ["ds_a"] and failed == []
+    assert len(session.read_session("ds_a")["tabs"]) == 1
+
+
+def test_unreadable_session_not_overwritten_by_save_dataset(ds_env):
+    session._touched.clear()
+    work_dir = _open_unreadable()
+    assert session.save_dataset(_FakeWindow([_fig_tab(ds_env)]), "ds_a") is True
+    assert (work_dir / "session.json").read_text(encoding="utf-8") == ""
+
+
+def test_unreadable_reopen_after_repair_clears_flag(ds_env):
+    session._touched.clear()
+    _open_unreadable()
+    session.write_session("ds_a", _payload(names=()))
+    session.open_dataset(_DispatchWindow(), "ds_a")
+    assert "ds_a" in session._restored
+    assert "ds_a" not in session._unreadable
+
+
+def test_unreadable_save_targets(ds_env):
+    session._touched.clear()
+    _open_unreadable()
+    assert session.unreadable_save_targets(_FakeWindow([_fig_tab(ds_env)])) == ["ds_a"]
+    assert session.unreadable_save_targets(_FakeWindow([])) == []
+
+
+# ---- A-2 / A-3: chat persistence ----
+
+def _chat(ds, text="hi", title="t"):
+    s = chat_store.new_session("mock", "sys", dataset=ds, title=title)
+    s.messages.append(Message(role="user", content=text))
+    return s
+
+
+class _ChatFakeWindow(_FakeWindow):
+    def __init__(self, sessions=(), tabs=None, deleted=()):
+        super().__init__(list(tabs or []), active=None)
+        self._sessions = list(sessions)
+        self._deleted = set(deleted)
+        self.refuse_merge = False
+        self.merge_calls = 0
+
+    def chat_sessions(self):
+        return list(self._sessions)
+
+    def chat_deleted_sessions(self):
+        return set(self._deleted)
+
+    def chat_clear_deleted(self, applied):
+        self._deleted -= set(applied)
+
+    def chat_merge_sessions(self, ds, sessions):
+        self.merge_calls += 1
+        if self.refuse_merge:
+            return set()
+        by_id = {s.id: s for s in sessions}
+        out = set()
+        for i, cur in enumerate(self._sessions):
+            if cur.id in by_id:
+                self._sessions[i] = by_id[cur.id]
+                out.add(cur.id)
+        return out
+
+
+def _chat_path(work_dir, sid):
+    return work_dir / "chat_sessions" / f"{sid}.json"
+
+
+def _chat_bytes(work_dir, sid):
+    p = _chat_path(work_dir, sid)
+    return tuple(
+        q.read_bytes() if q.exists() else None
+        for q in (p, common_paths.bak_path(p))
+    )
+
+
+def _disk_copy(sess, *, text=None, updated=None, order=None):
+    d = copy.deepcopy(sess)
+    if text is not None:
+        d.messages[-1] = Message(role="user", content=text)
+    if updated is not None:
+        d.updated = updated
+    if order is not None:
+        d.order = order
+    return d
+
+
+def _set_base(ds, sid, work_dir, updated, order=0.0):
+    session._chat_baseline[(ds, sid)] = session.ChatBaseline(
+        session._norm_dir(work_dir), updated, order
+    )
+
+
+def _fail_chat_writes(monkeypatch, sids):
+    orig = common_paths.atomic_write_text
+
+    def fake(path, text, **k):
+        if any(Path(path).name.startswith(f"{sid}.json") for sid in sids):
+            raise OSError("mount write failed")
+        return orig(path, text, **k)
+
+    monkeypatch.setattr(common_paths, "atomic_write_text", fake)
+
+
+def test_save_all_chat_write_failure_marks_failed(ds_env, monkeypatch):
+    session._touched.clear()
+    s = _chat("ds_a")
+    _fail_chat_writes(monkeypatch, [s.id])
+    win = _ChatFakeWindow([s])
+    saved, failed = session.save_all(win)
+    assert "ds_a" in failed
+    assert win.dirty_cleared is False
+
+
+def test_save_all_chat_failure_other_sessions_still_written(ds_env, monkeypatch):
+    session._touched.clear()
+    bad, good = _chat("ds_a"), _chat("ds_a")
+    _fail_chat_writes(monkeypatch, [bad.id])
+    saved, failed = session.save_all(_ChatFakeWindow([bad, good]))
+    work_dir = dataset_config.get_work_dir("ds_a")
+    assert "ds_a" in failed
+    assert _chat_path(work_dir, good.id).exists()
+
+
+def test_save_all_chat_unregistered_dataset_skipped(ds_env):
+    session._touched.clear()
+    win = _ChatFakeWindow([_chat("ds_gone")])
+    saved, failed = session.save_all(win)
+    assert failed == []
+    assert win.dirty_cleared is True
+
+
+def test_save_all_chat_delete_failure_marks_failed(ds_env, monkeypatch):
+    session._touched.clear()
+    monkeypatch.setattr(chat_store, "delete_session_file", lambda wd, sid: False)
+    win = _ChatFakeWindow([], deleted={("ds_a", "x")})
+    saved, failed = session.save_all(win)
+    assert "ds_a" in failed
+    assert ("ds_a", "x") in win._deleted
+
+
+def test_save_all_chat_failure_not_duplicated_in_failed(ds_env, monkeypatch):
+    session._touched.clear()
+    monkeypatch.setattr(
+        common_paths, "atomic_write_text",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("all writes fail")),
+    )
+    win = _ChatFakeWindow([_chat("ds_a")], tabs=[_fig_tab(ds_env)])
+    saved, failed = session.save_all(win)
+    assert failed.count("ds_a") == 1
+
+
+def _disk_changed_setup(text="disk", delta=50.0):
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mem = _chat("ds_a", "mem")
+    disk = _disk_copy(mem, text=text, updated=mem.updated + delta, order=0.0)
+    chat_store.write_session_file(work_dir, disk)
+    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    return work_dir, mem, disk
+
+
+def test_chat_disk_only_change_is_adopted_not_written(ds_env):
+    session._touched.clear()
+    work_dir, mem, disk = _disk_changed_setup()
+    before = _chat_bytes(work_dir, mem.id)
+    win = _ChatFakeWindow([mem])
+    saved, failed = session.save_all(win)
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert win._sessions[0].messages[-1].content == "disk"
+    assert session._chat_baseline[("ds_a", mem.id)].updated == disk.updated
+    assert win.merge_calls == 1
+    assert failed == []
+
+
+def test_chat_disk_change_adopted_even_if_older_updated(ds_env):
+    session._touched.clear()
+    work_dir, mem, disk = _disk_changed_setup(delta=-50.0)
+    before = _chat_bytes(work_dir, mem.id)
+    win = _ChatFakeWindow([mem])
+    session.save_all(win)
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert win._sessions[0].messages[-1].content == "disk"
+
+
+def test_chat_adopt_batched_per_dataset(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mems = [_chat("ds_a", "m1"), _chat("ds_a", "m2")]
+    for i, m in enumerate(mems):
+        chat_store.write_session_file(
+            work_dir, _disk_copy(m, text="d", updated=m.updated + 5, order=float(i)))
+        _set_base("ds_a", m.id, work_dir, m.updated, float(i))
+    win = _ChatFakeWindow(mems)
+    session.save_all(win)
+    assert win.merge_calls == 1
+    assert [s.messages[-1].content for s in win._sessions] == ["d", "d"]
+
+
+def _written_setup(text="hi"):
+    """ディスク＝メモリ＝baseline の状態を作る。"""
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mem = _chat("ds_a", text)
+    mem.order = 0.0
+    chat_store.write_session_file(work_dir, _disk_copy(mem))
+    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    return work_dir, mem
+
+
+def _read_disk(work_dir, sid):
+    status, sess = chat_store.read_session_file_status(work_dir, sid)
+    assert status == "ok"
+    return sess
+
+
+def test_chat_local_only_change_written(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    mem.messages.append(Message(role="assistant", content="local"))
+    mem.updated += 10
+    session.save_all(_ChatFakeWindow([mem]))
+    disk = _read_disk(work_dir, mem.id)
+    assert disk.messages[-1].content == "local"
+    assert session._chat_baseline[("ds_a", mem.id)].updated == mem.updated
+
+
+def test_chat_both_changed_local_wins(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    chat_store.write_session_file(
+        work_dir, _disk_copy(mem, text="disk", updated=mem.updated + 20))
+    mem.messages[-1] = Message(role="user", content="mem")
+    mem.updated += 10
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _read_disk(work_dir, mem.id).messages[-1].content == "mem"
+
+
+def test_chat_local_edit_with_smaller_updated_still_written(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    mem.messages[-1] = Message(role="user", content="mem")
+    mem.updated -= 50
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _read_disk(work_dir, mem.id).messages[-1].content == "mem"
+
+
+def test_chat_unchanged_session_not_rewritten(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    before = _chat_bytes(work_dir, mem.id)
+    win = _ChatFakeWindow([mem])
+    saved, failed = session.save_all(win)
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert win.merge_calls == 0 and failed == []
+
+
+def test_chat_reorder_elsewhere_not_clobbered(ds_env):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    chat_store.write_session_file(work_dir, _disk_copy(mem, order=3.0))
+    before = _chat_bytes(work_dir, mem.id)
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert _read_disk(work_dir, mem.id).order == 3.0
+
+
+def _two_written():
+    work_dir = dataset_config.get_work_dir("ds_a")
+    a, b = _chat("ds_a", "a"), _chat("ds_a", "b")
+    for i, s in enumerate((a, b)):
+        s.order = float(i)
+        chat_store.write_session_file(work_dir, _disk_copy(s))
+        _set_base("ds_a", s.id, work_dir, s.updated, float(i))
+    return work_dir, a, b
+
+
+def test_chat_local_reorder_written(ds_env):
+    session._touched.clear()
+    work_dir, a, b = _two_written()
+    session.save_all(_ChatFakeWindow([b, a]))
+    assert _read_disk(work_dir, b.id).order == 0.0
+    assert _read_disk(work_dir, a.id).order == 1.0
+
+
+def test_chat_local_reorder_loses_to_disk_content_change(ds_env):
+    session._touched.clear()
+    work_dir, a, b = _two_written()
+    chat_store.write_session_file(
+        work_dir, _disk_copy(a, text="disk", updated=a.updated + 5, order=0.0))
+    before = _chat_bytes(work_dir, a.id)
+    win = _ChatFakeWindow([b, a])
+    session.save_all(win)
+    assert _chat_bytes(work_dir, a.id) == before
+    assert win._sessions[1].messages[-1].content == "disk"
+
+
+def test_chat_deleted_elsewhere_not_resurrected(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mem = _chat("ds_a")
+    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    saved, failed = session.save_all(_ChatFakeWindow([mem]))
+    assert not _chat_path(work_dir, mem.id).exists()
+    assert failed == []
+    # 位置だけが変わった版でも作られない。
+    a, b = _chat("ds_a"), _chat("ds_a")
+    _set_base("ds_a", a.id, work_dir, a.updated, 0.0)
+    _set_base("ds_a", b.id, work_dir, b.updated, 1.0)
+    saved, failed = session.save_all(_ChatFakeWindow([b, a]))
+    assert not _chat_path(work_dir, a.id).exists()
+    assert not _chat_path(work_dir, b.id).exists()
+    assert failed == []
+
+
+def test_chat_deleted_elsewhere_local_edit_rewritten(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mem = _chat("ds_a")
+    _set_base("ds_a", mem.id, work_dir, mem.updated, 0.0)
+    mem.updated += 1
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_path(work_dir, mem.id).exists()
+
+
+def test_chat_new_session_without_baseline_written(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    mem = _chat("ds_a")
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_path(work_dir, mem.id).exists()
+    assert session._chat_baseline[("ds_a", mem.id)].updated == mem.updated
+
+
+def test_chat_work_dir_changed_absent_written(ds_env, tmp_path):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    old = tmp_path / "old_wd"
+    old.mkdir()
+    mem = _chat("ds_a")
+    _set_base("ds_a", mem.id, old, mem.updated, 0.0)
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_path(work_dir, mem.id).exists()
+    assert session._chat_baseline[("ds_a", mem.id)].work_dir == session._norm_dir(work_dir)
+
+
+def _moved_same_id_setup(tmp_path):
+    wd_b = dataset_config.get_work_dir("ds_a")
+    wd_a = tmp_path / "old_wd"
+    wd_a.mkdir()
+    mem = _chat("ds_a", "A")
+    mem.order = 0.0
+    chat_store.write_session_file(wd_a, _disk_copy(mem))
+    chat_store.write_session_file(
+        wd_b, _disk_copy(mem, text="B", updated=mem.updated + 3))
+    _set_base("ds_a", mem.id, wd_a, mem.updated, 0.0)
+    return wd_b, mem
+
+
+def test_chat_work_dir_changed_same_id_unchanged_adopted(ds_env, tmp_path):
+    session._touched.clear()
+    wd_b, mem = _moved_same_id_setup(tmp_path)
+    before = _chat_bytes(wd_b, mem.id)
+    win = _ChatFakeWindow([mem])
+    saved, failed = session.save_all(win)
+    assert _chat_bytes(wd_b, mem.id) == before
+    assert win._sessions[0].messages[-1].content == "B"
+    assert failed == []
+
+
+def test_chat_work_dir_changed_same_id_local_edit_fails(ds_env, tmp_path):
+    session._touched.clear()
+    wd_b, mem = _moved_same_id_setup(tmp_path)
+    mem.updated += 1
+    before = _chat_bytes(wd_b, mem.id)
+    saved, failed = session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_bytes(wd_b, mem.id) == before
+    assert "ds_a" in failed
+
+
+def test_chat_adopt_refused_keeps_baseline(ds_env):
+    session._touched.clear()
+    work_dir, mem, disk = _disk_changed_setup()
+    base = session._chat_baseline[("ds_a", mem.id)]
+    before = _chat_bytes(work_dir, mem.id)
+    win = _ChatFakeWindow([mem])
+    win.refuse_merge = True
+    session.save_all(win)
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert session._chat_baseline[("ds_a", mem.id)] == base
+
+
+def _unreadable_chat(monkeypatch, sid):
+    orig = common_paths.read_json_classified
+
+    def fake(path, *a, **k):
+        if Path(path).name in (f"{sid}.json", f"{sid}.json.bak"):
+            return ("unreadable", None)
+        return orig(path, *a, **k)
+
+    monkeypatch.setattr(common_paths, "read_json_classified", fake)
+
+
+def test_chat_unreadable_disk_unchanged_local_fails_without_write(ds_env, monkeypatch):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    before = _chat_bytes(work_dir, mem.id)
+    _unreadable_chat(monkeypatch, mem.id)
+    win = _ChatFakeWindow([mem])
+    saved, failed = session.save_all(win)
+    assert _chat_bytes(work_dir, mem.id) == before
+    assert "ds_a" in failed
+    assert win.dirty_cleared is False
+
+
+def test_chat_unreadable_disk_local_change_written(ds_env, monkeypatch):
+    session._touched.clear()
+    work_dir, mem = _written_setup()
+    before = _chat_bytes(work_dir, mem.id)
+    _unreadable_chat(monkeypatch, mem.id)
+    mem.messages[-1] = Message(role="user", content="local")
+    mem.updated += 1
+    session.save_all(_ChatFakeWindow([mem]))
+    assert _chat_bytes(work_dir, mem.id) != before
+    assert "local" in _chat_path(work_dir, mem.id).read_text(encoding="utf-8")
+
+
+def test_save_chat_sessions_dataset_order_deterministic(ds_env, monkeypatch):
+    session._touched.clear()
+    sb, sa = _chat("ds_b"), _chat("ds_a")
+    _fail_chat_writes(monkeypatch, [sb.id, sa.id])
+    assert session._save_chat_sessions(_ChatFakeWindow([sb, sa])) == ["ds_b", "ds_a"]
+
+
+# ---- A-3: open_dataset records the chat baseline ----
+
+class _MergingCW:
+    """chat_store.merge_sessions で実際に統合するフェイク ChatWidget。"""
+
+    def __init__(self, pool=(), only=None):
+        self.pool = list(pool)
+        self.only = only   # 採用 id をこの集合に制限する（一部だけを返すフェイク用）
+
+    def merge_dataset_sessions(self, ds, incoming, *, prefer_incoming=False):
+        for s in incoming:
+            s.dataset = ds
+        if self.only is not None:
+            incoming = [s for s in incoming if s.id in self.only]
+        new = chat_store.merge_sessions(
+            self.pool, incoming, prefer_incoming=prefer_incoming)
+        ids = {id(s) for s in new}
+        self.pool = new
+        return {s.id for s in incoming if id(s) in ids}
+
+    def set_current_dataset(self, ds):
+        pass
+
+
+class _ChatDispatchWindow(_DispatchWindow):
+    def __init__(self, cw):
+        super().__init__()
+        self._cw = cw
+
+    def chat_widget(self):
+        return self._cw
+
+    def chat_sessions(self):
+        return list(getattr(self._cw, "pool", []))
+
+    def chat_merge_sessions(self, ds, sessions):
+        return self._cw.merge_dataset_sessions(ds, sessions, prefer_incoming=True)
+
+    def chat_deleted_sessions(self):
+        return []
+
+    def chat_clear_deleted(self, applied):
+        pass
+
+
+def _write_disk_chats(work_dir, *orders):
+    out = []
+    for o in orders:
+        s = _chat("ds_a", f"o{o}")
+        s.order = float(o)
+        chat_store.write_session_file(work_dir, s)
+        out.append(s)
+    return out
+
+
+def test_open_dataset_records_chat_baseline_only_for_adopted(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    x, y = _write_disk_chats(work_dir, 0, 1)
+    cw = _MergingCW(only={y.id})
+    session.open_dataset(_ChatDispatchWindow(cw), "ds_a")
+    assert ("ds_a", x.id) not in session._chat_baseline
+    base = session._chat_baseline[("ds_a", y.id)]
+    assert base.work_dir == session._norm_dir(work_dir)
+    assert base.updated == y.updated
+    assert base.order == 0.0   # chat_sessions() での位置（ディスクの order 1 ではない）
+
+    session._chat_baseline.clear()
+
+    class _NoneCW:
+        pool: list = []
+
+        def merge_dataset_sessions(self, ds, sessions):
+            return None
+
+    session.open_dataset(_ChatDispatchWindow(_NoneCW()), "ds_a")
+    assert session._chat_baseline == {}
+
+
+def test_open_dataset_chat_baseline_order_is_merged_position(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    y, x = _write_disk_chats(work_dir, 0, 1)   # Y が先頭（他の PC で新規）、X は 2 番目
+    x_mem = copy.deepcopy(x)
+    _set_base("ds_a", x.id, work_dir, x.updated, 0.0)
+    cw = _MergingCW(pool=[x_mem])
+    win = _ChatDispatchWindow(cw)
+    session.open_dataset(win, "ds_a")
+    assert session._chat_baseline[("ds_a", y.id)].order == 1.0
+    bx, by = _chat_bytes(work_dir, x.id), _chat_bytes(work_dir, y.id)
+    session.save_all(win)
+    assert _chat_bytes(work_dir, x.id) == bx
+    assert _chat_bytes(work_dir, y.id) == by
+
+
+def test_open_dataset_sparse_order_not_rewritten(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    x, z = _write_disk_chats(work_dir, 0, 5)
+    win = _ChatDispatchWindow(_MergingCW())
+    session.open_dataset(win, "ds_a")
+    bx, bz = _chat_bytes(work_dir, x.id), _chat_bytes(work_dir, z.id)
+    session.save_all(win)
+    assert _chat_bytes(work_dir, x.id) == bx
+    assert _chat_bytes(work_dir, z.id) == bz
+    assert _read_disk(work_dir, z.id).order == 5.0
+
+
+def test_open_dataset_then_reorder_elsewhere_not_clobbered(ds_env):
+    session._touched.clear()
+    work_dir = dataset_config.get_work_dir("ds_a")
+    x, y = _write_disk_chats(work_dir, 0, 1)
+    win = _ChatDispatchWindow(_MergingCW())
+    session.open_dataset(win, "ds_a")
+    # 他の PC の並べ替え（updated は変えない）
+    chat_store.write_session_file(work_dir, _disk_copy(x, order=1.0))
+    chat_store.write_session_file(work_dir, _disk_copy(y, order=0.0))
+    bx, by = _chat_bytes(work_dir, x.id), _chat_bytes(work_dir, y.id)
+    session.save_all(win)
+    assert _chat_bytes(work_dir, x.id) == bx
+    assert _chat_bytes(work_dir, y.id) == by

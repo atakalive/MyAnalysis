@@ -2171,3 +2171,68 @@ def test_provider_prompt_toggle_reaches_cached_backends(widget, monkeypatch):
     assert widget._session_backends == {"a": a, "b": b, "c": c}
     assert all(widget._session_backends[k] is v
                for k, v in {"a": a, "b": b, "c": c}.items())
+
+
+def test_merge_prefer_incoming_returns_adopted_and_rerenders(widget):
+    """保存時の取り込み（A-3）: 古い updated の同一 id でも差し替え、採用 id を返し、
+    表示中の transcript を新しい版で描き直す。進行中ターンの id は返さない。"""
+    import copy
+
+    from llm_backend.base import Message
+    from llm_bridge import chat_store
+
+    a = chat_store.new_session("mock", "sys", dataset="ds", title="A")
+    a.messages.append(Message(role="user", content="old-body"))
+    busy = chat_store.new_session("mock", "sys", dataset="ds", title="busy")
+    busy.messages.append(Message(role="user", content="busy"))
+    widget._sessions = [a, busy]
+    widget._active = a
+    widget._current_dataset = "ds"
+    widget._rebuild_tab_bar()
+    widget._render_session(a)
+
+    a2 = copy.deepcopy(a)
+    a2.messages[-1] = Message(role="user", content="uniq-new-body")
+    a2.updated = a.updated - 100
+    busy2 = copy.deepcopy(busy)
+    widget._turns[busy.id] = object()
+    try:
+        got = widget.merge_dataset_sessions("ds", [a2, busy2], prefer_incoming=True)
+    finally:
+        widget._turns.pop(busy.id, None)
+
+    assert got == {a.id}
+    assert widget._active is a2
+    assert "uniq-new-body" in widget._log.toPlainText()
+
+
+def test_start_turn_bumps_updated(widget, monkeypatch):
+    """送信直後（ターン完了前）に updated が進む（A-3: 内容が変われば updated も変わる）。"""
+    import gui.chat as gc
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    class _FakeWorker:
+        def __init__(self, *a, **k):
+            self.chunk = self.done = self.failed = self.finished = _Sig()
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(gc, "_StreamWorker", _FakeWorker)
+    monkeypatch.setattr(widget, "_load_backend_session", lambda *a, **k: None)
+    sess = widget._active
+    sess.updated = time.time() - 100
+    before = sess.updated
+    widget.set_input_draft("hello")
+    widget._on_send()
+    try:
+        assert sess.updated > before
+    finally:
+        widget._turns.clear()
+        widget._spin_timer.stop()

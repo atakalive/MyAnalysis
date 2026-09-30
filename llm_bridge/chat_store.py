@@ -118,7 +118,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "order": sess.order,
         # getattr for every optional field: a hot-reload `patch` leaves live
         # instances without newly-added attributes, and an AttributeError here
-        # would escape write_session_file (which only catches OSError).
+        # would escape write_session_file and fail the chat save.
         "tool_display": getattr(sess, "tool_display", None),
         "archived": bool(getattr(sess, "archived", False)),
         "engine": getattr(sess, "engine", None),
@@ -257,6 +257,25 @@ def read_session_file(path: Path) -> ChatSession | None:
     return None
 
 
+def read_session_file_status(work_dir: Path, id: str) -> tuple[str, ChatSession | None]:
+    """<work_dir>/chat_sessions/<id>.json を primary と .bak の新しい方で読む（書かない）。never raise.
+
+    ('ok', sess) / ('absent', None) = 両コピーとも無い /
+    ('unreadable', None) = どちらかは在るが読めない（読取の OSError・同期途中を含む）、
+    または中身が ChatSession にならない。
+    """
+    from common.paths import durable_read_json
+    status, data = durable_read_json(work_dir / "chat_sessions" / f"{id}.json")
+    if status == "absent":
+        return ("absent", None)
+    if status in ("ok", "recovered"):
+        try:
+            return ("ok", session_from_dict(data))
+        except Exception:
+            return ("unreadable", None)
+    return ("unreadable", None)
+
+
 def write_session_file(work_dir: Path, sess: ChatSession) -> None:
     """Durably write <work_dir>/chat_sessions/<id>.json (+ .bak, tmp + replace).
 
@@ -264,16 +283,14 @@ def write_session_file(work_dir: Path, sess: ChatSession) -> None:
     history is irreplaceable and lives on the synced mount, so it is written with
     a `.bak` sidecar (durable_write_json) — if the primary is evicted with a
     failed upload, read_session_file/load_dataset_sessions recover from `.bak`.
-    Best-effort: OSError is swallowed.
+    書込・検証の失敗（`MountWriteError` を含む OSError など）は送出する。呼び出し側
+    （`session._save_chat_sessions`）がデータセットの失敗として扱う。
     """
     from common.paths import durable_write_json
-    try:
-        target_dir = work_dir / "chat_sessions"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / f"{sess.id}.json"
-        durable_write_json(target, session_to_dict(sess))
-    except OSError:
-        _log.warning("write_session_file: failed to write %r", sess.id, exc_info=True)
+    target_dir = work_dir / "chat_sessions"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{sess.id}.json"
+    durable_write_json(target, session_to_dict(sess))
 
 
 def load_dataset_sessions(work_dir: Path) -> list[ChatSession]:
@@ -330,12 +347,16 @@ def delete_session_file(work_dir: Path, id: str) -> bool:
 
 
 def merge_sessions(
-    existing: list[ChatSession], incoming: list[ChatSession]
+    existing: list[ChatSession], incoming: list[ChatSession],
+    *, prefer_incoming: bool = False,
 ) -> list[ChatSession]:
     """Merge `incoming` onto `existing` by id (pure, non-destructive).
 
     Same id → replace ONLY when incoming.updated > existing.updated (strict);
     tie or older keeps `existing`. New id → appended. Returns a new list.
+
+    prefer_incoming=True: same id → always replace (updated は比べない。保存時に
+    他の PC の版を取り込む経路 — Issue #106 A-3)。位置は既存の要素の位置のまま。
     """
     by_id: dict[str, ChatSession] = {}
     order: list[str] = []
@@ -348,6 +369,6 @@ def merge_sessions(
         if cur is None:
             by_id[s.id] = s
             order.append(s.id)
-        elif (s.updated or 0.0) > (cur.updated or 0.0):
+        elif prefer_incoming or (s.updated or 0.0) > (cur.updated or 0.0):
             by_id[s.id] = s
     return [by_id[i] for i in order]

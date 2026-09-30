@@ -131,7 +131,9 @@
 "err.restore_partial.body"    = "復元できなかったデータセット:\n{datasets}\nディレクトリが存在しないか読み取れません（datasets.local.json（登録簿）・同期ドライブを確認。詳細は data/logs/myanalysis.log）。"
 "err.open_dataset.body"       = "データセット {dataset} を開けません（ディレクトリが存在しないか読み取れません。datasets.local.json（登録簿）・同期ドライブを確認。詳細は data/logs/myanalysis.log）。"
 "err.session_unreadable.title" = "セッションを復元できません"
-"err.session_unreadable.body"  = "session.json が破損しているため、以下のデータセットのタブ構成を復元できません:\n{dataset}\n破損ファイルは上書きしていません（.bak でも回復できませんでした。詳細は data/logs/myanalysis.log）。"
+"err.session_unreadable.body"  = "session.json が破損しているため、以下のデータセットのタブ構成を復元できません:\n{dataset}\n破損ファイルは上書きしません（.bak でも回復できませんでした。詳細は data/logs/myanalysis.log）。今のタブ構成で上書きするには、ファイル → セッションを保存 の確認で「はい」を選びます。"
+"dlg.overwrite_unreadable.title" = "壊れたタブ構成の上書き"
+"dlg.overwrite_unreadable.body" = "次のデータセットの session.json は壊れていて読めません:\n{datasets}\n今のタブ構成で上書きしますか？（いいえ: このデータセットのタブ構成は保存しません）"
 "err.register.title"          = "登録エラー"
 
 # --- dev (devtools/qt_integration.py) ---
@@ -149,6 +151,7 @@
 # --- status ---
 "status.active"               = "アクティブ: {name}"
 "status.write_failed"         = "保存に失敗しました（検証NG）: {name} / 詳細は python -m llm_bridge doctor"
+"status.session_not_saved" = "タブ構成を保存しなかったデータセット（開いていない／session.json が読めない／開いた後に出力先が変わった）: {datasets}"
 
 # --- chat ---
 "chat.input.placeholder"      = "メッセージ...（Ctrl+Enter で送信、Enter で改行）"

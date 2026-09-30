@@ -712,3 +712,46 @@ def test_file_menu_close_dataset(win, tmp_path):
     assert win.open_dataset_names() == []
     assert win.current_dataset is None
     assert not act.isEnabled()
+
+
+# ---- Issue #106 A-4: 壊れた session.json の上書き確認 ----
+
+def _unreadable_ds_with_tab(win, tmp_path, monkeypatch):
+    import config
+    from llm_bridge import session
+    wd = tmp_path / "dsU" / "_work"
+    wd.mkdir(parents=True)
+    (wd / "session.json").write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "reload_datasets", lambda *a, **k: None)
+    monkeypatch.setattr(config, "DATASETS", {"dsU": {}})
+    assert session.open_dataset(win, "dsU") == "unreadable-session:dsU"
+    _write_analysis(tmp_path, "dsU", "a")
+    assert win.dispatch_command("add-tab", name="a", dataset="dsU") == "added:a"
+    win.set_session_saver(lambda: session.save_all(win))
+    return wd
+
+
+def _patch_question(monkeypatch, answer):
+    import gui.window as gw
+    monkeypatch.setattr(gw.QMessageBox, "question", lambda *a, **k: answer)
+
+
+def test_save_session_overwrite_unreadable_yes(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from llm_bridge import session
+    wd = _unreadable_ds_with_tab(win, tmp_path, monkeypatch)
+    _patch_question(monkeypatch, QMessageBox.StandardButton.Yes)
+    _patch_warning(monkeypatch)
+    win._save_session()
+    assert (wd / "session.json").read_text(encoding="utf-8") != ""
+    assert [t["name"] for t in session.read_session("dsU")["tabs"]] == ["a"]
+
+
+def test_save_session_overwrite_unreadable_no(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    wd = _unreadable_ds_with_tab(win, tmp_path, monkeypatch)
+    _patch_question(monkeypatch, QMessageBox.StandardButton.No)
+    _patch_warning(monkeypatch)
+    win._save_session()
+    assert (wd / "session.json").read_text(encoding="utf-8") == ""
+    assert "dsU" in win.statusBar().currentMessage()

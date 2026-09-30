@@ -131,7 +131,9 @@
 "err.restore_partial.body"    = "Datasets that could not be restored:\n{datasets}\nTheir directory is missing or unreadable (check datasets.local.json / the synced drive; see data/logs/myanalysis.log)."
 "err.open_dataset.body"       = "Cannot open dataset {dataset} (its directory is missing or unreadable; check datasets.local.json / the synced drive; see data/logs/myanalysis.log)."
 "err.session_unreadable.title" = "Cannot restore session"
-"err.session_unreadable.body"  = "session.json is corrupt; the tab layout could not be restored for:\n{dataset}\nThe corrupt file was left untouched (the .bak copy could not recover it either; see data/logs/myanalysis.log)."
+"err.session_unreadable.body"  = "session.json is corrupt; the tab layout could not be restored for:\n{dataset}\nThe corrupt file is not overwritten (the .bak copy could not recover it either; see data/logs/myanalysis.log). To overwrite it with the current tab layout, answer Yes in File → Save session."
+"dlg.overwrite_unreadable.title" = "Overwrite corrupt tab layout"
+"dlg.overwrite_unreadable.body" = "session.json is corrupt and cannot be read for:\n{datasets}\nOverwrite it with the current tab layout? (No: the tab layout of these datasets is not saved)"
 "err.register.title"          = "Registration error"
 
 # --- dev (devtools/qt_integration.py) ---
@@ -149,6 +151,7 @@
 # --- status ---
 "status.active"               = "Active: {name}"
 "status.write_failed"         = "Save failed verification: {name} / run: python -m llm_bridge doctor"
+"status.session_not_saved" = "Tab layout not saved (dataset not opened / session.json unreadable / output folder changed after opening): {datasets}"
 
 # --- chat ---
 "chat.input.placeholder"      = "Message... (Ctrl+Enter to send, Enter for newline)"

@@ -20,6 +20,7 @@ from llm_bridge.chat_store import (
     message_to_dict,
     new_session,
     read_session_file,
+    read_session_file_status,
     session_from_dict,
     session_to_dict,
     write_session_file,
@@ -315,6 +316,16 @@ def test_merge_older_keeps_existing():
     a_old = _s("a", 1.0)
     out = merge_sessions([a], [a_old])
     assert out[0] is a
+
+
+def test_merge_prefer_incoming_replaces_older():
+    a = _s("a", 5.0)
+    b = _s("b", 1.0)
+    a_old = _s("a", 1.0)
+    out = merge_sessions([a, b], [a_old], prefer_incoming=True)
+    assert out[0] is a_old          # 古い updated でも差し替わる
+    assert [s.id for s in out] == ["a", "b"]   # 位置は既存のまま
+    assert merge_sessions([a, b], [a_old])[0] is a   # 既定値では差し替わらない
 
 
 def test_merge_does_not_mutate_inputs():
@@ -625,3 +636,29 @@ def test_fork_carries_persona():
     src.persona = "粗野な知識人"
     new = fork_session(src, cut=2, title="forked")
     assert new.persona == "粗野な知識人"
+
+
+def test_read_session_file_status_ok_absent_unreadable(tmp_path):
+    sess = _sample_session()
+    assert read_session_file_status(tmp_path, sess.id) == ("absent", None)
+    write_session_file(tmp_path, sess)
+    status, got = read_session_file_status(tmp_path, sess.id)
+    assert status == "ok" and got.id == sess.id
+    primary = tmp_path / "chat_sessions" / f"{sess.id}.json"
+    primary.unlink()                 # .bak だけ残った
+    status, got = read_session_file_status(tmp_path, sess.id)
+    assert status == "ok" and got.id == sess.id
+    primary.write_text("", encoding="utf-8")
+    (tmp_path / "chat_sessions" / f"{sess.id}.json.bak").write_text("", encoding="utf-8")
+    assert read_session_file_status(tmp_path, sess.id) == ("unreadable", None)
+
+
+def test_write_session_file_raises_on_oserror(tmp_path, monkeypatch):
+    from common import paths as common_paths
+
+    def boom(*a, **k):
+        raise OSError("mount write failed")
+
+    monkeypatch.setattr(common_paths, "atomic_write_text", boom)
+    with pytest.raises(OSError):
+        write_session_file(tmp_path, _sample_session())

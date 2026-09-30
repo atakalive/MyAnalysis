@@ -113,3 +113,15 @@ def _isolate_dataset_registry(monkeypatch, tmp_path):
         config.DATASETS.clear()
         config.DATASETS.update(saved)
         fs_kind.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_ownership(monkeypatch):
+    """session の持ち主・チャット baseline の記録をテストごとに空にする（Issue #106）。
+
+    テスト間で持ち越すと結果が順序依存になる。関数はモジュールグローバルを実行時に
+    引くので、新しい dict への差し替えが効く。
+    """
+    from llm_bridge import session
+    for name in ("_restored", "_unreadable", "_chat_baseline", "_last_skipped"):
+        monkeypatch.setattr(session, name, {})

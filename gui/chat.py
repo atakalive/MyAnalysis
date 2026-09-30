@@ -1639,8 +1639,16 @@ class ChatWidget(QWidget):
         self._switch_active_composer(prev_id)
         self._update_turn_ui()
 
-    def merge_dataset_sessions(self, dataset: str, incoming: list) -> None:
-        """Merge sessions loaded from `dataset`'s work_dir into the pool."""
+    def merge_dataset_sessions(
+        self, dataset: str, incoming: list, *, prefer_incoming: bool = False
+    ) -> set[str]:
+        """Merge sessions loaded from `dataset`'s work_dir into the pool.
+
+        prefer_incoming=True は updated を比べずに差し替える（保存時の取り込み。
+        Issue #106 A-3）。Returns the ids of the incoming sessions (after the
+        tombstone / in-flight filters) whose own instance made it into the pool.
+        """
+        prev_active = self._active
         prev_id = self._active.id
         self._commit_draft()
         # Stamp each with the owning dataset (file location is the truth).
@@ -1655,7 +1663,11 @@ class ChatWidget(QWidget):
         # them across by id (the commit above put the active composer in here
         # too). Must be read from the OLD pool, before self._sessions is rebound.
         drafts = {s.id: d for s in self._sessions if (d := getattr(s, "draft", ""))}
-        new_pool = chat_store.merge_sessions(self._sessions, incoming)
+        new_pool = chat_store.merge_sessions(
+            self._sessions, incoming, prefer_incoming=prefer_incoming
+        )
+        pool = {id(s) for s in new_pool}
+        adopted = {s.id for s in incoming if id(s) in pool}
         for s in new_pool:
             if not getattr(s, "draft", "") and s.id in drafts:
                 s.draft = drafts[s.id]
@@ -1669,12 +1681,13 @@ class ChatWidget(QWidget):
             # Newly merged-in chats should hide a stray blank and take focus.
             self._sync_active_to_visible()
             self._rebuild_tab_bar()
-            if self._active.id != prev_id:
+            if self._active.id != prev_id or self._active is not prev_active:
                 # _sync_active_to_visible が active を差し替えた（例: 同期で来た archived
                 # フラグが旧 active を hidden 化）場合、rebuild は QSignalBlocker 内なので
                 # currentChanged が飛ばず transcript が旧いまま残る → 明示再描画する。
                 self._render_session(self._active)
             self._switch_active_composer(prev_id)
+        return adopted
 
     # ----- send / receive -----
 
@@ -1707,6 +1720,7 @@ class ChatWidget(QWidget):
         transcript is redrawn by `_render_session` on tab switch).
         """
         sess.messages.append(Message(role="user", content=text))
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         self.messageAdded.emit(sess.id, "user", text, origin)
         # Auto-title from the first non-empty line of the first user message.
         if sess.title == chat_store._DEFAULT_TITLE:
@@ -1910,7 +1924,7 @@ class ChatWidget(QWidget):
         if turn.buffer:
             self.messageAdded.emit(sess.id, "assistant", turn.buffer, "local")
         self._capture_backend_session(turn.backend, sess)
-        sess.updated = time.time()
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         if sess.dataset is not None:
             self._mark_chat_dirty()
         if sid == self._active.id:
@@ -1958,7 +1972,7 @@ class ChatWidget(QWidget):
             # drop the token so the next turn replays history and re-establishes a
             # native session, instead of re-sending a token that just failed.
             self._forget_backend_session(sess)
-        sess.updated = time.time()
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         if sess.dataset is not None:
             self._mark_chat_dirty()
         error_text = "\n\n" + tr("chat.turn.error", error=msg)

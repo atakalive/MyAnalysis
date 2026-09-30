@@ -1071,6 +1071,12 @@ class ToolWindow(QMainWindow):
         if self._chat_widget is not None:
             self._chat_widget.clear_deleted(applied)
 
+    def chat_merge_sessions(self, ds: str, sessions: list) -> set[str]:
+        """ディスクで他の PC が更新したセッションを、updated を比べずにメモリへ取り込む（A-3）。"""
+        if self._chat_widget is None:
+            return set()
+        return self._chat_widget.merge_dataset_sessions(ds, sessions, prefer_incoming=True)
+
     def current_chat_dataset(self) -> str | None:
         return self._current_dataset
 
@@ -1267,12 +1273,30 @@ class ToolWindow(QMainWindow):
                 self, tr("dlg.save_session.title"), tr("err.no_saver")
             )
             return
+        from llm_bridge import session
+        bad = session.unreadable_save_targets(self)
+        if bad:
+            reply = QMessageBox.question(
+                self,
+                tr("dlg.overwrite_unreadable.title"),
+                tr("dlg.overwrite_unreadable.body", datasets="\n".join(bad)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for ds in bad:
+                    session.clear_unreadable(ds)
         try:
             result = self._session_saver()
         except Exception as e:
             QMessageBox.critical(self, tr("err.save.title"), str(e))
             return
         saved, failed = result
+        skipped = session.skipped_datasets()
+        if skipped:
+            self.statusBar().showMessage(
+                tr("status.session_not_saved", datasets=", ".join(sorted(skipped))), 30000
+            )
         if failed:
             QMessageBox.warning(
                 self,

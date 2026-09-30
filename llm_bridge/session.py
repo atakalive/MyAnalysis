@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
+from typing import NamedTuple
 
 import config
 import dataset_config
@@ -59,10 +61,36 @@ class SessionUnreadableError(RuntimeError):
 # handlers), never by open_dataset.
 _touched: set[str] = set()
 
-# Hot-reload (Tier 1): preserve `_touched` across a re-exec of this module so a
-# patch doesn't drop pending empty-tabs persistence. Under Tier 3 the set is
-# already flushed empty by save_all, so this is consistent there too.
-__hot_preserve__ = ["_touched"]
+
+
+class ChatBaseline(NamedTuple):
+    """チャット 1 件が最後にディスクと一致していた時点の記録（A-3）。"""
+    work_dir: str            # _norm_dir(読み書きした work_dir)
+    updated: float | None    # そのときの updated
+    order: float             # 手元の一覧での並び位置（書いた order、開いた・取り込んだ時点の位置）
+
+
+# データセット → このプロセスのタブ構成がその work_dir の session.json の正当な
+# 後継だと確認できたときの _norm_dir(work_dir)（Issue #106 A-1）。
+_restored: dict[str, str] = {}
+# データセット → 開いたときに session.json が読めなかった work_dir（A-4。理由の
+# 表示と上書き確認にだけ使う）。_restored とキーは交わらない。
+_unreadable: dict[str, str] = {}
+# (dataset, chat id) → ChatBaseline（A-3）。
+_chat_baseline: dict[tuple[str, str], ChatBaseline] = {}
+# 直前の save_all で session.json を書かなかったデータセット → 理由。
+_last_skipped: dict[str, str] = {}
+
+# Hot-reload (Tier 1): preserve `_touched` (and the ownership records above)
+# across a re-exec of this module so a patch doesn't drop pending empty-tabs
+# persistence. Under Tier 3 the set is already flushed empty by save_all, and
+# the manifest's open-dataset refills the ownership records.
+__hot_preserve__ = ["_touched", "_restored", "_unreadable", "_chat_baseline"]
+
+
+def _norm_dir(p) -> str:
+    """work_dir の比較用の正規形（safe_resolve ＋ normcase）。"""
+    return os.path.normcase(str(safe_resolve(p)))
 
 
 def note_dataset(name: str) -> None:
@@ -76,8 +104,11 @@ def forget_dataset(name: str) -> None:
     Called by ToolWindow.close_dataset AFTER flushing that dataset's layout, so
     a later window-wide save_all won't write an empty ``tabs:[]`` over the
     flushed layout (close ≠ forget). Idempotent.
+    閉じたデータセットは、開き直すまで保存対象として持ち主扱いしない。
     """
     _touched.discard(name)
+    _restored.pop(name, None)
+    _unreadable.pop(name, None)
 
 
 def _spec_to_tab(spec: dict, work_dir: Path, tab=None) -> dict | None:
@@ -389,20 +420,39 @@ def _resolve_work_dir_readonly(dataset: str) -> Path:
     return dataset_config.get_work_dir(dataset, create=False)
 
 
-def read_session(dataset: str) -> dict | None:
-    """Read <work_dir>/session.json (durable: primary → `.bak` fallback).
+def _session_file_present(work_dir: Path) -> bool:
+    """work_dir に session.json か session.json.bak のどちらかがあるか。
 
-    Returns the session dict, or None when there is genuinely no session
-    (work_dir resolution failure, or primary AND `.bak` both absent). A primary
-    that exists but cannot be parsed — and cannot be recovered from `.bak` —
-    raises SessionUnreadableError instead of returning None: callers must not
-    treat a corrupt session.json (0-byte truncation on the synced mount) as
-    "no session".
+    FileNotFoundError だけを「無い」とみなす。それ以外の OSError（マウント障害等）は
+    送出する — 呼び出し側の try が従来の書込失敗と同じく failed / False に載せる。
     """
-    try:
-        work_dir = _resolve_work_dir_readonly(dataset)
-    except Exception:
+    target = work_dir / "session.json"
+    for p in (target, bak_path(target)):
+        try:
+            p.stat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _skip_reason(dataset: str, work_dir: Path) -> str | None:
+    """この work_dir の session.json を書いてはいけないなら理由、書いてよいなら None。"""
+    wd = _norm_dir(work_dir)
+    if _restored.get(dataset) == wd or not _session_file_present(work_dir):
         return None
+    if _unreadable.get(dataset) == wd:
+        return "unreadable"
+    if dataset in _restored or dataset in _unreadable:
+        return "work-dir-changed"     # 開いた後に登録先・myanalysis.toml の work_dir が変わった
+    return "not-opened"
+
+
+def _read_session_at(work_dir: Path, dataset: str) -> dict | None:
+    """work_dir/session.json を読む（read_session の本体。work_dir の解決はしない）。
+
+    両コピーとも無ければ None。在るのに読めなければ SessionUnreadableError。
+    """
     path = work_dir / "session.json"
     status, data = durable_read_json(path)
     if status == "ok":
@@ -433,17 +483,25 @@ def read_session(dataset: str) -> dict | None:
     )
 
 
-def write_session(dataset: str, payload: dict) -> None:
-    """Durably write <work_dir>/session.json and verify (side-effecting resolve).
+def read_session(dataset: str) -> dict | None:
+    """Read <work_dir>/session.json (durable: primary → `.bak` fallback).
 
-    durable_write_json = primary + `.bak` の 2 コピー。Issue #96 以降、各コピーの
-    read-back 検証とリトライは書込 chokepoint（common.paths）が担うので、ここは
-    「2 コピーが揃って正しく読み戻せる」という**最終的な整合性**だけを確認する。
-    primary が 'ok' で読めない（= 'recovered' に落ちる）のもマウント異常のサインなので
-    失敗扱い。`.bak` 単独の劣化も二重化の黙った喪失なので失敗扱い。比較は JSON 正規化後
-    （非 JSON 型の混入で偽陽性の保存失敗を出さないため）と `_seq` を除いた内容で行う。
+    Returns the session dict, or None when there is genuinely no session
+    (work_dir resolution failure, or primary AND `.bak` both absent). A primary
+    that exists but cannot be parsed — and cannot be recovered from `.bak` —
+    raises SessionUnreadableError instead of returning None: callers must not
+    treat a corrupt session.json (0-byte truncation on the synced mount) as
+    "no session".
     """
-    work_dir = dataset_config.get_work_dir(dataset)
+    try:
+        work_dir = _resolve_work_dir_readonly(dataset)
+    except Exception:
+        return None
+    return _read_session_at(work_dir, dataset)
+
+
+def _write_session_at(work_dir: Path, dataset: str, payload: dict) -> None:
+    """work_dir/session.json に durable に書いて検証する（write_session の本体。work_dir の解決はしない）。"""
     target = work_dir / "session.json"
     durable_write_json(target, payload)
     normalized = json.loads(json.dumps(payload, ensure_ascii=False))
@@ -463,6 +521,55 @@ def write_session(dataset: str, payload: dict) -> None:
         )
 
 
+def write_session(dataset: str, payload: dict) -> None:
+    """Durably write <work_dir>/session.json and verify (side-effecting resolve).
+
+    durable_write_json = primary + `.bak` の 2 コピー。Issue #96 以降、各コピーの
+    read-back 検証とリトライは書込 chokepoint（common.paths）が担うので、ここは
+    「2 コピーが揃って正しく読み戻せる」という**最終的な整合性**だけを確認する。
+    primary が 'ok' で読めない（= 'recovered' に落ちる）のもマウント異常のサインなので
+    失敗扱い。`.bak` 単独の劣化も二重化の黙った喪失なので失敗扱い。比較は JSON 正規化後
+    （非 JSON 型の混入で偽陽性の保存失敗を出さないため）と `_seq` を除いた内容で行う。
+    """
+    _write_session_at(dataset_config.get_work_dir(dataset), dataset, payload)
+
+
+def _group_tabs(window) -> dict[str, list[tuple]]:
+    """Group session-tracked tabs by dataset, preserving tab order."""
+    grouped: dict[str, list[tuple]] = {}
+    for tab in window.tabs():
+        spec = getattr(tab, "session_spec", None)
+        if not spec:
+            continue
+        ds = spec.get("dataset")
+        if ds is None:
+            continue
+        grouped.setdefault(ds, []).append((spec, tab))
+    return grouped
+
+
+def skipped_datasets() -> dict[str, str]:
+    """直前の save_all で session.json を書かなかったデータセット → 理由（コピーを返す）。"""
+    return dict(_last_skipped)
+
+
+def clear_unreadable(dataset: str) -> None:
+    """利用者が「壊れた session.json を今のタブ構成で上書きする」と確認したときに呼ぶ。
+
+    読めなかった work_dir についてだけ持ち主にする（その後 work_dir が変わっていれば、
+    保存時の判定が "work-dir-changed" で止める）。
+    """
+    wd = _unreadable.pop(dataset, None)
+    if wd is not None:
+        _restored[dataset] = wd
+
+
+def unreadable_save_targets(window) -> list[str]:
+    """_unreadable のうち、save_all が書く対象（タブのあるデータセット ∪ _touched）に入るもの（昇順）。"""
+    targets = set(_group_tabs(window)) | set(_touched)
+    return sorted(ds for ds in _unreadable if ds in targets)
+
+
 def save_all(window) -> tuple[list[str], list[str]]:
     """Save every dataset's session from the window's tracked tabs.
 
@@ -473,16 +580,9 @@ def save_all(window) -> tuple[list[str], list[str]]:
     (rebuild_meta, heavy=False) as a ride-along — does not affect saved/failed
     or the dirty-clear gate.
     """
+    _last_skipped.clear()
     # 1. Group session-tracked tabs by dataset, preserving tab order.
-    grouped: dict[str, list[tuple]] = {}
-    for tab in window.tabs():
-        spec = getattr(tab, "session_spec", None)
-        if not spec:
-            continue
-        ds = spec.get("dataset")
-        if ds is None:
-            continue
-        grouped.setdefault(ds, []).append((spec, tab))
+    grouped = _group_tabs(window)
 
     active = window.active_tab()
     active_name = active.name if active is not None else None
@@ -497,6 +597,14 @@ def save_all(window) -> tuple[list[str], list[str]]:
         specs = grouped.get(ds, [])
         try:
             work_dir = dataset_config.get_work_dir(ds)
+            reason = _skip_reason(ds, work_dir)
+            if reason is not None:
+                _log.warning(
+                    "save_all: not writing session.json for %r (%s); existing file kept",
+                    ds, reason,
+                )
+                _last_skipped[ds] = reason
+                continue
             tabs: list[dict] = []
             ds_tab_names: set[str] = set()
             for spec, tab in specs:
@@ -512,7 +620,9 @@ def save_all(window) -> tuple[list[str], list[str]]:
                 "active_tab": ds_active,
                 "tabs": tabs,
             }
-            write_session(ds, payload)
+            _write_session_at(work_dir, ds, payload)
+            _restored[ds] = _norm_dir(work_dir)
+            _unreadable.pop(ds, None)
             saved.append(ds)
             # Empty tabs:[] persisted → stop tracking. Non-empty → keep tracking.
             if not tabs:
@@ -521,11 +631,13 @@ def save_all(window) -> tuple[list[str], list[str]]:
             _log.warning("save_all: failed to save session for %r", ds, exc_info=True)
             failed.append(ds)
 
-    # Chat persistence ride-along — fully independent of the tab-save loop above.
-    # Side-effect only: never touches `saved`/`failed` or the dirty-clear gate
-    # (the existing tests assert those exactly). All chat access is duck-typed so
-    # the headless _FakeWindow / CLI skip it entirely.
-    _save_chat_sessions(window)
+    # Chat persistence ride-along — independent of the tab-save loop above.
+    # チャットの失敗は failed に合流する（終了・Tier 3/4 リロードを止める。
+    # saved からは消さない）。All chat access is duck-typed so the headless
+    # _FakeWindow / CLI skip it entirely.
+    for ds in _save_chat_sessions(window):
+        if ds not in failed:
+            failed.append(ds)
 
     # Materialize display meta (LIGHT only) for each successfully saved dataset.
     # Ride-along side effect (like chat above): never touches saved/failed or the
@@ -562,7 +674,9 @@ def save_dataset(window, dataset: str) -> bool:
 
     Returns True on success — INCLUDING the zero-tab case, where it writes
     nothing (persisting an empty layout would erase a synced session.json;
-    close ≠ forget). Returns False only on disk / work_dir-resolve / unexpected
+    close ≠ forget). 開いていない／読めなかった／開いた後に work_dir が変わった
+    データセットで session.json が既にあるときも、書かずに True。
+    Returns False only on disk / work_dir-resolve / unexpected
     failure, so close_dataset can abort rather than lose unsaved edits.
     """
     try:
@@ -576,6 +690,13 @@ def save_dataset(window, dataset: str) -> bool:
         active = window.active_tab()
         active_name = active.name if active is not None else None
         work_dir = dataset_config.get_work_dir(dataset)
+        reason = _skip_reason(dataset, work_dir)
+        if reason is not None:
+            _log.warning(
+                "save_dataset: not writing session.json for %r (%s); existing file kept",
+                dataset, reason,
+            )
+            return True
         tabs: list[dict] = []
         ds_tab_names: set[str] = set()
         for spec, tab in pairs:
@@ -584,12 +705,14 @@ def save_dataset(window, dataset: str) -> bool:
                 tabs.append(entry)
             ds_tab_names.add(spec.get("name"))
         ds_active = active_name if active_name in ds_tab_names else None
-        write_session(dataset, {
+        _write_session_at(work_dir, dataset, {
             "version": SCHEMA_VERSION,
             "dataset": dataset,
             "active_tab": ds_active,
             "tabs": tabs,
         })
+        _restored[dataset] = _norm_dir(work_dir)
+        _unreadable.pop(dataset, None)
         return True
     except Exception:
         _log.warning("save_dataset: failed to save %r", dataset, exc_info=True)
@@ -628,11 +751,27 @@ def read_last_window() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _save_chat_sessions(window) -> None:
+def _is_live_chat(sess) -> bool:
+    """保存対象のチャットか（データセットに紐づき、system 以外の発言がある）。並び位置の基準。"""
+    return sess.dataset is not None and len(sess.messages) > 1
+
+
+def _live_chat_positions(sessions, dataset: str) -> dict[str, float]:
+    """dataset の保存対象チャットの id → 一覧での位置（_save_chat_sessions の idx と同じ番号）。"""
+    live = [s for s in sessions if _is_live_chat(s) and s.dataset == dataset]
+    return {s.id: float(i) for i, s in enumerate(live)}
+
+
+def _save_chat_sessions(window) -> list[str]:
     """Persist dataset-bound chat sessions and apply delete tombstones.
 
-    Independent of tab saving. Each dataset is isolated in its own try/except so
-    one work_dir failure can't cascade. Best-effort: failures only warn.
+    Independent of tab saving. Each dataset (and each file within it) is
+    isolated in its own try/except so one failure can't cascade. 失敗した
+    データセットを返す（save_all が failed に合流させる）。
+
+    A-3（Issue #106）: 時刻の大小ではなく、前回ディスクと一致していた時点
+    （_chat_baseline）からの変化で「書く／取り込む／書かない／失敗」を決める。
+    PC 間の排他制御は無い（best-effort。判定から書込までの間の他 PC の変更は残る）。
     """
     sessions = getattr(window, "chat_sessions", lambda: [])()
     deleted = getattr(window, "chat_deleted_sessions", lambda: [])()
@@ -640,9 +779,7 @@ def _save_chat_sessions(window) -> None:
     # Group dataset-bound, non-empty live sessions by dataset.
     live_by_ds: dict[str, list] = {}
     for sess in sessions:
-        if sess.dataset is None:
-            continue
-        if len(sess.messages) <= 1:  # system-only → nothing worth saving
+        if not _is_live_chat(sess):
             continue
         live_by_ds.setdefault(sess.dataset, []).append(sess)
 
@@ -651,30 +788,120 @@ def _save_chat_sessions(window) -> None:
     for (d, sid) in deleted:
         tomb_ids_by_ds.setdefault(d, set()).add(sid)
 
+    failed: list[str] = []
+
+    def _fail(ds: str) -> None:
+        if ds not in failed:
+            failed.append(ds)
+
     applied: list = []
-    for ds in set(live_by_ds) | set(tomb_ids_by_ds):
+    ds_order = list(live_by_ds) + sorted(
+        d for d in tomb_ids_by_ds if d not in live_by_ds
+    )
+    for ds in ds_order:
+        if ds not in config.DATASETS:
+            # 登録を削除したデータセットのチャットがメモリに残っている。書けないので
+            # 失敗にはしない（毎回の保存が失敗して終了できなくなるのを防ぐ）。
+            _log.warning(
+                "save_all: chat for unregistered dataset %r not persisted", ds
+            )
+            continue
         try:
             work_dir = dataset_config.get_work_dir(ds)
             tomb_ids = tomb_ids_by_ds.get(ds, set())
             # (a) physical deletes first; collect those confirmed absent.
-            for sid in tomb_ids:
-                if chat_store.delete_session_file(work_dir, sid):
-                    applied.append((ds, sid))
-            # (b) live writes (skip any id under a tombstone — tombstone wins).
-            #     Stamp explicit tab order from list position so drag-and-drop
-            #     reordering persists. live_by_ds[ds] preserves self._sessions
-            #     order, so enumerate() index == per-dataset tab position.
+            for sid in sorted(tomb_ids):
+                try:
+                    if chat_store.delete_session_file(work_dir, sid):
+                        applied.append((ds, sid))
+                        _chat_baseline.pop((ds, sid), None)
+                    else:
+                        _fail(ds)
+                except Exception:
+                    _log.warning(
+                        "save_all: failed to delete chat %r in %r", sid, ds,
+                        exc_info=True,
+                    )
+                    _fail(ds)
+            # (b) live sessions (skip any id under a tombstone — tombstone wins).
+            #     idx = per-dataset position in the list (drag-and-drop order);
+            #     the order is stamped only when the session is actually written.
+            wd = _norm_dir(work_dir)
+            to_adopt: list[tuple] = []
             for idx, sess in enumerate(live_by_ds.get(ds, [])):
                 if sess.id in tomb_ids:
                     continue
-                sess.order = float(idx)
-                chat_store.write_session_file(work_dir, sess)
+                key = (ds, sess.id)
+                try:
+                    base = _chat_baseline.get(key)
+                    moved = base is not None and base.work_dir != wd   # 出力先が変わった
+                    new_order = float(idx)
+                    content_changed = base is None or sess.updated != base.updated
+                    order_changed = base is not None and new_order != base.order
+                    status, disk = chat_store.read_session_file_status(work_dir, sess.id)
+                    if moved:
+                        # 新しい work_dir に同じ id が無いときだけ書く（A-1 の
+                        # work-dir-changed と同じ考え方）
+                        if status == "absent":
+                            action = "write"
+                        elif status == "ok" and not content_changed:
+                            action = "adopt"     # 手元は旧 baseline から不変 → 新しい側の版を採る
+                        else:
+                            action = "fail"      # 手元が変わった／読めない → どちらが正しいか決められない
+                    elif content_changed:
+                        action = "write"         # 手元の内容が変わった（新規を含む）。衝突は手元が勝つ
+                    elif status == "ok" and disk.updated != base.updated:
+                        action = "adopt"         # ディスクの内容だけが変わった（手元の並べ替えより優先）
+                    elif status == "ok":
+                        action = "write" if order_changed else "skip"
+                    elif status == "absent":
+                        action = "skip"          # 他の PC で削除された（並べ替えだけでは復活させない）
+                    else:
+                        action = "fail"          # 読めない: 手元に新しい内容が無いので書かない
+                    if action == "write":
+                        sess.order = new_order
+                        chat_store.write_session_file(work_dir, sess)
+                        _chat_baseline[key] = ChatBaseline(wd, sess.updated, new_order)
+                    elif action == "adopt":
+                        to_adopt.append((disk, new_order))
+                    elif action == "fail":
+                        _log.warning(
+                            "save_all: chat %r in %r not written (disk %s, work_dir "
+                            "moved=%s); existing file kept", sess.id, ds, status, moved,
+                        )
+                        _fail(ds)
+                except Exception:
+                    _log.warning(
+                        "save_all: failed to persist chat %r in %r", sess.id, ds,
+                        exc_info=True,
+                    )
+                    _fail(ds)
+            if to_adopt:
+                # 取り込みはデータセットごとに 1 回。戻り値に入った id だけ baseline を
+                # 進める（入らなかったものは次の保存で同じ判定をやり直す）。
+                merge = getattr(window, "chat_merge_sessions", None)
+                adopted: set = set()
+                if merge is not None:
+                    try:
+                        adopted = set(merge(ds, [d for d, _o in to_adopt]) or ())
+                    except Exception:
+                        _log.warning(
+                            "save_all: failed to adopt chats for %r", ds,
+                            exc_info=True,
+                        )
+                for disk, order in to_adopt:
+                    if disk.id in adopted:
+                        _chat_baseline[(ds, disk.id)] = ChatBaseline(
+                            wd, disk.updated, order
+                        )
         except Exception:
             _log.warning(
                 "save_all: failed to persist chat for %r", ds, exc_info=True
             )
+            _fail(ds)
 
     getattr(window, "chat_clear_deleted", lambda a: None)(applied)
+    return failed
 
 
 def open_dataset(window, dataset: str) -> str:
@@ -721,7 +948,7 @@ def open_dataset(window, dataset: str) -> str:
 
         unreadable = False
         try:
-            sess = read_session(dataset)
+            sess = _read_session_at(work_dir, dataset)
         except SessionUnreadableError:
             # 破損 session.json は上書きも削除もしない（復旧材料を保全）。DS は
             # 開く（チャット復元・グループ生成は下の非 error 経路が担う）。
@@ -731,6 +958,13 @@ def open_dataset(window, dataset: str) -> str:
             )
             sess = None
             unreadable = True
+        wd = _norm_dir(work_dir)
+        if unreadable:
+            _unreadable[dataset] = wd
+            _restored.pop(dataset, None)   # 読めた後に読めなくなった＝ディスク側が変わった可能性。上書きしない側へ倒す
+        else:
+            _restored[dataset] = wd
+            _unreadable.pop(dataset, None)
         if sess is None:
             result = (
                 f"unreadable-session:{dataset}" if unreadable
@@ -950,9 +1184,20 @@ def open_dataset(window, dataset: str) -> str:
         # Chat restore (best-effort, exception-isolated from tab restore).
         if cw is not None:
             try:
-                cw.merge_dataset_sessions(
-                    dataset, chat_store.load_dataset_sessions(work_dir)
-                )
+                loaded = chat_store.load_dataset_sessions(work_dir)
+                adopted = cw.merge_dataset_sessions(dataset, loaded)
+                if isinstance(adopted, (set, frozenset)):
+                    # baseline の order はディスクの order ではなく統合後の手元の
+                    # 位置（保存時の判定と同じ座標。A-3）。採用されなかったものは
+                    # メモリの版が baseline のまま正しいので変えない。
+                    pos = _live_chat_positions(
+                        getattr(window, "chat_sessions", lambda: [])(), dataset
+                    )
+                    for s in loaded:
+                        if s.id in adopted and s.id in pos:
+                            _chat_baseline[(dataset, s.id)] = ChatBaseline(
+                                wd, s.updated, pos[s.id]
+                            )
             except Exception:
                 _log.warning(
                     "open_dataset: failed to restore chat for %r", dataset,
