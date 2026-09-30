@@ -107,3 +107,81 @@ def test_list_commands_prints_every_verb(monkeypatch, capsys):
         set(COMMON_TAB_VERBS) | set(ANALYSIS_TAB_VERBS) | set(IMAGE_VIEWER_VERBS)
     )
     assert submitted == []
+
+
+# ---- chat search verbs（Issue #108） ----
+
+
+def _chat_ctx():
+    from llm_backend.base import Message
+    from llm_bridge.chat_search import SearchContext
+    from llm_bridge.chat_store import new_session
+
+    def mk(ds, text, *, archived=False, updated=1.0):
+        s = new_session("b", "sys", dataset=ds, title=f"t-{text}")
+        s.messages += [Message(role="user", content=text), Message(role="assistant", content="ok " + text)]
+        s.archived = archived
+        s.updated = updated
+        return s
+
+    odd = "<chat_index> a'b"
+    sessions = [mk("dsA", "peak one", updated=3.0), mk("dsB", "peak two", updated=2.0),
+                mk(None, "peak free", updated=1.0), mk(odd, "peak odd", updated=4.0),
+                mk(odd, "peak old", archived=True, updated=5.0)]
+    search = new_session("b", "sys", dataset="dsA", kind="search",
+                         search_spec={"scope": "dataset", "dataset": odd,
+                                      "include_archived": True, "ai": True})
+    sessions.append(search)
+    ctx = SearchContext(sessions=sessions, current_dataset="dsA",
+                        open_datasets=["dsA", "dsB", odd])
+    return ctx, search, odd, sessions
+
+
+def _handlers(ctx):
+    win = MagicMock()
+    win.chat_widget.return_value.search_context.return_value = ctx
+    llm_bridge._rewire_window(win)
+    return win, {c.args[0]: c.args[1] for c in win.register_command.call_args_list}
+
+
+def test_chat_verbs_match_core():
+    import pytest
+    from llm_bridge import chat_search as cs
+    ctx, _search, _odd, sessions = _chat_ctx()
+    win, h = _handlers(ctx)
+    assert h["chat-list"](scope="all", archived="true", offset=1) == cs.list_page(
+        ctx, scope="all", include_archived=True, offset=1)
+    assert h["chat-search"](query="peak", offset=1) == cs.search_hits(ctx, "peak", offset=1)
+    sid = sessions[0].id[:8]
+    assert h["chat-show"](sid=sid, start=1, end=2, char_offset=2) == cs.show_session(
+        ctx, sid, start=1, end=2, char_offset=2)
+    assert h["chat-list"](scope="unbound")["total"] == 1
+    with pytest.raises(ValueError):
+        h["chat-list"](scope="bogus")
+    with pytest.raises(ValueError):
+        h["chat-search"](query="peak", limit=True)
+    win.chat_widget.return_value = None
+    with pytest.raises(RuntimeError):
+        h["chat-list"]()
+
+
+def test_chat_verbs_search_tab_end_to_end():
+    import re
+
+    import pytest
+    from llm_bridge import chat_search as cs
+    ctx, search, odd, sessions = _chat_ctx()
+    _win, h = _handlers(ctx)
+    req = cs.SearchRequest(query="q", scope="dataset", dataset=odd, include_archived=True, ai=True)
+    prompt = cs.build_ai_prompt(req, ctx, "en", search_sid=search.id)
+    tab = re.search(r"search_tab=([0-9a-f]+)", prompt).group(1)
+    expect_list = cs.list_page(ctx, scope="dataset", dataset=odd, include_archived=True)
+    assert h["chat-list"](search_tab=tab) == expect_list
+    assert expect_list["total"] == 3   # odd の 2 件（archived 含む）＋ DS 無しの 1 件
+    assert h["chat-list"](search_tab=tab, scope="all") == expect_list
+    assert h["chat-search"](query="peak", search_tab=tab) == cs.search_hits(
+        ctx, "peak", scope="dataset", dataset=odd, include_archived=True)
+    with pytest.raises(ValueError):
+        h["chat-list"](search_tab=sessions[0].id[:8])
+    with pytest.raises(LookupError):
+        h["chat-list"](search_tab="ffffffff")

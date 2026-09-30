@@ -19,6 +19,9 @@ from llm_bridge.__main__ import _parse_kvs
         ("dataset=1.5", "dataset", "1.5"),
         ("session=123e4", "session", "123e4"),
         ("text=1e3", "text", "1e3"),
+        ("query=2024", "query", "2024"),
+        ("sid=12345678", "sid", "12345678"),
+        ("search_tab=12345678", "search_tab", "12345678"),
         # 変換されるもの
         ("x=-3", "x", -3),
         ("x=+2.5", "x", 2.5),

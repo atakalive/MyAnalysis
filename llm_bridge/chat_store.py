@@ -68,11 +68,42 @@ class ChatSession:
     # engine 同様 str 検証のみ・解決は使用時。未解決名は「なし」に degrade し
     # フィールドは書き換えない（ストアは PC ローカル、別 PC でも選択を保持）。
     persona: str | None = None
+    # "chat" = 普通の会話 / "search" = チャット検索の結果タブ（Issue #108）。検索結果は
+    # 全ての検索・verb の対象から外す。search_spec は検索の条件（続きの質問に指示を
+    # 付け直すのに使う）で、kind="search" のときだけ意味を持つ。
+    kind: str = "chat"
+    search_spec: dict | None = None
     # Per-tab unsent composer text. Deliberately NOT persisted: session_to_dict
     # omits it and session_from_dict never reads it, so a draft lives only as
     # long as the process. Kept on the session (not a side dict) so deleting a
     # session drops its draft with it.
     draft: str = ""
+
+
+_SEARCH_SCOPES = ("dataset", "all", "unbound")
+
+
+def normalize_search_spec(v) -> dict | None:
+    """検索条件 dict を正規化する。不正なら None（Issue #108）。
+
+    scope の 3 値は llm_bridge.chat_search.SCOPES と同じ（chat_store は Qt 非依存かつ
+    chat_search を import しないのでここに直書きする）。
+    """
+    if not isinstance(v, dict):
+        return None
+    scope = v.get("scope")
+    if scope not in _SEARCH_SCOPES:
+        return None
+    inc, ai = v.get("include_archived"), v.get("ai")
+    if not isinstance(inc, bool) or not isinstance(ai, bool):
+        return None
+    ds = v.get("dataset")
+    if scope == "dataset":
+        if not isinstance(ds, str) or not ds:
+            return None
+    else:
+        ds = None
+    return {"scope": scope, "dataset": ds, "include_archived": inc, "ai": ai}
 
 
 # ----- Message ⇄ dict -----
@@ -106,6 +137,7 @@ def message_from_dict(d: dict) -> Message:
 
 
 def session_to_dict(sess: ChatSession) -> dict:
+    kind = getattr(sess, "kind", "chat")
     return {
         "version": SCHEMA_VERSION,
         "id": sess.id,
@@ -126,6 +158,9 @@ def session_to_dict(sess: ChatSession) -> dict:
         "engine_model": getattr(sess, "engine_model", None),
         "engine_provider": getattr(sess, "engine_provider", None),
         "persona": getattr(sess, "persona", None),
+        "kind": kind,
+        "search_spec": (normalize_search_spec(getattr(sess, "search_spec", None))
+                        if kind == "search" else None),
     }
 
 
@@ -148,6 +183,8 @@ def session_from_dict(data: dict) -> ChatSession:
     # 「明示的にペルソナなし」("") が「全体設定に従う」(None) に化ける。
     raw = data.get("persona")
     persona = raw.strip() if isinstance(raw, str) else None
+    kind = "search" if data.get("kind") == "search" else "chat"
+    search_spec = normalize_search_spec(data.get("search_spec")) if kind == "search" else None
 
     def _opt_str(key):
         """Accept any str; anything else (or missing) → None.
@@ -180,6 +217,8 @@ def session_from_dict(data: dict) -> ChatSession:
         engine_model=_opt_str("engine_model"),
         engine_provider=_opt_str("engine_provider"),
         persona=persona,
+        kind=kind,
+        search_spec=search_spec,
     )
 
 
@@ -211,6 +250,8 @@ def new_session(
     system_prompt: str,
     dataset: str | None = None,
     title: str = _DEFAULT_TITLE,
+    kind: str = "chat",
+    search_spec: dict | None = None,
 ) -> ChatSession:
     """Mint a fresh ChatSession seeded with a single system Message."""
     now = time.time()
@@ -223,6 +264,8 @@ def new_session(
         backend_session_id=None,
         created=now,
         updated=now,
+        kind=kind,
+        search_spec=search_spec,
     )
 
 
@@ -233,6 +276,8 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
     サーバ側会話状態を引き継がない）。`title` は呼び出し側が決めた最終文字列を
     そのまま採用する — この関数は Qt-free / i18n-free なので tr() や suffix 付与は
     行わない（センチネル _DEFAULT_TITLE を渡せば据え置き、それ以外はその文字列）。
+    検索結果タブ（kind="search"）から分岐した先は普通の会話（kind="chat"・
+    search_spec=None）になり、以後は検索対象に入る（Issue #108）。
     """
     now = time.time()
     return ChatSession(
@@ -252,6 +297,8 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
         engine_provider=getattr(src, "engine_provider", None),
         # 口調（ペルソナ）も同様に引き継ぐ。
         persona=getattr(src, "persona", None),
+        kind="chat",
+        search_spec=None,
     )
 
 

@@ -396,3 +396,52 @@ def apply_selection(
     cur_env = os.environ.get("LLM_BACKEND")
     if cur_env and cur_env != engine.backend_key:
         os.environ["LLM_BACKEND"] = engine.backend_key
+
+
+# ----- AI chat-search model (Issue #108) -----
+#
+# ``[chat_search]`` in config.toml: engine ("" = follow the global selection) /
+# model / provider. Baked into each new AI-search chat as its per-session engine
+# override, so it applies from the next AI search on.
+
+CHAT_SEARCH_SECTION = "chat_search"
+
+
+def _chat_search_raw() -> dict:
+    sec = backend_config().get(CHAT_SEARCH_SECTION, {})
+    return sec if isinstance(sec, dict) else {}
+
+
+def chat_search_selection() -> tuple[Engine | None, str, str]:
+    """(engine, model, provider) for AI search. (None, "", "") = follow the global. Never rewrites."""
+    sec = _chat_search_raw()
+    eid = sec.get("engine")
+    eid = eid if isinstance(eid, str) else ""
+    engine = engine_by_id(eid.strip())
+    if engine is None:
+        return (None, "", "")
+    model = sec.get("model")
+    provider = sec.get("provider")
+    return (
+        engine,
+        model.strip() if isinstance(model, str) else "",
+        provider.strip() if isinstance(provider, str) else "",
+    )
+
+
+def apply_chat_search_selection(engine: Engine | None, model: str, provider: str) -> None:
+    """Persist ``[chat_search]`` (skipped when unchanged) and refresh the cache."""
+    eid = engine.id if engine else ""
+    m = model.strip() if engine and "model" in engine.fields else ""
+    p = provider.strip() if engine and "provider" in engine.fields else ""
+    sec = _chat_search_raw()
+
+    def _cur(key):
+        v = sec.get(key)
+        return v if isinstance(v, str) else ""
+
+    if (_cur("engine"), _cur("model"), _cur("provider")) == (eid, m, p):
+        return
+    set_toml_keys(config_toml_path(),
+                  {CHAT_SEARCH_SECTION: {"engine": eid, "model": m, "provider": p}})
+    backend_config.cache_clear()

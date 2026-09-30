@@ -667,12 +667,21 @@ class MeetingRelay(QObject):
     def classify_private_sessions(self, summaries) -> None:
         """規則で非公開にするチャットを opt-out に記録する（Issue #107 B-6 修正 9・13）。
         - dataset 未設定で履歴があるチャット
-        - opt-out された親から分岐したチャット（推移的。分岐ごとに 1 回だけ決める）"""
+        - opt-out された親から分岐したチャット（推移的。分岐ごとに 1 回だけ決める）
+        - チャット検索の結果タブ（kind="search"。他のチャットの抜粋を載せるため。
+          sid ごとに 1 回だけ決める＝ホストが共有を選べば以後は共有。Issue #108）"""
         optout = self.__dict__.setdefault("_session_optout", set())
         decided = self.__dict__.setdefault("_fork_decided", set())
+        search_decided = self.__dict__.setdefault("_search_decided", set())
         for s in summaries:
             if s.get("dataset") is None and self._session_has_history(s["id"]):
                 optout.add(s["id"])
+        # 検索タブは fork の抽出より前に optout へ入れる（同じ呼び出しで検索タブを
+        # 親に持つ分岐が「継承しない」と確定されないように）。
+        for s in summaries:
+            if s.get("kind") == "search" and s["id"] not in search_decided:
+                optout.add(s["id"])
+                search_decided.add(s["id"])
         forks = [s for s in summaries if s.get("forked_from") and s["id"] not in decided]
         changed = True
         while changed:                      # 親子の並び順に依存しないよう、変化が無くなるまで回す

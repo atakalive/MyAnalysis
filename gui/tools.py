@@ -417,6 +417,74 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "chat_list",
+            "description": "Past chats overview, newest first (chat-search result tabs "
+            "excluded). Returns chats [{sid, title, dataset, updated, archived, n, "
+            "first_user}], total and next_offset (call again with offset=next_offset "
+            "for more). Omit dataset and scope for the front dataset; scope=all = all "
+            "open datasets; scope=unbound = chats not bound to any dataset; search_tab "
+            "= use that search tab's scope and archived choice.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dataset": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["dataset", "all", "unbound"]},
+                    "archived": {"type": "boolean"},
+                    "search_tab": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chat_search",
+            "description": "Keyword search over past chats: space-separated words, ALL "
+            "must appear in one message (case-insensitive; tool-call lines excluded). "
+            "Returns hits [{sid, idx, title, dataset, role, snippet, updated}], total "
+            "and next_offset. Scope arguments as in chat_list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "dataset": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["dataset", "all", "unbound"]},
+                    "archived": {"type": "boolean"},
+                    "search_tab": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chat_show",
+            "description": "Read a chat transcript. idx = message index (same as "
+            "chat_search's idx); start/end select messages by idx, end is inclusive. "
+            "If truncated is true, call again with start=next and "
+            "char_offset=next_char_offset to continue. raw=true keeps tool-call lines.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sid": {"type": "string"},
+                    "start": {"type": "integer"},
+                    "end": {"type": "integer"},
+                    "char_offset": {"type": "integer"},
+                    "max_chars": {"type": "integer"},
+                    "raw": {"type": "boolean"},
+                },
+                "required": ["sid"],
+            },
+        },
+    },
 ]
 
 
@@ -565,6 +633,14 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         if ds is None:
             return json.dumps({})
         return json.dumps(state.read(ds, tab_name), ensure_ascii=False)
+    if name in ("chat_list", "chat_search", "chat_show"):
+        keys = {
+            "chat_list": ("dataset", "scope", "archived", "search_tab", "limit", "offset"),
+            "chat_search": ("query", "dataset", "scope", "archived", "search_tab", "limit", "offset"),
+            "chat_show": ("sid", "start", "end", "char_offset", "max_chars", "raw"),
+        }[name]
+        return _via_bridge("window", None, name.replace("_", "-"),
+                           {k: args[k] for k in keys if k in args}, cancelled=cancelled)
     return json.dumps({"error": f"unknown tool: {name}"})
 
 

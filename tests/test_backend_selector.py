@@ -29,16 +29,29 @@ def _patch_config(monkeypatch, *, engine_id="claude-vscode", model="opus", provi
     monkeypatch.setattr(mod, "current_provider", lambda e: provider)
 
 
-def _make_dialog(monkeypatch, parent_widget, *, busy=False):
+def _make_dialog(monkeypatch, parent_widget, *, busy=False, search_sel=("", "", "")):
     """busy はチャット応答中の状況を模す（ダイアログはもう busy を見ないので、
-    test_apply_proceeds_while_busy の regression guard としてのみ意味を持つ）。"""
-    import gui.backend_selector_dialog as mod
+    test_apply_proceeds_while_busy の regression guard としてのみ意味を持つ）。
 
+    AI 検索用モデル（[chat_search]）は必ず差し替える — 実 config.toml を読み書きしない。
+    search_sel は (engine id, model, provider)。engine id "" = 全体設定に従う。
+    書込の呼び出しは dlg._search_spy に記録される。"""
+    import gui.backend_selector_dialog as mod
+    from llm_backend.engines import engine_by_id
+
+    eid, smodel, sprov = search_sel
+    eng = engine_by_id(eid) if eid else None
+    monkeypatch.setattr(mod, "chat_search_selection",
+                        lambda: (eng, smodel, sprov) if eng else (None, "", ""))
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_chat_search_selection", spy)
     main_window = MagicMock()
     cw = MagicMock()
     cw.is_busy.return_value = busy
     main_window.chat_widget.return_value = cw
-    return mod.BackendSelectorDialog(main_window, parent_widget), main_window
+    dlg = mod.BackendSelectorDialog(main_window, parent_widget)
+    dlg._search_spy = spy
+    return dlg, main_window
 
 
 def test_initial_selection_reflects_config(monkeypatch, parent_widget):
@@ -416,3 +429,108 @@ def test_seed_uses_session_value_only_for_its_own_engine(monkeypatch, parent_wid
     from llm_backend.engines import engine_by_id
     assert dlg._seed_value(engine_by_id("pi"), "model") == "qwen3-coder"
     assert dlg._seed_value(engine_by_id("claude-vscode"), "model") == "opus"
+
+
+
+# --------------------------------------------------------------------------- #
+# AI 検索用モデル（Issue #108）                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_search_group_only_in_global_dialog(monkeypatch, parent_widget):
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._search_follow is not None
+    sdlg, _, _, _ = _session_dlg(monkeypatch, parent_widget)
+    assert not hasattr(sdlg, "_search_follow")
+
+
+def test_search_follow_default_on_open(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="codex", model="gpt")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._search_follow.isChecked()
+    assert dlg._search_engine_combo.currentData() == "codex"
+    assert not dlg._search_engine_combo.isEnabled()
+    assert not dlg._search_model_combo.isEnabled()
+
+
+def test_search_override_on_open(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="claude-vscode", model="opus")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget, search_sel=("codex", "gpt-x", ""))
+    assert not dlg._search_follow.isChecked()
+    assert dlg._search_engine_combo.currentData() == "codex"
+    assert dlg._search_model_combo.currentText() == "gpt-x"
+    assert dlg._search_engine_combo.isEnabled()
+    dlg._search_follow.setChecked(True)
+    assert not dlg._search_engine_combo.isEnabled()
+    assert not dlg._search_model_combo.isEnabled()
+    dlg._search_follow.setChecked(False)
+    assert dlg._search_model_combo.isEnabled()
+
+
+@pytest.mark.parametrize("follow", [True, False])
+def test_search_locked_during_ping(monkeypatch, parent_widget, follow):
+    import gui.backend_selector_dialog as mod
+
+    _patch_config(monkeypatch, engine_id="mock")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget,
+                          search_sel=("", "", "") if follow else ("pi", "m", ""))
+    monkeypatch.setattr(mod, "build_backend", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self: None)
+    dlg._on_test()
+    assert not dlg._search_follow.isEnabled()
+    for c in (dlg._search_engine_combo, dlg._search_model_combo, dlg._search_provider_combo):
+        assert not c.isEnabled()
+
+
+def test_search_engine_switch_rows(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="claude-vscode")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget, search_sel=("pi", "", ""))
+    form = dlg._search_form
+    assert form.isRowVisible(dlg._search_model_combo)
+    assert form.isRowVisible(dlg._search_provider_combo)
+    dlg._search_engine_combo.setCurrentIndex(dlg._search_engine_combo.findData("mock"))
+    assert not form.isRowVisible(dlg._search_model_combo)
+    assert not form.isRowVisible(dlg._search_provider_combo)
+    dlg._search_engine_combo.setCurrentIndex(dlg._search_engine_combo.findData("codex"))
+    assert form.isRowVisible(dlg._search_model_combo)
+    assert not form.isRowVisible(dlg._search_provider_combo)
+
+
+def test_apply_writes_search_selection_after_main(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+
+    _patch_config(monkeypatch, engine_id="claude-vscode", model="opus")
+    order = []
+    monkeypatch.setattr(mod, "apply_selection", lambda *a, **k: order.append("main"))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget, search_sel=("pi", "m1", "llama.cpp"))
+    dlg._search_spy.side_effect = lambda *a: order.append("search")
+    dlg._on_apply()
+    assert order == ["main", "search"]
+    eng, model, provider = dlg._search_spy.call_args.args
+    assert eng.id == "pi" and model == "m1" and provider == "llama.cpp"
+
+
+def test_apply_follow_writes_empty_search_selection(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+
+    _patch_config(monkeypatch)
+    monkeypatch.setattr(mod, "apply_selection", MagicMock())
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._on_apply()
+    dlg._search_spy.assert_called_once_with(None, "", "")
+
+
+def test_search_apply_error_shows_message(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from PySide6.QtWidgets import QDialog
+
+    _patch_config(monkeypatch)
+    monkeypatch.setattr(mod, "apply_selection", MagicMock())
+    shown = {}
+    monkeypatch.setattr(
+        mod.QMessageBox, "critical", lambda *a, **k: shown.setdefault("called", True)
+    )
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._search_spy.side_effect = RuntimeError("bad toml")
+    dlg._on_apply()
+    assert shown.get("called")
+    assert dlg.result() != QDialog.DialogCode.Accepted

@@ -62,7 +62,8 @@ def test_settings_menu_holds_the_preference_items(qapp):
         win._help_menu.menuAction(),
     ]
 
-    assert win._view_menu.actions() == [win._chat_action, win._meeting_share_action]
+    assert win._view_menu.actions() == [win._chat_action, win._chat_search_action,
+                                        win._meeting_share_action]
 
     # Submenus appear in the parent's action list as their menuAction().
     settings = win._settings_menu.actions()

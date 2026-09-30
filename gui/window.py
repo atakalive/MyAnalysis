@@ -2,7 +2,7 @@ import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -227,6 +227,13 @@ class ToolWindow(QMainWindow):
         self._view_menu = self.menuBar().addMenu(tr("menu.view"))
         self._chat_action = self._view_menu.addAction(tr("menu.view.toggle_chat"))
         self._chat_action.triggered.connect(self.toggle_chat_floating)
+        # チャット検索（Issue #108）。アプリショートカットなのでフロートしたドック・
+        # 切り離したタブのウィンドウからも効く（ChatWidget 側に QShortcut を置かない:
+        # 両方あると activatedAmbiguously でどちらも発火しない）。
+        self._chat_search_action = self._view_menu.addAction(tr("menu.view.chat_search"))
+        self._chat_search_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Find))
+        self._chat_search_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._chat_search_action.triggered.connect(self._open_chat_search)
         self._meeting_share_action = self._view_menu.addAction(tr("menu.view.meeting_share"))
         self._meeting_share_action.triggered.connect(self._open_meeting_share)
 
@@ -306,6 +313,7 @@ class ToolWindow(QMainWindow):
         self._quit_action.setText(tr("menu.file.quit"))
         self._view_menu.setTitle(tr("menu.view"))
         self._chat_action.setText(tr("menu.view.toggle_chat"))
+        self._chat_search_action.setText(tr("menu.view.chat_search"))
         self._meeting_share_action.setText(tr("menu.view.meeting_share"))
         self._settings_menu.setTitle(tr("menu.settings"))
         self._language_menu.setTitle(tr("menu.settings.language"))
@@ -1130,6 +1138,15 @@ class ToolWindow(QMainWindow):
 
     def toggle_chat_floating(self) -> None:
         self._chat_dock.setFloating(not self._chat_dock.isFloating())
+
+    def _open_chat_search(self) -> None:
+        cw = self.chat_widget()
+        if cw is None or not hasattr(cw, "open_search"):
+            return
+        if self._chat_dock.isFloating():
+            self._chat_dock.raise_()
+            self._chat_dock.activateWindow()
+        cw.open_search()
 
     def register_command(
         self, verb: str, handler: Callable[..., object]

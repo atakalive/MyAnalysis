@@ -747,6 +747,68 @@ def _do_close_dataset(window, name: str) -> str:
     return f"closed:{name}:{n}"
 
 
+def _chat_search_ctx(window):
+    cw = window.chat_widget()
+    if cw is None or not hasattr(cw, "search_context"):
+        raise RuntimeError("the chat panel is not available")
+    return cw.search_context()
+
+
+def _chat_scope(scope, dataset) -> tuple[str, str | None]:
+    s = "dataset" if scope in (None, "") else str(scope)
+    if s not in ("dataset", "all", "unbound"):
+        raise ValueError(f"scope must be 'dataset', 'all' or 'unbound': {scope!r}")
+    return s, ((dataset or None) if s == "dataset" else None)
+
+
+def _int_arg(v, name: str) -> int:
+    # _parse_kvs も openai tools も整数は int で渡す。bool（int のサブクラス）と非 int は拒否。
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ValueError(f"{name} must be an integer: {v!r}")
+    return v
+
+
+def _chat_search_scope(ctx, dataset, scope, archived, search_tab):
+    """(scope, dataset, include_archived)。search_tab が空でなければその検索タブの条件（Issue #108）。"""
+    from llm_bridge import chat_search
+    if search_tab not in (None, ""):
+        req = chat_search.resolve_search_tab(ctx, str(search_tab))
+        return req.scope, req.dataset, req.include_archived
+    s, ds = _chat_scope(scope, dataset)
+    return s, ds, _flag(archived)
+
+
+def _chat_list_verb(window, *, dataset=None, scope=None, archived=False, search_tab=None,
+                    limit=200, offset=0):
+    from llm_bridge import chat_search
+    ctx = _chat_search_ctx(window)
+    s, ds, inc = _chat_search_scope(ctx, dataset, scope, archived, search_tab)
+    return chat_search.list_page(ctx, scope=s, dataset=ds, include_archived=inc,
+                                 limit=_int_arg(limit, "limit"),
+                                 offset=_int_arg(offset, "offset"))
+
+
+def _chat_search_verb(window, *, query, dataset=None, scope=None, archived=False,
+                      search_tab=None, limit=50, offset=0):
+    from llm_bridge import chat_search
+    ctx = _chat_search_ctx(window)
+    s, ds, inc = _chat_search_scope(ctx, dataset, scope, archived, search_tab)
+    return chat_search.search_hits(ctx, str(query), scope=s, dataset=ds, include_archived=inc,
+                                   limit=_int_arg(limit, "limit"),
+                                   offset=_int_arg(offset, "offset"))
+
+
+def _chat_show_verb(window, *, sid, start=0, end=None, char_offset=0, max_chars=20000,
+                    raw=False):
+    from llm_bridge import chat_search
+    ctx = _chat_search_ctx(window)
+    return chat_search.show_session(
+        ctx, str(sid), start=_int_arg(start, "start"),
+        end=None if end is None else _int_arg(end, "end"),
+        char_offset=_int_arg(char_offset, "char_offset"),
+        max_chars=_int_arg(max_chars, "max_chars"), raw=_flag(raw))
+
+
 def _rewire_window(window) -> None:
     """(Re)register the window-tier verbs + session saver.
 
@@ -795,6 +857,10 @@ def _rewire_window(window) -> None:
     window.register_command(
         "chat-list-sessions", lambda: window.chat_widget().session_summaries()
     )
+    # Chat search verbs (Issue #108): GUI のメモリ上のチャットを読む。
+    window.register_command("chat-list", lambda **kw: _chat_list_verb(window, **kw))
+    window.register_command("chat-search", lambda **kw: _chat_search_verb(window, **kw))
+    window.register_command("chat-show", lambda **kw: _chat_show_verb(window, **kw))
     # meeting-start の lan=true でLAN リンクを併発する。CLI 単独起動は
     # ホスト IP を渡せないため meeting_start が RELAY_LAN_HOST env を読む
     # （未設定で lan=true にすると LAN リンクは空＝トンネル失敗時も非致命分岐に入らない）。

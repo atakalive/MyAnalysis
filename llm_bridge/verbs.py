@@ -21,6 +21,9 @@ WINDOW_VERBS: dict[str, str] = {
     "set-active-dataset": "name=<ds> — bring a dataset to the front",
     "switch-dataset": "name=<ds> — alias of set-active-dataset",
     "close-dataset": "name=<ds> — save the layout and close a dataset",
+    "chat-list": "[dataset=<ds>|scope=all|scope=unbound|search_tab=<sid>] [archived=true] [limit=200] [offset=<n>] — past chats overview (search result tabs excluded)",
+    "chat-search": "query=<words> [dataset=<ds>|scope=all|scope=unbound|search_tab=<sid>] [archived=true] [limit=50] [offset=<n>] — keyword search over chats (all words, case-insensitive)",
+    "chat-show": "sid=<sid> [start=<idx>] [end=<idx>] [char_offset=<n>] [max_chars=20000] [raw=true] — read a chat transcript (idx = message index, end is inclusive)",
     "reload": "[scope=patch|tab|app|restart] [target=<tab>] — hot reload (development)",
 }
 

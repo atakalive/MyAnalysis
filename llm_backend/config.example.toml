@@ -65,3 +65,10 @@ use_provider_system_prompt = true
 #   なってしまうため、既定では外に出して「データ解析役」に保つ。リポジトリ自体は
 #   --add-dir + PYTHONPATH で参照可能。明示上書きしたい場合のみ↓を有効化:
 # cwd = 'C:/path/to/agent_home'
+
+[chat_search]
+# AI 検索（Ctrl+F → AI 検索）に使うエンジンとモデル。設定 → バックエンド/モデル設定… の
+# 「AI 検索用モデル」が書き換える。engine が空 = 全体設定（[backend]）と同じエンジン・モデル。
+engine = ""          # "" | "claude-vscode" | "claude-cli" | "pi" | "codex" | "openai-http" | "mock"
+model = ""           # 空 = そのエンジンの既定モデル
+provider = ""        # pi のみ。空 = pi の既定

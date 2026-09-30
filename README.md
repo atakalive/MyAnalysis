@@ -105,6 +105,7 @@ To remove a registration, select the dataset in **File → Open dataset…** and
 
 - The agent uses the Python in `.venv` and may pip install missing packages (such as scipy) into `.venv`.
 - Right-click a chat tab → **Close** **deletes** the chat. To keep it, use **Archive**.
+- **Ctrl+F** (**View → Search chats…**) searches past chats and lists the hits in a new chat tab. With **AI search** on, the agent looks through your chats, sums up what was concluded, and answers follow-up questions (→ [docs/usage_ja.md](docs/usage_ja.md#チャット)).
 
 To view microscope images and the like as in ImageJ (16-bit / multi-dimensional TIFF, LUTs, channel composites), use the image viewer. Ask in the chat, e.g. "open `<file path>` in the image viewer" (the agent opens the image viewer only when asked), or open it from the CLI. For the steps, read [docs/usage_ja.md](docs/usage_ja.md#図ビューアと画像ビューア).
 

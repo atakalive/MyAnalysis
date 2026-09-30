@@ -686,3 +686,85 @@ def test_write_session_file_raises_on_oserror(tmp_path, monkeypatch):
     monkeypatch.setattr(common_paths, "atomic_write_text", boom)
     with pytest.raises(OSError):
         write_session_file(tmp_path, _sample_session())
+
+
+# ---- kind / search_spec（Issue #108） ----
+
+
+def test_kind_and_search_spec_roundtrip():
+    from llm_bridge.chat_store import normalize_search_spec  # noqa: F401
+    sess = _sample_session()
+    sess.kind = "search"
+    sess.search_spec = {"scope": "dataset", "dataset": "ds_a", "include_archived": True, "ai": True}
+    d = session_to_dict(sess)
+    assert d["kind"] == "search"
+    got = session_from_dict(d)
+    assert got.kind == "search"
+    assert got.search_spec == sess.search_spec
+    assert got == sess
+
+
+def test_old_dict_without_kind_is_chat():
+    d = session_to_dict(_sample_session())
+    d.pop("kind")
+    d.pop("search_spec")
+    got = session_from_dict(d)
+    assert got.kind == "chat" and got.search_spec is None
+
+
+def test_unknown_kind_is_chat():
+    d = session_to_dict(_sample_session())
+    d["kind"] = "weird"
+    d["search_spec"] = {"scope": "all", "include_archived": False, "ai": False}
+    got = session_from_dict(d)
+    assert got.kind == "chat" and got.search_spec is None
+
+
+def test_chat_kind_drops_search_spec():
+    d = session_to_dict(_sample_session())
+    d["kind"] = "chat"
+    d["search_spec"] = {"scope": "all", "include_archived": False, "ai": False}
+    assert session_from_dict(d).search_spec is None
+    sess = _sample_session()
+    sess.search_spec = {"scope": "all", "include_archived": False, "ai": False}
+    assert session_to_dict(sess)["search_spec"] is None
+
+
+def test_normalize_search_spec():
+    from llm_bridge.chat_store import normalize_search_spec
+    assert normalize_search_spec(None) is None
+    assert normalize_search_spec({"scope": "bogus", "include_archived": False, "ai": False}) is None
+    assert normalize_search_spec({"scope": "dataset", "include_archived": False, "ai": False}) is None
+    assert normalize_search_spec({"scope": "dataset", "dataset": "", "include_archived": False,
+                                  "ai": False}) is None
+    assert normalize_search_spec({"scope": "all", "include_archived": "yes", "ai": False}) is None
+    assert normalize_search_spec({"scope": "all", "include_archived": False, "ai": 1}) is None
+    assert normalize_search_spec({"scope": "all", "dataset": "x", "include_archived": False,
+                                  "ai": True}) == {"scope": "all", "dataset": None,
+                                                   "include_archived": False, "ai": True}
+    assert normalize_search_spec({"scope": "unbound", "include_archived": True, "ai": False,
+                                  "extra": 1}) == {"scope": "unbound", "dataset": None,
+                                                   "include_archived": True, "ai": False}
+
+
+def test_new_session_kind_search():
+    spec = {"scope": "all", "dataset": None, "include_archived": False, "ai": True}
+    s = new_session("b", "sys", kind="search", search_spec=spec)
+    assert s.kind == "search" and s.search_spec == spec
+    assert new_session("b", "sys").kind == "chat"
+
+
+def test_fork_of_search_session_is_chat():
+    spec = {"scope": "all", "dataset": None, "include_archived": False, "ai": True}
+    src = new_session("b", "sys", kind="search", search_spec=spec)
+    src.messages.append(Message(role="user", content="q"))
+    f = fork_session(src, 2, title="t")
+    assert f.kind == "chat" and f.search_spec is None
+
+
+def test_content_fingerprint_distinguishes_kind():
+    a = _sample_session()
+    b = _sample_session()
+    b.kind = "search"
+    b.search_spec = {"scope": "all", "dataset": None, "include_archived": False, "ai": False}
+    assert content_fingerprint(a) != content_fingerprint(b)

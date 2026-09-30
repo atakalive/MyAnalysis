@@ -463,3 +463,21 @@ class TestPaneTools:
         for t in ("set_lut", "set_range", "set_mode", "set_channel", "set_visible",
                   "set_z", "set_t", "auto_contrast"):
             assert "slot" in by[t]["properties"], t
+
+    def test_chat_search_tools_dispatch(self, monkeypatch):
+        from gui.tools import _dispatch
+
+        calls = self._record(monkeypatch)
+        _dispatch(None, "chat_list", {"scope": "all", "archived": True, "offset": 5,
+                                      "search_tab": "abcd1234", "bogus": 1})
+        _dispatch(None, "chat_search", {"query": "peak", "offset": 50, "limit": 10,
+                                        "sid": "x"})
+        _dispatch(None, "chat_show", {"sid": "abcd1234", "start": 3, "end": 4,
+                                      "char_offset": 100, "query": "x"})
+        assert calls == [
+            ("window", None, "chat-list",
+             {"scope": "all", "archived": True, "search_tab": "abcd1234", "offset": 5}),
+            ("window", None, "chat-search", {"query": "peak", "limit": 10, "offset": 50}),
+            ("window", None, "chat-show",
+             {"sid": "abcd1234", "start": 3, "end": 4, "char_offset": 100}),
+        ]

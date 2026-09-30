@@ -2698,3 +2698,89 @@ def test_ttl_sec_and_period_label(qapp, monkeypatch):
     sw._update_remaining()
     assert "2h00m" in sw._remaining_label.text()
     r.stop()
+
+
+# ---- chat search result tabs are private by default (Issue #108) ----
+
+def _search(sid, dataset="ds1"):
+    d = _sess_a(sid, dataset=dataset)
+    d["kind"] = "search"
+    return d
+
+
+def test_search_tab_private_at_start(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _search("s")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "s" not in r.published_session_ids()
+    assert "s" in r.session_optout()
+    assert "a" in r.published_session_ids()
+    r.stop()
+
+
+def test_search_tab_added_during_meeting_stays_private(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_search("s"))
+    r._on_capture_tick()
+    assert "s" not in r.published_session_ids()
+    assert "s" in r.session_optout()
+    r.stop()
+
+
+def test_search_tab_host_share_survives_restart(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _search("s")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    r.set_session_optout(visible={"s"}, checked={"s"})
+    r.stop()
+    r.meeting_start(3600)
+    assert "s" in r.published_session_ids()
+    r.stop()
+    r.meeting_start(3600)
+    assert "s" in r.published_session_ids()      # 規則で再び外れない
+    r.stop()
+
+
+def test_row_without_kind_is_public(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _sess_a("b")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert r.published_session_ids() == {"a", "b"}
+    r.stop()
+
+
+def test_fork_of_search_tab_stays_private(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _search("s")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_fork("f", "s"))
+    r._on_capture_tick()
+    assert "f" not in r.published_session_ids()
+    assert "f" in r.session_optout()
+    r.stop()
+
+
+def test_search_tab_and_its_fork_first_seen_together(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries += [_fork("f", "s"), _search("s")]   # 分岐が先に並んでも
+    r._on_capture_tick()
+    assert "s" not in r.published_session_ids()
+    assert "f" not in r.published_session_ids()
+    assert {"s", "f"} <= r.session_optout()
+    r.stop()

@@ -16,7 +16,7 @@ from llm_bridge.paths import active_state_path
 # 名前・パス・識別子・自由文のキー。数値に見えても変換しない（Issue #100 D-6）。
 _STRING_KEYS: frozenset[str] = frozenset({
     "name", "dataset", "target", "path", "scope", "slot", "panel", "mode", "lut",
-    "text", "label", "color", "sender", "session",
+    "text", "label", "color", "sender", "session", "query", "sid", "search_tab",
 })
 _INT_RE = re.compile(r"[+-]?[0-9]+")
 _FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")

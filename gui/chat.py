@@ -16,14 +16,14 @@ from PySide6.QtCore import (
     Qt, QByteArray, QSignalBlocker, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QActionGroup, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
+    QActionGroup, QColor, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
     QTextDocumentFragment,
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QToolButton,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -442,6 +442,10 @@ class ChatWidget(QWidget):
         self._fork_parent: dict[str, str] = {}
         self._tool_display_default = _load_tool_display()
         self._persona_default = _load_persona_default()
+        # チャット検索（Issue #108）: (sid, 語) のハイライト対象と、描画中の
+        # メッセージ idx → 文書位置（リンクからのスクロール用）。
+        self._search_highlight: tuple[str, list[str]] | None = None
+        self._msg_positions: dict[int, int] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -474,6 +478,7 @@ class ChatWidget(QWidget):
         self._input.setPlaceholderText(tr("chat.input.placeholder"))
         self._input.setMinimumHeight(40)
         self._input.installEventFilter(self)
+        self._log.installEventFilter(self)   # Esc で検索ハイライトを消す（_input 生成後に入れる）
 
         # ----- 履歴/入力の境界をドラッグでリサイズ（送信ボタン行は splitter の外） -----
         self._io_split = QSplitter(Qt.Orientation.Vertical)
@@ -553,7 +558,16 @@ class ChatWidget(QWidget):
         self._apply_zoom()
 
     def eventFilter(self, obj, ev) -> bool:
-        if obj is self._input and isinstance(ev, QKeyEvent) \
+        log = getattr(self, "_log", None)
+        if log is not None and obj is log and isinstance(ev, QKeyEvent) \
+                and ev.type() == QKeyEvent.Type.KeyPress \
+                and ev.key() == Qt.Key.Key_Escape:
+            self._search_highlight = None
+            log.setExtraSelections([])
+            return False
+        # getattr: _log にもフィルタを入れたので、破棄途中（Python 側の属性が先に
+        # 消えた後）のイベントもここへ来る。
+        if obj is getattr(self, "_input", None) and isinstance(ev, QKeyEvent) \
                 and ev.type() == QKeyEvent.Type.KeyPress \
                 and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
                 and (ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -1150,6 +1164,7 @@ class ChatWidget(QWidget):
         (system / tool / tool-call-only messages are not drawn — matches live)."""
         self._status.setText("")
         self._log.clear()
+        self._msg_positions = {}
         self._append_system_line(self._engine_header(sess))
         # getattr: Tier 1 patch は既存インスタンスを残し __init__ を再実行しないので、
         # patch 前に作られた ChatWidget には _backend_error が無い（_effective_engine と同じ理由）。
@@ -1193,6 +1208,226 @@ class ChatWidget(QWidget):
         note = self._turn_notes.pop(sess.id, None)
         if note:
             self._append_system_line(note)
+        self._apply_search_highlight(sess)
+
+    # ----- chat search (Issue #108) -----
+
+    def _status_note(self, text: str) -> None:
+        w = self._window
+        if w is not None and hasattr(w, "statusBar"):
+            w.statusBar().showMessage(text, 5000)
+
+    def _apply_search_highlight(self, sess: ChatSession) -> None:
+        """検索リンクから来た語を extraSelections でハイライトする（再描画のたびに付け直す）。"""
+        hl = getattr(self, "_search_highlight", None)
+        if not hl or hl[0] != sess.id or not hl[1]:
+            self._log.setExtraSelections([])
+            return
+        doc = self._log.document()
+        sels = []
+        for term in hl[1]:
+            c = doc.find(term)
+            while not c.isNull() and len(sels) < 2000:
+                sel = QTextEdit.ExtraSelection()
+                sel.format.setBackground(QColor("#ffe066"))
+                sel.format.setForeground(QColor("#000000"))
+                sel.cursor = c
+                sels.append(sel)
+                c = doc.find(term, c)
+            if len(sels) >= 2000:
+                break
+        self._log.setExtraSelections(sels)
+
+    def _scroll_to_message(self, idx: int) -> None:
+        pos = getattr(self, "_msg_positions", {}).get(idx)
+        if pos is None:
+            return
+        c = QTextCursor(self._log.document())
+        c.setPosition(pos)
+        self._log.setTextCursor(c)
+        self._log.ensureCursorVisible()
+        sb = self._log.verticalScrollBar()
+        sb.setValue(sb.value() + self._log.cursorRect(c).top())
+
+    def search_context(self):
+        """検索コア用のスナップショット。never raise."""
+        from llm_bridge.chat_search import SearchContext
+        open_ds = None
+        w = self._window
+        if w is not None and hasattr(w, "open_dataset_names"):
+            try:
+                names = w.open_dataset_names()
+                if isinstance(names, (list, tuple)):
+                    open_ds = [n for n in names if isinstance(n, str)]
+            except Exception:
+                open_ds = None
+        titles = {}
+        for s in self._sessions:
+            try:
+                titles[s.id] = self._display_title(s)
+            except Exception:
+                pass
+        return SearchContext(sessions=list(self._sessions),
+                             current_dataset=self._current_dataset,
+                             open_datasets=open_ds, titles=titles)
+
+    def _switch_dataset_for_search(self, ds) -> bool:
+        w = self._window
+        if w is None or not hasattr(w, "set_active_dataset"):
+            return False
+        try:
+            ok = bool(w.set_active_dataset(ds))
+        except Exception:
+            return False
+        return ok and self._current_dataset == ds
+
+    def open_search(self) -> None:
+        """検索ウィンドウを開き、結果タブを追加する（Ctrl+F）。"""
+        from gui import chat_search as cs
+        dlg = cs.ChatSearchDialog(self, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sid = dlg.jump_session_id()
+        if sid is not None:
+            self._jump_to_session(sid)
+            return
+        req = dlg.request()
+        if req is not None:
+            self.run_search(req)
+
+    def _jump_to_session(self, sid) -> None:
+        self._on_search_link(sid, None, [])
+
+    def run_search(self, req) -> None:
+        """検索を実行して結果の新しいチャットタブ（kind="search"）を追加する。"""
+        import dataclasses
+        from common import i18n
+        from gui import chat_search as cs
+        from llm_bridge import chat_search as core
+        if self._window is not None and hasattr(self._window, "current_chat_dataset"):
+            ds = self._window.current_chat_dataset()
+            if ds is not None:
+                self._current_dataset = ds
+        if req.scope == "dataset" and req.dataset is None:
+            if self._current_dataset is not None:
+                req = dataclasses.replace(req, dataset=self._current_dataset)
+            else:
+                req = dataclasses.replace(req, scope="unbound")
+        target = None
+        if req.scope == "dataset" and req.dataset is not None \
+                and req.dataset != self._current_dataset:
+            target = req.dataset
+        elif req.scope == "all" and self._current_dataset is None:
+            open_ds = self.search_context().open_datasets
+            if open_ds:
+                target = open_ds[0]
+        if target is not None and not self._switch_dataset_for_search(target):
+            self._status_note(tr("chat.search.dataset_closed", dataset=target))
+            return
+        ctx = self.search_context()
+        ds_arg = req.dataset if req.scope == "dataset" else None
+        spec = {"scope": req.scope, "dataset": req.dataset,
+                "include_archived": req.include_archived, "ai": req.ai}
+        hits: list = []
+        initial: list = []
+        if not req.ai:
+            hits = core.text_search(ctx, req.query, scope=req.scope, dataset=ds_arg,
+                                    include_archived=req.include_archived)
+        else:
+            if not core.list_sessions(ctx, scope=req.scope, dataset=ds_arg,
+                                      include_archived=req.include_archived):
+                self._status_note(tr("chat.search.no_sessions"))
+                return
+            if req.hint.strip():
+                initial = core.text_search(ctx, req.hint, scope=req.scope, dataset=ds_arg,
+                                           include_archived=req.include_archived, limit=30)
+        first = next((ln.strip() for ln in req.query.splitlines() if ln.strip()), "")[:30]
+        prev_id = self._active.id
+        self._commit_draft()
+        sess = chat_store.new_session(
+            self._backend.name, _SYSTEM_PROMPT, dataset=self._current_dataset,
+            title=tr("chat.search.title", query=first), kind="search", search_spec=spec,
+        )
+        if req.ai:
+            eng, model, provider = cs.ai_search_engine()
+            if eng is not None:
+                sess.engine = eng.id
+                sess.engine_model = model.strip() or None
+                sess.engine_provider = provider.strip() or None
+        else:
+            user_line = tr("chat.search.user_line", query=req.query,
+                           scope=cs.scope_label(req))
+            md = cs.hits_to_markdown(hits, req)
+            sess.messages += [Message(role="user", content=user_line),
+                              Message(role="assistant", content=md)]
+            sess.updated = max(time.time(), sess.updated + 1e-3)
+        self._sessions.append(sess)
+        self._active = sess
+        self._last_active_by_ds[self._current_dataset] = sess.id
+        self._rebuild_tab_bar()
+        self._render_session(sess)
+        self._switch_active_composer(prev_id)
+        self._update_turn_ui()
+        if not req.ai:
+            self.messageAdded.emit(sess.id, "user", user_line, "local")
+            self.messageAdded.emit(sess.id, "assistant", md, "local")
+            if sess.dataset is not None:
+                self._mark_chat_dirty()
+            self._log.verticalScrollBar().setValue(0)
+        else:
+            if req.hint.strip():
+                display = tr("chat.search.ai_user_line_hint", query=req.query,
+                             hint=req.hint, scope=cs.scope_label(req))
+            else:
+                display = tr("chat.search.ai_user_line", query=req.query,
+                             scope=cs.scope_label(req))
+            self._start_turn(sess, display, "local", wire_text=core.build_ai_prompt(
+                req, ctx, i18n.current_language(), search_sid=sess.id, initial_hits=initial))
+        if sess.dataset is not None:
+            if not cs.record_search(req, ctx, dataset=sess.dataset,
+                                    n_hits=(None if req.ai else len(hits)),
+                                    session_id=sess.id):
+                self._status_note(tr("chat.search.history.write_failed"))
+
+    def _on_search_link(self, sid, idx, terms) -> None:
+        """chatsearch: リンク／履歴からのジャンプ。該当チャットへ切替・スクロール・ハイライト。"""
+        from llm_bridge import chat_search as core
+        sess = core.resolve_session(self.search_context(), sid)
+        if sess is None:
+            self._status_note(tr("chat.search.link_missing"))
+            return
+        # データセット切替を先に（_on_unarchive_session は _current_dataset で
+        # _last_active_by_ds を書き、可視集合で rebuild するため）。
+        if sess.dataset is not None and sess.dataset != self._current_dataset:
+            if not self._switch_dataset_for_search(sess.dataset):
+                self._status_note(tr("chat.search.dataset_closed", dataset=sess.dataset))
+                return
+        self._search_highlight = (sess.id, list(terms))   # 描画前にセット
+        if _is_archived(sess):
+            self._on_unarchive_session(sess.id)
+            self._status_note(tr("chat.search.restored_archived",
+                                 title=self._display_title(sess)))
+        elif sess is not self._active:
+            self.set_active_session_by_id(sess.id)
+        else:
+            self._render_session(sess)
+        self._last_active_by_ds[self._current_dataset] = sess.id
+        if idx is not None:
+            self._scroll_to_message(idx)
+        self._log.setFocus()
+
+    def _search_followup_wire(self, sess: ChatSession, text: str) -> str | None:
+        """AI 検索タブの続きの質問に付ける指示。対象外・失敗は None（入力文をそのまま送る）。"""
+        try:
+            from common import i18n
+            from llm_bridge import chat_search as core
+            req = core.request_from_search_session(sess)
+            if req is None or not req.ai:
+                return None
+            return core.build_ai_followup_prompt(req, self.search_context(), text,
+                                                 i18n.current_language(), search_sid=sess.id)
+        except Exception:
+            return None
 
     # ----- tab bar -----
 
@@ -1330,6 +1565,13 @@ class ChatWidget(QWidget):
     # ----- fork / edit (Issue #63) -----
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
+        if url.scheme() == "chatsearch":
+            from llm_bridge import chat_search as core
+            parsed = core.parse_search_link(
+                url.toString(QUrl.ComponentFormattingOption.FullyEncoded))
+            if parsed is not None:
+                self._on_search_link(*parsed)
+            return
         s = url.toString()
         if s.startswith("chataction:"):
             parts = s.split(":", 2)
@@ -1708,7 +1950,8 @@ class ChatWidget(QWidget):
                 self._current_dataset = ds
         self._start_turn(self._active, text, "local")
 
-    def _start_turn(self, sess: ChatSession, text: str, origin: str = "local") -> None:
+    def _start_turn(self, sess: ChatSession, text: str, origin: str = "local", *,
+                    wire_text: str | None = None) -> None:
         """Begin a streaming turn for `sess` with user message `text`.
 
         Extracted from `_on_send` so remote (guest) injections share the exact
@@ -1718,7 +1961,13 @@ class ChatWidget(QWidget):
         Works whether `sess` is the visible session or a background one: `_log`
         is touched ONLY when `sess is self._active` (a background session's
         transcript is redrawn by `_render_session` on tab switch).
+
+        `wire_text` はバックエンドへ送る最後の user 本文だけを差し替える（セッション・
+        transcript・messageAdded には `text` が残る）。None なら AI 検索タブの続きの
+        質問に指示を付ける（`_search_followup_wire`。Issue #108）。
         """
+        if wire_text is None:
+            wire_text = self._search_followup_wire(sess, text)
         sess.messages.append(Message(role="user", content=text))
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         self.messageAdded.emit(sess.id, "user", text, origin)
@@ -1738,7 +1987,7 @@ class ChatWidget(QWidget):
             self._mark_chat_dirty()
         is_active = sess is self._active
         if is_active:
-            self._append_block("user", text)
+            self._append_block("user", text, msg_index=len(sess.messages) - 1)
             self._append_block("assistant", "")
         backend = self._session_backends.get(sess.id)
         if backend is None:
@@ -1748,8 +1997,10 @@ class ChatWidget(QWidget):
         kill_timer = QTimer(self)
         kill_timer.setSingleShot(True)
         kill_timer.timeout.connect(partial(self._force_kill, sess.id))
-        worker = _StreamWorker(sess.id, backend, list(sess.messages),
-                               self._dispatch, self)
+        msgs = list(sess.messages)
+        if wire_text is not None:
+            msgs[-1] = Message(role="user", content=wire_text)
+        worker = _StreamWorker(sess.id, backend, msgs, self._dispatch, self)
         turn = _Turn(sess, backend, worker, kill_timer)
         turn.stream_id = uuid.uuid4().hex   # この応答の partial/最終を紐付ける安定 ID
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは
@@ -1859,7 +2110,8 @@ class ChatWidget(QWidget):
             {"id": s.id, "title": self._display_title(s),
              "busy": s.id in self._turns, "dataset": s.dataset,
              "archived": _is_archived(s),
-             "forked_from": self._fork_parent.get(s.id)}
+             "forked_from": self._fork_parent.get(s.id),
+             "kind": getattr(s, "kind", "chat")}
             for s in self.sessions_for_persistence()
         ]
 
@@ -2190,6 +2442,8 @@ class ChatWidget(QWidget):
                     f' style="color:#888888;text-decoration:none">'
                     f'{html.escape(label)}</a>'
                 )
+            if getattr(self, "_msg_positions", None) is not None:
+                self._msg_positions[msg_index] = cursor.position()
         cursor.insertHtml(header)
         cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())

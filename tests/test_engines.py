@@ -566,3 +566,57 @@ def test_session_settings_untouched_for_empty_config_patch(monkeypatch):
 
 def test_session_settings_mock_has_no_settings_key():
     assert session_settings(engine_by_id("mock"), "m", "") == {"model": "m"}
+
+
+# --------------------------------------------------------------------------- #
+# [chat_search] (Issue #108)                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_chat_search_selection_defaults(monkeypatch):
+    for data in ({}, {"chat_search": {}}, {"chat_search": {"engine": ""}},
+                 {"chat_search": {"engine": "nope", "model": "x"}},
+                 {"chat_search": "bad"}, {"chat_search": {"engine": 3}}):
+        monkeypatch.setattr(engines, "backend_config", _cfg(data))
+        assert engines.chat_search_selection() == (None, "", "")
+
+
+def test_chat_search_selection_values(monkeypatch):
+    monkeypatch.setattr(engines, "backend_config", _cfg(
+        {"chat_search": {"engine": " pi ", "model": " m ", "provider": "llama.cpp"}}))
+    eng, model, provider = engines.chat_search_selection()
+    assert eng.id == "pi" and model == "m" and provider == "llama.cpp"
+    monkeypatch.setattr(engines, "backend_config", _cfg(
+        {"chat_search": {"engine": "codex", "model": 5, "provider": None}}))
+    eng, model, provider = engines.chat_search_selection()
+    assert eng.id == "codex" and model == "" and provider == ""
+
+
+def test_apply_chat_search_selection_writes(apply_env):
+    apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
+    engines.apply_chat_search_selection(engine_by_id("pi"), " m1 ", "llama.cpp")
+    d = tomllib.loads(apply_env.cfg_p.read_text(encoding="utf-8"))
+    assert d["chat_search"] == {"engine": "pi", "model": "m1", "provider": "llama.cpp"}
+    assert d["backend"]["name"] == "mock"
+    assert apply_env.bc.cleared == 1
+
+
+def test_apply_chat_search_selection_none_and_mock(apply_env):
+    apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
+    apply_env.bc.data = {"chat_search": {"engine": "pi", "model": "m", "provider": "p"}}
+    engines.apply_chat_search_selection(None, "x", "y")
+    d = tomllib.loads(apply_env.cfg_p.read_text(encoding="utf-8"))
+    assert d["chat_search"] == {"engine": "", "model": "", "provider": ""}
+    engines.apply_chat_search_selection(engine_by_id("mock"), "x", "y")
+    d = tomllib.loads(apply_env.cfg_p.read_text(encoding="utf-8"))
+    assert d["chat_search"] == {"engine": "mock", "model": "", "provider": ""}
+
+
+def test_apply_chat_search_selection_unchanged_no_write(apply_env):
+    apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
+    apply_env.bc.data = {"chat_search": {"engine": "codex", "model": "gpt", "provider": ""}}
+    before = apply_env.cfg_p.read_bytes()
+    mtime = os.stat(apply_env.cfg_p).st_mtime_ns
+    engines.apply_chat_search_selection(engine_by_id("codex"), "gpt", "ignored")
+    assert apply_env.cfg_p.read_bytes() == before
+    assert os.stat(apply_env.cfg_p).st_mtime_ns == mtime
+    assert apply_env.bc.cleared == 0

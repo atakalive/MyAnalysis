@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -31,13 +32,16 @@ from common.i18n import tr
 from llm_backend import build_backend
 from llm_backend.engines import (
     ENGINES,
+    apply_chat_search_selection,
     apply_selection,
     candidate_settings,
+    chat_search_selection,
     combo_choices,
     current_engine_id,
     current_model,
     current_provider,
     engine_by_id,
+    engine_label,
     save_choices,
     session_settings,
 )
@@ -98,6 +102,8 @@ class BackendSelectorDialog(QDialog):
         )
         self._form.addRow(tr("backend.dialog.provider"), self._provider_row)
 
+        self._build_search_section(layout)
+
         self._env_warning = QLabel(tr("backend.dialog.env_warning"), self)
         self._env_warning.setWordWrap(True)
         layout.addWidget(self._env_warning)
@@ -154,6 +160,73 @@ class BackendSelectorDialog(QDialog):
         apply_selection(
             engine, model, provider, engine_changed=self._engine_changed()
         )
+
+    # ----- AI chat-search model (Issue #108) -----
+
+    def _build_search_section(self, layout) -> None:
+        """「AI 検索用モデル」グループ（[chat_search]）。疎通確認は主選択のみ。"""
+        group = QGroupBox(tr("backend.dialog.search_group"), self)
+        self._search_form = QFormLayout(group)
+        self._search_follow = QCheckBox(tr("backend.dialog.follow_default"), group)
+        self._search_form.addRow(self._search_follow)
+        self._search_engine_combo = QComboBox(group)
+        for e in ENGINES:
+            self._search_engine_combo.addItem(engine_label(e), e.id)
+        self._search_form.addRow(tr("backend.dialog.engine"), self._search_engine_combo)
+        self._search_model_combo = QComboBox(group)
+        self._search_model_combo.setEditable(True)
+        self._search_form.addRow(tr("backend.dialog.model"), self._search_model_combo)
+        self._search_provider_combo = QComboBox(group)
+        self._search_provider_combo.setEditable(True)
+        self._search_form.addRow(tr("backend.dialog.provider"), self._search_provider_combo)
+        layout.addWidget(group)
+
+        eng, model, provider = chat_search_selection()
+        self._search_follow.setChecked(eng is None)
+        idx = self._search_engine_combo.findData(eng.id if eng else current_engine_id())
+        if idx >= 0:
+            self._search_engine_combo.setCurrentIndex(idx)
+        self._search_override = (eng.id if eng else None, model, provider)
+        self._sync_search_widgets()
+        # _refresh_enabled はまだ _buttons が無いので呼べない — 初期状態を直接当てる。
+        on = not self._search_follow.isChecked()
+        for c in (self._search_engine_combo, self._search_model_combo,
+                  self._search_provider_combo):
+            c.setEnabled(on)
+        self._search_engine_combo.currentIndexChanged.connect(
+            lambda _i=0: self._sync_search_widgets())
+        self._search_follow.toggled.connect(lambda _c=False: self._refresh_enabled())
+
+    def _sync_search_widgets(self) -> None:
+        e = engine_by_id(self._search_engine_combo.currentData())
+        if e is None:
+            return
+        ov_id, ov_model, ov_provider = self._search_override
+        for field, combo, ov, cur in (
+            ("model", self._search_model_combo, ov_model, current_model),
+            ("provider", self._search_provider_combo, ov_provider, current_provider),
+        ):
+            seed = ov if (ov_id == e.id and ov) else cur(e)
+            items = [seed] if seed else []
+            for v in combo_choices(e, field):
+                if v not in items:
+                    items.append(v)
+            combo.clear()
+            combo.addItems(items)
+            combo.setEditText(seed)
+            self._search_form.setRowVisible(combo, field in e.fields)
+
+    def _apply_search_selection(self) -> None:
+        if getattr(self, "_search_follow", None) is None:
+            return
+        if self._search_follow.isChecked():
+            apply_chat_search_selection(None, "", "")
+        else:
+            apply_chat_search_selection(
+                engine_by_id(self._search_engine_combo.currentData()),
+                self._search_model_combo.currentText(),
+                self._search_provider_combo.currentText(),
+            )
 
     # ----- selection helpers -----
 
@@ -317,6 +390,12 @@ class BackendSelectorDialog(QDialog):
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
             self._ping_unlocked
         )
+        if getattr(self, "_search_follow", None) is not None:
+            self._search_follow.setEnabled(self._ping_unlocked)
+            search_on = self._ping_unlocked and not self._search_follow.isChecked()
+            for c in (self._search_engine_combo, self._search_model_combo,
+                      self._search_provider_combo):
+                c.setEnabled(search_on)
 
     # ----- connectivity check -----
 
@@ -421,6 +500,7 @@ class BackendSelectorDialog(QDialog):
         provider = self._current_provider_text(engine)
         try:
             self._do_apply(engine, model, provider)
+            self._apply_search_selection()
         except (RuntimeError, OSError) as e:
             # RuntimeError = set_toml_keys validation / rollback double-fault;
             # OSError (incl. PermissionError) = raw IO on either write. Both must
@@ -518,6 +598,9 @@ class SessionEngineDialog(BackendSelectorDialog):
 
     def _editable_by_mode(self) -> bool:
         return not self._follow_default.isChecked()
+
+    def _build_search_section(self, layout) -> None:
+        return   # AI 検索用モデルは全体ダイアログだけ（Issue #108）
 
     def _on_follow_toggled(self, _checked: bool = False) -> None:
         self._refresh_enabled()
