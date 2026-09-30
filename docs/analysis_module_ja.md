@@ -60,7 +60,7 @@ def apply_state(tab, state):               # 任意: 前回の表示状態を復
   - `AnalysisTab`（`gui.tab`）: `add_panel(key, widget, "top"|"left"|"right")`、`set_split_orientation("horizontal"|"vertical")`、`set_split_ratio(l, r)`、`register_command(verb, handler)` など。
   - `gui.panels`: `SelectorPanel`（コンボボックス）、`TrajectoryPanel`（散布図）、`ImagePanel`（配列画像）、`FigurePanel`（PNG 表示）。
   - `gui.imageviewer.attach_image_viewer(tab, image, panel="left")`（画像ビューア）。
-- **独自コマンド**: `tab.register_command("select", handler)` で登録すると、`python -m llm_bridge tab <解析名> select session=... --wait` やエージェントから呼べる。`k=v` はキーワード引数として渡されるので、ハンドラの引数名をキーに合わせる。値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキー（`llm_bridge/__main__.py` の `_STRING_KEYS`）では文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。独自コマンドの引数名が `_STRING_KEYS` に入っていると、数字でも文字列のまま届く。`true` / `false` は文字列のまま。返り値は結果の `result` に入り、例外は `status: error` になる。`set-split` / `snapshot` / `refresh-state` は予約済み。用途は解析の `README.md` に書いておく。
+- **独自コマンド**: `tab.register_command("select", handler)` で登録すると、`python -m llm_bridge tab <解析名> select session=... --wait` やエージェントから呼べる。`k=v` はキーワード引数として渡されるので、ハンドラの引数名をキーに合わせる。値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキー（`llm_bridge/__main__.py` の `_STRING_KEYS`）では文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。独自コマンドの引数名が `_STRING_KEYS` に入っていると、数字でも文字列のまま届く。`true` / `false` は文字列のまま。返り値は結果の `result` に入り、例外は `status: error` になる。`set-split` / `close-pane` / `list-panes` / `snapshot` / `refresh-state` は予約済み。用途は解析の `README.md` に書いておく。
 - **import**: `common.*` / `core.*` / `gui.*` / `config` は使える。同じフォルダに置いた補助 `.py` は import できないので、1 ファイルにまとめる。追加パッケージは GUI と同じ venv に入れる（Qt 以外はモジュール先頭で import してよい）。
 - **`@dataclass` と型注釈**: `@dataclass` や型注釈はそのまま使える（雛形の `from __future__ import annotations` も外さなくてよい）。ただし `analysis.py` は開くときだけモジュールとして登録されるので、解析のオブジェクトの pickle と、Windows の multiprocessing（spawn）は使えない。タブを開いた後に関数の中で `@dataclass` を定義するのも避ける。注釈の評価（`typing.get_type_hints`）やソースの取得（`inspect.getsource`）は、開いた後だと解析の中で定義した名前を解決できず失敗するので、`load()` / `build_tab()` の中で済ませる。BOM 付きで保存した `analysis.py` は GUI では開けない（`U+FEFF` の構文エラー）ので、BOM 無しの UTF-8 で保存する。
 
@@ -88,17 +88,17 @@ python -m llm_bridge apply-analysis <解析名> --dataset <データセット名
 - CLI の `--wait` の出力（JSON の `status` / `error` / `result`）か、エージェントの返答で確認する。
 - 解析が 0 バイト・見つからない・`build_tab` が無い・名前の不一致などは、エラーメッセージにそのまま出る。
 - `load()` / `build_tab()` の例外は、`error` に型とメッセージが、`traceback` に末尾 10 フレームのトレースバックが入る。詳しく調べるときは、自分のスクリプトから `load()` を呼んでみる。
-- `apply_state` の例外は、`could not establish state for … (apply_state failed: <型>: <メッセージ>)` というエラーになり、`traceback` にも元の例外の連鎖（`The above exception was the direct cause …`）として解析側のフレームが入る。ただし再読み込み（`reload scope=tab`）の失敗は `status: "ok"` の戻り値の文字列として返るので、`traceback` は `null` のまま。詳しい traceback は `python tool.py` で起動したときのコンソールにも出る。雛形のように `build_tab` の中で `refresh-state` を呼ぶ場合、状態を返す関数の失敗（JSON にできない値など）は `build_tab` の例外として型とメッセージが返る。
-- 保存したセッションの復元に失敗したタブは、黙って飛ばされる。原因は `python tool.py` で起動したときのコンソールに出る。ボタン操作などで起きた未捕捉の例外は `data/logs/gui-crash-*.log` に残る。
+- `apply_state` の例外は、`could not establish state for … (apply_state failed: <型>: <メッセージ>)` というエラーになり、`traceback` にも元の例外の連鎖（`The above exception was the direct cause …`）として解析側のフレームが入る。ただし再読み込み（`reload scope=tab`）の失敗は `status: "ok"` の戻り値の文字列として返るので、`traceback` は `null` のまま。詳しい traceback は、ログを書ける限り `data/logs/myanalysis.log` に残る（書けない場合 → [トラブルシューティング](troubleshooting_ja.md#トラブルシューティング)。`python tool.py` で起動したときはコンソールにも出る）。雛形のように `build_tab` の中で `refresh-state` を呼ぶ場合、状態を返す関数の失敗（JSON にできない値など）は `build_tab` の例外として型とメッセージが返る。
+- 保存したセッションの復元に失敗したタブは、黙って飛ばされる。原因は、ログを書ける限り `data/logs/myanalysis.log` に残る（書けない場合 → [トラブルシューティング](troubleshooting_ja.md#トラブルシューティング)。`python tool.py` で起動したときはコンソールにも出る）。ボタン操作などで起きた未捕捉の例外は `data/logs/gui-crash-*.log` に残る。
 - `load()` は GUI のスレッドで動くので、重い読み込みの間はウィンドウが固まる。CLI では `--wait 120` のように長めに待つ。
 
 ## PNG の一括出力（GUI 不要）
 
 ```bash
-python -B -m export <データセット名> <解析名>
+python -m export <データセット名> <解析名>
 ```
 
-`load()` の結果を `build_export_figs()` に渡し、返された図を `<work_dir>/analyses/<解析名>/batch/` に PNG で保存する（`load()` が `None` を返すと失敗する）。`-B` は同期ドライブ上にキャッシュファイルを作らないため。
+`load()` の結果を `build_export_figs()` に渡し、返された図を `<work_dir>/analyses/<解析名>/batch/` に PNG で保存する（`load()` が `None` を返すと失敗する）。
 
 ## Python から直接使う
 

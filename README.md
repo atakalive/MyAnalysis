@@ -1,439 +1,184 @@
 # MyAnalysis
 
-Experimental measurement-data analysis project (Python). It provides a **PySide6 GUI** + an **LLM chat dock** + a **hot-reload** development environment. Measurement data lives **outside the repository** (on a synced drive); only code is versioned here.
+[English](README.md) | [日本語](README_ja.md)
 
-> This file is an overview for users and newcomers. For the detailed conventions aimed at developers and LLM agents, see [CLAUDE.md](CLAUDE.md). A Japanese version of this README is available at [README_ja.md](README_ja.md).
+A desktop app (Python / PySide6) for analyzing measurement data by chatting with an AI agent.
 
----
+Ask "plot the relationship between A and B", and the agent inspects how the data is organized, analyzes and plots it in Python, and shows the figure in a tab. The chat history and the analysis code, figures, and reports the agent saved are kept in the dataset's folder, so if you put the folder on a sync drive you can pick up where you left off on another PC.
 
-## How MyAnalysis works (concept)
+**Repositories:**
+- **GitHub (stable):** <https://github.com/atakalive/MyAnalysis>
+- **GitLab (development):** <https://gitlab.com/atakalive/MyAnalysis>
 
-MyAnalysis is built around one idea: **you analyze measurement data by telling an AI agent in the chat dock what you want to know — in plain language — and it does the analysis and drives the GUI for you.** You are not expected to hand-write plotting code or memorize commands; you direct the work at the level of *questions and goals*, and the agent handles the mechanics (finding the data's real layout, loading it, plotting, saving, laying out tabs).
-
-**Design principles**
-
-1. **Everything lives with the data, on the synced drive.** Only the application code is in this repository. Each dataset is self-contained — its settings (`myanalysis.toml`), its analysis code (`analyses/<name>/`), and its output (`_work/`) all sit under the dataset directory on the synced drive. The point: *the same analysis resumes identically on any PC.*
-2. **The chat agent is a data analyst, not an app developer.** Its job is to analyze the registered datasets and operate the GUI — never to modify MyAnalysis itself.
-3. **Inspect first.** No data layout is assumed. The agent looks at a dataset's real structure before loading it, so you can point it at a brand-new dataset and it works out the shape.
-4. **No local persistence.** Figures, code, and state are written only to the dataset's `work_dir` on the synced drive; nothing is stashed on the local machine. This is what makes "resume on any PC" hold.
-
-**How you instruct it** — say what you want in ordinary language. The agent decides where to load from, where to save (the `work_dir` is automatic — you never specify it), how to label things, and which GUI operations to run. For example:
-
-- "Open `<Dataset Name>` and explain the overview."
-- "Visualize the relationship between `<quantity A>` and `<quantity B>`."
-- "Display the results of the current `<Tab A>` and `<Tab B>` side by side in a vertical panel split."
-- "Apply an equivalent analysis to `<Dataset A>` and `<Dataset B>` and compare them."
-- "Summarize the overall conclusion as a single presentation slide."
-- "Explain exactly what this analysis did."
-
-Under the hood the agent analyzes with Python (`common/explore.py`) and drives the GUI with `python -m llm_bridge` verbs — but you don't have to think about that. For the exact agent contract, see the chat system prompt in [llm_backend/claude_code.py](llm_backend/claude_code.py); for conventions, [CLAUDE.md](CLAUDE.md).
+The detailed documents under `docs/` are available in Japanese only.
 
 ---
 
-## Requirements / Setup
+## QuickStart
 
-- **Python 3.11 or newer is required** (the code uses `tomllib` from the standard library; 3.10 and earlier will not work).
-- Dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). There is no `pyproject.toml`.
+**Prerequisites**: Windows 11 / Python 3.11 or later / Git for Windows / the Claude Code extension installed in VS Code and signed in. To use another engine → [AI engines](#ai-engines)
 
-**Core dependencies** (needed to launch the GUI):
+> [!WARNING]
+> The agent runs commands with your user privileges, without asking for confirmation. Your requests and the data it reads are sent to the engine's provider. → [Security](#security)
 
-```
-pip install -r requirements.txt
-```
+1. **Install** (in Command Prompt, in a local folder that is not a sync folder such as OneDrive)
 
-(PySide6, pyqtgraph, numpy, pandas, matplotlib, Pillow — see requirements.txt)
-
-**Optional dependencies** (only for specific analyses):
-
-- `h5py` — needed only for analyses that handle `.h5` camera images (e.g. `dataset_d`). Imported lazily inside `load()`.
-- `tifffile` — needed only for opening TIFF in the ImageJ-style image viewer (Issue #60, `show_image`). `tifffile` opens 16bit / multi-page / N-dimensional TIFF. It is imported lazily inside `common/image_io.py`; without it TIFF loading raises a graceful `ImportError` pointing at `pip install`.
-
-**Config files** (copy each `.example` to activate; the real files are gitignored):
-
-| Copy from | Copy to | Purpose |
-|---|---|---|
-| [.env.example](.env.example) | `.env` | LLM connection & secrets (`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `LLM_BACKEND`, etc.) |
-| [llm_backend/config.example.toml](llm_backend/config.example.toml) | `llm_backend/config.toml` | Backend selection and operational settings |
-| [models.example.toml](models.example.toml) | `models.toml` | Model settings (model / thinking / effort / provider) |
-
-The GUI itself starts even without these files — the chat simply has no configured backend.
-
----
-
-## Launching
-
-```bash
-# Windows: double-click also works. Activates .venv if present, then launches the
-# GUI windowless via pythonw (no lingering console). Use `python tool.py` to see errors.
-run.bat
-
-# Direct (keeps a console — use this to see startup errors / tracebacks)
-python tool.py
-python tool.py --demo            # Adds a synthetic demo tab exercising every panel type
-python tool.py --resume-session  # Restore window/tabs/chat from the reload manifest (mainly for hot-reload)
-```
-
-The GUI entry point is [tool.py](tool.py) (PySide6).
-
-When launched windowless (`run.bat` / `pythonw`), uncaught exceptions are written as tracebacks to `data/logs/gui-crash-*.log` (a crash at the same site is recorded only on its first occurrence even if the message changes; at most 200 files per process; intentional exits are not recorded). Startup failures show a dialog. An old Python is reported by the dialog only (nothing is logged). Import failures (missing packages, a corrupt registry) and errors while building the window also write a traceback to `data/logs/gui-crash-*.log` (best-effort); warnings go to `data/logs/myanalysis.log`.
-
----
-
-## Directory layout
-
-| Path | Role |
-|---|---|
-| [tool.py](tool.py) | GUI entry point (`QApplication` + `ToolWindow`) |
-| [run.bat](run.bat) | Windows launcher (activate `.venv` → windowless `pythonw tool.py`) |
-| [config.py](config.py) | Dataset registry **API**: `DATASETS` (dataset name → {hostname: full path}), `get_dataset_dir()` |
-| [dataset_registry.py](dataset_registry.py) | Registry **storage**: reads/writes `datasets.local.json` (Git-ignored) |
-| `datasets.local.json` | Your registration data (repo root, Git-ignored, never committed) |
-| [dataset_config.py](dataset_config.py) | Reads/writes per-dataset settings (`myanalysis.toml`) |
-| [common/](common/) | Shared utilities (`explore.py`, `loaders.py`, `paths.py`, `filelock.py`, `env.py`) |
-| [core/](core/) | Low-level modules (`figures.py` = matplotlib helpers; forces the Agg backend on import) |
-| [gui/](gui/) | PySide6 GUI (`window.py`, `tab.py`, `chat.py`, `panels.py`, `tools.py`) |
-| [llm_backend/](llm_backend/) | LLM backend abstraction (claude / openai / pi / codex / mock) |
-| [llm_bridge/](llm_bridge/) | GUI↔CLI bridge (over the filesystem, cross-platform) |
-| [devtools/](devtools/) | Hot reload (`hotreload.py`, `qt_integration.py`) |
-| [meeting/](meeting/) | Meeting-share relay (local in-memory relay + cloudflared tunnel) |
-| [relay-worker/](relay-worker/) | Meeting-share guest page (`chatdock.html`, published to GitLab Pages) + its setup README |
-| [config_share.py](config_share.py) | Optional Cloudflare R2 sync for the registry + portable files (push / pull / sync) |
-| [i18n/](i18n/) | UI text catalogs (`en.toml` / `ja.toml`) |
-| [newanalysis/](newanalysis/) | Analysis-module scaffold generator |
-| [export/](export/) | Headless PNG export driver |
-| [tests/](tests/) | pytest test suite |
-| `data/` | Gitignored local scratch space (outputs, caches). Never commit its contents |
-
-Analysis modules are **not** in the repository — each analysis lives with its data on the synced drive at `<dataset_dir>/analyses/<name>/analysis.py` (see "Adding an analysis & exporting" below).
-
----
-
-## Data access
-
-Measurement data lives outside the repository on a synced drive, and **the mount-point drive letter differs per PC**. To absorb that difference, the registry maps each dataset to "hostname → full path on that PC". It lives in `datasets.local.json` at the repo root (Git-ignored, so your paths are never committed) and is read through [config.py](config.py) ([dataset_registry.py](dataset_registry.py) does the storage):
-
-```json
-{
-  "sample_dataset": {
-    "HOST_A": "C:/example-data/sample",
-    "HOST_B": "/example-data/sample"
-  }
-}
-```
-
-A fresh checkout has no `datasets.local.json` — the app starts with an empty registry and the file is created on the first registration.
-
-**Never hardcode absolute paths like `G:\...` in analysis code.** Always go through:
-
-```python
-from config import get_dataset_dir
-path = get_dataset_dir("dataset_a")  # resolved by current hostname
-```
-
-Unknown dataset names and unregistered hosts raise descriptive errors telling you to register the dataset. When using a new PC, add an entry for that hostname (uppercase) to each dataset you'll use.
-
-### Registering a dataset
-
-```bash
-# CLI (writes datasets.local.json under a lock; auto-opens if the GUI is running)
-python -m llm_bridge register-dataset <name> <path> [--host H] [--no-open]
-
-# GUI: File → データセットを新規登録 (New dataset)
-```
-
-With R2 sync configured, GUI startup and CLI registration sync both ways; registering a dataset or deleting a registration in the GUI pushes to R2 right away in the background (push only; failures are silent and the next startup sync catches up). Settings-file edits ride along with the next push or startup sync. `R2_AUTOSYNC=0` turns all automatic syncing off.
-
-Hand-editing `datasets.local.json` is fine too (plain UTF-8 JSON, LF). A corrupt
-registry is never silently replaced with an empty one: reads fail loudly, and sync
-refuses to push or overwrite. Restore by fixing the JSON by hand, or by moving it
-aside (e.g. `datasets.local.json.corrupt`, also Git-ignored) and running
-`python -m llm_bridge config-pull` if you use R2 sync.
-
-**Multiple PCs without R2 sync**: `datasets.local.json` is untracked, so `git pull`
-no longer carries registrations between machines. Either set up the optional R2
-config sync, or copy the file across by hand.
-
-#### Migrating from the old in-code registry
-
-Older versions kept `DATASETS` as a literal inside `config.py`. To move an existing
-setup over:
-
-1. Quit the GUI and make sure no CLI is registering or syncing.
-2. Copy the old `config.py` somewhere Git-ignored (e.g. `data/legacy_registry/config.py.legacy`). Do not overwrite an existing copy.
-3. After updating the code, and **before** starting the new app, convert it:
-
-   ```bash
-   python -m devtools.migrate_dataset_registry --source <saved config.py> [--output <registry.json>] [--dry-run]
+   ```bat
+   git clone https://github.com/atakalive/MyAnalysis.git
+   cd MyAnalysis
+   py -3 -m venv .venv
+   .venv\Scripts\activate
+   python -m pip install -r requirements.txt
    ```
 
-   The tool never imports or executes the old file (`ast.literal_eval` only), never
-   touches the network, and never overwrites an existing, different registry. To
-   confirm the result, run the exact same command a second time: a successful
-   migration then exits 0 as an "already up to date" no-op. Exit code 1 means the
-   destination differs or is unreadable — resolve that by hand.
-4. To restore from R2 sync instead, run `python -m llm_bridge config-pull` with a
-   valid or absent local registry. Credentials are configured as before.
-5. Restart on the new code and check the dataset list and path resolution on this host.
-   Migration works fully offline.
-
-### Session folder naming
-
-Inside a dataset directory, sessions are folders named `session_<yyyymmdd>_<hhmmss>_<id>`.
-
-### Per-dataset settings — `myanalysis.toml`
-
-Settings specific to one dataset live not in the registry (`datasets.local.json`) but in a **`myanalysis.toml` at the top of that dataset's directory** (managed by [dataset_config.py](dataset_config.py)), so they travel with the data on the synced drive.
-
-- `work_dir` (default `_work`) — where analysis output is saved. Relative paths resolve under the dataset directory.
-- `format` (default `csv_per_subdir`) — load format: `csv_per_subdir` or `custom`.
-
-Measurement files (CSV etc.) are never modified. `myanalysis.toml` is written mechanically at save time and is safe to hand-edit.
+2. **Launch**: double-click `run.bat`. The UI starts in English (to switch to Japanese: **Settings → Language / 言語 → 日本語**). If no window appears → [Troubleshooting](#troubleshooting)
+3. **AI engine**: in **Settings → Backend / model settings…**, choose "Claude (VS Code bundled engine)" and press **Apply**. On the second and later PCs that use [R2 config sync](docs/config_sync_ja.md), first read [the section for the second and later PCs](docs/config_sync_ja.md#2-台目以降).
+4. **Dataset**: choose the folder with your measurement data in **File → New dataset**. The folder name is filled in as the name; change it if it contains symbols or starts with `-` (→ [Datasets](#datasets)). When registration finishes, the dataset opens.
+5. **Ask**: type something like "describe what is in this dataset" or "plot the relationship between `<column A>` and `<column B>`" in the chat pane on the right and press **Ctrl+Enter**. A reply can take from tens of seconds to a few minutes, and figures open in tabs on the left. Code written on the spot is not kept, so if you want to reproduce it, ask "save the code too" (→ [Usage](#usage)). If you see `[error: …]` (`[エラー: …]` in the Japanese UI) → [Troubleshooting](#troubleshooting)
+6. **Save**: the tab layout and chats are not saved automatically. Use **File → Save session** often, and **File → Save and quit** when you are done (→ [Saving and resuming](#saving-and-resuming)).
 
 ---
 
-## Exploratory analysis
+## Contents
 
-For LLM agents and interactive exploration, [common/explore.py](common/explore.py) offers a minimal surface:
-
-```python
-from common.explore import load_dataset, save_fig, save_code, save_text, dataset_summary
-
-summary = dataset_summary("my_dataset")   # INSPECT first: real subdirs + sample CSV columns/rows
-# No default pattern is assumed — use what you saw above to load:
-sessions = load_dataset("my_dataset", subdir_pattern="<real_folder_*>", csv_name="<real>.csv")
-# → list[dict]: each {"name": str, "dir": Path, "df": DataFrame}
-
-save_fig("my_dataset", fig, "overview")    # → <work_dir>/figures/overview.png (fig is closed after save)
-save_code("my_dataset", "helper", code)    # → <work_dir>/code/helper.py   (.py only; no extension in the label)
-save_text("my_dataset", "reports/summary.md", md)   # → <work_dir>/reports/summary.md (any extension, subdirs OK)
-```
-
-`save_text` is the general text writer — notes, reports, derived CSV/JSON. The relative path is validated (no `..`, no absolute/drive-relative/UNC paths, no Windows forbidden characters or reserved device names — `nul.txt` included) and re-checked to stay under `work_dir`; `session.json`, `chat_sessions/` and any `*.bak` are refused because they are live GUI state. `save_fig` / `save_code` labels must not contain a dot — the extension is added for you. All three return the absolute `Path`.
-
-The lower-level loader is `load_csv_per_subdir` in [common/loaders.py](common/loaders.py) (globs subdirectories and `pd.read_csv`). Output goes to the dataset's `work_dir`.
+- [Installation and launch](#installation-and-launch)
+- [AI engines](#ai-engines)
+- [Datasets](#datasets)
+- [Usage](#usage)
+- [Saving and resuming](#saving-and-resuming)
+- [Security](#security)
+- [Optional features](#optional-features)
+- [Troubleshooting](#troubleshooting)
+- [Uninstall](#uninstall)
+- [Limitations](#limitations)
+- [For developers](#for-developers)
+- [License](#license)
 
 ---
 
-## Adding an analysis & exporting
+## Installation and launch
 
-Each analysis is a single `<dataset_dir>/analyses/<name>/analysis.py` module that lives on the synced drive beside its data (not in the repo). Standard pattern:
+- Name the venv `.venv`. `run.bat` looks for this name only.
+- Run commands that start with `python` from the repository root with the venv activated.
+- To update, `git pull` and restart. Datasets are not affected.
 
-```python
-NAME = "my_analysis"      # module identifier
-DATASET = "my_dataset"    # dataset key it uses
-
-def load() -> dict:                         # load data (no GUI side effects)
-    ...
-def build_export_figs(data) -> dict:        # headless PNG: {filename: Figure}
-    ...
-def build_tab(parent, data) -> AnalysisTab: # build the GUI tab
-    ...
-```
-
-Existing examples: `dataset_d` (.h5 camera images), `analysis_c` (scaffold), `example_analysis`, `dataset_b`.
-
-### Scaffold generation
-
-```bash
-python -m newanalysis <name> --dataset <key>
-```
-
-Creates `<dataset_dir>/analyses/<name>/` with an `analysis.py` (standard pattern) + `README.md`. `--dataset` is required (the scaffold writes into that dataset's directory).
-
-### Headless PNG export
-
-```bash
-python -m export <dataset> <name>
-```
-
-Runs `build_export_figs()` on the Agg backend and writes PNGs to `<work_dir>/analyses/<name>/batch/` (no GUI required).
+- If `activate` fails in PowerShell, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use Command Prompt.
+- To open TIFF images, also install `pip install tifffile`.
+- Package versions are not pinned. If something does not work, match the tested versions (Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2).
+- To try the screens without data, run `python tool.py --demo`.
+- On macOS / Linux: `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install -r requirements.txt` → `python tool.py` (untested).
 
 ---
 
-## GUI overview
+## AI engines
 
-- **Multi-tab** — reorder analysis tabs by drag & drop.
-- **LLM chat dock** (right side, floatable) — multiple session tabs, Ctrl+Enter to send, streaming output, tool calls (tab control, snapshots, etc.), font zoom.
-- **Menus** — File / View / Settings / Help / Develop(&D).
-- **Session save/restore** — per-dataset tab layout and chat are saved/restored under `work_dir` (File → Save session / on-exit dialog). For the saved-file breakdown, see [CLAUDE.md](CLAUDE.md) / [llm_bridge/session.py](llm_bridge/session.py).
+- Claude is recommended (it is the most tested).
+- Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
+- The **model field** can be left empty; the engine's default model is used. To specify one: for Claude, an alias such as `opus` / `sonnet` or a name shown by `/model` in Claude Code; for Codex and pi, a catalog ID such as `gpt-5.5` (the dialog's suggestions, or `pi --list-models`); for OpenAI-compatible engines, the server-side model name (`ollama list` for Ollama). Values for thinking / effort: [docs/engines_ja.md](docs/engines_ja.md#モデルの指定).
+
+To use an engine other than Claude (Codex CLI / pi / an OpenAI-compatible HTTP server such as Ollama), to change the model per chat, or to write the configuration file by hand, read [docs/engines_ja.md](docs/engines_ja.md).
 
 ---
 
-## LLM chat & backends
+## Datasets
 
-The chat dock talks to an LLM backend through [llm_backend/](llm_backend/). Six engines exist, but **in practice MyAnalysis runs on Claude (VS Code bundled engine)**. The config values (env `LLM_BACKEND` / `[backend].name` in `config.toml`) take a **backend name** (second column); the two Claude routes are told apart by whether `[claude_code].bin` is empty (empty = auto-detect the bundled binary, non-empty = the CLI at that path):
+A dataset is a pair of "one folder containing measurement data" and "its name". Registration is per PC.
 
-| Engine (GUI label) | `[backend].name` | Description |
+- **Name**: names containing whitespace, `/`, `\`, or starting with `.` cannot be registered. **Avoid names that contain symbols (`"` `'` `&` `$`) or start with `-`.** They can be registered and opened from the GUI, but agent and CLI commands may treat them as options or break the quoting, so you cannot specify them there.
+- **Data format**: any layout (the agent inspects it before reading). A layout where each subfolder has one CSV file with the same name can be read as-is by the standard loader.
+- **What the app creates in the folder**: `myanalysis.toml` (settings), `meta.json` (for the list view), `analyses/` (analysis modules), `_work/` (outputs, chat history, tab layout). You need write permission on the folder. The app itself does not modify measurement files. The agent is instructed not to modify them, but this is not enforced mechanically.
+- **Using a dataset on several PCs via a sync drive**: register it with the same name on each PC. **Do not open the same dataset on two PCs at the same time** (there is no locking between PCs; for the tab layout, and for a chat changed on both PCs, the later save wins). The first send on another PC resends the whole chat history.
+
+To remove a registration, select the dataset in **File → Open dataset…** and press **Remove registration** (files in the folder are not deleted). To register from the CLI, or to change the output location or read format (`myanalysis.toml`), read [docs/usage_ja.md](docs/usage_ja.md#データセット).
+
+---
+
+## Usage
+
+**The agent produces three kinds of output.**
+
+| Kind | Kept? | Location |
 |---|---|---|
-| Claude (VS Code bundled engine) | `claude` (empty `bin`) | **Default in practice.** Reuses the VS Code Claude Code extension's bundled engine (stream-json mode) and your VS Code login |
-| Claude (CLI on PATH) | `claude` (`bin` set) | Alternate route through a `claude` CLI on PATH |
-| pi coding agent | `pi` | pi-coding-agent subprocess |
-| Codex CLI (OpenAI) | `codex` | OpenAI Codex CLI subprocess |
-| OpenAI-compatible HTTP | `openai` | OpenAI-compatible HTTP (including local endpoints like Ollama) |
-| Mock (smoke test) | `mock` | Offline smoke test (no LLM) |
+| Code written and run on the spot | **Not kept**. If you want to look at it later, ask "save the code too" | — |
+| Figures, code, and reports you had it save | Kept. The figures shown are usually files saved here | the dataset's `_work/` (`figures/`, `code/`, etc.) |
+| Analysis modules (interactive analysis tabs) | Kept. There is no menu to open them; ask in the chat, e.g. "open `<analysis name>`" | the dataset's `analyses/<analysis name>/analysis.py` (→ [docs/analysis_module_ja.md](docs/analysis_module_ja.md)) |
 
-### Setting up the `claude` backend (recommended)
+- The agent uses the Python in `.venv` and may pip install missing packages (such as scipy) into `.venv`.
+- Right-click a chat tab → **Close** **deletes** the chat. To keep it, use **Archive**.
 
-1. Install the **VS Code Claude Code extension and sign in** — the backend reuses its bundled engine and `~/.claude` login, so there is no API key to put in `.env`.
-2. In `llm_backend/config.toml`, set `[backend].name = "claude"` (leave `bin` empty to auto-detect the bundled binary; `permission_mode = "bypassPermissions"` is the default and is what lets the agent drive the GUI unattended).
-3. In `models.toml`, set the `[claude_code]` knobs — e.g. `model = "claude-opus-4-8"`, `thinking = "enabled"`, `effort = "xhigh"`.
-4. Apply — if you edited the files by hand, **restart the app** (they are read once at startup). Changes made through **Settings → Backend / model settings…** need no restart: applying reseeds every chat session from the next send onward.
-
-> The shipped `llm_backend/config.example.toml` defaults `[backend].name` to `pi` (a development placeholder); change it to `claude` for normal use.
-
-### Other backends (optional)
-
-- `openai` — point `.env`'s `OPENAI_BASE_URL` / `OPENAI_MODEL` / `OPENAI_API_KEY` at any OpenAI-compatible endpoint (e.g. a local Ollama).
-- `pi` — `npm i -g @earendil-works/pi-coding-agent` (the old `@mariozechner/…` name is deprecated); operational settings go in `config.toml`, secrets in `.env`. On Windows it must be the Windows-side install — a WSL-only `pi` is not reachable.
-- `codex` — `npm i -g @openai/codex`; log in with `codex login`. Model knobs live in `models.toml`'s `[codex]`.
-- `mock` — offline, no configuration; useful for smoke-testing the GUI.
-
-### Backend status window
-
-**Settings → Backend status…** lists the install state of every supported driver (an inventory independent of which engine is currently selected). The window is non-modal, so you can keep using the app while an npm install runs. The CLI equivalent is `python -m llm_bridge engines`.
-
-- **Display** — one row per engine; columns are Driver / Prereq (node+npm) / Installed (version) / Auth (logged-in providers). Marks: ✓ = OK, ✗ = missing, ? = could not be determined, — = not applicable. `?` does not mean "not installed" — a probe that merely timed out is deliberately not answered with a re-install offer.
-- **Install / Update** — both run the same `npm i -g <package>`; the button just reads "Install" on missing rows and "Update" on installed ones. No button appears when the prereq is missing or the state is `?`. Claude (VS Code bundled) has no button — updating the extension is its delivery channel.
-- **Log in** — shown even when already authenticated (account switching / re-login). On Windows it opens a new console for the interactive login; on other OSes it only prints the command to the log pane for you to paste into a terminal.
-- **Connectivity check** — actually sends one turn to the backend and is the **only billed action** in this window (fires only on click). Opening the window and pressing "Re-check" run local probes only and never bill. There is deliberately no auto-refresh timer. The CLI `engines` has no connectivity check, so it is entirely free.
-- **Safety** — probing only uses read-only commands that leave auth files untouched (`--version` / `codex login status` / `pi --list-models`); checking the status can never log out another PC or CLI.
-- **Note** — if a row stays ✗ after an install finishes, restart the GUI (PATH is a snapshot from launch, so an npm global bin added to PATH afterwards is not seen).
-
-The **Backend / model settings dialog** (Settings → Backend / model settings…) is where you pick the engine / model / provider and apply it globally. The model/provider candidate lists are editable via the ＋/− next to each combo (persisted to `models.toml`), and an optional connectivity check runs before applying. Right-click a chat tab → **Model for this chat…** to switch just that session to a different engine (sessions without an override follow the global setting).
-
-**AI persona** (Settings → AI persona…) picks a response style appended to the chat agent's system prompt — e.g. blunt and critical instead of the default polite tone. Personas (name + free-text body) are created, edited and deleted in the same dialog; definitions are PC-local (`data/llm_state/personas.json`) and do not sync between machines. Right-click a chat tab → **Persona for this chat…** to override per session — including "no persona" for one chat while a global persona is active. A persona only shapes tone and style; operational rules always win. The default is no persona, which leaves the prompt exactly as before.
-
-**Selection order**: env `LLM_BACKEND` → `[backend].name` in `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
-
-**Where settings live**:
-- `.env` — connection & secrets. Note: real shell environment variables override `.env`, and inline `# comments` are **not** supported there (`KEY=value # x` sets the value to `value # x`).
-- `llm_backend/config.toml` — backend selection and operational settings (bin / cwd / tools, etc.).
-- `models.toml` — model knobs (`model` / `thinking` / `effort` / `provider`).
-
-`config.toml` and `models.toml` are read at startup — hand edits need a restart; changes made through the settings dialog apply immediately.
+To view microscope images and the like as in ImageJ (16-bit / multi-dimensional TIFF, LUTs, channel composites), use the image viewer. Ask in the chat, e.g. "open `<file path>` in the image viewer" (the agent opens the image viewer only when asked), or open it from the CLI. For the steps, read [docs/usage_ja.md](docs/usage_ja.md#図ビューアと画像ビューア).
 
 ---
 
-## llm_bridge — GUI↔CLI bridge
+## Saving and resuming
 
-Connects the GUI and CLI over the filesystem so a running GUI can be driven externally (Windows / POSIX; some verbs run without PySide6).
+- **The tab layout and chats are not saved automatically.** Save them with **File → Save session** or **Save and quit**. After a crash or a forced exit, chats since the last save are lost.
+- Closing with unsaved changes asks for confirmation. However, chats used without opening any dataset are not saved, and no confirmation is shown for them.
+- To resume, use **File → Open dataset…** (restores that dataset's tabs and chats) or **File → Restore last session** (opens all datasets that were open at the last save).
 
-```bash
-python -m llm_bridge <verb> ...
-```
+What is saved in which file: [docs/usage_ja.md](docs/usage_ja.md#保存データと再開).
 
-Key verbs:
+---
 
-| verb | Purpose |
+## Security
+
+- **The agent runs with your user privileges, without asking for confirmation.** By default Claude runs with `bypassPermissions`, Codex without a sandbox, and pi with all tools allowed.
+- **Your requests and the data the agent reads are sent to the engine's provider.** The agent also communicates externally through the shell, web search, and so on. MyAnalysis itself sends no telemetry.
+- The agent can read `.env` and shell environment variables (API keys, etc.).
+
+To restrict the agent's permissions, read [docs/security_ja.md](docs/security_ja.md) (restricting them breaks GUI operations and analyses).
+
+---
+
+## Optional features
+
+| Feature | Description | Document |
+|---|---|---|
+| Your own analysis modules | Build an interactive analysis tab from a single Python file. Export PNGs in batch without the GUI | [docs/analysis_module_ja.md](docs/analysis_module_ja.md) |
+| CLI | Operate the GUI, register datasets, and run checks from the command line | [docs/cli_ja.md](docs/cli_ja.md) |
+| Config sync across PCs | Sync the registry and engine settings between PCs via Cloudflare R2 | [docs/config_sync_ja.md](docs/config_sync_ja.md) |
+| Meeting share | Share the analysis view and chat to a remote participant's browser (connecting to outside participants requires Cloudflare setup). **Anyone with the join link can run the agent without approval** | [docs/meeting_share_ja.md](docs/meeting_share_ja.md) |
+
+---
+
+## Troubleshooting
+
+| Symptom | What to do |
 |---|---|
-| `list-datasets [--json]` | List registered datasets |
-| `register-dataset <name> <path> ...` | Register a dataset (optionally scaffold + auto-open) |
-| `list-analyses [--dataset <ds>] [--json]` | List analyses across all open datasets (`{dataset: [names]}` with `--json`) |
-| `list-open-datasets` | Datasets open in the window + the active one |
-| `active` | Active tab, active dataset, and `open_datasets` |
-| `state [name]` | An analysis's `state.json` (active tab if omitted) |
-| `window <verb> [k=v] [--wait]` | Window ops (`open-dataset` / `add-tab` / `set-active-dataset` / `close-dataset` / `reload`, etc.) |
-| `tab <target> <verb> [k=v]` | Tab ops (`set-split [slot=]` / `close-pane slot=` / `list-panes` / `snapshot` / `refresh-state`, etc.). Viewer tabs take nested splits via `show`/`show-image slot=<path>` (e.g. `top/left` for a 2×2 grid) |
-| `annotate` / `clear-annotations` | Add/clear annotations (marker / note) |
-| `meeting-start [lan=true]` / `meeting-lan-link` | Start a meeting share / get the in-facility LAN link (see "Meeting share (hosting)") |
+| No window appears with `run.bat` | A dialog shows the cause. If Python is too old, there is only the dialog (nothing is logged). Otherwise a traceback is left in `data/logs/gui-crash-*.log` (logs at warning level and above go to `data/logs/myanalysis.log`) |
+| The first send fails with HTTP 401 | No AI engine is configured → step 3 of [QuickStart](#quickstart) |
+| `[error: RuntimeError('Claude Code engine not found…')]` | Install the Claude Code extension and sign in (or point to `claude` with `[claude_code].bin` in `llm_backend/config.toml` or the `CLAUDE_CODE_BIN` environment variable) |
+| The chat shows `[error: …]` | Expired authentication, rate limits, etc. Send again, or log in to the engine again |
+| "Save failed verification" | The sync drive is misbehaving. Common with mounts such as rclone → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) (includes the check-and-repair command `doctor`) |
 
-### Multiple datasets
-
-Several datasets can be open in one process; the top-level dataset switcher swaps
-between each dataset's tabs and chat sessions. `open-dataset` adds a dataset to the
-workspace (others stay open); `set-active-dataset name=<ds>` (alias `switch-dataset`)
-brings one to the front; `close-dataset name=<ds>` flushes its layout to
-`session.json` then drops it. When the same tab name exists in two open datasets,
-pass `dataset=<ds>` to any tab-addressing verb (`add-tab` / `show` / `set-active-tab`
-/ `close-tab` / `tab <name> <verb>`) to disambiguate.
-
-**Workspace restore.** File → "Restore last session" re-opens the datasets that were
-open together (recorded in the gitignored `data/llm_state/last_window.json`); restore
-is additive (it never closes already-open datasets). No automatic restore at startup.
-
-**Meeting share** broadcasts every open dataset's tabs and chat sessions by default;
-making an item private is an explicit opt-out (Issue #78). Same-named tabs in
-different datasets stay distinct — the wire carries a per-dataset tab namespace. The
-guest page mirrors the host's DS-above-tabs structure: the DS bar lists every shared
-dataset as a clickable chip and each guest navigates on their own (`curDs` is
-guest-local; the host's active dataset only seeds the default on first load). A
-**Follow host** toggle sits at the right end of that bar — default OFF and not
-persisted; switching it ON snaps the guest to the host's active dataset and keeps it
-in sync, and clicking any dataset chip turns it back OFF (Issue #80). Switching
-datasets stashes the unsent message draft per dataset, so a host-driven switch never
-re-targets half-typed text at another dataset's chat. Guests also get their own "new
-chat session" button and their chat send-key follows the host's (Issues #81, #82), and
-an optional in-facility LAN direct link can be emitted alongside the public one for
-guests whose network can't resolve the tunnel host (Issue #85). The relay itself uses
-only the stdlib — see the [Meeting share (hosting)](#meeting-share-hosting) section and
-[relay-worker/README.md](relay-worker/README.md) for how to set it up.
-
-**Memory note (v1):** each open analysis tab eager-loads its DataFrame and keeps it
-resident while open, so opening many large datasets at once can pressure memory
-(lazy load/unload is a future item).
-
-Examples:
-
-```bash
-python -m llm_bridge list-datasets --json
-python -m llm_bridge window open-dataset name=my_dataset --wait 30
-python -m llm_bridge window set-active-dataset name=other_dataset --wait
-python -m llm_bridge tab summary snapshot dataset=other_dataset --wait
-```
+Other symptoms, problems with sync drives, and what to include when reporting a bug → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)
 
 ---
 
-## Meeting share (hosting)
+## Uninstall
 
-Meeting share (View → ミーティング共有…) live-shares your chat dock and analysis view to remote guests in their browser — by default every open dataset's tabs and chat are broadcast (Issue #78; making an item private is an explicit opt-out). Guests join by opening a link; nothing is persisted server-side.
+1. Delete the app folder (the repository) and `%USERPROFILE%\.myanalysis` (`~/.myanalysis` on macOS / Linux).
+2. To restore a dataset folder, delete `myanalysis.toml`, `meta.json*`, `analyses/`, and `_work/`. `analyses/` holds the analysis modules and `_work/` holds the chat history and outputs.
 
-**Architecture.** A local in-memory relay (bound to `127.0.0.1` by default) plus a single public tunnel — a **cloudflared named tunnel**. It costs $0 and uses no external key/value store. The full walkthrough and source of truth is [relay-worker/README.md](relay-worker/README.md); the `.env` variables are documented in [.env.example](.env.example).
-
-**What you need to host a share** — all in `.env`, which is read once at startup (restart the GUI after editing):
-
-1. `RELAY_ADMIN_KEY` — **required**, a non-empty secret (generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`). If it is empty, the share feature is simply disabled and nothing else is affected.
-2. For the public (external) link, cloudflared needs `CLOUDFLARE_TUNNEL_NAME` and `CLOUDFLARE_TUNNEL_HOSTNAME`, plus a one-time cloudflared setup (delegate a domain to Cloudflare, then `cloudflared tunnel login` / `create` / `route dns`). See [relay-worker/README.md](relay-worker/README.md).
-
-**In-facility LAN direct link (Issue #85, optional).** For guests on a venue network whose DNS can't resolve the tunnel hostname, you can emit a *second* link that connects them straight to the host PC over the LAN. Turn on "LAN リンクも出す" in the share dialog (default OFF), or run `python -m llm_bridge meeting-start lan=true` (plus `meeting-lan-link`); related env: `RELAY_LAN_HOST` / `RELAY_LAN_PORT`. The external (tunnel, https) and in-facility (LAN, http) links are active at the same time, so internal and external guests can join one meeting. The LAN link is distributed as a full copy-link only (it is http, so a bare token pasted onto an https page would be blocked as mixed content), and the relay binds `0.0.0.0` only while a share is live — see the security notes in [relay-worker/README.md](relay-worker/README.md).
+To also remove the engines' conversation records and the R2 / Cloudflare settings, read [docs/usage_ja.md](docs/usage_ja.md#アンインストールの詳細).
 
 ---
 
-## Hot reload
+## Limitations
 
-Injects edited code into the running GUI and activates it while keeping open tabs, plots, and chat context intact ([devtools/](devtools/)). **Manual trigger only** (CLI verb + Develop(&D) menu; no automatic file watching).
-
-```bash
-python -m llm_bridge window reload [scope=app] --wait
-```
-
-Four-tier escalation:
-
-| scope | Target | Mechanism |
-|---|---|---|
-| `patch` (default) | repo modules in sys.modules | in-place patch (display state untouched) |
-| `tab` | `<dataset_dir>/analyses/<name>/analysis.py` | rebuild a single tab in a sandbox → swap |
-| `app` | structural changes (`__init__` / Signal / `__bases__`, etc.) | blue-green window rebuild |
-| `restart` | tool.py itself, PySide6 upgrade | process restart + automatic session restore |
-
-For details and known limitations, see [CLAUDE.md](CLAUDE.md).
+- Tested on Windows 11 only.
+- An analysis tab keeps its data in memory while it is open. Opening many large datasets puts pressure on memory.
+- In the Japanese UI, some displays remain in English (→ [display language](docs/usage_ja.md#表示言語)).
+- Details → [docs/usage_ja.md](docs/usage_ja.md#制限事項の詳細)
 
 ---
 
-## Tests
+## For developers
 
-```bash
-python -m pytest tests/
-```
-
-GUI tests set `QT_QPA_PLATFORM=offscreen` themselves, so they run headless.
+For developing MyAnalysis itself (structure, tests, hot reload, conventions), see [docs/development_ja.md](docs/development_ja.md). Conventions for AI coding agents are in [CLAUDE.md](CLAUDE.md).
 
 ---
 
-## Development conventions (excerpt)
+## License
 
-- **Commit directly to `main`** (do not create feature branches).
-- `data/` is gitignored — local scratch space; never commit its contents.
-- `.bat` / `.cmd` files use **CRLF line endings** (LF breaks `cmd.exe`; pinned via `.gitattributes`).
-- The repository is a private GitLab repo (`git@gitlab.com:atakalive/MyAnalysis.git`).
-
-For fuller conventions and per-subsystem design, see [CLAUDE.md](CLAUDE.md).
+MIT License ([LICENSE](LICENSE))

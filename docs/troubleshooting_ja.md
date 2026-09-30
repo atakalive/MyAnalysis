@@ -28,7 +28,7 @@ rclone などのマウントでは、「一時ファイルに書いて置き換�
 | `MYANALYSIS_FS_OVERRIDE` | 判定の上書き。例 `M:=fragile,C:\mnt\sync=fragile`（前方一致） |
 | `MYANALYSIS_WRITE_STRATEGY` | `auto`（既定）/ `inplace` / `replace`（旧方式。rclone では危険） |
 | `MYANALYSIS_FORCE_FRAGILE` | `1` で全パスを fragile として扱う |
-| `PYTHONPYCACHEPREFIX` | Python のキャッシュをローカルに置く。**`.env` では効かない**ので、起動前に OS / シェルで設定する（`run.bat` は自動で設定する）。`python tool.py` や `python -m export` を手で実行するときは自分で設定するか、`PYTHONDONTWRITEBYTECODE=1`（または `python -B`） |
+| `PYTHONPYCACHEPREFIX` | Python のキャッシュをローカルに置く。**`.env` では効かない**ので、起動前に OS / シェルで設定する（`run.bat` は自動で設定する）。`python tool.py` を手で実行するときは自分で設定するか、`PYTHONDONTWRITEBYTECODE=1`（または `python -B`）。`python -m export` は自分でローカルに置くので要らない |
 
 ## doctor（点検と修復）
 
@@ -70,6 +70,6 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 | 毎回全履歴を送り直している | `data/llm_state/backend_sessions.json` が壊れている | `doctor` で「JSON として読めない」と出たら、GUI を終了してファイルを削除する |
 | CLI の出力をファイルやパイプに流すと `UnicodeEncodeError` / 文字化け | Windows の文字コード（cp932） | `python -X utf8 -m …`、または環境変数 `PYTHONUTF8=1` |
 
-エラーダイアログの「詳細は data/logs/myanalysis.log」は、warning 以上のログのファイルを指す（`run.bat` 起動でも残る。`python tool.py` で起動したときはコンソールにも出る）。ステータスバーの「保存に失敗しました」も 30 秒で消える。
+エラーダイアログの「詳細は data/logs/myanalysis.log」は、warning 以上のログのファイルを指す（`run.bat` 起動でも残る。ただし `data/logs/` を作れない・書けないときは残らない。Windows では、このファイルが 1 MB を超えた後、MyAnalysis のプロセスが複数（多重起動や再起動の重なり）同時に動いている間の記録も残らない。`python tool.py` で起動したときはコンソールにも出る）。ステータスバーの「保存に失敗しました」も 30 秒で消える。
 
 **不具合を報告するときに添えるもの**: `doctor` の出力、`data/logs/gui-crash-*.log`、`data/logs/myanalysis.log`、`python tool.py` で起動したときのコンソール出力、（必要なら）`data/llm_state/command_log.jsonl`。ログにはパスやデータセット名が含まれるので、添える前に確認する。この版より前のログ（`command_log.jsonl.1` を含む）にはミーティングのトークンが平文で残っていることがあるので、`meeting-` を含む行は消してから添える。

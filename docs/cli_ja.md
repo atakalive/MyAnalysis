@@ -59,6 +59,7 @@ python -m llm_bridge <verb> ...
 - 画像ビューアのタブ: `set-lut lut=<Grays|Red|Green|Blue|Magenta|Cyan|Yellow|Fire|Ice|Spectrum> [invert=true]`、`set-range min= max=`、`auto-contrast [low=0.35] [high=99.65]`、`set-channel index=`、`set-mode mode=single|composite`、`set-z index=`、`set-t index=`、`set-visible channel= visible=true|false`、`load-image path=`。`set-lut` / `set-range` / `auto-contrast` は `channel=<n>` も取る（省略時は選択中のチャンネル）。番号は 0 から。いずれも `slot=<パス>` で対象ペインを指定できる（省略時は最初の画像ペイン。これらは向きを変えず、実際の分割と合わない slot はエラーになり現在の slot 一覧を返す）。
 - 解析タブ: 各 `analysis.py` が登録したコマンド。
 - `tab` コマンドは対象のタブを前面に出す。同じ名前のタブが複数のデータセットにあるときは `dataset=<ds>` を付ける。
+- `dataset=` に開いていないデータセットを指定して出したタブ（`add-tab` / `show` / `show-image`）は、そのデータセットに保存済みのタブ構成（`session.json`）があると保存されない（上書きを防ぐため）。先に `open-dataset` する。
 
 ## 例
 
@@ -84,4 +85,4 @@ python -m llm_bridge tab q list-panes --wait
 | コマンド | 用途 |
 |---|---|
 | `python -m newanalysis <解析名> --dataset <ds> [--format …]` | 解析モジュールの雛形を作る |
-| `python -B -m export <ds> <解析名>` | PNG の一括出力 |
+| `python -m export <ds> <解析名>` | PNG の一括出力 |

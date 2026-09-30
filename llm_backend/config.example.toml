@@ -17,6 +17,11 @@ bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
 # model / provider はモデル設定なので models.toml の [pi] で指定(models.example.toml 参照)
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
                      #   "read,write"=許可リスト, "none"=--no-tools)
+# ── Visual feedback (Observe self-view) ──
+# 図の self-view には次のいずれかが必要:
+#   (a) models.toml の [pi].model に vision 対応モデルを指定する
+#   (b) pi-vision-proxy を導入し PI_VISION_PROXY_MODEL を設定する
+# read ツールを無効化しないこと (画像視認に必要。tools="" で全許可=既定)。
 
 [codex]
 # OpenAI Codex CLI (npm i -g @openai/codex)。認証は ~/.codex を共有 (codex login)。
@@ -60,9 +65,3 @@ use_provider_system_prompt = true
 #   なってしまうため、既定では外に出して「データ解析役」に保つ。リポジトリ自体は
 #   --add-dir + PYTHONPATH で参照可能。明示上書きしたい場合のみ↓を有効化:
 # cwd = 'C:/path/to/agent_home'
-
-# ── Visual feedback (Observe self-view) ──
-# 図の self-view には次のいずれかが必要:
-#   (a) models.toml の [claude_code].model に vision 対応モデルを指定する
-#   (b) pi-vision-proxy を導入し PI_VISION_PROXY_MODEL を設定する
-# read ツールを無効化しないこと (画像視認に必要。tools="" で全許可=既定)。

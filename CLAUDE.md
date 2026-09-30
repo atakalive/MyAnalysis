@@ -54,7 +54,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
-- `.env` is gitignored. Used for LLM backend overrides (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`). Copy `.env.example` to get started.
+- `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started.
 - Dataset registration (per-host paths) lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
 
@@ -219,8 +219,8 @@ catalog until llama-server has them loaded, which is why the list is editable.
   GUI-driving tool calls run unattended (stdin is closed after the prompt, so an
   interactive permission prompt would deadlock); to tighten, set `permission_mode`
   to a mode other than `bypassPermissions` (`allowed_tools` alone does not restrict
-  under `bypassPermissions`). An empty or invalid value falls back to
-  `bypassPermissions` and shows a note in the backend status window.
+  under `bypassPermissions`). An empty, whitespace-only or non-string value falls back to
+  `bypassPermissions` (warning + a note in the backend status window); any other string is passed to `--permission-mode` as is.
   `[claude_code].use_provider_system_prompt` defaults to `true` (append MyAnalysis's
   instructions onto CC's built-in system prompt); set it `false` to replace the CC
   default so only MyAnalysis's instructions remain (`--system-prompt` instead of
@@ -290,7 +290,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   検出は `python -m llm_bridge doctor`（`check_local_state`。`--repair` は削除＝次回書込で再生成）。
 - ロックファイルはマウント外（`data/locks/`）へ自動マッピングされる（`common/filelock.py`）。
   マウント上では排他が効いている保証がなく、同期チャーンも生むため。PC 間排他は元々成立しない。
-- バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と両バックエンドが設定）。
+- バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と claude / codex / pi の各バックエンドが設定。`python -m export` は `sys.pycache_prefix` を自分で設定）。
   マウント上の `.py` を import すると CPython が `__pycache__/*.pyc` を tmp+rename で書き、
   同じ失敗経路に乗る（実測で rename 失敗の 16%）。
 - **claude エンジンでは、チャットエージェントの `Write`/`Edit` がマウント上で機械的に拒否される**（PreToolUse hook →
@@ -345,7 +345,7 @@ to discover registered dataset names.
 - 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
 - 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。
 - `llm_bridge/session.py` が中核。`show` verb の `dataset=` 引数でタブ→データセット紐付け。
-- `session.json` は durable 書込（`common/paths.py` の `durable_write_json` = primary + `.bak` の 2 コピー＋書込後 read-back 検証。同期マウントの 0 バイト truncate 対策）。検証失敗は `save_all` の failed に載り、Tier 3/4 リロード中止・「保存して終了」の close 拒否・close_dataset 中止という既存経路が発火する。読取は `.bak` フォールバック付きで、破損して回復不能なら `no-session` と区別して `unreadable-session:<ds>`（GUI が警告・破損ファイルは上書きしない）。
+- `session.json` は durable 書込（`common/paths.py` の `durable_write_json` = primary + `.bak` の 2 コピー＋書込後 read-back 検証。同期マウントの 0 バイト truncate 対策）。検証失敗は `save_all` の failed に載り、Tier 3/4 リロード中止・「保存して終了」の close 拒否・close_dataset 中止という既存経路が発火する。読取は `.bak` フォールバック付きで、破損して回復不能なら `no-session` と区別して `unreadable-session:<ds>`（GUI が警告。破損ファイルは自動では上書きせず、File → セッションを保存 の確認で「はい」のときだけ上書き）。
 - 暫定運用の `_work/code/restore_view.py` 方式は本機能で置換済み。
 
 ### 入れ子パネル分割（Issue #97）

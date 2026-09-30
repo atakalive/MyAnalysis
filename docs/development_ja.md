@@ -49,7 +49,7 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 
 **クラッシュログ** — 未捕捉例外（メインスレッド・Python スレッド）は `data/logs/gui-crash-*.log` に traceback が残る。同じ箇所の例外は 1 回だけ、1 プロセス最大 200 件、Ctrl-C / `SystemExit` は記録しない。フックは `tool.py` の冒頭（`__main__` のときだけ）で入る。Python の版不足はダイアログだけ（フックより前に判定して終了するので、ログには残らない）。import 時の失敗と `main()` の中の起動失敗（`app.exec()` より前）は、原因を示すダイアログを出し、`data/logs/gui-crash-*.log` に traceback を残す（書き込みは best-effort）。warning 以上のログは `data/logs/myanalysis.log`（1 MB で回転、3 世代）。
 
-**`PYTHONPYCACHEPREFIX`** — `run.bat` とエージェントの子プロセスは `data/pycache` を設定するが、手元のシェルから起動した python には設定されない。同期ドライブ上の `.py` を import 機構で読むコマンド（例: `python -m export`）を手で実行するときは、`PYTHONPYCACHEPREFIX=<repo>/data/pycache` を設定しておく（理由は [§5.1](#51-同期ドライブへの書込)）。
+**`PYTHONPYCACHEPREFIX`** — `run.bat` とエージェントの子プロセスは `data/pycache` を設定するが、手元のシェルから起動した python には設定されない（`python -m export` は自分で `sys.pycache_prefix` を `data/pycache` にする）。同期ドライブ上の `.py` を import 機構で読むコードを手で実行するときは、`PYTHONPYCACHEPREFIX=<repo>/data/pycache` を設定しておく（理由は [§5.1](#51-同期ドライブへの書込)）。
 
 ---
 
@@ -127,7 +127,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `~/.myanalysis/config_share_state.json` | R2 設定同期の状態（登録時刻 `entry_meta`・登録削除の記録 tombstone を含む。同期前に消すと削除した登録が復活する） |
 | `datasets.local.json`（+ `.lock`） | データセット登録簿（リポジトリ直下） |
 | `models.toml` / `llm_backend/config.toml` | モデル設定 / バックエンドの運用設定 |
-| `.env` | LLM バックエンドと R2 の設定 |
+| `.env` | 秘密情報と環境変数（LLM バックエンド、R2 同期、ミーティング共有、同期ドライブの書込戦略） |
 
 `data/` は丸ごと gitignore されている。リポジトリ直下の登録簿・`models.toml`・`llm_backend/config.toml`・`.env` も gitignore 済みで、R2 設定同期（任意機能）を使えば PC 間で同期できる（`.env` は明示したときだけ）。
 
@@ -167,6 +167,8 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `image_io.py` | 画像ビューア用のローダ（tifffile / Pillow は遅延 import） |
 | `crashlog.py` | 未捕捉例外のログ記録 |
 | `env.py` | `.env` の読み込み |
+| `analysis_module.py` | `analysis.py` を import せず `compile` + `exec` で実行し、実行中だけ `sys.modules` に登録する（GUI と `python -m export` が共有） |
+| `slots.py` | ペインの slot パス（`left/top` 等）の文法。Qt 非依存 |
 
 ### `core/`
 
@@ -192,6 +194,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `backend_selector_dialog.py` | バックエンド/モデル設定ダイアログ、チャット単位のエンジン上書き |
 | `backend_status_window.py` | バックエンドの状況ウィンドウ |
 | `persona_dialog.py` | AI ペルソナの設定ダイアログ |
+| `qt_translation.py` | Qt 標準ボタン等の翻訳（`qtbase_<lang>.qm`）の読込と言語切替時の張り直し |
 | `meeting_share.py` | 会議共有ウィンドウ |
 
 ### `llm_backend/`
@@ -199,7 +202,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | ファイル | 役割 |
 |---|---|
 | `__init__.py` | バックエンド登録簿 `_BACKENDS`、`get_backend()` / `build_backend()`、`config.toml` の読み込み |
-| `base.py` | `LLMBackend` Protocol、`Message` 等の型、全プロンプト共通の定数（`NO_LOCAL_PERSISTENCE` / `MOUNT_SAFE_EDITS`）、`compose_system_prompt`、`build_prompt_with_history` |
+| `base.py` | `LLMBackend` Protocol、`Message` 等の型、プロンプトの共通定数（全バックエンドの `NO_LOCAL_PERSISTENCE`、claude / codex / pi の `ANALYST_FRAMING` / `GUI_DISPLAY_VERBS` / `MOUNT_SAFE_EDITS`）、`compose_system_prompt`、`build_prompt_with_history` |
 | `claude_code.py` / `codex.py` / `pi.py` | サブプロセス型バックエンド |
 | `openai_compat.py` | OpenAI 互換 HTTP（SSE ストリーミング、ツール呼び出し） |
 | `mock.py` | 動作確認用の定型文バックエンド |
@@ -218,6 +221,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `commands.py` | コマンドキューの投入・待機・GUI 側の実行と watcher |
 | `paths.py` | `data/llm_state` 下のパスと PC ローカル状態の読み書き |
 | `session.py` | データセットごとの `session.json` の保存・復元 |
+| `verbs.py` | `list-commands` が表示する verb の表（登録済みの verb との一致は `tests/test_verbs_registry.py` が検査） |
 | `chat_store.py` | チャット履歴 `chat_sessions/<id>.json`（Qt・`config`・`dataset_config` に依存しない） |
 | `state.py` / `snapshots.py` / `annotations.py` | 解析タブの `current.json` / `current_view.png` / `annotations.json` |
 | `analysis_edit.py` | `draft-analysis` / `apply-analysis` / `recover-analysis` |
@@ -275,7 +279,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 
 ### 5.3 エージェントの system プロンプト
 
-- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE` と `MOUNT_SAFE_EDITS` を含める。どちらも「作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない」「既存の `analysis.py` は draft → apply で編集する」という契約。
+- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE`（作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない）を含める。コードを実行できる claude / codex / pi は、さらに `ANALYST_FRAMING`（先頭。アプリの開発ではなくデータ解析の担当）、`GUI_DISPLAY_VERBS`（表示系 verb）、`MOUNT_SAFE_EDITS`（既存の `analysis.py` は draft → apply で編集する）を含める。openai / mock（`gui/chat.py` の `_SYSTEM_PROMPT`）はコードを実行できないので `MOUNT_SAFE_EDITS` を含めない。
 - `save_text` に言及する（`work_dir` に任意のファイルを書く正規の経路）。
 - `set-description` / `set-completed` には言及しない（利用者が決める値で、エージェントに書かせない。CLI の `--help` からも隠してある）。
 - `tests/test_backend_prompts.py` が検査する（検査範囲は [§6.1](#61-llm-バックエンドの追加) の手順 7）。
@@ -297,8 +301,8 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 4. **表示名** — `i18n/en.toml` と `i18n/ja.toml` に `backend.engine.<…>` を追加する（`tests/test_engines.py` がラベルキーの解決を検査する）。
 5. **導入判定** — `llm_backend/preflight.py` の `_check_engine` に分岐を追加する。無いと「何も要らない」エンジン（mock と同じ）として表示される。判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う（トークンをリフレッシュするコマンドは、同じトークンを共有する他の環境をログアウトさせ得る）。
 6. **設定例** — `models.example.toml`（`model` / `thinking` / `effort` / `provider`）と `llm_backend/config.example.toml`（`bin` / `cwd` 等の運用設定）にセクションを追加する。
-7. **system プロンプト** — モジュール直下に名前が `_SYSTEM_PROMPT` で始まる定数を置き、`NO_LOCAL_PERSISTENCE` と `MOUNT_SAFE_EDITS` を連結する（[§5.3](#53-エージェントの-system-プロンプト)）。ペルソナは `set_persona(text)` で受け取り、送信時に `compose_system_prompt(base, persona)` で合成する。
-   `tests/test_backend_prompts.py` は `llm_backend/` の `_SYSTEM_PROMPT*` 定数を自動収集するが、自動で検査するのは `save_text` の有無だけ。2 つの定数を含むことと meta 書込 verb を載せないことはバックエンドごとの明示テストなので、**新バックエンド用のテストを追加する**。
+7. **system プロンプト** — モジュール直下に名前が `_SYSTEM_PROMPT` で始まる定数を置く。`ANALYST_FRAMING` で始め、`GUI_DISPLAY_VERBS`・`NO_LOCAL_PERSISTENCE`・`MOUNT_SAFE_EDITS` を連結する（いずれも `llm_backend/base.py`。[§5.3](#53-エージェントの-system-プロンプト)）。ペルソナは `set_persona(text)` で受け取り、送信時に `compose_system_prompt(base, persona)` で合成する。
+   `tests/test_backend_prompts.py` は `llm_backend/` の `_SYSTEM_PROMPT*` 定数を自動収集し、`save_text` の有無、`GUI_DISPLAY_VERBS` を含むこと、`ANALYST_FRAMING` で始まることを検査する。`NO_LOCAL_PERSISTENCE` / `MOUNT_SAFE_EDITS` を含むことと meta 書込 verb を載せないことはバックエンドごとの明示テストなので、**新バックエンド用のテストを追加する**。
 8. **任意の属性**（`gui/chat.py` が `hasattr` / `getattr` で使う）:
 
    | 属性 | 意味 |
@@ -332,21 +336,21 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
   - 未知のキーは `TypeError` になり、`status: "error"` で記録される。
 - **実行** — ハンドラは GUI スレッドで動く。例外は `status: "error"`、`error: "<型>: <メッセージ>"` と、`traceback`（末尾 10 フレーム。`raise … from` の連鎖も含む）として記録される。
 - **戻り値** — JSON にできる値はそのまま `result` に入り、それ以外は `repr` される。既存の操作系 verb は `added:<name>` / `closed:<ds>:<n>` のような短い文字列を、一覧系は list / dict を返す。
-- **周知** — エージェントは verb を system プロンプト等から知る。必要に応じて更新する: `llm_backend/claude_code.py` の `_SYSTEM_PROMPT`、`llm_backend/pi.py` の `_SYSTEM_PROMPT_PI` と `.pi/skills/myanalysis-bridge/SKILL.md`、`llm_backend/codex.py` の `_SYSTEM_PROMPT_CODEX`、openai 系は `gui/tools.py`（[§6.4](#64-openai-互換バックエンド向けの-gui-ツール)）。利用者向けの一覧は [cli_ja.md](cli_ja.md)。
+- **周知** — エージェントは verb を system プロンプト等から知る。必要に応じて更新する: 表示系（図・画像ビューア・ペイン）の verb は `llm_backend/base.py` の `GUI_DISPLAY_VERBS`（claude / codex / pi 共通。画像ビューアの verb は `tests/test_backend_prompts.py` が `llm_bridge.verbs.IMAGE_VIEWER_VERBS` と突き合わせる）、それ以外は `llm_backend/claude_code.py` の `_SYSTEM_PROMPT`、`llm_backend/pi.py` の `_SYSTEM_PROMPT_PI` と `.pi/skills/myanalysis-bridge/SKILL.md`、`llm_backend/codex.py` の `_SYSTEM_PROMPT_CODEX`、openai 系は `gui/tools.py`（[§6.4](#64-openai-互換バックエンド向けの-gui-ツール)）。利用者向けの一覧は [cli_ja.md](cli_ja.md)。
 - `python -m llm_bridge list-commands [タブ名]` は `llm_bridge/verbs.py` の表を表示する。verb を追加・削除したら表も直す（`tests/test_verbs_registry.py` が不一致を検出する）。解析ごとの独自 verb は表示されない。
 
 ### 6.3 UI 文言（i18n）の追加
 
 - UI 文言は `common.i18n.tr("<key>", **params)` で出す。カタログは `i18n/en.toml`（既定言語・フォールバックの基底）と `i18n/ja.toml` の平坦なキー。`tr()` は「選択中の言語 → en → キー文字列」の順にフォールバックし、例外を出さない。
 - **両カタログに同じキー・同じプレースホルダ（`{name}` 等）を入れる。** `tests/test_i18n_catalog.py` が全カタログのキー集合とプレースホルダの一致を検査する。
-- 同テストはさらに `IN_FILES`（`gui/window.py`、`gui/chat.py`、`common/paths.py`、`dataset_config.py`、`tool.py`、`devtools/qt_integration.py`）について、`tr()` の第 1 引数が文字列リテラルであること、使ったキーがカタログにあること、`tr()` の外に日本語の文字列リテラルが無いこと（docstring は除く）を検査する。**他のファイルは検査されない**ので自分で守る。属性に持ったキーを引くときは、`IN_FILES` の外に lookup 関数を置く（`llm_backend/engines.py` の `engine_label` が例）。
+- 同テストはさらに、`tr()` を呼ぶファイル（リポジトリ直下の `*.py` と `_SCAN_DIRS` の各パッケージから自動検出した `IN_FILES`）について、使ったキーがカタログにあること、キーの形をした文字列リテラル（`chat.turn.stopped` 等）がカタログにあること、`tr()` の外に日本語の文字列リテラルが無いこと（docstring 等の式文は除く。CLI の `llm_bridge/__main__.py` は対象外、許可は `CJK_LITERAL_ALLOW`）を検査する。`tr()` の第 1 引数は文字列リテラルにする。変数を渡す呼び出しはファイルごとの件数を `DYNAMIC_TR_CALLS` で固定しており、増やすときはキーの出どころを別のテストで検査したうえで件数を更新する（例: `llm_backend/engines.py` の `engine_label` は `tests/test_engines.py` がラベルキーの解決を検査する）。`tr()` を呼ばないファイルは検査されないので自分で守る。パッケージを追加したら `_SCAN_DIRS` にも足す（`test_scan_dirs_cover_all_packages` が検出する）。
 - **言語のライブ切替** — `ToolWindow.retranslate()` が自分のメニュー等を張り替える。ToolWindow の外で作る UI は `retranslate()` を用意し、`window.register_retranslate_hook(fn)` で登録する（開発メニュー、バックエンド状況ウィンドウ、会議共有ウィンドウが例）。
 - 言語の追加は `i18n/<code>.toml` を置くだけでよく、次の起動から言語メニューに出る。`_lang.name` にその言語での言語名を入れ、キー集合を en と一致させる。
 
 ### 6.4 openai 互換バックエンド向けの GUI ツール
 
 - claude / codex / pi は `tools` 引数を使わず、エージェント自身が `python -m llm_bridge` を実行する。`gui/tools.py` のツールを使うのは openai 互換バックエンドだけ。
-- 追加するのは 2 か所: `TOOLS`（OpenAI function calling の JSON スキーマ）と `_dispatch()` の分岐。両者の整合を確かめるテストは無い。
+- 追加するのは 2 か所: `TOOLS`（OpenAI function calling の JSON スキーマ）と `_dispatch()` の分岐。`tests/test_registry_consistency.py` が、`TOOLS` の全ツールが `_dispatch()` で処理される（未知ツール扱いにならない）ことを検査する。
 - `_dispatch()` は `_StreamWorker` のスレッドで動く。ウィジェットに触る操作は `_via_bridge(tier, target, verb, args)` でコマンドキューを通す（既定 10 秒でタイムアウト、Stop で中断できる）。
 - 戻り値は JSON 文字列。例外は `make_dispatch()` が `{"error": ...}` に変換する。1 回の送信でのツール往復は最大 8 回（`gui/chat.py` の `_MAX_TOOL_TURNS`）。
 - ツールの使い方の指示が要るなら `gui/chat.py` の `_SYSTEM_PROMPT` も更新する。これはチャット作成時にセッションへ保存されるので、既存のチャットには効かない（[§5.3](#53-エージェントの-system-プロンプト)）。
@@ -424,6 +428,7 @@ python -m pytest tests/
 | `data/llm_state` の `last_window` / `recent_datasets` / `backend_sessions` / `ui_prefs` / `personas` | `llm_bridge.paths` の各 `*_path` を `tmp_path` に向ける |
 | FS 判定 | `MYANALYSIS_FS_OVERRIDE=<tmp_path>=local` を設定し、`MYANALYSIS_FORCE_FRAGILE` / `MYANALYSIS_WRITE_STRATEGY` を外す |
 | R2 設定同期 | `R2_AUTOSYNC=0`。`.env` の読込・状態ファイル・boto3 クライアントをスタブにする（ネットワーク禁止） |
+| session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
 
 **隔離されないもの** — `data/llm_state` の `commands/`、`command_log.jsonl`、`active.json`、`reload_manifest.json`。これらに触れるテストは、`llm_bridge.paths.global_state_dir`（または個別の `*_path` 関数）を自分で `tmp_path` にパッチする。`from ... import` で取り込まれた名前は、取り込んだ側のモジュールでパッチする。
 
@@ -438,17 +443,18 @@ python -m pytest tests/
 |---|---|
 | 書込 chokepoint・FS 判定・ロック | `test_paths`, `test_fs_kind`, `test_filelock`, `test_mount_compat`, `test_figures`, `test_local_state_store` |
 | 登録簿・データセット設定・設定同期 | `test_dataset_registry`, `test_register_dataset`, `test_migrate_dataset_registry`, `test_dataset_config`, `test_config_share`, `test_cli_register_auto_open`, `test_config_push` |
-| explore / export / newanalysis | `test_explore`, `test_export_driver`, `test_newanalysis` |
-| llm_bridge の CLI と状態ファイル | `test_active_state`, `test_cli_state_dataset`, `test_cli_set_description`, `test_cli_set_completed`, `test_annotations`, `test_annotations_handler`, `test_analysis_edit`, `test_guard_write`, `test_recent_datasets`, `test_dataset_meta` |
+| explore / export / newanalysis | `test_explore`, `test_export_driver`, `test_newanalysis`, `test_analysis_module` |
+| llm_bridge の CLI と状態ファイル | `test_active_state`, `test_cli_state_dataset`, `test_cli_set_description`, `test_cli_set_completed`, `test_annotations`, `test_annotations_handler`, `test_analysis_edit`, `test_guard_write`, `test_recent_datasets`, `test_dataset_meta`, `test_parse_kvs`, `test_command_log`, `test_cli_stdio`, `test_verbs_registry` |
 | セッションとチャット履歴の保存 | `test_session`, `test_session_meta_hooks`, `test_chat_store`, `test_backend_session_store` |
-| window / tab verb と GUI | `test_show`, `test_show_image`, `test_attach_tab_dataset`, `test_current_dataset_gui`, `test_workspace_gui`, `test_floating_tab`, `test_tabbar`, `test_tab_context_menu`, `test_dataset_context_menu`, `test_open_dataset_dialog`, `test_imageviewer`, `test_image_io` |
+| window / tab verb と GUI | `test_show`, `test_show_image`, `test_attach_tab_dataset`, `test_current_dataset_gui`, `test_workspace_gui`, `test_floating_tab`, `test_tabbar`, `test_tab_context_menu`, `test_dataset_context_menu`, `test_open_dataset_dialog`, `test_imageviewer`, `test_image_io`, `test_nested_split`, `test_slots` |
 | チャット UI・ツール呼び出し | `test_chat_widget`, `test_chat_persona`, `test_llm_tool_use` |
-| LLM バックエンド | `test_backend_registry`, `test_backend_prompt`, `test_backend_prompts`, `test_claude_code`, `test_claude_system_prompt`, `test_pi_backend`, `test_codex_backend`, `test_cmd_shim`, `test_proc`, `test_persona_prompt` |
+| LLM バックエンド | `test_backend_registry`, `test_backend_prompt`, `test_backend_prompts`, `test_claude_code`, `test_claude_system_prompt`, `test_pi_backend`, `test_codex_backend`, `test_cmd_shim`, `test_proc`, `test_persona_prompt`, `test_registry_consistency` |
 | エンジン設定・状況・ペルソナ | `test_engines`, `test_model_settings`, `test_settings_store`, `test_backend_selector`, `test_backend_status_window`, `test_preflight`, `test_ping`, `test_personas`, `test_persona_dialog` |
-| i18n | `test_i18n`, `test_i18n_catalog`, `test_i18n_gui` |
+| i18n | `test_i18n`, `test_i18n_catalog`, `test_i18n_gui`, `test_qt_translation` |
 | ホットリロード | `test_hotreload`（Qt 非依存コア）, `test_hotreload_qt` |
 | 会議共有 | `test_local_relay`, `test_meeting_relay`, `test_meeting_chat` |
-| クラッシュログ | `test_crashlog` |
+| クラッシュログ・起動 | `test_crashlog`, `test_tool_startup` |
+| doctor・mount_probe | `test_doctor`, `test_mount_probe` |
 
 ---
 
