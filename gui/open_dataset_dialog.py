@@ -7,7 +7,10 @@ background thread.
 """
 from __future__ import annotations
 
+import os
+import socket
 import time
+from pathlib import Path, PureWindowsPath
 
 from PySide6.QtCore import (
     QAbstractTableModel,
@@ -23,6 +26,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
@@ -81,6 +85,58 @@ def _avail_text(meta) -> str:
         "missing": tr("picker.avail.missing"),
         "bad-config": tr("picker.avail.bad_config"),
     }.get(meta.unavailable_reason, tr("picker.avail.bad_config"))
+
+
+def _needs_heavy_rebuild(m) -> bool:
+    """meta が未集計、または HEAVY 項目が欠けていて、バックグラウンド再集計が要るか。"""
+    return bool(m.name) and (m.uncomputed or any(
+        getattr(m, f) is None for f in HEAVY_FIELDS))
+
+
+# アプリがデータセットのフォルダに作るもの。どれも無いフォルダは、同期が未完了か別のフォルダ。
+_DATASET_MARKERS = ("myanalysis.toml", "meta.json", "analyses")
+
+
+def _norm_path(p: str) -> str:
+    return os.path.normcase(os.path.normpath(p))
+
+
+def _path_doubts(name: str, path: str, registry: dict, host: str) -> list[tuple[str, dict]]:
+    """この PC での *name* のパスとして *path* を登録する前に確認すべき点（Qt 非依存）。
+
+    戻り値は (理由コード, tr の引数) の列。空なら確認なしで登録してよい。
+      - "no_marker":    フォルダに _DATASET_MARKERS のどれも無い（stat 失敗も無い扱い）。
+      - "name_differs": フォルダ名が、他ホストの登録パスのどのフォルダ名とも違う
+                        （PureWindowsPath は `/` と `\\` の両方で区切るので POSIX パスにも効く）。
+      - "dup":          この PC で、別のデータセット名に同じフォルダが登録済み。
+    """
+    doubts: list[tuple[str, dict]] = []
+
+    def _exists(p: Path) -> bool:
+        try:
+            return p.exists()
+        except OSError:
+            return False
+
+    if not any(_exists(Path(path) / m) for m in _DATASET_MARKERS):
+        doubts.append(("no_marker", {}))
+
+    others = [p for h, p in (registry.get(name) or {}).items()
+              if h != host and isinstance(p, str)]
+    other_names = sorted({PureWindowsPath(p).name for p in others})
+    if others and PureWindowsPath(path).name.casefold() not in {
+            n.casefold() for n in other_names}:
+        doubts.append(("name_differs", {"names": ", ".join(other_names)}))
+
+    mine = _norm_path(path)
+    for ds, per_host in sorted(registry.items()):
+        if ds == name or not isinstance(per_host, dict):
+            continue
+        p = per_host.get(host)
+        if isinstance(p, str) and _norm_path(p) == mine:
+            doubts.append(("dup", {"other": ds}))
+            break
+    return doubts
 
 
 class DatasetTableModel(QAbstractTableModel):
@@ -318,6 +374,8 @@ class OpenDatasetDialog(QDialog):
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail_layout.addWidget(self._thumb)
         btn_row = QHBoxLayout()
+        self._add_path_btn = QPushButton(tr("picker.btn.add_host_path"), detail)
+        self._add_path_btn.clicked.connect(self._on_add_host_path)
         self._refresh_btn = QPushButton(tr("picker.btn.refresh"), detail)
         self._refresh_btn.clicked.connect(self._on_refresh)
         self._edit_btn = QPushButton(tr("picker.btn.edit_desc"), detail)
@@ -326,6 +384,7 @@ class OpenDatasetDialog(QDialog):
         self._complete_btn.clicked.connect(self._on_toggle_completed)
         self._delete_btn = QPushButton(tr("picker.btn.delete"), detail)
         self._delete_btn.clicked.connect(self._on_delete)
+        btn_row.addWidget(self._add_path_btn)
         btn_row.addWidget(self._refresh_btn)
         btn_row.addWidget(self._edit_btn)
         btn_row.addWidget(self._complete_btn)
@@ -371,11 +430,7 @@ class OpenDatasetDialog(QDialog):
         # background worker — never on the GUI thread — so a large synced-drive
         # os.walk can't freeze the dialog.
         self._workers: list[_MetaBuildWorker] = []
-        stale_names = [
-            m.name for m in metas
-            if m.name and (m.uncomputed or any(
-                getattr(m, f) is None for f in HEAVY_FIELDS))
-        ]
+        stale_names = [m.name for m in metas if _needs_heavy_rebuild(m)]
         if stale_names:
             self._start_worker(stale_names)
 
@@ -505,6 +560,9 @@ class OpenDatasetDialog(QDialog):
         # this host or a vanished directory is exactly what one wants to remove.
         self._refresh_btn.setEnabled(m is not None)
         self._delete_btn.setEnabled(m is not None)
+        # この PC のパスだけが無い行に、この PC のパスを足す。「ディレクトリ不在」は
+        # 同期ドライブが未マウントなだけのことが多いので、付け替えさせない。
+        self._add_path_btn.setEnabled(bool(m and m.unavailable_reason == "no-host"))
 
     def _clear_form(self) -> None:
         while self._form.rowCount() > 0:
@@ -572,7 +630,6 @@ class OpenDatasetDialog(QDialog):
         # thumbnail: a live re-grab (更新 on an open dataset) takes precedence over
         # the persisted snapshot so the pane shows the current on-screen view;
         # otherwise fall back to the dataset's stored current_view.png.
-        from pathlib import Path
         thumb_path = None
         live = self._live_thumbs.get(m.name)
         if live and Path(live).exists():
@@ -775,6 +832,81 @@ class OpenDatasetDialog(QDialog):
             fn()
         except Exception:
             pass                            # best-effort: 削除の成否に影響させない
+
+    def _on_add_host_path(self) -> None:
+        # 他の PC の登録は届いているが、この PC のパスだけが無い行に、この PC のパスを足す。
+        # 登録簿に足すだけでフォルダには書かない（myanalysis.toml も作らない）。登録しても
+        # 自動では開かない — 一覧の中なので、行が利用可になれば「開く」を押すだけでよい。
+        m = self._current_meta()
+        if m is None or not m.name or m.unavailable_reason != "no-host":
+            return
+        name = m.name
+        host = socket.gethostname().upper()
+        path = QFileDialog.getExistingDirectory(
+            self, tr("picker.add_path.title", name=name, host=host))
+        if not path:
+            return
+
+        import config
+        doubts = _path_doubts(name, path, config.DATASETS, host)
+        if doubts:
+            lines = []
+            for code, params in doubts:
+                if code == "no_marker":
+                    lines.append(tr("picker.add_path.reason.no_marker"))
+                elif code == "name_differs":
+                    lines.append(tr("picker.add_path.reason.name_differs", **params))
+                elif code == "dup":
+                    lines.append(tr("picker.add_path.reason.dup", **params))
+            answer = QMessageBox.question(
+                self, tr("picker.add_path.dialog_title"),
+                tr("picker.add_path.confirm",
+                   reasons="\n".join(lines), path=path, name=name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            res = config.register_dataset(name, path)
+        except Exception as e:
+            QMessageBox.warning(
+                self, tr("picker.add_path.dialog_title"),
+                tr("picker.add_path.failed", error=str(e)))
+            return
+        # 成功時のみメモリ poke（window._register_dataset と同じ）。次の load_one が
+        # get_dataset_dir でこの PC のパスを引けるよう、先に行う。
+        config.DATASETS.setdefault(res["name"], {})[res["host"]] = res["path"]
+        self._request_config_push()         # R2 へ（送信のみ・非同期・best-effort）
+
+        fresh = dataset_meta.load_one(name)
+        self._model.update_meta(fresh)
+        # 読めるようになった meta.json の completed で、行が完了済みの一覧へ移ることがある。
+        self._proxy.invalidate()
+        self._completed_proxy.invalidate()
+        self._sync_completed_section()
+        self._select_by_name(name)
+        if _needs_heavy_rebuild(fresh):
+            self._start_worker([name])
+
+    def _select_by_name(self, name: str) -> None:
+        """name の行を選ぶ。通常の一覧に無ければ完了済みの一覧を展開して選ぶ。"""
+        row = self._find_proxy_row(self._proxy, name)
+        if row is not None:
+            view, other, proxy = self._view, self._completed_view, self._proxy
+        else:
+            row = self._find_proxy_row(self._completed_proxy, name)
+            if row is None:
+                self._clear_all_selection()
+                return
+            self._completed_toggle.setChecked(True)
+            view, other, proxy = self._completed_view, self._view, self._completed_proxy
+        self._active_view = view
+        with QSignalBlocker(other.selectionModel()):
+            other.clearSelection()
+        view.selectRow(row)
+        view.scrollTo(proxy.index(row, 0))
+        self._on_selection_changed()        # 同じ行のままなら selectRow は変化を通知しない
 
     def _find_proxy_row(self, proxy, name: str) -> int | None:
         for r in range(proxy.rowCount()):

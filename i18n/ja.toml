@@ -327,6 +327,14 @@
 "picker.delete.confirm_open"     = "このデータセットは開いているため、先に閉じます。"
 "picker.delete.confirm_sync"     = "R2 同期により、他の PC の登録からも削除されます。"
 "picker.delete.failed"           = "登録を削除できませんでした: {error}"
+"picker.btn.add_host_path"       = "この PC のパスを登録…"
+"picker.add_path.dialog_title"   = "この PC のパスを登録"
+"picker.add_path.title"          = "'{name}' のフォルダを選択（この PC: {host}）"
+"picker.add_path.confirm"        = "選んだフォルダについて確認してください:\n\n{reasons}\n\n{path}\n\nこのフォルダを、この PC での '{name}' のパスとして登録しますか？"
+"picker.add_path.reason.no_marker"    = "・このアプリがデータセットに作るファイル（myanalysis.toml・meta.json・analyses）がありません。同期がまだ終わっていないか、別のフォルダかもしれません。"
+"picker.add_path.reason.name_differs" = "・フォルダ名が、他の PC で登録されているフォルダ（{names}）と違います。"
+"picker.add_path.reason.dup"          = "・この PC では既に '{other}' として登録されているフォルダです。"
+"picker.add_path.failed"         = "パスを登録できませんでした: {error}"
 
 # Issue #103
 "tab.placeholder.body" = "解析はまだありません。お試し: python tool.py --demo"

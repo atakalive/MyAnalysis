@@ -327,6 +327,14 @@
 "picker.delete.confirm_open"     = "This dataset is open, so it will be closed first."
 "picker.delete.confirm_sync"     = "With R2 sync, it is also removed from the registries on your other PCs."
 "picker.delete.failed"           = "Could not remove the registration: {error}"
+"picker.btn.add_host_path"       = "Register path on this PC…"
+"picker.add_path.dialog_title"   = "Register path on this PC"
+"picker.add_path.title"          = "Select the folder of '{name}' (this PC: {host})"
+"picker.add_path.confirm"        = "Please check the selected folder:\n\n{reasons}\n\n{path}\n\nRegister this folder as the path of '{name}' on this PC?"
+"picker.add_path.reason.no_marker"    = "- It has none of the files this app creates in a dataset (myanalysis.toml, meta.json, analyses). Syncing may not have finished, or it may be a different folder."
+"picker.add_path.reason.name_differs" = "- The folder name differs from the folders registered on other PCs ({names})."
+"picker.add_path.reason.dup"          = "- This folder is already registered on this PC as '{other}'."
+"picker.add_path.failed"         = "Could not register the path: {error}"
 
 # Issue #103
 "tab.placeholder.body" = "No analyses defined yet. Try: python tool.py --demo"

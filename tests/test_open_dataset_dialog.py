@@ -857,3 +857,230 @@ def test_open_cancel_buttons_are_translated(qapp, patch_picker, monkeypatch):
         == i18n.tr("picker.btn.open") == "開く"
     assert buttons.button(QDialogButtonBox.StandardButton.Cancel).text() \
         == i18n.tr("picker.btn.cancel") == "キャンセル"
+
+
+# --------------------------------------------------------------------------- #
+# この PC のパスを登録（「このホストにパス無し」の行に、この PC のパスを足す）（Issue #112）
+# --------------------------------------------------------------------------- #
+def _no_host(name, **kw):
+    return _meta(name, available=False, unavailable_reason="no-host", **kw)
+
+
+@pytest.fixture
+def add_path_stubs(monkeypatch, tmp_path):
+    """フォルダ選択・確認・警告・register_dataset・load_one を stub 化して記録する。
+
+    既定のフォルダは tmp の `ds/`（myanalysis.toml あり）で、確認なしで登録される形。
+    """
+    import socket
+
+    import config
+    from gui import open_dataset_dialog as mod
+    from PySide6.QtWidgets import QMessageBox
+
+    folder = tmp_path / "ds"
+    folder.mkdir()
+    (folder / "myanalysis.toml").write_text("", encoding="utf-8")
+    rec = {"calls": [], "dir": str(folder), "host": socket.gethostname().upper(),
+           "answer": QMessageBox.StandardButton.Yes, "questions": [], "warned": 0,
+           "fresh": lambda n: _meta(n), "register_exc": None}
+
+    def register(name, path, host=None, **k):
+        rec["calls"].append(("register", name, path))
+        if rec["register_exc"] is not None:
+            raise rec["register_exc"]
+        return {"name": name, "host": rec["host"], "path": path, "created": False}
+
+    def question(*a, **k):
+        rec["questions"].append(a[2])
+        return rec["answer"]
+
+    monkeypatch.setattr(config, "register_dataset", register)
+    monkeypatch.setattr(mod.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: rec["dir"]))
+    monkeypatch.setattr(mod.QMessageBox, "question", staticmethod(question))
+    monkeypatch.setattr(
+        mod.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: rec.__setitem__("warned", rec["warned"] + 1)))
+    monkeypatch.setattr(mod.dataset_meta, "load_one", lambda n: rec["fresh"](n))
+    monkeypatch.setattr(mod.dataset_meta, "rebuild_meta", lambda *a, **k: None)
+    return rec
+
+
+def test_add_path_enabled_only_for_no_host(qapp, patch_picker):
+    patch_picker([_no_host("nh"), _meta("ok"),
+                  _meta("miss", available=False, unavailable_reason="missing"),
+                  _meta("bad", available=False, unavailable_reason="bad-config")])
+    dlg, _m, _h = _make_dialog(qapp)
+    for name in ("nh", "ok", "miss", "bad"):
+        dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, name))
+        assert dlg._add_path_btn.isEnabled() is (name == "nh"), name
+    dlg._clear_all_selection()
+    assert dlg._add_path_btn.isEnabled() is False
+
+
+def test_add_path_cancel_does_nothing(qapp, patch_picker, add_path_stubs):
+    import config
+    patch_picker([_no_host("ds")])
+    add_path_stubs["dir"] = ""
+    main = _FakeMainPush([], rec=add_path_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_add_host_path()
+    assert add_path_stubs["calls"] == []
+    assert config.DATASETS["ds"] == {}
+
+
+def test_add_path_registers_and_enables_open(qapp, patch_picker, add_path_stubs):
+    import config
+    patch_picker([_no_host("ds")])
+    main = _FakeMainPush([], rec=add_path_stubs)
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    assert dlg._open_btn.isEnabled() is False
+    dlg._on_add_host_path()
+    d = add_path_stubs["dir"]
+    assert add_path_stubs["calls"] == [("register", "ds", d), ("push",)]
+    assert add_path_stubs["questions"] == []          # 疑わしい点が無ければ確認しない
+    assert config.DATASETS["ds"] == {add_path_stubs["host"]: d}
+    m = dlg._current_meta()
+    assert m.name == "ds" and m.available is True
+    assert dlg._open_btn.isEnabled() is True
+    assert dlg._add_path_btn.isEnabled() is False
+    assert dlg._workers == []                         # 集計済みの meta なら再集計しない
+
+
+def test_add_path_doubtful_folder_declined(qapp, patch_picker, add_path_stubs, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    patch_picker([_no_host("ds")])
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    add_path_stubs["dir"] = str(bare)
+    add_path_stubs["answer"] = QMessageBox.StandardButton.No
+    dlg, _m, _h = _make_dialog(qapp, main=_FakeMainPush([], rec=add_path_stubs))
+    dlg._on_add_host_path()
+    assert len(add_path_stubs["questions"]) == 1
+    assert str(bare) in add_path_stubs["questions"][0]
+    assert add_path_stubs["calls"] == []
+
+
+def test_add_path_doubtful_folder_accepted(qapp, patch_picker, add_path_stubs, tmp_path):
+    patch_picker([_no_host("ds")])
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    add_path_stubs["dir"] = str(bare)
+    dlg, _m, _h = _make_dialog(qapp, main=_FakeMainPush([], rec=add_path_stubs))
+    dlg._on_add_host_path()
+    assert len(add_path_stubs["questions"]) == 1
+    assert add_path_stubs["calls"] == [("register", "ds", str(bare)), ("push",)]
+
+
+def test_add_path_failure_warns_and_keeps_row(qapp, patch_picker, add_path_stubs):
+    import config
+    patch_picker([_no_host("ds")])
+    add_path_stubs["register_exc"] = config.RegistryError("nope")
+    dlg, _m, _h = _make_dialog(qapp, main=_FakeMainPush([], rec=add_path_stubs))
+    dlg._on_add_host_path()
+    assert add_path_stubs["warned"] == 1
+    assert ("push",) not in add_path_stubs["calls"]
+    assert config.DATASETS["ds"] == {}
+    assert dlg._current_meta().unavailable_reason == "no-host"
+    assert dlg._open_btn.isEnabled() is False
+
+
+def test_add_path_row_moves_to_completed(qapp, patch_picker, add_path_stubs):
+    # この PC で読めるようになった meta.json が完了済みなら、行は完了済みの一覧へ移る。
+    patch_picker([_meta("x"), _no_host("ds")])
+    add_path_stubs["fresh"] = lambda n: _meta(n, completed=True)
+    dlg, _m, _h = _make_dialog(qapp)
+    dlg._view.selectRow(dlg._find_proxy_row(dlg._proxy, "ds"))
+    dlg._on_add_host_path()
+    assert dlg._completed_toggle.isChecked() is True
+    assert dlg._active_view is dlg._completed_view
+    assert dlg._current_meta().name == "ds"
+    assert dlg._open_btn.isEnabled() is True
+
+
+def test_add_path_starts_worker_for_stale_meta(qapp, patch_picker, add_path_stubs):
+    patch_picker([_no_host("ds")])
+    add_path_stubs["fresh"] = lambda n: _meta(n, uncomputed=True)
+    dlg, _m, _h = _make_dialog(qapp)
+    assert dlg._workers == []
+    dlg._on_add_host_path()
+    assert len(dlg._workers) == 1
+    assert dlg._workers[-1].wait(5000)
+
+
+def test_add_path_through_real_registry(qapp, real_registry, monkeypatch, tmp_path):
+    """実ストレージ越し: 他ホストの登録を残したまま、この PC のホストが足される。"""
+    import json
+    import socket
+
+    import config
+    import config_share
+    from gui import open_dataset_dialog as mod
+
+    folder = tmp_path / "ds"
+    folder.mkdir()
+    (folder / "meta.json").write_text("{}", encoding="utf-8")
+    real_registry.write({"ds": {"OTHERHOST": "/x/ds"}})
+    monkeypatch.setattr(mod.dataset_meta, "load_for_picker",
+                        lambda ns: [_no_host(n) for n in ns])
+    monkeypatch.setattr(mod.dataset_meta, "load_one", lambda n: _meta(n))
+    monkeypatch.setattr(mod.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(folder)))
+    monkeypatch.setattr(mod.QMessageBox, "question",
+                        staticmethod(lambda *a, **k: pytest.fail("unexpected confirm")))
+    main = _FakeMainPush([], rec={"calls": []})
+    dlg, _m, _h = _make_dialog(qapp, main=main)
+    dlg._on_add_host_path()
+    host = socket.gethostname().upper()
+    assert json.loads(real_registry.path.read_text(encoding="utf-8")) == {
+        "ds": {"OTHERHOST": "/x/ds", host: str(folder)}}
+    assert config.DATASETS["ds"][host] == str(folder)
+    assert f"ds/{host}" in config_share._local_state()["entry_meta"]
+    assert main._rec["calls"] == [("push",)]
+
+
+# ----- _path_doubts（Qt の画面は使わない純関数） -----
+def _doubt_codes(name, path, registry, host="ME"):
+    from gui.open_dataset_dialog import _path_doubts
+    return [c for c, _p in _path_doubts(name, str(path), registry, host)]
+
+
+def test_path_doubts_no_marker(tmp_path):
+    bare = tmp_path / "ds"
+    bare.mkdir()
+    assert _doubt_codes("ds", bare, {"ds": {}}) == ["no_marker"]
+    (bare / "analyses").mkdir()
+    assert _doubt_codes("ds", bare, {"ds": {}}) == []
+
+
+def test_path_doubts_name_differs(tmp_path):
+    from gui.open_dataset_dialog import _path_doubts
+    folder = tmp_path / "elsewhere"
+    folder.mkdir()
+    (folder / "myanalysis.toml").write_text("", encoding="utf-8")
+    reg = {"ds": {"OTHER": "D:\\data\\ds", "OTHER2": "/mnt/g/data/ds"}}
+    assert _path_doubts("ds", str(folder), reg, "ME") == [
+        ("name_differs", {"names": "ds"})]
+    # 他ホストの登録が無ければ比べようがないので疑わない。
+    assert _doubt_codes("ds", folder, {"ds": {}}) == []
+
+
+def test_path_doubts_name_matches_posix_and_case(tmp_path):
+    folder = tmp_path / "ds"
+    folder.mkdir()
+    (folder / "meta.json").write_text("{}", encoding="utf-8")
+    assert _doubt_codes("ds", folder, {"ds": {"OTHER": "/mnt/g/data/DS"}}) == []
+    assert _doubt_codes("ds", folder, {"ds": {"OTHER": "G:\\Data\\Ds"}}) == []
+
+
+def test_path_doubts_dup(tmp_path):
+    import os
+
+    from gui.open_dataset_dialog import _path_doubts
+    folder = tmp_path / "ds"
+    folder.mkdir()
+    (folder / "myanalysis.toml").write_text("", encoding="utf-8")
+    reg = {"ds": {"OTHER": "/x/ds"}, "alias": {"ME": str(folder) + os.sep},
+           "elsewhere": {"OTHER": str(folder)}}
+    assert _path_doubts("ds", str(folder), reg, "ME") == [("dup", {"other": "alias"})]

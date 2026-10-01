@@ -89,7 +89,7 @@ A dataset is a pair of "one folder containing measurement data" and "its name". 
 - **What the app creates in the folder**: `myanalysis.toml` (settings), `meta.json` (for the list view), `analyses/` (analysis modules), `_work/` (outputs, chat history, tab layout). You need write permission on the folder. The app itself does not modify measurement files. The agent is instructed not to modify them, but this is not enforced mechanically.
 - **Using a dataset on several PCs via a sync drive**: register it with the same name on each PC. **Do not open the same dataset on two PCs at the same time** (there is no locking between PCs; for the tab layout, and for a chat changed on both PCs, the later save wins). The first send on another PC resends the whole chat history.
 
-To remove a registration, select the dataset in **File → Open dataset…** and press **Remove registration** (files in the folder are not deleted). To register from the CLI, or to change the output location or read format (`myanalysis.toml`), read [docs/usage_ja.md](docs/usage_ja.md#データセット).
+To remove a registration, select the dataset in **File → Open dataset…** and press **Remove registration** (files in the folder are not deleted). A row shown as "No path on this host" (registered on another PC and synced here) becomes openable once you press **Register path on this PC…** in the same list and select the folder on this PC. To register from the CLI, or to change the output location or read format (`myanalysis.toml`), read [docs/usage_ja.md](docs/usage_ja.md#データセット).
 
 ---
 
