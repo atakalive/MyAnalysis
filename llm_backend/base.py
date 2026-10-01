@@ -16,6 +16,7 @@ TOOL_CALL_MARKER = "🔧"
 TOOL_RESULT_MARKER = "↳"
 TOOL_ERROR_MARKER = "✗"
 TOOL_RESULT_INDENT = "   "   # 結果行の 3 スペース字下げ
+THINKING_MARKER = "💭"
 
 
 # Shared across ALL backend system prompts (claude / pi / gui-chat). This
@@ -173,21 +174,30 @@ class Message:
         return d
 
 
+def format_thinking_line(text: str) -> str:
+    """思考サマリ 1 件を、前後を改行で挟んだ 💭 の 1 行にする（空白は畳むだけで切り詰めない）。
+    空・空白だけなら ""（呼び出し側は "" を yield しない）。"""
+    body = " ".join(text.split())
+    return f"\n{THINKING_MARKER} {body}\n" if body else ""
+
+
 def strip_tool_lines(content: str) -> str:
-    """assistant content から ツール呼び出し行（🔧…）/ ツール結果行（   ↳… /    ✗…）を
+    """assistant content から ツール呼び出し行（🔧…）/ ツール結果行（   ↳… /    ✗…）/ 思考行（💭…）を
     落とし地の文だけ残す。保存 buffer にはツール痕跡がテキストで混入しており（UI 側
     _simplify_tool_text の 'hidden' 相当）、replay 履歴にそのまま載せると (a) プロンプト
     肥大、(b) 過去のツール結果を live 状態と誤認させる原因になる。ここで剥がしモデルへは
     会話の地の文だけ渡す。剥がした後に残る連続空行は畳む。
 
     除去は行頭のマーカー完全一致（🔧+空白 / 3スペース字下げ+↳+空白 / 同+✗+空白）で行う。
-    UI 側 _is_tool_call/_is_tool_result（gui/chat.py:90-100）と同一述語・同一マーカー定数
+    UI 側 _is_tool_call/_is_tool_result/_is_thinking_line と同一述語・同一マーカー定数
     （base.py:15-18 の単一ソース）なので表示が隠す行と過不足なく一致する。理論上は同じ
     接頭辞で始まる自然文を誤除去し得るが、これらは絵文字マーカーで地の文と衝突しない前提。
     tool 行は _tool_input_summary/_tool_result_text が改行を畳んで単一行化
     するため、複数行結果の継続行が漏れ残ることもない。"""
     out = []
     for line in content.split("\n"):
+        if line.startswith(THINKING_MARKER + " "):
+            continue
         if line.startswith(TOOL_CALL_MARKER + " "):
             continue
         if line.startswith(TOOL_RESULT_INDENT + TOOL_RESULT_MARKER + " ") \

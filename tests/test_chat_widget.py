@@ -2235,3 +2235,137 @@ def test_start_turn_bumps_updated(widget, monkeypatch):
     finally:
         widget._turns.clear()
         widget._spin_timer.stop()
+
+
+# ---- Issue #109: 思考行（💭） ----
+
+_TH_INPUTS = [
+    "💭 a  b\nbody",
+    "🔧 A  x\n   ↳ r\n💭 t\n🔧 B  y\n   ↳ s\ndone",
+    "pre\n💭 a\n💭 b\npost",
+    "\n💭 only\n",
+    "```\n💭 plan\n```",
+]
+
+
+def test_thinking_simplify_quote_and_hidden():
+    from gui.chat import _simplify_tool_text
+    for mode in ("full", "compact"):
+        assert _simplify_tool_text("💭 a  b\nbody", mode) == "> 💭 a b\n\nbody"
+    assert _simplify_tool_text("💭 a  b\nbody", "hidden") == "body"
+    t = "🔧 A  x\n   ↳ r\n💭 t\n🔧 B  y\n   ↳ s\ndone"
+    assert _simplify_tool_text(t, "compact") == "🔧 A\n\n> 💭 t\n\n🔧 B\n\ndone"
+    assert _simplify_tool_text(t, "full") == (
+        "🔧 A  x\n\n   ↳ r\n\n> 💭 t\n\n🔧 B  y\n\n   ↳ s\n\ndone")
+    assert _simplify_tool_text(t, "hidden") == "done"
+    t = "pre\n💭 a\n💭 b\npost"
+    assert _simplify_tool_text(t, "compact") == "pre\n\n> 💭 a\n\n> 💭 b\n\npost"
+    assert _simplify_tool_text(t, "hidden") == "pre\npost"
+    assert _simplify_tool_text("\n💭 only\n", "hidden").strip() == ""
+    for mode in ("full", "compact"):
+        assert _simplify_tool_text("```\n💭 plan\n```", mode) == "```\n\n> 💭 plan\n\n```"
+    assert _simplify_tool_text("```\n💭 plan\n```", "hidden") == "```\n```"
+
+
+def test_thinking_hidden_equals_without_thinking_lines():
+    from gui.chat import _simplify_tool_text
+    for x in _TH_INPUTS:
+        stripped = "\n".join(ln for ln in x.split("\n") if not ln.startswith("💭 "))
+        assert _simplify_tool_text(x, "hidden") == _simplify_tool_text(stripped, "hidden")
+
+
+_TH_BODY = "\n💭 plan\n\n🔧 Read  a.py\n   ↳ ok\n\n💭 next\n\nresult"
+
+
+@pytest.mark.parametrize("mode", ["full", "compact"])
+def test_thinking_live_matches_completion(widget, mode):
+    from gui.chat import _simplify_tool_text
+    pieces = ("\n💭 pl", "an\n\n🔧 Read  a.py\n", "   ↳ ok\n\n💭 ne", "xt\n\nres", "ult")
+    assert "".join(pieces) == _TH_BODY
+
+    widget._log.clear()
+    sess, turn = _start_inflight(widget, mode_default=mode)
+    for piece in pieces:
+        turn.buffer += piece
+        widget._flush_live_markdown()
+    staged = widget._log.toHtml()
+    widget._turns.pop(sess.id)
+
+    widget._log.clear()
+    widget._append_block("assistant", _simplify_tool_text(_TH_BODY, mode), markdown=True)
+    assert staged == widget._log.toHtml()
+
+
+@pytest.mark.parametrize("mode", ["full", "compact"])
+def test_thinking_first_block_is_indented_and_grey(widget, mode):
+    from PySide6.QtGui import QTextFormat
+    from gui.chat import _simplify_tool_text
+    widget._log.clear()
+    widget._append_block("assistant", _simplify_tool_text(_TH_BODY, mode), markdown=True)
+    doc = widget._log.document()
+    lvl = QTextFormat.Property.BlockQuoteLevel
+    header = doc.begin()
+    first = header.next()
+    assert header.blockFormat().property(lvl) is None
+    assert first.text().startswith("💭 plan")
+    assert first.blockFormat().property(lvl) == 1
+    frag = first.begin().fragment()
+    assert frag.charFormat().foreground().color().name() == "#b4b4b4"
+    blk = doc.begin()
+    result = None
+    while blk.isValid():
+        if blk.text() == "result":
+            result = blk
+        blk = blk.next()
+    assert result is not None
+    assert not result.blockFormat().property(lvl)
+
+
+def test_thinking_in_fence_stays_code(widget):
+    from PySide6.QtGui import QTextFormat
+    from gui.chat import _simplify_tool_text
+    widget._log.clear()
+    widget._append_block(
+        "assistant", _simplify_tool_text("```\n💭 plan\n```", "full"), markdown=True)
+    doc = widget._log.document()
+    lvl = QTextFormat.Property.BlockQuoteLevel
+    texts = []
+    blk = doc.begin()
+    while blk.isValid():
+        assert blk.blockFormat().property(lvl) is None
+        texts.append(blk.text())
+        blk = blk.next()
+    assert "> 💭 plan" in texts
+
+
+def _last_block(widget):
+    return widget._log.document().lastBlock()
+
+
+@pytest.mark.parametrize("body", ["ans\n💭 still thinking", "text\n\n- item"])
+def test_system_line_does_not_inherit_quote_or_list(widget, body):
+    from PySide6.QtGui import QTextFormat
+    from llm_backend.base import Message
+    sess = widget._active
+    sess.messages.append(Message(role="user", content="q"))
+    sess.messages.append(Message(role="assistant", content=body))
+    widget._render_session(sess)
+    widget._append_system_line("[stopped]")
+    last = _last_block(widget)
+    assert last.text() == "[stopped]"
+    assert last.blockFormat().property(QTextFormat.Property.BlockQuoteLevel) is None
+    assert last.textList() is None
+
+
+def test_error_line_does_not_inherit_quote(widget):
+    from PySide6.QtGui import QTextFormat
+    from llm_backend.base import Message
+    sess = widget._active
+    sess.messages.append(Message(role="user", content="q"))
+    backend = _TokenBackend(token="t")
+    turn = _failed_turn(widget, sess, backend, stopped=False)
+    turn.buffer = "ans\n💭 still thinking"
+    widget._on_failed(sess.id, "boom")
+    last = _last_block(widget)
+    assert last.text() == tr("chat.turn.error", error="boom")
+    assert last.blockFormat().property(QTextFormat.Property.BlockQuoteLevel) is None

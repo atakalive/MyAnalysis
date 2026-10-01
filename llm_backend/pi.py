@@ -25,7 +25,7 @@ from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS,
-    build_prompt_with_history, compose_system_prompt,
+    build_prompt_with_history, compose_system_prompt, format_thinking_line,
 )
 
 # Mandatory rules + minimal llm_bridge contract injected on every turn via
@@ -161,6 +161,11 @@ class PiCodingAgentBackend:
                     ae = event.get("assistantMessageEvent", {})
                     if ae.get("type") == "text_delta":
                         yield TextDelta(text=ae.get("delta", ""))
+                    elif ae.get("type") == "thinking_end":
+                        content = ae.get("content")
+                        line = format_thinking_line(content) if isinstance(content, str) else ""
+                        if line:
+                            yield TextDelta(text=line)
                 elif etype == "session":
                     self._session_id = event.get("id")
                 elif etype == "tool_execution_start":

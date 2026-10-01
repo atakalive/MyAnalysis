@@ -320,6 +320,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
    - cwd はリポジトリの外にする（[§3.3](#33-エージェント子プロセス)）。
    - 子プロセスは無人で動く（権限確認に答える UI が無く、確認待ちになるとターンが止まる）ので、対話的な権限確認が出ない設定で起動する（claude は `bypassPermissions`、codex は既定で承認・サンドボックスを迂回）。
    - エージェント側のツール実行は、`base.py` の `TOOL_CALL_MARKER` / `TOOL_RESULT_MARKER` を使った行として `TextDelta` で流す。UI のツール表示切替と、履歴を送り直すときのツール行の除去がこの形式に依存する。pi は共通マーカーではなく `[<ツール名>...]` の行を出す例外で、これは真似しない。
+   - モデルの思考（要約）は `base.py` の `format_thinking_line()` で `THINKING_MARKER`（💭）の 1 行にして `TextDelta` で流す（切り詰めない）。UI は通常・簡略で字下げした引用として表示し、非表示では隠す。`strip_tool_lines()` がこの行も落とすので、履歴の送り直しとチャット検索には入らない。少しずつストリームする場合（claude）は、行を閉じるまで改行を入れず、思考以外を出す前に必ず `"\n"` で閉じる。
    - 止めるときはプロセスツリーごと（Windows は `taskkill /T`、POSIX は `start_new_session=True` + `killpg`）。
 
 ### 6.2 window / tab verb の追加

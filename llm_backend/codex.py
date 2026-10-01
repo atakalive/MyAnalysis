@@ -40,7 +40,7 @@ from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
-    build_prompt_with_history, compose_system_prompt,
+    build_prompt_with_history, compose_system_prompt, format_thinking_line,
 )
 
 # Injected via AGENTS.md in the agent's cwd (codex auto-discovers it there).
@@ -231,8 +231,9 @@ class CodexBackend:
         agent_message text arrives whole on item.completed (codex exec --json
         has no token deltas). command_execution renders as call line on start
         + result line on completion, mirroring the claude backend's markers so
-        strip_tool_lines / the UI treat them identically. reasoning and other
-        item types are skipped.
+        strip_tool_lines / the UI treat them identically. reasoning renders as one
+        💭 thinking line (full text, whitespace collapsed); other item types are
+        skipped.
         """
         itype = item.get("item_type") or item.get("type")
         if started:
@@ -255,6 +256,11 @@ class CodexBackend:
             text = item.get("text") or ""
             if text:
                 yield TextDelta(text=text)
+        elif itype == "reasoning":
+            text = item.get("text")
+            line = format_thinking_line(text) if isinstance(text, str) else ""
+            if line:
+                yield TextDelta(text=line)
         elif itype == "command_execution":
             out = _one_line(item.get("aggregated_output") or "")
             code = item.get("exit_code")

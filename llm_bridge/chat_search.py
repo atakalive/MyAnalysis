@@ -82,7 +82,7 @@ def agent_safe_id(session_id) -> bool:
 
 
 def searchable_text(m) -> str | None:
-    """検索・表示の対象になる本文。user は本文、assistant はツール呼び出し行を除いた地の文。"""
+    """検索・表示の対象になる本文。user は本文、assistant はツール呼び出し行・思考行（💭）を除いた地の文。"""
     content = getattr(m, "content", None)
     if not isinstance(content, str) or not content:
         return None

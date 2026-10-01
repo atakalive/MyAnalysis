@@ -445,7 +445,7 @@ TOOLS = [
         "function": {
             "name": "chat_search",
             "description": "Keyword search over past chats: space-separated words, ALL "
-            "must appear in one message (case-insensitive; tool-call lines excluded). "
+            "must appear in one message (case-insensitive; tool-call and thinking lines excluded). "
             "Returns hits [{sid, idx, title, dataset, role, snippet, updated}], total "
             "and next_offset. Scope arguments as in chat_list.",
             "parameters": {
@@ -470,7 +470,7 @@ TOOLS = [
             "description": "Read a chat transcript. idx = message index (same as "
             "chat_search's idx); start/end select messages by idx, end is inclusive. "
             "If truncated is true, call again with start=next and "
-            "char_offset=next_char_offset to continue. raw=true keeps tool-call lines.",
+            "char_offset=next_char_offset to continue. raw=true keeps tool-call and thinking lines.",
             "parameters": {
                 "type": "object",
                 "properties": {

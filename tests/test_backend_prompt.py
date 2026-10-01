@@ -7,7 +7,7 @@ directly.
 from __future__ import annotations
 
 from llm_backend.base import (
-    Message, build_prompt_with_history, strip_tool_lines,
+    Message, build_prompt_with_history, format_thinking_line, strip_tool_lines,
     TOOL_CALL_MARKER, TOOL_RESULT_MARKER, TOOL_RESULT_INDENT,
 )
 
@@ -120,6 +120,27 @@ def test_strip_tool_lines_direct():
     assert "prose two" in out
     # 連続空行は畳まれる
     assert "\n\n\n" not in out
+
+
+def test_strip_tool_lines_drops_thinking():
+    assert strip_tool_lines("前\n💭 考え中\n後") == "前\n後"
+
+
+def test_replay_strips_thinking_lines():
+    msgs = [
+        Message(role="user", content="u1"),
+        Message(role="assistant", content="\n💭 秘密の思考\n\n答えです。"),
+        Message(role="user", content="u2"),
+    ]
+    out = build_prompt_with_history(msgs, replay=True)
+    assert "💭" not in out
+    assert "秘密の思考" not in out
+    assert "答えです。" in out
+
+
+def test_format_thinking_line():
+    assert format_thinking_line("  a\n\tb  ") == "\n💭 a b\n"
+    assert format_thinking_line(" \n ") == ""
 
 
 # ----- injection resilience -----

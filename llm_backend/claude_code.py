@@ -43,7 +43,8 @@ from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
-    build_prompt_with_history, compose_system_prompt,
+    THINKING_MARKER, build_prompt_with_history, compose_system_prompt,
+    format_thinking_line,
 )
 
 # Mandatory rules + minimal llm_bridge contract, injected on every turn via
@@ -244,6 +245,13 @@ class ClaudeCodeBackend:
     ) -> Iterator[TextDelta | ToolCallRequest]:
         config = self._config
 
+        self._thinking_open = False             # 💭 行を開いたまま（末尾の改行をまだ出していない）
+        self._thinking_space = False            # 開いた行の末尾で保留している空白（次の片の前に 1 つだけ出す）
+        self._thinking_raw: list[str] = []      # このターンで stream から受けた思考ブロックごとの生テキスト（受けた順）
+        self._thinking_matched: list[bool] = [] # 同じ位置のブロックを assistant イベントの thinking と突き合わせ済みか
+        self._thinking_cur: int | None = None   # いま受けている思考ブロックの位置（ブロックの外なら None）
+        self._pending: list[int] = []           # 本文が流れずに終わった思考ブロックの位置（未解決の枠。古い順）
+        self._queue: list[str | int] = []       # 未解決の枠（int）がある間の出力（str）を、出力順のまま溜める
         prompt = build_prompt_with_history(messages, replay=(self._session_id is None))
         if not prompt:
             raise RuntimeError("no user message to send")
@@ -346,7 +354,8 @@ class ClaudeCodeBackend:
                     if event.get("subtype") == "init" and m:
                         self.model = m
                 elif etype == "stream_event":
-                    yield from self._handle_stream_event(event.get("event", {}))
+                    yield from self._handle_stream_event(
+                        event.get("event", {}), event.get("parent_tool_use_id"))
                 elif etype == "assistant":
                     yield from self._handle_tool_calls(event)
                 elif etype == "user":
@@ -376,6 +385,7 @@ class ClaudeCodeBackend:
                     proc.wait(timeout=5)
             self._proc = None
 
+        yield from self._release_all()   # 安全弁: ターン終了で未解決の枠を捨てて溜めた分を出す
         if deferred_error is not None:
             raise deferred_error
         if proc.returncode not in (0, None):
@@ -417,32 +427,153 @@ class ClaudeCodeBackend:
 
     # ----- internals -----
 
-    def _handle_stream_event(self, ev: dict) -> Iterator[TextDelta]:
-        """Stream live assistant text from partial-message events.
+    def _handle_stream_event(self, ev: dict, parent: object = None) -> Iterator[TextDelta]:
+        """Stream live assistant text and thinking from partial-message events.
 
-        Only ``text_delta`` chunks are surfaced here (token streaming). Tool
+        ``text_delta`` chunks are surfaced as body text, ``thinking_delta`` (and
+        the initial value carried by ``content_block_start``) as a live 💭 line.
+        Thinking from a subagent (``parent_tool_use_id`` set) is not shown. Tool
         calls/results are rendered from the assembled ``assistant``/``user``
         events instead (see _handle_tool_calls / _handle_tool_results), which
         carry the full tool input and output. The assembled text block in the
         ``assistant`` event is ignored to avoid duplicating what we stream here.
+        Every output goes through ``_out``.
         """
-        if ev.get("type") == "content_block_delta":
+        etype = ev.get("type")
+        if etype == "content_block_delta":
             delta = ev.get("delta", {})
-            if delta.get("type") == "text_delta":
+            dtype = delta.get("type")
+            if dtype == "text_delta":
                 text = delta.get("text", "")
                 if text:
-                    yield TextDelta(text=text)
+                    yield from self._close_thinking()
+                    yield from self._out(text)
+            elif dtype == "thinking_delta" and not parent:
+                if self._thinking_cur is None:          # start の無い delta も 1 ブロックとして数える
+                    self._begin_thinking_block()
+                yield from self._thinking_piece(delta.get("thinking"))
+            return
+        if parent:
+            return      # サブエージェントのブロック境界は思考の状態に触れない
+        if etype in ("message_start", "content_block_start", "content_block_stop"):
+            yield from self._close_thinking()
+            self._end_thinking_block()
+        if etype == "message_start":
+            yield from self._release_all()               # 安全弁: 前のメッセージの未解決の枠を捨てて溜めた分を出す
+        elif etype == "content_block_start":
+            block = ev.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                self._begin_thinking_block()
+                yield from self._thinking_piece(block.get("thinking"))   # webview と同じく初期値も拾う
+
+    def _out(self, text: str) -> Iterator[TextDelta]:
+        """出力の唯一の出口。未解決の枠がある間は出力順のまま溜める。"""
+        if self._queue:
+            self._queue.append(text)
+        else:
+            yield TextDelta(text=text)
+
+    def _flush_queue(self) -> Iterator[TextDelta]:
+        """溜めた出力を、先頭から最初の未解決の枠の手前まで出す。"""
+        while self._queue and isinstance(self._queue[0], str):
+            text = self._queue.pop(0)
+            if text:
+                yield TextDelta(text=text)
+
+    def _release_all(self) -> Iterator[TextDelta]:
+        """未解決の枠を空として捨て、溜めた出力を全部出す。"""
+        texts = [t for t in self._queue if isinstance(t, str) and t]
+        self._pending = []
+        self._queue = []
+        for text in texts:
+            yield TextDelta(text=text)
+
+    def _begin_thinking_block(self) -> None:
+        self._thinking_raw.append("")
+        self._thinking_matched.append(False)
+        self._thinking_cur = len(self._thinking_raw) - 1
+
+    def _end_thinking_block(self) -> None:
+        """いまの思考ブロックを終える。本文が 1 文字も流れなかったブロックは未解決の枠にする。"""
+        cur = self._thinking_cur
+        self._thinking_cur = None
+        if cur is not None and not self._thinking_raw[cur].strip():
+            self._pending.append(cur)
+            self._queue.append(cur)       # ここから後の出力は、この枠が解決するまで溜める
+
+    def _thinking_piece(self, piece: object) -> Iterator[TextDelta]:
+        """思考の 1 片を生テキストに積み、💭 行に流す。空白の並びは片の境目をまたいでも
+        1 つの空白に畳み、行頭・行末の空白は出さない。str でない片・空白だけの片
+        （signature だけ・estimated_tokens だけの delta）では行を開かない。"""
+        if not isinstance(piece, str) or not piece:
+            return
+        if self._thinking_cur is not None:
+            self._thinking_raw[self._thinking_cur] += piece
+        body = " ".join(piece.split())
+        if not body:                      # 空白だけ: 開いた行なら空白を 1 つ保留するだけ
+            if self._thinking_open:
+                self._thinking_space = True
+            return
+        if not self._thinking_open:
+            self._thinking_open = True
+            text = f"\n{THINKING_MARKER} {body}"
+        else:
+            text = (" " if self._thinking_space or piece[0].isspace() else "") + body
+        self._thinking_space = piece[-1].isspace()
+        yield from self._out(text)
+
+    def _close_thinking(self) -> Iterator[TextDelta]:
+        if self._thinking_open:
+            self._thinking_open = False
+            self._thinking_space = False  # 行末の保留空白は捨てる
+            yield from self._out("\n")
+
+    def _match_streamed_thinking(self, text: str) -> bool:
+        """assistant イベントの thinking の本文（空白を畳んだもの）が、未使用のストリーム済み
+        ブロックと一致するか。一致したブロックは使用済みにする。空の本文は一致しない。"""
+        body = " ".join(text.split())
+        if not body:
+            return False
+        for i, raw in enumerate(self._thinking_raw):
+            if not self._thinking_matched[i] and " ".join(raw.split()) == body:
+                self._thinking_matched[i] = True
+                return True
+        return False
 
     def _handle_tool_calls(self, event: dict) -> Iterator[TextDelta]:
-        """Render each tool_use block as a visible call line: name + input."""
+        """Render each tool_use block as a 🔧 call line (name + input) and each
+        thinking block as a 💭 line.
+
+        thinking は partial で流れなかった分の補完で、ストリーム済みのブロックと本文が
+        一致すれば出さない（二重出力しない）。補完は最も古い未解決の枠に入れて時系列を
+        保つ。サブエージェント（``parent_tool_use_id`` あり）の thinking と
+        ``redacted_thinking`` は出さない。
+        """
+        parent = event.get("parent_tool_use_id")
         for block in event.get("message", {}).get("content", []) or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "thinking":
+                text = block.get("thinking")
+                if parent or not isinstance(text, str) or self._match_streamed_thinking(text):
+                    continue                                   # サブエージェント / 型違い / ストリーム済み
+                line = format_thinking_line(text)
+                if self._pending:                              # 最も古い未解決の枠に入れる（空なら空のまま）
+                    pos = self._pending.pop(0)
+                    self._queue[self._queue.index(pos)] = line
+                    yield from self._flush_queue()
+                elif line:                                     # 枠が無い（partial の無い engine 版・安全弁の後）
+                    yield from self._close_thinking()
+                    yield from self._out(line)
+            elif btype == "tool_use":
                 name = block.get("name", "tool")
                 summary = self._tool_input_summary(block.get("input"))
                 line = f"\n{TOOL_CALL_MARKER} {name}"
                 if summary:
                     line += f"  {summary}"
-                yield TextDelta(text=line + "\n")
+                yield from self._close_thinking()
+                yield from self._out(line + "\n")
 
     def _handle_tool_results(self, event: dict) -> Iterator[TextDelta]:
         """Render each tool_result block as an indented result line."""
@@ -454,7 +585,8 @@ class ClaudeCodeBackend:
                 text = self._tool_result_text(block)
                 if text:
                     mark = TOOL_ERROR_MARKER if block.get("is_error") else TOOL_RESULT_MARKER
-                    yield TextDelta(text=f"{TOOL_RESULT_INDENT}{mark} {text}\n")
+                    yield from self._close_thinking()
+                    yield from self._out(f"{TOOL_RESULT_INDENT}{mark} {text}\n")
 
     def _capture_usage(self, event: dict) -> None:
         """Pull token/cost telemetry from a `result` event into last_usage.

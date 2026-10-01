@@ -231,6 +231,19 @@ def test_search_hits_pages():
     assert cs.search_hits(ctx, "  ") == {"hits": [], "total": 0, "next_offset": None}
 
 
+def test_thinking_lines_not_searched():
+    a = _sess([("user", "q"), ("assistant", "💭 secretplan here\nvisible answer")])
+    ctx = _ctx([a])
+    assert cs.search_hits(ctx, "secretplan")["total"] == 0
+    r = cs.search_hits(ctx, "visible")
+    assert r["total"] == 1
+    assert "secretplan" not in r["hits"][0]["snippet"]
+    shown = cs.show_session(ctx, a.id[:8])
+    assert all("💭" not in m["text"] for m in shown["messages"])
+    raw = cs.show_session(ctx, a.id[:8], raw=True)
+    assert any("💭" in m["text"] for m in raw["messages"])
+
+
 # ---- idx 基準 ----
 
 

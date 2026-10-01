@@ -168,7 +168,7 @@ const T = {
         sending: "Sending…", sent: "Sent ✓",
         hostOffline: "Host disconnected — reconnecting", retrying: "Connection issue — retrying…",
         loadOlder: "Load older history", loadingHistory: "Loading…", noMoreHistory: "No older messages",
-        toolDisplay: "Tool calls", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden",
+        toolDisplay: "Tool and thinking display", toolFull: "Full", toolCompact: "Compact", toolHidden: "Hidden",
         copyTabName: "Copy tab name", commentOnTab: "Comment on this tab",
         tabCommentPrefix: "[Comment on tab: {name}] ",
         noDataset: "(no dataset)", switchingDs: "Dataset switched — loading view…",
@@ -188,7 +188,7 @@ const T = {
         sending: "送信中…", sent: "送信済 ✓",
         hostOffline: "ホスト切断 — 再接続待ち", retrying: "接続不良 — 再試行中…",
         loadOlder: "過去履歴を取得", loadingHistory: "取得中…", noMoreHistory: "これ以上の履歴はありません",
-        toolDisplay: "ツール呼び出し表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示",
+        toolDisplay: "ツール・思考の表示", toolFull: "通常", toolCompact: "簡略", toolHidden: "非表示",
         copyTabName: "タブ名をコピー", commentOnTab: "このタブにコメント",
         tabCommentPrefix: "[タブ「{name}」へのコメント] ",
         noDataset: "（データセットなし）", switchingDs: "データセット切替中 — ビューを読込中…",
@@ -216,6 +216,8 @@ const STATUS_MSG_MS = 5000;     // status 行の一時メッセージ寿命（Is
 // ワイヤ上の送信内容は変えない) ----
 const TOOL_CALL_MARKER = "🔧", TOOL_RESULT_MARKER = "↳", TOOL_ERROR_MARKER = "✗";
 const TOOL_RESULT_INDENT = "   ";          // 3 spaces, mirror llm_backend/base.py
+const THINKING_MARKER = "💭";
+function isThinking(l) { return l.startsWith(THINKING_MARKER + " "); }
 const TOOL_DISPLAY_KEY = "ma_tool_display";
 const TOOL_DISPLAY_MODES = ["full", "compact", "hidden"];
 function loadToolDisplay() {
@@ -241,17 +243,17 @@ function toolCallName(l) {
 //   full    = 無変換
 //   compact = 連続するツール run を、呼び出し名のみの 1 行 `🔧 A · B · C` に集約
 //             （順序・重複保持、引数summary破棄、結果行(↳/✗)破棄）
-//   hidden  = ツール行(呼び出し+結果)を run ごと全削除
+//   hidden  = ツール行(呼び出し+結果)を run ごと全削除。思考行（💭）も削除
 // ツール行除去で空いた連続空行は1つに畳み、前後の余り空行は trim する。本文(prose)は維持。
 // 本体との差は「呼び出しの無い結果のみの run」を残さない点のみ（display 目的では十分）。
 function simplifyToolText(content, mode) {
   if (!content || mode === "full") return content;        // full: 無変換（現状維持）
   const lines = content.split("\n");
-  if (!lines.some(isToolLine)) return content;
+  if (!lines.some((l) => isToolLine(l) || isThinking(l))) return content;
   const kept = [];
   if (mode === "hidden") {
     // hidden: ツール行を全削除（現行の行フィルタと byte 一致）。prose のみ残す。
-    for (const l of lines) { if (!isToolLine(l)) kept.push(l); }
+    for (const l of lines) { if (!isToolLine(l) && !isThinking(l)) kept.push(l); }
   } else {
     // compact: 連続するツール run（呼び出し・結果＋run 内部の空行を吸収。
     // 本体 _simplify_tool_text の吸収規則に準拠）を、呼び出し名のみの 1 行
@@ -385,6 +387,7 @@ function renderList(lines, start) {
 function isBlockStart(lines, i) {
   const line = lines[i], t = line.trim();
   if (isToolCall(line)) return true;              // ツール行は段落に取り込まず独立ブロックにする
+  if (isThinking(line)) return true;   // 思考行も段落に吸い込ませない
   if (/^(#{1,6})\s+/.test(t)) return true;
   if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) return true;
   if (/^&gt;\s?/.test(t)) return true;                           // 引用 > はエスケープ後 &gt;
@@ -401,6 +404,11 @@ function renderBlocks(src) {
   while (i < lines.length) {
     const line = lines[i], t = line.trim();
     if (t === "") { i++; continue; }
+    if (isThinking(line)) {                        // 思考行は 1 行の引用（host の > 💭 と同じ見た目）
+      html.push("<blockquote>" + renderInline(line) + "</blockquote>");
+      i++;
+      continue;
+    }
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { html.push("<hr>"); i++; continue; }   // 水平線
     const hm = /^(#{1,6})\s+(.*)$/.exec(t);                       // 見出し
     if (hm) { const n = hm[1].length; html.push("<h" + n + ">" + renderInline(hm[2]) + "</h" + n + ">"); i++; continue; }
@@ -1661,6 +1669,14 @@ async function runSelfTest() {
     check("st-toolline-literal",
           r.indexOf("<em>") === -1 && r.indexOf("<strong>") === -1 &&
           r.indexOf("read_file · write_file") !== -1);
+    r = simplifyToolText("💭 t\nbody", "hidden");
+    check("th-hidden-no-tool", r === "body");                                    // ツール行が無くても思考を消す
+    r = simplifyToolText("🔧 A  x\n   ↳ r\n💭 t\n🔧 B  y", "compact");
+    check("th-compact-split", r === "🔧 A\n💭 t\n🔧 B");                          // 思考で run を分断して保持
+    r = renderMarkdown("pre\n💭 a\nnext");
+    check("th-render-quote", r === "<p>pre</p>\n<blockquote>💭 a</blockquote>\n<p>next</p>");   // 前後の段落に吸われない
+    r = renderMarkdown("```\n💭 plan\n```");
+    check("th-in-fence-code", r === "<pre><code>💭 plan</code></pre>");          // フェンスの中は引用にしない（仕様の例外）
     // 9. Issue #78/#80: DSナビゲーション。クリック可能DSバー・現DSフィルタ・0セッション
     //    リセット・switchToDataset の sid/cur null 化とドラフト退避・「ホストに追従」トグルの
     //    状態遷移・poll の追従判定と stale poll 中断。副作用は stopped と stub で無効化。

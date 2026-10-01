@@ -236,6 +236,34 @@ class TestJSONLParsing:
         assert isinstance(events[0], TextDelta)
         assert events[0].text == "hello"
 
+    def test_thinking_end_yields_thinking_line(self, monkeypatch):
+        lines = [
+            json.dumps({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "thinking_end", "contentIndex": 0, "content": "a\nb"},
+            }),
+            json.dumps({"type": "agent_end"}),
+        ]
+        backend = self._make_backend_with_lines(lines, monkeypatch)
+        events = list(backend.stream([Message(role="user", content="hi")]))
+        assert len(events) == 1
+        assert isinstance(events[0], TextDelta)
+        assert events[0].text == "\n💭 a b\n"
+
+    def test_thinking_end_empty_yields_nothing(self, monkeypatch):
+        lines = [
+            json.dumps({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "thinking_end", "contentIndex": 0, "content": ""},
+            }),
+            json.dumps({"type": "agent_end"}),
+        ]
+        backend = self._make_backend_with_lines(lines, monkeypatch)
+        events = list(backend.stream([Message(role="user", content="hi")]))
+        assert events == []
+
     def test_session_id_captured(self, monkeypatch):
         lines = [
             json.dumps({"type": "session", "id": "sess-42"}),

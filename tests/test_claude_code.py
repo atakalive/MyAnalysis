@@ -171,3 +171,276 @@ def test_empty_permission_mode_passes_default_to_cli(monkeypatch, tmp_path):
     cmd = captured["cmd"]
     i = cmd.index("--permission-mode")
     assert cmd[i + 1] == "bypassPermissions"
+
+
+# ---- Issue #109: 思考サマリ（💭）の表示 ----
+
+from llm_backend.base import TextDelta, format_thinking_line  # noqa: E402
+
+
+def SE(ev, parent=None):
+    return {"type": "stream_event", "event": ev, "parent_tool_use_id": parent}
+
+
+MS = SE({"type": "message_start", "message": {}})
+RESULT = {"type": "result", "subtype": "success", "session_id": "s1"}
+TU = {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}
+
+
+def B(i, thinking=""):
+    return SE({"type": "content_block_start", "index": i,
+               "content_block": {"type": "thinking", "thinking": thinking}})
+
+
+def D(i, t, parent=None):
+    return SE({"type": "content_block_delta", "index": i,
+               "delta": {"type": "thinking_delta", "thinking": t}}, parent)
+
+
+def S(i):
+    return SE({"type": "content_block_stop", "index": i})
+
+
+def TD(t, i=0):
+    return SE({"type": "content_block_delta", "index": i,
+               "delta": {"type": "text_delta", "text": t}})
+
+
+def TH(t, **extra):
+    return {"type": "thinking", "thinking": t, **extra}
+
+
+def A(*content, parent=None):
+    ev = {"type": "assistant", "message": {"content": list(content)}}
+    if parent is not None:
+        ev["parent_tool_use_id"] = parent
+    return ev
+
+
+def _run_events(events, monkeypatch, tmp_path, *, positions=None):
+    """events（末尾に result を足す）を stdout に流し、TextDelta の (行番号, text) を返す。"""
+    backend = ClaudeCodeBackend({"bin": "/usr/bin/claude", "cwd": str(tmp_path)})
+    lines = [json.dumps(e).encode() + b"\n" for e in [*events, RESULT]]
+    state = {"pos": -1}
+
+    def gen():
+        for k, ln in enumerate(lines):
+            state["pos"] = k
+            yield ln
+
+    def fake_popen(cmd, **kwargs):
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdin.closed = False
+        proc.stdout = gen()
+        proc.stderr = iter([])
+        proc.poll.return_value = 0
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    out = []
+    for e in backend.stream(_msgs()):
+        if isinstance(e, TextDelta):
+            out.append((state["pos"], e.text))
+    return out
+
+
+def _joined(events, monkeypatch, tmp_path):
+    return "".join(t for _, t in _run_events(events, monkeypatch, tmp_path))
+
+
+def _abc_events():
+    return [
+        MS,
+        B(0),
+        SE({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "signature_delta", "signature": "s"}}),
+        S(0),
+        A(TH("", signature="s")),
+        B(1),
+        D(1, "データ構造を確認した。\n"),
+        D(1, "続いて中核レポートを読む。"),
+        S(1),
+        A(TH("データ構造を確認した。\n続いて中核レポートを読む。")),
+        A(TU),
+        SE({"type": "message_stop"}),
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "a.csv"}]}},
+        MS,
+        SE({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}}),
+        TD("結論です。"),
+        S(0),
+    ]
+
+
+def test_thinking_stream_order_one_line_no_dup(monkeypatch, tmp_path):
+    # (a)(b)(c)
+    assert _joined(_abc_events(), monkeypatch, tmp_path) == (
+        "\n💭 データ構造を確認した。 続いて中核レポートを読む。\n"
+        "\n🔧 Bash  ls\n   ↳ a.csv\n結論です。")
+
+
+def test_thinking_from_assistant_without_delta(monkeypatch, tmp_path):
+    # (d)
+    events = [A(TH("計画\nを立てる"), TU)]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 計画 を立てる\n\n🔧 Bash  ls\n"
+
+
+def test_thinking_initial_value_from_block_start(monkeypatch, tmp_path):
+    # (e)
+    events = [MS, B(0, "初期値"), D(0, "の続き"), S(0)]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 初期値の続き\n"
+
+
+def test_thinking_subagent_hidden(monkeypatch, tmp_path):
+    # (f)(g)
+    events = [
+        A(TH("サブ"), parent="toolu_1"),
+        SE({"type": "message_start", "message": {}}, "toolu_1"),
+        D(0, "サブ思考", "toolu_1"),
+    ]
+    assert _joined(events, monkeypatch, tmp_path) == ""
+
+
+def test_thinking_closed_before_text(monkeypatch, tmp_path):
+    # (h)
+    events = [MS, D(0, "途中"), TD("本文")]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 途中\n本文"
+
+
+def test_thinking_partial_only_some_blocks(monkeypatch, tmp_path):
+    # (i1)
+    events = [MS, B(0), D(0, "A"), S(0), A(TH("A")), B(1), S(1), A(TH("B"))]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 A\n\n💭 B\n"
+
+
+def test_thinking_partial_assistant_bundled(monkeypatch, tmp_path):
+    # (i2)
+    events = [MS, B(0), D(0, "A"), S(0), B(1), S(1), A(TH("A"), TH("B"))]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 A\n\n💭 B\n"
+
+
+def test_thinking_assistant_after_next_message_start(monkeypatch, tmp_path):
+    # (i3)
+    events = [MS, B(0), D(0, "A"), S(0), MS, A(TH("A"))]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 A\n"
+
+
+def test_thinking_empty_signature_block_first(monkeypatch, tmp_path):
+    # (i4)
+    events = [
+        MS,
+        SE({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+        S(0),
+        A(TH("", signature="x")),
+        B(1), D(1, "本文"), S(1),
+        A(TH("本文")),
+    ]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 本文\n"
+
+
+def test_thinking_whitespace_across_pieces(monkeypatch, tmp_path):
+    # (j)
+    pieces = ["a ", " b\t c", " \n ", "　d "]
+    events = [MS, B(0), *[D(0, p) for p in pieces], S(0)]
+    got = _joined(events, monkeypatch, tmp_path)
+    assert got == "\n💭 a b c d\n"
+    assert got == format_thinking_line("".join(pieces))
+
+
+def test_thinking_subagent_interrupt_silent(monkeypatch, tmp_path):
+    # (k1)
+    events = [
+        MS, B(0), D(0, "親の"),
+        A(TH("サブ"), {"type": "text", "text": "サブ本文"}, parent="toolu_1"),
+        D(0, "思考"), S(0),
+    ]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 親の思考\n"
+
+
+def test_thinking_subagent_interrupt_with_tool(monkeypatch, tmp_path):
+    # (k2)
+    events = [
+        MS, B(0), D(0, "親の"),
+        A(TU, parent="toolu_1"),
+        D(0, "思考"), S(0),
+        A(TH("親の思考")),
+    ]
+    assert _joined(events, monkeypatch, tmp_path) == (
+        "\n💭 親の\n\n🔧 Bash  ls\n\n💭 思考\n")
+
+
+def _l1_events():
+    return [MS, B(0), D(0, "A"), S(0), B(1), S(1), B(2), D(2, "C"), S(2),
+            A(TH("A"), TH("B"), TH("C"))]
+
+
+def test_thinking_chronology_l1(monkeypatch, tmp_path):
+    assert _joined(_l1_events(), monkeypatch, tmp_path) == "\n💭 A\n\n💭 B\n\n💭 C\n"
+
+
+def test_thinking_chronology_l2(monkeypatch, tmp_path):
+    events = [MS, B(0), D(0, "A"), S(0), B(1), S(1), B(2), D(2, "C"), S(2),
+              A(TH("A"), TH("B"), TH("C"), TU)]
+    assert _joined(events, monkeypatch, tmp_path) == (
+        "\n💭 A\n\n💭 B\n\n💭 C\n\n🔧 Bash  ls\n")
+
+
+def test_thinking_chronology_l3_per_block_assistant(monkeypatch, tmp_path):
+    events = [MS, B(0), D(0, "A"), S(0), A(TH("A")), B(1), S(1), A(TH("B")),
+              B(2), D(2, "C"), S(2), A(TH("C")), A(TU)]
+    assert _joined(events, monkeypatch, tmp_path) == (
+        "\n💭 A\n\n💭 B\n\n💭 C\n\n🔧 Bash  ls\n")
+
+
+def test_thinking_safety_valve_message_start(monkeypatch, tmp_path):
+    # (l4)
+    events = [MS, B(0), S(0), B(1), D(1, "X"), S(1), A(TH("X")), A(TU), MS, TD("次")]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 X\n\n🔧 Bash  ls\n次"
+
+
+def test_thinking_safety_valve_turn_end(monkeypatch, tmp_path):
+    # (l5)
+    events = [MS, B(0), S(0), TD("本文")]
+    assert _joined(events, monkeypatch, tmp_path) == "本文"
+
+
+def test_thinking_empty_block_resolved_by_assistant(monkeypatch, tmp_path):
+    # (l6)
+    events = [MS, B(0), S(0), A(TH("")), B(1), D(1, "Y"), S(1), A(TH("Y")), A(TU)]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 Y\n\n🔧 Bash  ls\n"
+
+
+def test_thinking_two_pending_frames(monkeypatch, tmp_path):
+    # (l7)
+    events = [MS, B(0), S(0), B(1), S(1), A(TH("P")), A(TH("Q"))]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 P\n\n💭 Q\n"
+
+
+def test_thinking_subagent_output_between_frames(monkeypatch, tmp_path):
+    # (l8)
+    events = [
+        MS, B(0), S(0),
+        A({"type": "tool_use", "name": "Read", "input": {"file_path": "a"}},
+          parent="toolu_1"),
+        A(TH("B")),
+    ]
+    assert _joined(events, monkeypatch, tmp_path) == "\n💭 B\n\n🔧 Read  a\n"
+
+
+def test_thinking_liveness(monkeypatch, tmp_path):
+    # (m)
+    assert _run_events(_abc_events(), monkeypatch, tmp_path) == [
+        (6, "\n💭 データ構造を確認した。"),
+        (7, " 続いて中核レポートを読む。"),
+        (8, "\n"),
+        (10, "\n🔧 Bash  ls\n"),
+        (12, "   ↳ a.csv\n"),
+        (15, "結論です。"),
+    ]
+    out = _run_events(_l1_events(), monkeypatch, tmp_path)
+    assert (9, "\n💭 C") in out

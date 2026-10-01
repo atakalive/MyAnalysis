@@ -198,3 +198,17 @@ def test_agents_md_written_to_cwd(fake_popen, tmp_path):
 @pytest.fixture(autouse=True)
 def _default_turn(fake_popen):
     fake_popen.events = list(_TURN)
+
+
+def test_reasoning_renders_full_thinking_line(fake_popen, tmp_path):
+    fake_popen.events = [
+        {"type": "thread.started", "thread_id": "th-1"},
+        {"type": "item.completed",
+         "item": {"id": "r1", "type": "reasoning", "text": "x" * 300}},
+        {"type": "turn.completed",
+         "usage": {"input_tokens": 1, "output_tokens": 1}},
+    ]
+    events = _run(_backend(tmp_path))
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert "\n💭 " + "x" * 300 + "\n" in text
+    assert "…" not in text

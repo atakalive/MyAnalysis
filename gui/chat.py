@@ -17,8 +17,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QActionGroup, QColor, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
-    QTextDocumentFragment,
+    QTextBlock, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextDocumentFragment, QTextFormat,
 )
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView,
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from llm_backend.base import (
     LLMBackend, Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
+    THINKING_MARKER,
 )
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
@@ -115,6 +116,7 @@ def _save_chat_split(hexstate: str) -> None:
 
 
 _TOOL_DISPLAY_MODES = frozenset({"full", "compact", "hidden"})
+_THINKING_COLOR = "#b4b4b4"   # 思考行（💭）の文字色。背景 #1e1e1e 比 8.0:1
 
 
 def _load_tool_display() -> str:
@@ -185,6 +187,22 @@ def _is_tool_line(line: str) -> bool:
     return _is_tool_call(line) or _is_tool_result(line)
 
 
+def _is_thinking_line(line: str) -> bool:
+    return line.startswith(THINKING_MARKER + " ")
+
+
+def _thinking_quote(line: str) -> str:
+    """'💭 本文' 行を Markdown の引用 1 行 '> 💭 本文' にする（本文の空白は畳む）。"""
+    body = " ".join(line[len(THINKING_MARKER + " "):].split())
+    return f"> {THINKING_MARKER} {body}".rstrip()
+
+
+def _is_thinking_block(block: QTextBlock) -> bool:
+    """setMarkdown 後の思考の引用ブロックか（引用レベルが付き、本文が '💭 ' で始まる）。"""
+    return bool(block.blockFormat().property(QTextFormat.Property.BlockQuoteLevel)) \
+        and block.text().startswith(THINKING_MARKER + " ")
+
+
 def _tool_call_name(line: str) -> str:
     """'🔧 name  summary' 行からツール名だけを取り出す。summary（2スペース以降）は捨てる。"""
     rest = line[len(TOOL_CALL_MARKER + " "):]   # "🔧 " を除去
@@ -196,13 +214,18 @@ def _simplify_tool_text(content: str, mode: str) -> str:
 
     Pure / Qt-free. The stored text is always the full raw stream, so this is
     fully reversible (switch mode back to full to see everything). Body prose and
-    code blocks are left verbatim in all modes; only contiguous tool runs are
-    rewritten, and each emitted tool line is separated by a blank line so the
-    Markdown renderer (which space-joins single newlines) keeps the layout."""
+    code blocks (other than 💭 lines) are left verbatim in all modes; only
+    contiguous tool runs are rewritten, and each emitted tool line is separated by
+    a blank line so the Markdown renderer (which space-joins single newlines)
+    keeps the layout. 思考行（💭）は full / compact では空行で区切った引用
+    `> 💭 本文`（空白を畳む）にし、hidden では行ごと除く。"""
     if not content:
         return content
     lines = content.split("\n")
-    if not any(_is_tool_line(ln) for ln in lines):
+    if mode == "hidden":                                  # 思考行は行ごと消してから既存処理
+        lines = [ln for ln in lines if not _is_thinking_line(ln)]
+        content = "\n".join(lines)
+    if not any(_is_tool_line(ln) or _is_thinking_line(ln) for ln in lines):
         return content
     out: list[str] = []
     i, n = 0, len(lines)
@@ -242,6 +265,13 @@ def _simplify_tool_text(content: str, mode: str) -> str:
                     out.append("")
                 out.append(bl)
             i = j
+        elif _is_thinking_line(lines[i]):          # compact / full のみ（hidden は除去済み）
+            if out and out[-1] != "":
+                out.append("")
+            out.append(_thinking_quote(lines[i]))
+            if i + 1 < n and lines[i + 1] != "":   # 直後の行と引用を分ける（lazy continuation 防止）
+                out.append("")
+            i += 1
         else:
             if lines[i] != "" and out and _is_tool_line(out[-1]):   # ③ tool block 直後の本文を分離
                 out.append("")
@@ -2238,8 +2268,9 @@ class ChatWidget(QWidget):
             self._render_session(sess)        # partial 本文を Markdown 化（_on_done と対称）
             cursor = QTextCursor(self._log.document())
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.setCharFormat(QTextCharFormat())
-            cursor.insertText(error_text)
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())   # 空行（引用・リスト書式を継承しない）
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
+            cursor.insertText(tr("chat.turn.error", error=msg))
             self._scroll_to_bottom()
             self._update_turn_ui()
         else:
@@ -2394,7 +2425,12 @@ class ChatWidget(QWidget):
         self._scroll_to_bottom()
 
     def _append_system_line(self, text: str) -> None:
-        self._log.append(
+        doc = self._log.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if doc.characterCount() > 1:
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())   # 直前の引用・リスト書式を継承しない
+        cursor.insertHtml(
             f'<span style="color:#888888;font-style:italic">'
             f'{html.escape(text)}</span>'
         )
@@ -2402,14 +2438,34 @@ class ChatWidget(QWidget):
 
     def _insert_markdown(self, cursor: QTextCursor, text: str) -> None:
         """text を Markdown として一時ドキュメントに流し込み、フラグメントとして
-        本体ドキュメントの cursor 位置に挿入する。外部ライブラリ不要。"""
+        本体ドキュメントの cursor 位置に挿入する。外部ライブラリ不要。
+
+        思考の引用ブロック（💭）は文字色を _THINKING_COLOR にする。断片の先頭ブロックは
+        挿入先のブロックに合流して引用書式を失うので、先頭が思考の引用なら挿入後に
+        その書式を付け直す。"""
         doc = QTextDocument()
         doc.setDefaultFont(self._log.font())   # 見出しサイズを現在のズーム基準に揃える
         doc.setMarkdown(
             text.rstrip(),                     # 末尾空白由来の余分な末尾段落を抑制
             QTextDocument.MarkdownFeature.MarkdownDialectGitHub,  # 既定値だが明示
         )
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(_THINKING_COLOR))
+        block = doc.begin()
+        while block.isValid():
+            if _is_thinking_block(block):
+                c = QTextCursor(block)
+                c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+                c.mergeCharFormat(fmt)
+            block = block.next()
+        first = doc.begin()
+        first_fmt = first.blockFormat() if _is_thinking_block(first) else None
+        start = cursor.position()
         cursor.insertFragment(QTextDocumentFragment(doc))
+        if first_fmt is not None:
+            c = QTextCursor(self._log.document())
+            c.setPosition(start)
+            c.setBlockFormat(first_fmt)
 
     def _append_block(
         self, role: str, text: str, *, markdown: bool = False,
