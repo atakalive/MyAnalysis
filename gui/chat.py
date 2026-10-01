@@ -1355,6 +1355,8 @@ class ChatWidget(QWidget):
             self._status_note(tr("chat.search.dataset_closed", dataset=target))
             return
         ctx = self.search_context()
+        datasets = cs.search_datasets(req, ctx)     # 切替後の ctx から（見出し・表示行・履歴で共用）
+        now = time.time()                           # 実行時刻（見出しと履歴の ts で共用）
         ds_arg = req.dataset if req.scope == "dataset" else None
         spec = {"scope": req.scope, "dataset": req.dataset,
                 "include_archived": req.include_archived, "ai": req.ai}
@@ -1385,9 +1387,8 @@ class ChatWidget(QWidget):
                 sess.engine_model = model.strip() or None
                 sess.engine_provider = provider.strip() or None
         else:
-            user_line = tr("chat.search.user_line", query=req.query,
-                           scope=cs.scope_label(req))
-            md = cs.hits_to_markdown(hits, req)
+            user_line = tr("chat.search.user_line", query=req.query)
+            md = cs.hits_to_markdown(hits, req, datasets=datasets, when=now)
             sess.messages += [Message(role="user", content=user_line),
                               Message(role="assistant", content=md)]
             sess.updated = max(time.time(), sess.updated + 1e-3)
@@ -1405,18 +1406,24 @@ class ChatWidget(QWidget):
                 self._mark_chat_dirty()
             self._log.verticalScrollBar().setValue(0)
         else:
-            if req.hint.strip():
+            target_label = cs.target_text(req, datasets)
+            if target_label is None:
+                if req.hint.strip():
+                    display = tr("chat.search.ai_user_line_hint_unbound", query=req.query,
+                                 hint=req.hint)
+                else:
+                    display = tr("chat.search.ai_user_line_unbound", query=req.query)
+            elif req.hint.strip():
                 display = tr("chat.search.ai_user_line_hint", query=req.query,
-                             hint=req.hint, scope=cs.scope_label(req))
+                             hint=req.hint, scope=target_label)
             else:
-                display = tr("chat.search.ai_user_line", query=req.query,
-                             scope=cs.scope_label(req))
+                display = tr("chat.search.ai_user_line", query=req.query, scope=target_label)
             self._start_turn(sess, display, "local", wire_text=core.build_ai_prompt(
                 req, ctx, i18n.current_language(), search_sid=sess.id, initial_hits=initial))
         if sess.dataset is not None:
             if not cs.record_search(req, ctx, dataset=sess.dataset,
                                     n_hits=(None if req.ai else len(hits)),
-                                    session_id=sess.id):
+                                    session_id=sess.id, ts=now):
                 self._status_note(tr("chat.search.history.write_failed"))
 
     def _on_search_link(self, sid, idx, terms) -> None:

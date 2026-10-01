@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -124,3 +125,11 @@ def test_new_entry_valid():
     assert h.valid_entry(_entry())
     with pytest.raises(ValueError):
         h.new_entry(_req(scope="unbound", dataset=None), datasets=[], n_hits=0, session_id="s")
+
+
+def test_new_entry_ts():
+    e = h.new_entry(_req(), datasets=["dsA"], n_hits=0, session_id="s", ts=1_790_000_000.5)
+    assert e["ts"] == 1_790_000_000.5 and h.valid_entry(e)
+    before = time.time()
+    e2 = h.new_entry(_req(), datasets=["dsA"], n_hits=0, session_id="s")
+    assert before <= e2["ts"] <= time.time()

@@ -126,12 +126,13 @@ def delete_history_entry(work_dir, entry_id) -> bool:
         return False
 
 
-def new_entry(req, *, datasets, n_hits, session_id) -> dict:
+def new_entry(req, *, datasets, n_hits, session_id, ts: float | None = None) -> dict:
+    """ts は実行時刻（None なら今）。結果の見出しと同じ時刻を渡す。"""
     if req.scope not in ("dataset", "all"):
         raise ValueError(f"a search with scope={req.scope!r} is not recorded")
     return {
         "id": uuid.uuid4().hex,
-        "ts": time.time(),
+        "ts": time.time() if ts is None else ts,
         "mode": "ai" if req.ai else "text",
         "query": req.query,
         "hint": req.hint,

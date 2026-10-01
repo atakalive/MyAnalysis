@@ -116,10 +116,18 @@ def test_dialog_scope_and_labels(env):
 
 
 def test_dialog_no_dataset(qapp, monkeypatch, dirs):
+    from PySide6.QtWidgets import QLabel
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_search_history_open", True)      # 開く設定でも履歴は出さない
     w, _ = _make_widget(monkeypatch, open_ds=(), current=None)
     d = _dialog(w)
-    assert d._scope_combo.count() == 1
+    assert d._scope_combo.count() == 0
     assert d._active_label.text() == tr("chat.search.dialog.no_dataset")
+    assert not d._active_label.isHidden()
+    labels = [lb for lb in d.findChildren(QLabel) if lb.text() == tr("chat.search.dialog.scope")]
+    assert len(labels) == 1 and labels[0].isHidden()
+    assert d._scope_combo.isHidden() and d._switch_note.isHidden()
+    assert d._history_toggle.isHidden() and d._history_panel.isHidden()
     d._query_edit.setText("x")
     r = d.request()
     assert r.scope == "unbound" and r.dataset is None
@@ -232,7 +240,7 @@ def test_run_search_standard(env):
     w.run_search(_req(query="peak"))
     md2 = w._active.messages[2].content
     assert sess.id[:8] not in md2
-    assert tr("chat.search.result.count", n=2) in md2
+    assert md2.splitlines()[0] == _header("dsA", n=2)
 
 
 def test_run_search_all_and_none(env):
@@ -242,7 +250,7 @@ def test_run_search_all_and_none(env):
     md = w._active.messages[2].content
     assert "dsB / Btitle" in md
     w.run_search(_req(query="zzzqqq"))
-    assert tr("chat.search.result.none") in w._active.messages[2].content
+    assert w._active.messages[2].content == _header("dsA", n=0)
 
 
 def test_run_search_600_hits(env, dirs):
@@ -250,7 +258,7 @@ def test_run_search_600_hits(env, dirs):
     _add(w, "dsA", [("user", f"hit {i}") for i in range(600)])
     w.run_search(_req(query="hit"))
     md = w._active.messages[2].content
-    assert tr("chat.search.result.count", n=600) in md
+    assert md.splitlines()[0] == _header("dsA", n=600)
     assert tr("chat.search.result.more", n=500) in md
     from llm_bridge import chat_search_history as h
     import dataset_config
@@ -303,6 +311,14 @@ def _history(ds):
     import dataset_config
     from llm_bridge import chat_search_history as h
     return h.load_history(dataset_config.get_work_dir(ds, create=False))
+
+
+def _header(ds, *, n, target=None):
+    """ds の最新の履歴の時刻で組んだ標準検索の見出し行（target 省略時は ds）。"""
+    from llm_bridge.chat_search import format_ts
+    entries, _ = _history(ds)
+    return tr("chat.search.result.header", target=target or ds,
+              time=format_ts(entries[-1]["ts"]), n=n)
 
 
 def test_history_recorded_and_listed(env):
@@ -468,7 +484,7 @@ def test_hits_markdown_unconvertible_updated():
     from llm_bridge.chat_search import SearchHit
     hit = SearchHit(session_id="abcdef12" + "0" * 24, dataset="dsA", title="t", archived=False,
                     msg_index=1, role="user", snippet="s", updated=1e20)
-    md = gcs.hits_to_markdown([hit], _req())
+    md = gcs.hits_to_markdown([hit], _req(), datasets=["dsA"], when=0.0)
     assert " · - — " in md
 
 
@@ -751,3 +767,189 @@ def test_window_ctrl_f_action(qapp, monkeypatch):
     monkeypatch.setattr(cw, "open_search", lambda: called.append(True))
     act.trigger()
     assert called == [True]
+
+
+# ---- Issue #110: 対象の選択を itemData に頼らない / 結果の見出し ----
+
+
+@pytest.fixture()
+def list_item_data(monkeypatch):
+    """PySide6 6.10.1 の挙動を再現する: itemData / currentData の tuple が list で返る。"""
+    import gui.chat_search as gcs
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QComboBox
+
+    def _as_list(d):
+        return list(d) if isinstance(d, tuple) else d
+
+    class _ListDataCombo(QComboBox):
+        def currentData(self, role=Qt.ItemDataRole.UserRole):
+            return _as_list(super().currentData(role))
+
+        def itemData(self, index, role=Qt.ItemDataRole.UserRole):
+            return _as_list(super().itemData(index, role))
+
+    monkeypatch.setattr(gcs, "QComboBox", _ListDataCombo)
+
+
+def test_dialog_every_scope_item(env, list_item_data):
+    w, _ = env
+    d = _dialog(w)
+    d._query_edit.setText("x")
+    got = []
+    for i in range(d._scope_combo.count()):
+        d._scope_combo.setCurrentIndex(i)
+        r = d.request()
+        got.append((r.scope, r.dataset))
+    assert got == [("dataset", "dsA"), ("dataset", "dsB"), ("all", None)]
+    d._scope_combo.setCurrentIndex(1)
+    assert not d._switch_note.isHidden()
+    assert all(d._scope_combo.itemData(i) is None for i in range(d._scope_combo.count()))
+
+
+def test_history_readback_sets_scope(env, list_item_data, monkeypatch):
+    import gui.chat_search as gcs
+    w, _ = env
+    _add(w, "dsB", [("user", "peak")])
+    w.run_search(_req(dataset="dsB"))
+    w.run_search(_req(query="peak all", scope="all", dataset=None))
+    w.set_current_dataset("dsA")
+    monkeypatch.setattr(gcs, "load_scope_pref", lambda: "all")
+    d = _dialog(w)
+    tree = d._history_tree
+    assert tree.topLevelItemCount() == 2
+    row = {e["scope"]: i for i, (_, e) in enumerate(d._history_rows)}
+    tree.setCurrentItem(tree.topLevelItem(row["dataset"]))
+    assert d._scope_combo.currentIndex() == 1          # データセット: dsB
+    tree.setCurrentItem(tree.topLevelItem(row["all"]))
+    assert d._scope_combo.currentIndex() == 2          # 開いている全データセット
+
+
+def test_search_other_dataset_real_window(qapp, monkeypatch, dirs, list_item_data):
+    """前面 dsA でダイアログの対象を dsB にして検索 → dsB が前面になり、結果は dsB の一覧に入る。"""
+    from gui.chat import ChatWidget
+    from gui.window import ToolWindow
+    win = ToolWindow()
+    cw = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)
+    win.set_chat_widget(cw)
+    win._ensure_group("dsA")
+    win._ensure_group("dsB")
+    win.note_current_dataset("dsA")
+    _add(cw, "dsA", [("user", "peak in A")])
+    _add(cw, "dsB", [("user", "peak in B")])
+    d = _dialog(cw)
+    d._query_edit.setText("peak")
+    d._scope_combo.setCurrentIndex(1)                  # データセット: dsB
+    cw.run_search(d.request())
+    sess = cw._active
+    assert sess.kind == "search" and sess.dataset == "dsB"
+    assert win.current_dataset == "dsB" and cw._current_dataset == "dsB"
+
+    def tab_ids():
+        return [cw._tab_bar.tabData(i) for i in range(cw._tab_bar.count())]
+
+    assert sess.id in tab_ids()
+    entries, status = _history("dsB")
+    assert status == "ok" and [e["session_id"] for e in entries] == [sess.id]
+    assert _history("dsA") == ([], "absent")
+    assert sess.messages[1].content == tr("chat.search.user_line", query="peak")
+    assert sess.messages[2].content.splitlines()[0] == _header("dsB", n=1)
+    win.set_active_dataset("dsA")
+    assert sess.id not in tab_ids()
+
+
+def _hit(ds="dsB", title="t"):
+    from llm_bridge.chat_search import SearchHit
+    return SearchHit(session_id="abcdef12" + "0" * 24, dataset=ds, title=title, archived=False,
+                     msg_index=1, role="user", snippet="s", updated=0.0)
+
+
+def test_hits_markdown_header():
+    from gui import chat_search as gcs
+    from llm_bridge.chat_search import format_ts
+    when = 1_790_000_000.0
+    t = format_ts(when)
+    md = gcs.hits_to_markdown([_hit()], _req(scope="all", dataset=None),
+                              datasets=["dsA", "dsB"], when=when)
+    assert md.splitlines()[0] == tr("chat.search.result.header", target="dsA, dsB", time=t, n=1)
+    assert "dsB / t" in md
+    md = gcs.hits_to_markdown([_hit()], _req(dataset="dsB", archived=True),
+                              datasets=["dsB"], when=when)
+    assert md.splitlines()[0] == (tr("chat.search.result.header", target="dsB", time=t, n=1)
+                                  + tr("chat.search.result.archived_included"))
+    md = gcs.hits_to_markdown([], _req(dataset="ds_x"), datasets=["ds_x"], when=when)
+    assert md == tr("chat.search.result.header", target="ds\\_x", time=t, n=0)
+    md = gcs.hits_to_markdown([], _req(scope="unbound", dataset=None), datasets=[], when=when)
+    assert md == tr("chat.search.result.header_unbound", time=t, n=0)
+
+
+def test_run_search_ai_display_line_all(env):
+    w, _ = env
+    _add(w, "dsA", [("user", "peak offset")])
+    w.run_search(_req(query="q", scope="all", dataset=None, ai=True))
+    assert w._active.messages[-1].content == tr("chat.search.ai_user_line", query="q",
+                                                scope="dsA, dsB")
+
+
+def test_run_search_ai_display_line_unbound(qapp, monkeypatch, dirs):
+    w, _ = _make_widget(monkeypatch, open_ds=(), current=None)
+    _add(w, None, [("user", "peak x")])
+    w.run_search(_req(query="q", scope="unbound", dataset=None, ai=True))
+    assert w._active.messages[-1].content == tr("chat.search.ai_user_line_unbound", query="q")
+    w.run_search(_req(query="q2", scope="unbound", dataset=None, ai=True, hint="peak"))
+    assert w._active.messages[-1].content == tr("chat.search.ai_user_line_hint_unbound",
+                                                query="q2", hint="peak")
+
+
+def test_removed_search_keys_absent():
+    import tomllib
+    from common.paths import repo_root
+    for lang in ("ja", "en"):
+        with open(repo_root() / "i18n" / f"{lang}.toml", "rb") as f:
+            cat = tomllib.load(f)
+        for key in ("chat.search.scope.none", "chat.search.result.count",
+                    "chat.search.result.none"):
+            assert key not in cat, (lang, key)
+
+
+def test_run_search_all_window_unknown(env):
+    """open_datasets が分からない（window 不明）と core は DS を絞らない → 見出し・履歴も検索した DS。"""
+    w, win = env
+    _add(w, "dsA", [("user", "peak a")])
+    _add(w, "dsC", [("user", "peak c")])           # 開いている一覧に無い DS も検索される
+    win.open_dataset_names.return_value = None
+    w.run_search(_req(scope="all", dataset=None))
+    md = w._active.messages[2].content
+    entries, _ = _history("dsA")
+    assert entries[-1]["datasets"] == ["dsA", "dsC"]
+    assert md.splitlines()[0] == _header("dsA", n=2, target="dsA, dsC")
+
+
+def test_run_search_unbound_chat_in_range(env):
+    """未所属のチャットは dataset / all のどちらの範囲でも検索に入る。対象には書かず、hit 行に DS 名は付かない。"""
+    w, _ = env
+    loose = _add(w, None, [("user", "peak loose")], title="Loose")
+    a = _add(w, "dsA", [("user", "peak a")], title="Atitle")
+    w.run_search(_req(dataset="dsA"))
+    md = w._active.messages[2].content
+    assert md.splitlines()[0] == _header("dsA", n=2)
+    assert f"[Loose](chatsearch:{loose.id[:8]}:1?q=peak)" in md
+    w.run_search(_req(scope="all", dataset=None))
+    md = w._active.messages[2].content
+    assert md.splitlines()[0] == _header("dsA", n=2, target="dsA, dsB")
+    assert f"[Loose](chatsearch:{loose.id[:8]}:1?q=peak)" in md
+    assert f"[dsA / Atitle](chatsearch:{a.id[:8]}:1?q=peak)" in md
+
+
+def test_run_search_all_window_unknown_bad_dataset(env):
+    """同期ファイル由来の str 以外の dataset が混ざっても検索は落ちず、見出し・履歴には str だけが出る。"""
+    w, win = env
+    _add(w, "dsA", [("user", "peak a")])
+    for bad in (3, ["x"]):                         # session_from_dict は dataset の型を検査しない
+        s = _add(w, "dsA", [("user", "other")])
+        s.dataset = bad
+    win.open_dataset_names.return_value = None
+    w.run_search(_req(scope="all", dataset=None))
+    entries, _ = _history("dsA")
+    assert entries[-1]["datasets"] == ["dsA"]
+    assert w._active.messages[2].content.splitlines()[0] == _header("dsA", n=1)

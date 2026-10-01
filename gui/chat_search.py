@@ -75,12 +75,33 @@ def ai_engine_label_text() -> str:
 # ----- result Markdown -----
 
 
-def scope_label(req) -> str:
+def search_datasets(req, ctx) -> list[str]:
+    """実際に検索する範囲のデータセット。結果の見出し・AI 検索の表示行・履歴の datasets で共用する。
+
+    scope="dataset" は [req.dataset]。"all" は ctx.open_datasets（切替後に取った ctx を渡す）。
+    ctx.open_datasets が None（window 不明）のときは core が DS を絞らずに検索するので、
+    検索範囲に入るチャットのデータセット（名前順。同期ファイル由来の str 以外の値は数えない）。
+    "unbound" は []。未所属のチャットはどの範囲でも検索に入るが、ここには数えない。"""
+    if req.scope == "dataset":
+        return [req.dataset] if req.dataset is not None else []
     if req.scope == "all":
-        return tr("chat.search.scope.all_short")
-    if req.scope == "unbound" or req.dataset is None:
-        return tr("chat.search.scope.none")
-    return req.dataset
+        if ctx.open_datasets is None:
+            return sorted({s.dataset for s in core.scope_sessions(
+                ctx, scope="all", include_archived=req.include_archived)
+                if isinstance(s.dataset, str)})
+        return list(ctx.open_datasets)
+    return []
+
+
+def target_text(req, datasets: list[str]) -> str | None:
+    """見出しと AI 検索の表示行に出す対象（選択した範囲の略記）。unbound は None。
+
+    ダイアログの選択肢と同じく、未所属のチャットも検索に含むことは書かない。"""
+    if req.scope == "dataset" and req.dataset is not None:
+        return req.dataset
+    if req.scope == "all":
+        return ", ".join(datasets) if datasets else tr("chat.search.scope.all_short")
+    return None
 
 
 _MD_SPECIAL = set("\\`*_[]<>#~|")
@@ -90,15 +111,21 @@ def _md_escape(text) -> str:
     return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in str(text))
 
 
-def hits_to_markdown(hits, req) -> str:
-    """標準検索の結果（hits は全件）を Markdown にする。各 hit は chatsearch: リンク。"""
-    head = f"**{tr('chat.search.result.count', n=len(hits))}** — {_md_escape(scope_label(req))}"
+def hits_to_markdown(hits, req, *, datasets: list[str], when: float) -> str:
+    """標準検索の結果（hits は全件）を Markdown にする。各 hit は chatsearch: リンク。
+
+    1 行目は対象・実行日時・件数（0 件ならこの 1 行だけ）。"""
+    target = target_text(req, datasets)
+    if target is None:
+        head = tr("chat.search.result.header_unbound", time=core.format_ts(when), n=len(hits))
+    else:
+        head = tr("chat.search.result.header", target=_md_escape(target),
+                  time=core.format_ts(when), n=len(hits))
     if req.include_archived:
-        head += f" / {tr('chat.search.dialog.archived')}"
-    lines = [head, ""]
+        head += tr("chat.search.result.archived_included")
     if not hits:
-        lines.append(tr("chat.search.result.none"))
-        return "\n".join(lines)
+        return head
+    lines = [head, ""]
     for i, h in enumerate(hits[:_MAX_MD_HITS], 1):
         name = _md_escape(core._collapse(h.title))
         if req.scope == "all" and h.dataset is not None:
@@ -127,15 +154,15 @@ def history_work_dir(ds, *, create: bool) -> Path | None:
         return None
 
 
-def record_search(req, ctx, *, dataset, n_hits, session_id) -> bool:
+def record_search(req, ctx, *, dataset, n_hits, session_id, ts=None) -> bool:
     if req.scope == "unbound" or dataset is None:
         return False
     wd = history_work_dir(dataset, create=True)
     if wd is None:
         return False
-    datasets = [req.dataset] if req.scope == "dataset" else list(ctx.open_datasets or [])
     try:
-        entry = history.new_entry(req, datasets=datasets, n_hits=n_hits, session_id=session_id)
+        entry = history.new_entry(req, datasets=search_datasets(req, ctx), n_hits=n_hits,
+                                  session_id=session_id, ts=ts)
     except ValueError:
         return False
     return history.append_history(wd, entry)
@@ -248,15 +275,16 @@ class ChatSearchDialog(QDialog):
         # ----- options -----
         form = QFormLayout()
         self._scope_combo = QComboBox()
+        # 選択肢はコンボの index と対応するリストで持つ（itemData に tuple を入れると
+        # PySide6 6.10.1 は list で返し、比較・isinstance が外れる）。項目はここでだけ作る。
+        self._scope_items: list[tuple[str, str | None]] = []
+        for ds in open_ds:
+            self._scope_items.append(("dataset", ds))
+            self._scope_combo.addItem(tr("chat.search.scope.dataset", dataset=ds))
         if open_ds:
-            for ds in open_ds:
-                self._scope_combo.addItem(tr("chat.search.scope.dataset", dataset=ds),
-                                          ("dataset", ds))
+            self._scope_items.append(("all", None))
             self._scope_combo.addItem(
-                tr("chat.search.scope.all_named", datasets=", ".join(open_ds)), ("all", None))
-        else:
-            self._scope_combo.addItem(tr("chat.search.scope.none"), ("none", None))
-        if open_ds:
+                tr("chat.search.scope.all_named", datasets=", ".join(open_ds)))
             if load_scope_pref() == "all":
                 self._scope_combo.setCurrentIndex(self._scope_combo.count() - 1)
             else:
@@ -312,6 +340,12 @@ class ChatSearchDialog(QDialog):
         self._history_panel.setVisible(opened)
         self._history_toggle.setArrowType(
             Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        if not open_ds:
+            # 対象を選べず、検索履歴も常に空なので出さない（no_dataset の注記だけ残す）
+            form.setRowVisible(self._scope_combo, False)
+            form.setRowVisible(self._switch_note, False)
+            self._history_toggle.hide()
+            self._history_panel.hide()
 
         # ----- buttons -----
         self._buttons = QDialogButtonBox()
@@ -352,15 +386,15 @@ class ChatSearchDialog(QDialog):
     def _update_search_enabled(self, *_) -> None:
         self._search_btn.setEnabled(bool(self._main_text()))
 
-    def _scope_data(self) -> tuple:
-        d = self._scope_combo.currentData()
-        return d if isinstance(d, tuple) else ("none", None)
+    def _scope_data(self) -> tuple[str, str | None]:
+        i = self._scope_combo.currentIndex()
+        return self._scope_items[i] if 0 <= i < len(self._scope_items) else ("none", None)
 
-    def _scope_index(self, data: tuple) -> int:
-        for i in range(self._scope_combo.count()):
-            if self._scope_combo.itemData(i) == data:
-                return i
-        return -1
+    def _scope_index(self, data: tuple[str, str | None]) -> int:
+        try:
+            return self._scope_items.index(data)
+        except ValueError:
+            return -1
 
     def _update_switch_note(self) -> None:
         kind, ds = self._scope_data()
