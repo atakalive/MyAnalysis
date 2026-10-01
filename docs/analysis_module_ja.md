@@ -67,7 +67,7 @@ def apply_state(tab, state):               # 任意: 前回の表示状態を復
 ## 編集後の反映
 
 - タブを右クリック → **タブを閉じる** → 開き直す。
-- または `python -m llm_bridge window reload scope=tab target=<解析名> --wait`。成否は出力の `result`（`reloaded-tab:…` / `reload-tab-error:…`）で確認する。失敗すると古いタブが残る。同じ名前のタブが複数のデータセットにあるときはアクティブなデータセットのものが対象（`dataset=` は使えないので、先に `window set-active-dataset name=<ds>`）。
+- または `python -m llm_bridge window reload scope=tab target=<解析名> --wait`。成否は出力の `result`（`reloaded-tab:…` / `reload-tab-error:…`）で確認する。失敗すると古いタブが残る。同じ名前のタブが複数のデータセットにあるときは `dataset=<ds>` で対象を選ぶ（省略時はアクティブなデータセットのもの。チャットのエージェントが実行したときはチャットのデータセットのもの）。
 
 ## 同期ドライブ上で安全に編集する
 

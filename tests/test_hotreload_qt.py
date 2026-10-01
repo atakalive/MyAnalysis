@@ -397,6 +397,46 @@ def test_tier2_reload_tab_swaps_and_syncs_state(window, probe_analysis):
     assert state.read(HR_DS, name) == {"v": 2}  # refresh-state synced new UI
 
 
+def test_tier2_reload_tab_by_dataset(window, probe_analysis, tmp_path):
+    """dataset= で前面ではない DS の同名タブだけを reload する（Issue #111）。"""
+    from llm_bridge import state
+
+    name, af = probe_analysis
+    ds2 = "_hr_probe_ds2"
+    af2 = tmp_path / ds2 / "analyses" / name / "analysis.py"
+    af2.parent.mkdir(parents=True)
+    af2.write_text(_ANALYSIS_SRC.format(name=name, v=10), encoding="utf-8")
+    assert window.dispatch_command("add-tab", name=name, dataset=HR_DS) \
+        == f"added:{name}"
+    assert window.dispatch_command("add-tab", name=name, dataset=ds2) \
+        == f"added:{name}"
+    window.dispatch_command("set-active-dataset", name=ds2)
+    old_tab = window.find_tab(name, HR_DS)
+    other_tab = window.find_tab(name, ds2)
+    assert old_tab is not None and other_tab is not None
+
+    af.write_text(_ANALYSIS_SRC.format(name=name, v=2), encoding="utf-8")
+    result = window.dispatch_command("reload", scope="tab", target=name, dataset=HR_DS)
+    assert result == f"reloaded-tab:{name}"
+    new_tab = window.find_tab(name, HR_DS)
+    assert new_tab is not None and new_tab is not old_tab
+    assert window.find_tab(name, ds2) is other_tab
+    assert state.read(HR_DS, name) == {"v": 2}
+    assert state.read(ds2, name) == {"v": 10}
+
+    missing = window.dispatch_command("reload", scope="tab", target=name,
+                                      dataset="_hr_no_such_ds")
+    assert missing.startswith("reload-tab-error:")
+
+
+def test_command_accepts(window):
+    assert window.command_accepts("add-tab", "dataset") is True
+    assert window.command_accepts("reload", "dataset") is True
+    assert window.command_accepts("chat-search", "dataset") is False
+    assert window.command_accepts("open-dataset", "dataset") is False
+    assert window.command_accepts("_no_such_verb_", "dataset") is False
+
+
 def test_tier2_build_failure_retains_old_tab(window, probe_analysis):
     from llm_bridge import state
 

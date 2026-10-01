@@ -33,7 +33,7 @@ python -m llm_bridge <verb> ...
 | `window` | `<サブコマンド> [k=v …] [--wait [秒]]` | **必要** | ウィンドウ操作（→ [`window` のサブコマンド](#window-のサブコマンド)） |
 | `tab` | `<タブ名> <サブコマンド> [k=v …] [--wait [秒]]` | **必要** | タブ操作（→ [`tab` のサブコマンド](#tab-のサブコマンド)） |
 
-※ GUI が最後に書いた状態ファイル（`active.json`）を使う。GUI を閉じた後は前回の状態が出る。`--dataset` を省略すると、GUI で最後に前面（アクティブ）だったデータセットが対象になるので、書き込む verb では明示する。
+※ GUI が最後に書いた状態ファイル（`active.json`）を使う。GUI を閉じた後は前回の状態が出る。`--dataset` を省略すると、GUI で最後に前面（アクティブ）だったデータセットが対象になるので、書き込む verb では明示する。データセットのあるチャットのエージェントが実行したときは、`--dataset` 省略時の対象はそのチャットのデータセットになる（名前なしの `state` と `list-analyses` を除く。GUI でそのデータセットが閉じていても、`--dataset` を明示したときと同じく読み書きする）。window / tab verb の `dataset=` 省略時も同じ（`add-tab` / `close-tab` / `set-active-tab` / `show` / `show-image` / `reload scope=tab` と `tab` コマンド）だが、こちらはチャットのデータセットが開いていなければエラーになる。`--dataset` / `dataset=` に空の値を明示するとエラー。`active` の出力には `chat_dataset` が加わる（チャット外とデータセットの無いチャットでは `null`）。`active.json` が読めないときは `{"active_tab": null, "error": "active.json is unreadable", "chat_dataset": …}` を出す。
 
 ## `window` のサブコマンド
 
@@ -53,7 +53,7 @@ python -m llm_bridge <verb> ...
 | `chat-search` | `query=<語> [dataset=<ds>\|scope=all\|scope=unbound\|search_tab=<sid>] [archived=true] [limit=50] [offset=<n>]` | 空白区切りのすべての語を含むメッセージ（大文字・小文字を区別しない。ツール呼び出しの行と思考（💭）の行は対象外）→ `{"hits": [{sid, idx, title, dataset, role, snippet, updated}], "total": N, "next_offset": n\|null}` |
 | `chat-show` | `sid=<sid> [start=<idx>] [end=<idx>] [char_offset=<n>] [max_chars=20000] [raw=true]` | チャットの本文。`idx` はメッセージの番号（`chat-search` の `idx` と同じ）で、`end` を含む。`truncated` が true なら `start=<next> char_offset=<next_char_offset>` で、長いメッセージの途中からでも続きを読める。`raw=true` でツール呼び出しの行と思考（💭）の行も含める |
 | `meeting-start` / `meeting-token` / `meeting-lan-link` / `meeting-stop` | → [ミーティング共有](meeting_share_ja.md#コマンドから操作する) | |
-| `reload` | `scope=tab target=<解析名>` | 解析タブの再読み込み → `reloaded-tab:<名前>` / `reload-tab-error:…` / `reload-busy:…`（モーダルダイアログの表示中は実行されない。チャットの応答中でも実行する） |
+| `reload` | `scope=tab target=<解析名> [dataset=<ds>]` | 解析タブの再読み込み（同じ名前のタブが複数のデータセットにあるときは `dataset=` で選ぶ） → `reloaded-tab:<名前>` / `reload-tab-error:…` / `reload-busy:…`（モーダルダイアログの表示中は実行されない。チャットの応答中でも実行する） |
 
 ## `tab` のサブコマンド
 

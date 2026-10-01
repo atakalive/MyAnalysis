@@ -3,11 +3,13 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 import time
 import traceback
 import uuid
 from datetime import datetime
+from common.chat_dataset import chat_dataset_value
 from common.filelock import exclusive_lock
 from common.paths import atomic_write_text
 from llm_bridge.paths import (
@@ -25,9 +27,11 @@ _REDACTED = "<redacted>"
 _ID_RE = re.compile(r"[0-9a-f]{32}")   # submit() の uuid4().hex
 _RESULT_MAX_AGE_SEC = 3600.0
 _LOG_ROTATE_BYTES = 1 << 20   # 1 MiB。追記の前に判定するので各世代は「1 MiB 未満 + 最後の 1 エントリ」まで育つ
+_LOG_KEYS = ("id", "ts", "tier", "target", "verb", "args", "caller_dataset")
 
 
-def submit(tier: str, target: str | None, verb: str, args: dict) -> str:
+def submit(tier: str, target: str | None, verb: str, args: dict,
+           caller_dataset: str | None = None) -> str:
     """Write a command JSON to the queue atomically. Returns the command id."""
     if tier not in ("window", "tab"):
         raise ValueError(f"unknown tier: {tier!r}")
@@ -42,6 +46,8 @@ def submit(tier: str, target: str | None, verb: str, args: dict) -> str:
         "verb": verb,
         "args": args,
     }
+    if caller_dataset is not None:   # チャットの DS（Issue #111）。args には入れない
+        payload["caller_dataset"] = caller_dataset
     qd = commands_queue_dir()
     fname = f"{now:%Y%m%d_%H%M%S_%f}_{cmd_id[:8]}.json"
     target_path = qd / fname
@@ -249,6 +255,51 @@ def _write_result(cmd_id: str, result) -> None:
     )
 
 
+def _take_dataset_arg(args: dict, *, pop: bool) -> str | None:
+    """args の明示 dataset を検査して返す（Issue #111 の I2）。
+
+    キーが無い・値が None（openai の JSON null）→ None（省略扱い。None はキーごと消す）。
+    空文字・非 str・NUL 入り → ValueError（明示した不正値を前面やチャットの DS に倒さない）。
+    pop=True なら有効な値もキーから取り除く（tab tier。tab verb へは渡さない）。"""
+    if "dataset" not in args:
+        return None
+    value = args["dataset"]
+    if value is None:
+        del args["dataset"]
+        return None
+    ds = chat_dataset_value(value)
+    if ds is None:
+        raise ValueError(f"dataset= must be a non-empty dataset name, got {value!r}")
+    if pop:
+        del args["dataset"]
+    return ds
+
+
+# dataset を省略したとき caller_dataset（チャットの DS）を既定にする window verb（Issue #111）。
+# chat-list / chat-search の dataset は検索範囲という別の意味なので入れない。
+_DEFAULTABLE_WINDOW_VERBS: frozenset[str] = frozenset(
+    {"add-tab", "close-tab", "set-active-tab", "show", "show-image", "reload"}
+)
+
+
+def _default_dataset(window, payload: dict) -> str | None:
+    """payload の caller_dataset を既定の DS として返す。使えないときは None（従来どおり）。
+
+    group model（open_dataset_names と find_tab）を持たない window には補わない。
+    DS が開いていなければ LookupError（前面へはフォールバックしない・グループを作らない）。"""
+    ds = chat_dataset_value(payload.get("caller_dataset"))
+    names = getattr(window, "open_dataset_names", None)
+    if ds is None or names is None or getattr(window, "find_tab", None) is None:
+        return None
+    if ds not in names():
+        raise LookupError(
+            f"this chat's dataset {ds!r} is not open; open it with "
+            f"`python -m llm_bridge window open-dataset {shlex.quote(f'name={ds}')} "
+            f"--wait`, or pass dataset=<ds> explicitly"
+        )
+    return ds
+
+
 def _execute(window, payload: dict) -> None:
     tier = payload.get("tier")
     verb = payload.get("verb")
@@ -264,13 +315,31 @@ def _execute(window, payload: dict) -> None:
     try:
         if tier == "window":
             dispatcher = window
+            if verb in _DEFAULTABLE_WINDOW_VERBS:
+                explicit = _take_dataset_arg(args, pop=False)
+                accepts = getattr(window, "command_accepts", None)
+                if (explicit is None
+                        and (verb != "reload" or args.get("scope") == "tab")
+                        and accepts is not None and accepts(verb, "dataset")):
+                    ds = _default_dataset(window, payload)
+                    if ds is not None:
+                        args["dataset"] = ds
         elif tier == "tab":
             # `dataset=` is an optional ambiguity resolver for the tab address —
             # pop it so it is not forwarded to the tab verb (snapshot/set-split
             # etc. take no dataset). Non-tab verbs keep their args intact.
-            ds = args.pop("dataset", None)
+            ds = _take_dataset_arg(args, pop=True)
+            defaulted = False
+            if ds is None:
+                ds = _default_dataset(window, payload)
+                defaulted = ds is not None
             tab = _find_tab(window, target, ds) if target else None
             if tab is None:
+                if defaulted:
+                    raise LookupError(
+                        f"no tab named {target!r} in this chat's dataset {ds!r}; "
+                        f"pass dataset=<ds> to address a tab in another dataset"
+                    )
                 raise LookupError(f"no tab named {target!r}")
             dispatcher = tab
         else:
@@ -305,7 +374,7 @@ def _execute(window, payload: dict) -> None:
         result_repr = _REDACTED
         extra["result_redacted"] = redacted_to_file
     _append_log({
-        **{k: payload.get(k) for k in ("id", "ts", "tier", "target", "verb", "args")},
+        **{k: payload.get(k) for k in _LOG_KEYS},
         "status": status,
         "error": error,
         "result": result_repr,
@@ -403,12 +472,13 @@ def start_watcher(window, *, resume_after: float | None = None) -> object:
                     pass
             try:
                 payload = json.loads(f.read_text(encoding="utf-8"))
-                base = {k: payload.get(k) for k in ("id", "ts", "tier", "target", "verb", "args")}
+                base = {k: payload.get(k) for k in _LOG_KEYS}
             except (OSError, json.JSONDecodeError):
                 parts = f.stem.rsplit("_", 1)
                 id_hint = parts[-1] if len(parts) >= 2 else None
                 base = {"id": id_hint, "ts": None, "tier": None,
-                        "target": None, "verb": None, "args": None}
+                        "target": None, "verb": None, "args": None,
+                        "caller_dataset": None}
             _append_log({
                 **base,
                 "status": "stale",

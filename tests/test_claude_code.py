@@ -22,12 +22,14 @@ from llm_backend.claude_code import (
 )
 
 
-def _capture_prompt(msgs, monkeypatch, tmp_path, *, session_id=None):
+def _capture_prompt(msgs, monkeypatch, tmp_path, *, session_id=None, chat_dataset=None):
     # cwd をテスト用 tmp_path に固定し、_agent_home() が実ユーザー home 配下へ
     # ディレクトリを mkdir する副作用を避ける（hermetic 化）。
     backend = ClaudeCodeBackend({"bin": "/usr/bin/claude", "cwd": str(tmp_path)})
     if session_id:
         backend._session_id = session_id
+    if chat_dataset is not None:
+        backend.set_chat_dataset(chat_dataset)
     captured = {}
 
     def fake_popen(cmd, **kwargs):
@@ -73,6 +75,34 @@ def test_resume_session_no_replay(monkeypatch, tmp_path):
     prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, session_id="sid")
     assert "<prior_conversation>" not in prompt
     assert prompt == "user2"
+
+
+# ----- チャットの DS（Issue #111） -----
+
+_CTX_A = '<myanalysis_context>\nchat_dataset: "dsA"\n</myanalysis_context>\n\n'
+
+
+def test_fresh_session_prepends_chat_context(monkeypatch, tmp_path):
+    prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, chat_dataset="dsA")
+    assert prompt.startswith(_CTX_A)
+    assert "<prior_conversation>" in prompt
+    assert prompt.endswith("user2")
+
+
+def test_resume_session_does_not_resend_chat_context(monkeypatch, tmp_path):
+    prompt = _capture_prompt(_msgs(), monkeypatch, tmp_path, session_id="sid",
+                             chat_dataset="dsA")
+    assert prompt == "user2"
+
+
+def test_no_chat_dataset_prompt_is_unchanged(monkeypatch, tmp_path):
+    """I1: DS の無いチャットのプロンプトは現行の式と一致する。"""
+    from llm_backend.base import build_prompt_with_history
+    msgs = _msgs()
+    assert _capture_prompt(msgs, monkeypatch, tmp_path) == \
+        build_prompt_with_history(msgs, replay=True)
+    assert _capture_prompt(msgs, monkeypatch, tmp_path, session_id="sid") == \
+        build_prompt_with_history(msgs, replay=False)
 
 
 # ----- _resolve_bin (Issue #94) -----

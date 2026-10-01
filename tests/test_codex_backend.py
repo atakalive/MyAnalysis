@@ -125,6 +125,28 @@ def test_second_turn_resumes_thread(fake_popen, tmp_path):
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
 
 
+def test_first_turn_prepends_chat_context(fake_popen, tmp_path):
+    """チャットの DS は新規スレッドの最初の送信だけに前置する（Issue #111）。"""
+    fake_popen.events = _TURN
+    b = _backend(tmp_path)
+    b.set_chat_dataset("dsA")
+    _run(b)
+    assert fake_popen.last.stdin.data.startswith(
+        b'<myanalysis_context>\nchat_dataset: "dsA"\n</myanalysis_context>\n\n')
+    assert b._session_id == "th-123"
+    _run(b, "next")
+    assert b"<myanalysis_context>" not in fake_popen.last.stdin.data
+
+
+def test_first_turn_without_chat_dataset_is_unchanged(fake_popen, tmp_path):
+    """I1: DS の無いチャットの初回ターンは従来と同じ stdin。"""
+    fake_popen.events = _TURN
+    b = _backend(tmp_path)
+    b.set_chat_dataset(None)
+    _run(b)
+    assert fake_popen.last.stdin.data == b"hello"
+
+
 def test_sandbox_mode_replaces_bypass(fake_popen, tmp_path):
     b = _backend(tmp_path, sandbox_mode="workspace-write")
     _run(b)

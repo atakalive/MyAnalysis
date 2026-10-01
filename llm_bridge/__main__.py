@@ -2,12 +2,14 @@
 import argparse
 import json
 import math
+import os
 import re
 import socket
 import sys
 from pathlib import Path
 
 import dataset_config
+from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import safe_resolve
 from llm_bridge import state, annotations, commands
 from llm_bridge.paths import active_state_path
@@ -82,12 +84,37 @@ def _list_analysis_names(dataset: str) -> list[str]:
     return names
 
 
+def _chat_dataset_env() -> str | None:
+    """チャットのエージェントから実行されたときのチャットの DS（Issue #111）。無ければ None。"""
+    return chat_dataset_value(os.environ.get(CHAT_DATASET_ENV))
+
+
+def _submit(tier: str, target: str | None, verb: str, kwargs: dict) -> str:
+    """チャットの DS があるときだけ caller_dataset を付けて submit する。"""
+    chat_ds = _chat_dataset_env()
+    if chat_ds is None:
+        return commands.submit(tier, target, verb, kwargs)
+    return commands.submit(tier, target, verb, kwargs, caller_dataset=chat_ds)
+
+
 def _resolve_dataset(args, active: dict | None = None, *,
                      use_active_analysis: bool = False) -> str | None:
-    """優先順: --dataset 明示 → active.json の該当フィールド。解決不能なら None。"""
+    """優先順: --dataset 明示 → チャットの DS（環境変数。Issue #111）→ active.json の
+    該当フィールド。解決不能なら None。
+
+    明示した --dataset が有効な DS 名でなければ（空文字など）SystemExit。
+    use_active_analysis=True（`state` で name 省略）のときは環境変数を見ない（前面のまま）。
+    GUI で DS が開いているかは見ない（ファイルを直接読み書きする verb 用）。"""
     ds = getattr(args, "dataset", None)
-    if ds:
+    if ds is not None:
+        if chat_dataset_value(ds) is None:
+            raise SystemExit(
+                f"error: --dataset must be a non-empty dataset name, got {ds!r}")
         return ds
+    if not use_active_analysis:
+        chat_ds = _chat_dataset_env()
+        if chat_ds is not None:
+            return chat_ds
     if active is None:
         active = json.loads(active_state_path().read_text(encoding="utf-8")) \
             if active_state_path().exists() else {}
@@ -250,10 +277,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "active":
         p = active_state_path()
-        if p.exists():
-            print(p.read_text(encoding="utf-8"))
-        else:
-            print(json.dumps({"active_tab": None}))
+        chat_ds = _chat_dataset_env()
+        if not p.exists():
+            print(json.dumps({"active_tab": None, "chat_dataset": chat_ds},
+                             ensure_ascii=False))
+            return 0
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            # 読めない・壊れている・dict でないときも chat_dataset は必ず出す（規則文の
+            # 「active は常に chat_dataset を返す」を守る）。
+            data = {"active_tab": None, "error": "active.json is unreadable"}
+        data["chat_dataset"] = chat_ds
+        print(json.dumps(data, ensure_ascii=False))
         return 0
 
     if args.cmd == "list-analyses":
@@ -494,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "window":
         kwargs = _parse_kvs(args.kvs)
-        cmd_id = commands.submit("window", None, args.verb, kwargs)
+        cmd_id = _submit("window", None, args.verb, kwargs)
         if args.wait is not None:
             result = commands.wait_for(cmd_id, timeout=args.wait)
             if result is None:
@@ -508,7 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "tab":
         _check_tab_name(args.target)
         kwargs = _parse_kvs(args.kvs)
-        cmd_id = commands.submit("tab", args.target, args.verb, kwargs)
+        cmd_id = _submit("tab", args.target, args.verb, kwargs)
         if args.wait is not None:
             result = commands.wait_for(cmd_id, timeout=args.wait)
             if result is None:

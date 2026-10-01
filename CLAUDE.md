@@ -41,7 +41,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
     analyses/<name>/batch/       ← export 出力 PNG
 ```
 
-パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。**別データセットの同名解析を同時に開くのは Issue #51 で対応済み**：タブはデータセットごとの `_DatasetGroup`（トップの `DatasetSwitcher` で切替）にグループ化され、タブ ID は「グループ内で一意」になる。エージェント/CLI は衝突時のみ `dataset=` でアドレッシングを修飾する（`add-tab`/`show`/`set-active-tab`/`close-tab`/tab-tier verb が任意 `dataset=` を受ける）。
+パス解決は [dataset_config.py](dataset_config.py) の `analyses_root` / `analysis_file` / `state_dir` / `batch_dir`（read 経路は `create=False` で副作用なし）。`mod.DATASET`（scaffold が焼く）は `load()` のデータ読込にのみ使い、出力先・セッション紐付けは所在データセット（引数 `dataset`）が真実ソース。メニュー列挙は「現在開いているデータセットのみ」。**別データセットの同名解析を同時に開くのは Issue #51 で対応済み**：タブはデータセットごとの `_DatasetGroup`（トップの `DatasetSwitcher` で切替）にグループ化され、タブ ID は「グループ内で一意」になる。`add-tab`/`show`/`show-image`/`set-active-tab`/`close-tab`/`reload scope=tab`/tab-tier verb は任意 `dataset=` を受ける。省略時は、データセットのあるチャットのエージェントからならチャットのデータセット（Issue #111。「Multiple datasets」節）。チャット外の CLI とデータセットの無いチャットからなら従来どおり各 verb の既存の規則（CLI の verb と `add-tab` は前面のデータセット。タブ名は開いている全データセットから前面を優先して探す。`show` / `show-image` は同名のタブを先に探し、無ければパスから推定）。
 
 リポジトリ直下の旧 `analyses/` は削除済み（解析はデータセット配下 `<dataset_dir>/analyses/<name>/` に自己完結）。`data/analyses/` への書き込みは全廃。
 
@@ -54,7 +54,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
-- `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started.
+- `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started. `MYANALYSIS_CHAT_DATASET` is set by the GUI for agent subprocesses only — never put it in `.env`.
 - Dataset registration (per-host paths) lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
 
@@ -76,6 +76,8 @@ builds its own prompt (`claude_code._SYSTEM_PROMPT`, `pi._SYSTEM_PROMPT_PI`,
 the `openai`/`mock` system message), so a **new backend must append this
 constant too**. `tests/test_backend_prompts.py`
 guards that every prompt still contains it.
+
+**Chat dataset (Issue #111).** The claude / codex / pi prompts also append `CHAT_DATASET_RULE` (`llm_backend/base.py`). Every backend implements a duck-typed `set_chat_dataset(ds)` (called by `ChatWidget._start_turn` every turn): the CLI backends prepend `with_chat_context` to the prompt only when `_session_id is None` and set / pop `MYANALYSIS_CHAT_DATASET` in `_build_env`; openai composes a chat-dataset note into the system payload (`_payload_messages`); mock ignores it. A new backend must do the same.
 
 - **Selection order**: env `LLM_BACKEND` → `[backend].name` in
   `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
@@ -341,7 +343,7 @@ to discover registered dataset names.
 
 ## Session save/restore
 
-データセット単位のセッション（開いていたタブ構成・アクティブタブ）は引き続き `<work_dir>/session.json` に保存・復元する（データバインドの真実ソース＝同期ドライブでどこでも開ける）。現在開いているデータセットは `python -m llm_bridge active` の `active_dataset`/`dataset` フィールド、開いているデータセット一覧は `open_datasets` フィールド（または `list-open-datasets`）で取得できる。
+データセット単位のセッション（開いていたタブ構成・アクティブタブ）は引き続き `<work_dir>/session.json` に保存・復元する（データバインドの真実ソース＝同期ドライブでどこでも開ける）。現在開いているデータセットは `python -m llm_bridge active` の `active_dataset`/`dataset` フィールド、開いているデータセット一覧は `open_datasets` フィールド（または `list-open-datasets`）で取得できる。チャットのエージェントが実行した `active` には、そのチャットのデータセット `chat_dataset`（チャット外・データセット未設定は `null`）も出る（`active.json` 自体には無い）。
 
 - 保存: File → 「セッションを保存」、「保存して終了」、✕ 終了時の Yes/No/Cancel ダイアログ。
 - 復元: File → 「データセットを開く…」、CLI `window open-dataset name=<dataset>`。
@@ -389,6 +391,7 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
 - **ワークスペースメンバー一覧**（どのデータセットが一緒に開いていたか＋アクティブ）だけを repo-local・gitignored の `data/llm_state/last_window.json`（`{version, datasets, active}`）に集約する。#50 の `recent_datasets.json`（MRU＝履歴順）の隣に並ぶ 2 つ目の PC ローカルレコード（workspace＝同時開き集合）。両者とも **PC 間同期はしない** machine/window 状態で、per-dataset のタブ内容 `session.json` が同期側を担う。Tier 4 の `reload_manifest.json`（transient）とも別レコード。`datasets` は DS タブの表示順（ドラッグ並べ替えを反映し、復元で再現される。Issue #59）。
 - 復元は **手動**：File →「前回のセッションを復元」（起動時自動復元はしない）。復元は **ADDITIVE**（既に開いているデータセット/タブは閉じない・上書きしない）。
 - 会議共有（meeting relay）は **開いている全データセットのタブとチャットを既定で** ゲストへ配信する（Issue #78。非公開にするのは明示的なオプトアウトのみ）。データセット未設定・閉じたデータセットのチャットとタブは配信しない（Issue #107）。opt-out は停止・開始を跨いで保持（アプリ終了まで）。同名タブはデータセットごとに別物として扱われる（ワイヤは `tabs_by_dataset` の DS 単位名前空間）。ゲスト HTML はホストの「DS レイヤー → タブレイヤー」をミラーし、DS バーは共有中の全 DS をクリック可能なチップとして並べる。`curDs` はゲストローカルの真実ソースで、ホストのアクティブ DS は初回ロードの既定値を決めるだけ（タブ選択・履歴・未送信ドラフトは DS 単位で保持）。DS バー右端の **「ホストに追従」トグル**（既定 OFF・非永続、Issue #80）を ON にした時だけホストのアクティブ DS へ追従し、DS チップの手動クリックで OFF に戻る。
+- **チャットのデータセット（Issue #111）**: チャットは 1 つのデータセットに属する（`sess.dataset`）。`ChatWidget._start_turn` が毎ターン `set_chat_dataset` でバックエンドに渡し、エージェントには (1) 新規ネイティブセッションの最初のプロンプト先頭の `<myanalysis_context>`、(2) 子プロセスの環境変数 `MYANALYSIS_CHAT_DATASET`（`python -m llm_bridge` が読む）、(3) コマンドの `caller_dataset`（`commands._execute` が既定に使う）で伝わる（(1) は新しい会話だけ。途中で DS を採用したチャットとこの変更より前の resume token を持つチャットには届かず、エージェントは `active` の `chat_dataset` で知る）。dataset を省略した `state <name>` / `annotate` / `clear-annotations` / `draft|apply|recover-analysis`、`tab` verb、window verb `add-tab` / `close-tab` / `set-active-tab` / `show` / `show-image` / `reload scope=tab` はチャットのデータセットが対象。window / tab verb はチャットのデータセットが開いていなければエラー（前面へは倒れない）。CLI の `state <name>` 等はファイルを直接扱うので、閉じていても読み書きする（`--dataset` を明示したときと同じ）。`state`（名前なし）と `list-analyses` は従来どおり。チャットにデータセットが無ければ従来どおり各 verb の既存の規則（「解析ファイルはデータセット側に置く」節の段落と同じ）。
 - **メモリ天井（既知の制約・v1）**: 各解析タブは開いた時点で `mod.load()` を eager 実行し、開いている限り DataFrame を常駐させる。複数データセットを同時に開くと全データセットの全解析の DataFrame が同時常駐するため、大きな測定データを多数開くとメモリを圧迫し得る（遅延ロード/アンロードは将来課題）。
 
 ## ホットリロード — `devtools/`

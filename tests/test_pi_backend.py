@@ -360,7 +360,7 @@ class TestJSONLParsing:
 class TestHistoryReplayWiring:
     """Verify stream() wires build_prompt_with_history with the right replay flag."""
 
-    def _capture_prompt(self, msgs, monkeypatch, *, session_id=None):
+    def _capture_prompt(self, msgs, monkeypatch, *, session_id=None, chat_dataset=None):
         monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/pi")
         monkeypatch.setattr(
             "llm_backend.pi.repo_root", lambda: __import__("pathlib").Path("/repo")
@@ -369,6 +369,8 @@ class TestHistoryReplayWiring:
         backend = PiCodingAgentBackend({})
         if session_id:
             backend._session_id = session_id
+        if chat_dataset is not None:
+            backend.set_chat_dataset(chat_dataset)
         captured = {}
 
         def fake_popen(cmd, **kwargs):
@@ -404,6 +406,30 @@ class TestHistoryReplayWiring:
         prompt = self._capture_prompt(self._msgs(), monkeypatch, session_id="sid")
         assert "<prior_conversation>" not in prompt
         assert prompt == "user2"
+
+    # ----- チャットの DS（Issue #111） -----
+
+    _CTX_A = '<myanalysis_context>\nchat_dataset: "dsA"\n</myanalysis_context>\n\n'
+
+    def test_fresh_session_prepends_chat_context(self, monkeypatch):
+        prompt = self._capture_prompt(self._msgs(), monkeypatch, chat_dataset="dsA")
+        assert prompt.startswith(self._CTX_A)
+        assert "<prior_conversation>" in prompt
+        assert prompt.endswith("user2")
+
+    def test_resume_session_does_not_resend_chat_context(self, monkeypatch):
+        prompt = self._capture_prompt(self._msgs(), monkeypatch, session_id="sid",
+                                      chat_dataset="dsA")
+        assert prompt == "user2"
+
+    def test_no_chat_dataset_prompt_is_unchanged(self, monkeypatch):
+        """I1: DS の無いチャットのプロンプトは現行の式と一致する。"""
+        from llm_backend.base import build_prompt_with_history
+        msgs = self._msgs()
+        assert self._capture_prompt(msgs, monkeypatch) == \
+            build_prompt_with_history(msgs, replay=True)
+        assert self._capture_prompt(msgs, monkeypatch, session_id="sid") == \
+            build_prompt_with_history(msgs, replay=False)
 
 
 # ---------------------------------------------------------------------------

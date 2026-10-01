@@ -2237,6 +2237,58 @@ def test_start_turn_bumps_updated(widget, monkeypatch):
         widget._spin_timer.stop()
 
 
+@pytest.mark.parametrize("dataset", ["dsA", None])
+def test_start_turn_passes_chat_dataset(qapp, monkeypatch, dataset):
+    """_start_turn がチャットの DS をバックエンドと dispatch に渡す（Issue #111）。"""
+    import gui.chat as gc
+    from gui.chat import ChatWidget
+
+    class _DSBackend(_FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.chat_dataset_calls: list = []
+
+        def set_chat_dataset(self, value) -> None:
+            self.chat_dataset_calls.append(value)
+
+    class _Sig:
+        def connect(self, *a, **k):
+            pass
+
+    workers: list = []
+
+    class _FakeWorker:
+        def __init__(self, sid, backend, msgs, dispatch, parent):
+            self.backend = backend
+            self.dispatch = dispatch
+            self.chunk = self.done = self.failed = self.finished = _Sig()
+            workers.append(self)
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    w = ChatWidget(_DSBackend, dispatch=lambda *a, **k: None)
+    win = MagicMock()
+    win.current_chat_dataset.return_value = None   # 送信時に DS を採用させない
+    w.bind_window(win)
+    monkeypatch.setattr(gc, "_StreamWorker", _FakeWorker)
+    monkeypatch.setattr(w, "_load_backend_session", lambda *a, **k: None)
+    w._current_dataset = None
+    w._active.dataset = dataset
+    w.set_input_draft("hello")
+    w._on_send()
+    try:
+        (worker,) = workers
+        assert worker.backend.chat_dataset_calls == [dataset]
+        assert worker.dispatch.keywords == {"chat_dataset": dataset}
+    finally:
+        w._turns.clear()
+        w._spin_timer.stop()
+
+
 # ---- Issue #109: 思考行（💭） ----
 
 _TH_INPUTS = [

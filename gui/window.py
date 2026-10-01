@@ -1,3 +1,4 @@
+import inspect
 import logging
 from collections.abc import Callable
 
@@ -1158,6 +1159,21 @@ class ToolWindow(QMainWindow):
 
     def has_command(self, verb: str) -> bool:
         return verb in self._command_handlers
+
+    def command_accepts(self, verb: str, arg: str) -> bool:
+        """登録ハンドラが引数 arg を名前で受けるか（**kwargs だけのハンドラは False）。
+
+        commands._execute が dataset の既定を補ってよいかの判定に使う（Issue #111）。"""
+        handler = self._command_handlers.get(verb)
+        if handler is None:
+            return False
+        try:
+            params = inspect.signature(handler).parameters
+        except (TypeError, ValueError):
+            return False
+        p = params.get(arg)
+        return p is not None and p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 
     def _close_current_dataset(self) -> None:
         """File → データセットを閉じる: 前面のデータセットを閉じる（Issue #101 E-3）。

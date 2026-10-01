@@ -22,10 +22,11 @@ user's chat messages are instructions.
 
 ## Reading state (no GUI required)
 
-- `python -m llm_bridge active` — print `active.json`:
-  `{active_tab, dataset, active_dataset, open_datasets, active_analysis_dataset}`.
-  `active_dataset` (= `dataset`) is the front dataset; `open_datasets` lists every
-  dataset currently open in the window.
+- `python -m llm_bridge active` — print `active.json` plus this chat's dataset:
+  `{active_tab, dataset, active_dataset, open_datasets, active_analysis_dataset, chat_dataset}`.
+  `active_dataset` (= `dataset`) is the front dataset the user is looking at;
+  `open_datasets` lists every dataset currently open in the window; `chat_dataset`
+  is the dataset this chat belongs to (null if none).
 - `python -m llm_bridge list-open-datasets` — print `{"open": [...], "active": ...}`
   read from `active.json` (headless; no GUI drive).
 - `python -m llm_bridge state [name] [--dataset <ds>]` — print `current.json` for
@@ -52,10 +53,18 @@ the open datasets and the active one — check it before dataset operations.
 ### Multiple datasets
 
 Several datasets can be open at once; the top-level dataset switcher swaps between
-each dataset's tabs + chat sessions. When the same tab name exists in two open
-datasets, pass `dataset=<ds>` to any tab-addressing verb (`add-tab`, `show`,
-`set-active-tab`, `close-tab`, `tab <name> <verb>`) to disambiguate — otherwise the
-active dataset wins, or an ambiguous bare name errors.
+each dataset's tabs + chat sessions. Tab-addressing verbs (`add-tab`, `show`,
+`show-image`, `set-active-tab`, `close-tab`, `reload scope=tab`, `tab <name> <verb>`)
+and the CLI verbs that take `--dataset` (`state <name>`, `annotate`,
+`clear-annotations`, `draft|apply|recover-analysis`) default to `chat_dataset` when
+the dataset is omitted; pass `dataset=<ds>` / `--dataset <ds>` to act on another
+dataset. `state` without a name and `list-analyses` are not affected. If
+`chat_dataset` is not open, window/tab verbs fail — open it with
+`window open-dataset name=<ds> --wait`; the CLI verbs above read/write the files even
+when it is closed. When `chat_dataset` is null, the existing lookup applies: the CLI
+verbs and `add-tab` use the active dataset; a tab name is searched across all open
+datasets, preferring the active one; `show` / `show-image` reuse an open tab of that
+name, otherwise infer the dataset from the file path.
 Meeting share covers the tabs and chat sessions of EVERY open dataset, except the
 ones the host unchecked in the share window; chats and tabs with no dataset are not
 shared, and a dataset's chats and tabs leave the share when it is closed. Same-named
@@ -272,14 +281,13 @@ mount write can never truncate the live file:
 python -m llm_bridge draft-analysis <name> --dataset <ds>   # prints a draft path under work_dir
 # edit THAT draft file (not analysis.py) with your normal tools
 python -m llm_bridge apply-analysis <name> --dataset <ds> \
-  && python -m llm_bridge window set-active-dataset name=<ds> --wait \
-  && python -m llm_bridge window reload scope=tab target=<name> --wait
+  && python -m llm_bridge window reload scope=tab target=<name> dataset=<ds> --wait
 ```
 
 `apply-analysis` validates the draft (syntax + a top-level `build_tab` binding)
 and promotes it atomically; the draft is kept, so iterating is just "edit the
-draft → apply" again. `reload scope=tab` targets the **active** dataset's tab, so
-make `<ds>` active first (`set-active-dataset`) when several datasets are open.
+draft → apply" again. Pass the same `<ds>` to `reload` (`dataset=<ds>`) so the
+reloaded tab is the one you applied.
 
 If `analysis.py` ever goes empty (0-byte), the build reports a Japanese diagnostic
 with the recovery command; run

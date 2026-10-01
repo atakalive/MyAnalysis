@@ -330,30 +330,36 @@ class HotReloadController(QObject):
 
     # -- Tier 2 --
 
-    def reload_tab(self, name: str) -> str:
+    def reload_tab(self, name: str, dataset: str | None = None) -> str:
         busy = self._busy(check_chat=False)
         if busy:
             return busy
         import dataset_config
 
         window = self._window
-        # Resolve by (name, current dataset) so a same-named analysis in another
-        # dataset is neither reloaded nor closed by mistake. find_tab prefers the
-        # current dataset and raises on an unresolved ambiguity.
+        # (name, dataset) で解決。dataset 省略時は find_tab が前面 DS を優先し、
+        # 解決できない重複はエラー。別 DS の同名解析を誤って reload/close しない。
         finder = getattr(window, "find_tab", None)
         old_tab = None
         if finder is not None:
             try:
-                old_tab = finder(name, None)
+                old_tab = finder(name, dataset)
             except LookupError:
                 return (
                     f"reload-tab-error:tab {name!r} is open in multiple datasets; "
-                    f"switch to the target dataset first"
+                    f"pass dataset=<ds>"
                 )
         if old_tab is None:
-            old_tab = next((t for t in window.tabs() if t.name == name), None)
+            old_tab = next(
+                (t for t in window.tabs()
+                 if t.name == name and (
+                     dataset is None
+                     or (getattr(t, "session_spec", None) or {}).get("dataset") == dataset)),
+                None,
+            )
         if old_tab is None:
-            return f"reload-tab-error:no open tab named {name!r}"
+            where = "" if dataset is None else f" in dataset {dataset!r}"
+            return f"reload-tab-error:no open tab named {name!r}{where}"
         old_spec = getattr(old_tab, "session_spec", None) or {}
         # 同名の figure/viewer タブを解析タブとして reload しない（kind 一致を要求）。
         if old_spec.get("kind") != "analysis":
@@ -663,13 +669,14 @@ def install_hotreload(window) -> HotReloadController:
     controller = HotReloadController(window)
     _live_windows.add(window)
 
-    def _reload(scope: str = "patch", target: str | None = None) -> str:
+    def _reload(scope: str = "patch", target: str | None = None,
+                dataset: str | None = None) -> str:
         if scope == "patch":
             return controller.do_reload()
         if scope == "tab":
             if not target:
                 return "reload-error:scope=tab requires target=<tab name>"
-            return controller.reload_tab(target)
+            return controller.reload_tab(target, dataset=dataset)
         if scope == "app":
             return controller.reload_app()
         if scope == "restart":

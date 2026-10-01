@@ -186,3 +186,32 @@ def test_every_backend_prompt_starts_with_analyst_framing():
     assert prompts
     for key, prompt in prompts.items():
         assert prompt.startswith(ANALYST_FRAMING), key
+
+
+# ----- チャットの DS（Issue #111） -----
+
+def test_every_backend_prompt_includes_chat_dataset_rule():
+    from llm_backend.base import CHAT_DATASET_RULE
+    prompts = _all_backend_prompts()
+    assert prompts
+    for where, text in prompts.items():
+        assert CHAT_DATASET_RULE in text, where
+
+
+def test_chat_dataset_rule_names_the_contract():
+    from llm_backend.base import CHAT_DATASET_RULE
+    for needle in ("chat_dataset", "<myanalysis_context>", "active_dataset",
+                   "open-dataset", "list-analyses", "reload scope=tab"):
+        assert needle in CHAT_DATASET_RULE, needle
+
+
+def test_mount_safe_edits_reload_names_dataset():
+    assert "reload scope=tab target=<name> dataset=<ds>" in MOUNT_SAFE_EDITS
+    assert "set-active-dataset" not in MOUNT_SAFE_EDITS
+
+
+def test_gui_chat_prompt_has_no_chat_dataset_rule():
+    pytest.importorskip("PySide6")
+    from gui.chat import _SYSTEM_PROMPT
+    from llm_backend.base import CHAT_DATASET_RULE
+    assert CHAT_DATASET_RULE not in _SYSTEM_PROMPT

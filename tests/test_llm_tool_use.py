@@ -264,7 +264,7 @@ class TestDispatchDirectReads:
         from gui.tools import _dispatch
 
         result = json.loads(_dispatch(None, "get_active_tab", {}))
-        assert result == {"active_tab": None}
+        assert result == {"active_tab": None, "chat_dataset": None}
 
     def test_get_active_tab_exists(self, tmp_path, monkeypatch):
         p = tmp_path / "active.json"
@@ -274,7 +274,7 @@ class TestDispatchDirectReads:
         from gui.tools import _dispatch
 
         result = json.loads(_dispatch(None, "get_active_tab", {}))
-        assert result == {"active_tab": "_demo"}
+        assert result == {"active_tab": "_demo", "chat_dataset": None}
 
     def test_get_state_read_only(self, tmp_path, monkeypatch):
         monkeypatch.setattr("config.get_dataset_dir", lambda name: tmp_path / name)

@@ -34,11 +34,12 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
-    ANALYST_FRAMING, GUI_DISPLAY_VERBS,
+    ANALYST_FRAMING, GUI_DISPLAY_VERBS, CHAT_DATASET_RULE, with_chat_context,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     build_prompt_with_history, compose_system_prompt, format_thinking_line,
 )
@@ -56,9 +57,10 @@ _SYSTEM_PROMPT_CODEX = (
     "annotate <name> marker|note [k=v], clear-annotations <name>, "
     "draft-analysis <name> --dataset <ds>, apply-analysis <name> --dataset <ds>, "
     "recover-analysis <name> --dataset <ds>. "
-    "Multiple datasets can be open; active returns open_datasets + active_dataset. "
-    "Switch with `window set-active-dataset name=<ds>`; when a tab name exists in "
-    "two open datasets pass dataset=<ds> to disambiguate. "
+    "Multiple datasets can be open; active returns open_datasets, active_dataset "
+    "(the dataset the user is looking at) and chat_dataset (this chat's dataset). "
+    "Omitting dataset targets chat_dataset (see Chat dataset below); pass "
+    "dataset=<ds> to act on another open dataset. "
     "Always check the active tab (active) or state before operating. "
     "Analyze data with Python: `from common.explore import load_dataset, "
     "dataset_summary, save_fig, save_code, save_text` (repo is on PYTHONPATH). "
@@ -74,7 +76,7 @@ _SYSTEM_PROMPT_CODEX = (
     " Never modify measurement files (CSV etc.); analysis output is written by"
     " the tools to the dataset's per-dataset work_dir (default _work, set in"
     " myanalysis.toml)."
-) + "\n\n" + GUI_DISPLAY_VERBS + "\n\n" + NO_LOCAL_PERSISTENCE + "\n\n" + MOUNT_SAFE_EDITS
+) + "\n\n" + GUI_DISPLAY_VERBS + "\n\n" + NO_LOCAL_PERSISTENCE + "\n\n" + MOUNT_SAFE_EDITS + "\n\n" + CHAT_DATASET_RULE
 
 _MAX_LINE = 200
 
@@ -97,18 +99,27 @@ class CodexBackend:
         self.last_usage: dict | None = None
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
+        self._chat_dataset: str | None = None
 
     def set_persona(self, value: str) -> None:
         self._persona = str(value or "")
+
+    def set_chat_dataset(self, value: object) -> None:
+        """チャットの DS（Issue #111）。ChatWidget._start_turn が毎ターン duck-typed に呼ぶ。"""
+        self._chat_dataset = chat_dataset_value(value)
 
     def stream(
         self, messages: list[Message], tools: list | None = None
     ) -> Iterator[TextDelta | ToolCallRequest]:
         config = self._config
 
-        prompt = build_prompt_with_history(messages, replay=(self._session_id is None))
+        fresh = self._session_id is None     # 新規ネイティブセッション（replay と同じ条件）
+        prompt = build_prompt_with_history(messages, replay=fresh)
         if not prompt:
             raise RuntimeError("no user message to send")
+        if fresh:
+            # チャットの DS は新規セッションの最初の送信でだけ伝える（Issue #111）。
+            prompt = with_chat_context(prompt, getattr(self, "_chat_dataset", None))
 
         codex_bin = self._discover_binary()
         cwd = self._agent_home()
@@ -372,6 +383,12 @@ class CodexBackend:
         child_env["PATH"] = os.pathsep.join(
             [py_dir] + ([child_env["PATH"]] if child_env.get("PATH") else [])
         )
+        # チャットの DS（Issue #111）。無ければ GUI プロセスから継承した値も消す。
+        chat_ds = getattr(self, "_chat_dataset", None)
+        if chat_ds is not None:
+            child_env[CHAT_DATASET_ENV] = chat_ds
+        else:
+            child_env.pop(CHAT_DATASET_ENV, None)
         return child_env
 
     def _drain_stderr(self, proc: subprocess.Popen) -> None:

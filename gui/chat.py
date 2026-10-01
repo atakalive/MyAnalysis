@@ -10,6 +10,7 @@ from datetime import datetime
 from functools import partial
 from typing import Callable
 
+from common.chat_dataset import chat_dataset_value
 from common.i18n import tr
 
 from PySide6.QtCore import (
@@ -2031,13 +2032,17 @@ class ChatWidget(QWidget):
             backend = self._build_session_backend(sess)
             self._session_backends[sess.id] = backend
         self._load_backend_session(backend, sess)
+        if hasattr(backend, "set_chat_dataset"):   # チャットの DS（Issue #111。全バックエンド duck-typed）
+            backend.set_chat_dataset(sess.dataset)
         kill_timer = QTimer(self)
         kill_timer.setSingleShot(True)
         kill_timer.timeout.connect(partial(self._force_kill, sess.id))
         msgs = list(sess.messages)
         if wire_text is not None:
             msgs[-1] = Message(role="user", content=wire_text)
-        worker = _StreamWorker(sess.id, backend, msgs, self._dispatch, self)
+        worker = _StreamWorker(
+            sess.id, backend, msgs,
+            partial(self._dispatch, chat_dataset=chat_dataset_value(sess.dataset)), self)
         turn = _Turn(sess, backend, worker, kill_timer)
         turn.stream_id = uuid.uuid4().hex   # この応答の partial/最終を紐付ける安定 ID
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは

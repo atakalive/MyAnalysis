@@ -7,9 +7,12 @@ registry that lives in __init__.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
+
+from common.chat_dataset import chat_dataset_value
 
 
 TOOL_CALL_MARKER = "🔧"
@@ -64,9 +67,8 @@ MOUNT_SAFE_EDITS = (
     "draft path under the dataset's work_dir; edit THAT draft file freely (it is "
     "not the live analysis, and apply rejects it if it is broken); then promote it "
     "atomically with `python -m llm_bridge apply-analysis <name> --dataset <ds> && "
-    "python -m llm_bridge window set-active-dataset name=<ds> --wait && python -m "
-    "llm_bridge window reload scope=tab target=<name> --wait` (reload targets the "
-    "active dataset's tab, so make <ds> active first when several are open). If "
+    "python -m llm_bridge window reload scope=tab target=<name> dataset=<ds> "
+    "--wait` (use the same <ds> in both). If "
     "analysis.py ever goes empty, restore the last built version with `python -m "
     "llm_bridge recover-analysis <name> --dataset <ds>` (then re-seed with "
     "draft-analysis before editing again). Create a new analysis with `python -m "
@@ -107,6 +109,57 @@ GUI_DISPLAY_VERBS = (
     "name=<ds>`, `window list-tabs [detail=true]`. "
     "Full verb list: `python -m llm_bridge list-commands [<tab>]`."
 )
+
+# claude / codex / pi 共通（openai / mock は gui.chat._SYSTEM_PROMPT を使うので含めない）。
+# チャットは 1 つのデータセットに属し、dataset を省略した llm_bridge の verb はその
+# データセットが既定になる（Issue #111）。tests/test_backend_prompts.py が全 CLI 系
+# プロンプトに含まれることを検査する。
+CHAT_DATASET_RULE = (
+    "Chat dataset: this chat belongs to ONE dataset, chat_dataset. A new "
+    "conversation receives its name in a <myanalysis_context> block at the very "
+    "start of its first message. `python -m llm_bridge active` always reports it "
+    "as chat_dataset (null when the chat has no dataset) and is authoritative — "
+    "run it whenever you have not seen that block in this conversation (e.g. the "
+    "conversation started before this rule existed) or are unsure. "
+    "active_dataset is the dataset the user is LOOKING AT "
+    "and may differ from chat_dataset. When you omit the dataset, these default to "
+    "chat_dataset: `state <name>`, `annotate`, `clear-annotations`, "
+    "`draft-analysis` / `apply-analysis` / `recover-analysis` (--dataset), every "
+    "`tab <name> <verb>`, and the window verbs `add-tab`, `close-tab`, "
+    "`set-active-tab`, `show`, `show-image` and `reload scope=tab` (dataset=). "
+    "Verbs that address a tab (every `tab <name> <verb>` included, even "
+    "read-only ones) bring that tab's dataset to the front. Exceptions: "
+    "`state` without a name reads the tab the user is looking at, and "
+    "`list-analyses` covers all open datasets. To act on the dataset the user is "
+    "looking at (or any other), pass dataset=<ds> / --dataset <ds> explicitly. "
+    "Window/tab verbs that default to chat_dataset fail while it is not open "
+    "(the file-based CLI verbs above still work) — open it first with "
+    "`python -m llm_bridge window open-dataset name=<chat_dataset> --wait`. "
+    "When chat_dataset is null, an omitted dataset is resolved by each verb's "
+    "existing rules: the CLI verbs and `add-tab` use active_dataset; a tab name "
+    "is looked up across all open datasets, preferring the front one; `show` / "
+    "`show-image` reuse an open tab of that name, otherwise infer the dataset "
+    "from the file path. Pass dataset= whenever it matters."
+)
+
+CHAT_CONTEXT_OPEN = "<myanalysis_context>"
+CHAT_CONTEXT_CLOSE = "</myanalysis_context>"
+
+
+def with_chat_context(prompt: str, dataset: object) -> str:
+    """新規ネイティブセッションの最初の送信の先頭に、チャットの DS を置く（Issue #111）。
+
+    dataset が chat_dataset_value で None になる（None・空・非 str・NUL 入り）なら
+    prompt を**同一オブジェクトのまま**返す（DS の無いチャットの user プロンプトは従来とバイト同一）。
+    名前は json.dumps で引用し、< と > を \\u003c / \\u003e にして閉じタグを偽造
+    できないようにする（JSON として読めば同じ文字列）。"""
+    ds = chat_dataset_value(dataset)
+    if ds is None:
+        return prompt
+    quoted = (json.dumps(ds, ensure_ascii=False)
+              .replace("<", "\\u003c").replace(">", "\\u003e"))
+    return (f"{CHAT_CONTEXT_OPEN}\nchat_dataset: {quoted}\n{CHAT_CONTEXT_CLOSE}\n\n"
+            f"{prompt}")
 
 
 # ユーザー選択ペルソナ（応答口調）のセクション見出し。合成は compose_system_prompt

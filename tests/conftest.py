@@ -125,3 +125,10 @@ def _isolate_session_ownership(monkeypatch):
     from llm_bridge import session
     for name in ("_restored", "_unreadable", "_chat_baseline", "_last_skipped"):
         monkeypatch.setattr(session, name, {})
+
+
+@pytest.fixture(autouse=True)
+def _no_chat_dataset_env(monkeypatch):
+    """GUI がエージェントに渡す MYANALYSIS_CHAT_DATASET をテストに継承させない（Issue #111）。"""
+    from common.chat_dataset import CHAT_DATASET_ENV
+    monkeypatch.delenv(CHAT_DATASET_ENV, raising=False)

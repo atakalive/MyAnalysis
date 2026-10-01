@@ -34,6 +34,9 @@ class MockBackend:
         ChatWidget の duck-typed 注入（hasattr(backend, "set_persona")）が
         どのバックエンドでも同じ経路を通るための対称性のみ。"""
 
+    def set_chat_dataset(self, value: object) -> None:
+        """不活性。duck-typed 注入の対称性のため。"""
+
     def stream(
         self, messages: list[Message], tools: list | None = None
     ) -> Iterator[TextDelta | ToolCallRequest]:

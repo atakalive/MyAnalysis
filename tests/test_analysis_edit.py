@@ -74,7 +74,7 @@ def test_draft_followup_command_is_shell_quoted(ds, capsys):
     """名前にシェルメタ文字が入っても出力コマンドが安全に quote される。
 
     ';' は validate_identifier_name を通る（禁止文字は <>:"|?* と区切り/制御のみ）が
-    shell では危険。follow-up の apply/set-active-dataset/reload 全トークンで確認する。
+    shell では危険。follow-up の apply/reload 全トークンで確認する。
     """
     import shlex
 
@@ -142,6 +142,21 @@ def test_apply_promotes_and_keeps_draft(ds, capsys):
     assert af.read_text(encoding="utf-8") == _GOOD
     assert draft.is_file()                          # draft kept for the next iter
     assert f"applied: {af}" in out
+
+
+def test_reload_guidance_names_dataset(ds, capsys):
+    """draft / apply の reload 案内は dataset= で DS を選び、set-active-dataset を使わない（Issue #111）。"""
+    import shlex
+
+    _write_analysis(ds)
+    analysis_edit.draft_analysis(DS, NAME)
+    draft_out = capsys.readouterr().out
+    analysis_edit.apply_analysis(DS, NAME)
+    apply_out = capsys.readouterr().out
+    for out in (draft_out, apply_out):
+        assert shlex.quote(f"dataset={DS}") in out
+        assert "reload scope=tab" in out
+        assert "set-active-dataset" not in out
 
 
 def test_apply_no_draft_points_at_draft_analysis(ds):

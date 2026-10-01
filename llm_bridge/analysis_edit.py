@@ -105,16 +105,13 @@ def draft_analysis(dataset: str, name: str) -> None:
     draft = out_dir / "analysis.draft.py"
     atomic_write_text(draft, source)
     print(str(draft))
-    # reload は dataset を受け取らず active dataset のタブを対象にするので、
-    # 同名衝突を避けるため set-active-dataset を前置する。window の
-    # k=v トークン（name=/target=）は先頭が英字なので option 誤認せず、値だけ quote。
+    # reload は dataset= で対象の DS のタブを選ぶ（Issue #111）。window の k=v トークン
+    # （target=/dataset=）は先頭が英字なので option 誤認せず、トークン全体を quote。
     print(
         f"edit the file above, then promote it: "
         f"{_safe_cmd('python -m llm_bridge apply-analysis', dataset, name)} && "
-        f"python -m llm_bridge window set-active-dataset "
-        f"{shlex.quote(f'name={dataset}')} --wait && "
         f"python -m llm_bridge window reload scope=tab "
-        f"{shlex.quote(f'target={name}')} --wait"
+        f"{shlex.quote(f'target={name}')} {shlex.quote(f'dataset={dataset}')} --wait"
     )
 
 
@@ -166,12 +163,10 @@ def apply_analysis(dataset: str, name: str) -> None:
     af.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(af, source)   # 昇格。draft は残す（次の反復は Edit → apply）。
     print(f"applied: {af}")
-    # reload は active dataset のタブが対象なので set-active-dataset を前置。
+    # reload は dataset= で対象の DS のタブを選ぶ（Issue #111）。
     print(
-        f"reload:  python -m llm_bridge window set-active-dataset "
-        f"{shlex.quote(f'name={dataset}')} --wait && "
-        f"python -m llm_bridge window reload scope=tab "
-        f"{shlex.quote(f'target={name}')} --wait"
+        f"reload:  python -m llm_bridge window reload scope=tab "
+        f"{shlex.quote(f'target={name}')} {shlex.quote(f'dataset={dataset}')} --wait"
     )
 
 

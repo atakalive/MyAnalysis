@@ -1,16 +1,34 @@
+import contextvars
 import json
 import time
 
+from common.chat_dataset import chat_dataset_value
 from llm_bridge import commands, state
 from llm_bridge.paths import active_state_path
 import dataset_config
 
-# Optional `dataset` disambiguator shared by tab-addressing tools: when two open
-# datasets hold a same-named tab, dataset= selects which one.
+# dispatch 中のチャットの DS（Issue #111）。_StreamWorker のスレッドで make_dispatch の
+# dispatch が set/reset し、_via_bridge と get_state / get_active_tab が読む。
+_CHAT_DATASET: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "myanalysis_chat_dataset", default=None)
+
+# Optional `dataset` shared by tab-addressing tools: dataset= selects which open
+# dataset's tab to act on; omitted, it defaults to this chat's dataset (Issue #111).
 _DATASET_PROP = {
     "type": "string",
-    "description": "Optional dataset name to disambiguate a tab that exists in "
-    "more than one open dataset. Omit to use the active dataset.",
+    "description": "Optional dataset name. Omit to use this chat's dataset "
+    "(chat_dataset in get_active_tab). When the chat has none, the existing "
+    "lookup applies: open_analysis uses the active dataset; other tools search the "
+    "tab name across open datasets, preferring the active one; show / show_image "
+    "reuse an open tab of that name, otherwise infer the dataset from the file "
+    "path. Pass it to act on another open dataset.",
+}
+
+# list_analyses は dataset 省略時に全 DS を返す（Issue #111）。
+_LIST_DATASET_PROP = {
+    "type": "string",
+    "description": "Optional dataset name to restrict the listing to. Omit to "
+    "list ALL open datasets.",
 }
 
 # Pane slot path grammar shared by show / show_image (Issue #97).
@@ -40,7 +58,7 @@ TOOLS = [
             "(same {dataset: [names]} shape).",
             "parameters": {
                 "type": "object",
-                "properties": {"dataset": _DATASET_PROP},
+                "properties": {"dataset": _LIST_DATASET_PROP},
                 "required": [],
             },
         },
@@ -79,9 +97,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_active_tab",
-            "description": "Return the currently focused tab name, the active dataset, "
-            "and the open-datasets list (active.json: active_tab, dataset, "
-            "active_dataset, open_datasets).",
+            "description": "Return the currently focused tab and the datasets "
+            "(active.json: active_tab, dataset / active_dataset = the dataset the user "
+            "is looking at, open_datasets, active_analysis_dataset) plus chat_dataset "
+            "= this chat's dataset (null if none).",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -491,11 +510,14 @@ TOOLS = [
 def make_dispatch(window):
     """Build a dispatch function bound to a ToolWindow."""
 
-    def dispatch(name: str, args: dict, cancelled=None) -> str:
+    def dispatch(name: str, args: dict, cancelled=None, chat_dataset=None) -> str:
+        token = _CHAT_DATASET.set(chat_dataset_value(chat_dataset))
         try:
             return _dispatch(window, name, args, cancelled=cancelled)
         except Exception as e:
             return json.dumps({"error": repr(e)})
+        finally:
+            _CHAT_DATASET.reset(token)
 
     return dispatch
 
@@ -536,10 +558,19 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
     if name == "list_open_tabs":
         return _via_bridge("window", None, "list-tabs", {}, cancelled=cancelled)
     if name == "get_active_tab":
+        chat_ds = _CHAT_DATASET.get()
         p = active_state_path()
         if not p.exists():
-            return json.dumps({"active_tab": None})
-        return p.read_text(encoding="utf-8")
+            return json.dumps({"active_tab": None, "chat_dataset": chat_ds})
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            # CLI の active と同じく、読めないときも chat_dataset は必ず返す。
+            data = {"active_tab": None, "error": "active.json is unreadable"}
+        data["chat_dataset"] = chat_ds
+        return json.dumps(data, ensure_ascii=False)
     if name == "open_analysis":
         bargs = {"name": args["name"]}
         if "dataset" in args:
@@ -617,6 +648,8 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
         # named tab の state は、その名前で開いている解析タブ自身の dataset から
         # 引く（current_dataset と乖離し得るため）。(name, dataset) で解決する。
         want_ds = args.get("dataset")
+        if want_ds is None:
+            want_ds = _CHAT_DATASET.get()
         t = None
         finder = getattr(window, "find_tab", None)
         if finder is not None:
@@ -645,7 +678,11 @@ def _dispatch(window, name: str, args: dict, cancelled=None) -> str:
 
 
 def _via_bridge(tier, target, verb, args, timeout: float = 10.0, cancelled=None) -> str:
-    cmd_id = commands.submit(tier, target, verb, args)
+    chat_ds = _CHAT_DATASET.get()
+    if chat_ds is None:
+        cmd_id = commands.submit(tier, target, verb, args)
+    else:
+        cmd_id = commands.submit(tier, target, verb, args, caller_dataset=chat_ds)
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()

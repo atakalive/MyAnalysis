@@ -99,7 +99,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | pi | `pi --mode json --no-context-files --skill .pi/skills/myanalysis-bridge` | `--session <id>` | リポジトリ直下（既存セッションの互換のため。AGENTS.md / CLAUDE.md は読まない） | `--append-system-prompt` |
 | openai / mock | 子プロセスなし（HTTP / 定型文） | 毎回履歴を送る | — | チャット作成時に保存した system メッセージ（`gui/chat.py` の `_SYSTEM_PROMPT`） |
 
-- 3 つの子プロセスには `PYTHONPATH`（リポジトリ）と `PYTHONPYCACHEPREFIX`（`data/pycache`）が設定され、エージェントは `common.explore` と `python -m llm_bridge` を使える。cwd は `config.toml` の各セクションの `cwd` で変更できる。
+- 3 つの子プロセスには `PYTHONPATH`（リポジトリ）と `PYTHONPYCACHEPREFIX`（`data/pycache`）が設定され、エージェントは `common.explore` と `python -m llm_bridge` を使える。cwd は `config.toml` の各セクションの `cwd` で変更できる。チャットにデータセットがあれば `MYANALYSIS_CHAT_DATASET` も設定する（無ければ継承値も消す。内部用で `.env` には書かない。Issue #111）。
 - claude / codex の cwd をリポジトリ外にしているのは、リポジトリ内だと開発者向けの CLAUDE.md 等を拾って「アプリ開発役」として振る舞うため。
 - resume token は PC ローカルの `data/llm_state/backend_sessions.json` にだけ保存し、同期しない（指す先のセッション実体が各 PC の `~/.claude` 等にあるため）。token が無いターンは全履歴を送り直す。
 
@@ -169,6 +169,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `env.py` | `.env` の読み込み |
 | `analysis_module.py` | `analysis.py` を import せず `compile` + `exec` で実行し、実行中だけ `sys.modules` に登録する（GUI と `python -m export` が共有） |
 | `slots.py` | ペインの slot パス（`left/top` 等）の文法。Qt 非依存 |
+| `chat_dataset.py` | チャットのデータセットを渡す環境変数名 `CHAT_DATASET_ENV` と検査 `chat_dataset_value`（Issue #111） |
 
 ### `core/`
 
@@ -202,7 +203,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | ファイル | 役割 |
 |---|---|
 | `__init__.py` | バックエンド登録簿 `_BACKENDS`、`get_backend()` / `build_backend()`、`config.toml` の読み込み |
-| `base.py` | `LLMBackend` Protocol、`Message` 等の型、プロンプトの共通定数（全バックエンドの `NO_LOCAL_PERSISTENCE`、claude / codex / pi の `ANALYST_FRAMING` / `GUI_DISPLAY_VERBS` / `MOUNT_SAFE_EDITS`）、`compose_system_prompt`、`build_prompt_with_history` |
+| `base.py` | `LLMBackend` Protocol、`Message` 等の型、プロンプトの共通定数（全バックエンドの `NO_LOCAL_PERSISTENCE`、claude / codex / pi の `ANALYST_FRAMING` / `GUI_DISPLAY_VERBS` / `MOUNT_SAFE_EDITS` / `CHAT_DATASET_RULE`）、`compose_system_prompt`、`with_chat_context`、`build_prompt_with_history` |
 | `claude_code.py` / `codex.py` / `pi.py` | サブプロセス型バックエンド |
 | `openai_compat.py` | OpenAI 互換 HTTP（SSE ストリーミング、ツール呼び出し） |
 | `mock.py` | 動作確認用の定型文バックエンド |
@@ -279,7 +280,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 
 ### 5.3 エージェントの system プロンプト
 
-- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE`（作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない）を含める。コードを実行できる claude / codex / pi は、さらに `ANALYST_FRAMING`（先頭。アプリの開発ではなくデータ解析の担当）、`GUI_DISPLAY_VERBS`（表示系 verb）、`MOUNT_SAFE_EDITS`（既存の `analysis.py` は draft → apply で編集する）を含める。openai / mock（`gui/chat.py` の `_SYSTEM_PROMPT`）はコードを実行できないので `MOUNT_SAFE_EDITS` を含めない。
+- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE`（作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない）を含める。コードを実行できる claude / codex / pi は、さらに `ANALYST_FRAMING`（先頭。アプリの開発ではなくデータ解析の担当）、`GUI_DISPLAY_VERBS`（表示系 verb）、`MOUNT_SAFE_EDITS`（既存の `analysis.py` は draft → apply で編集する）、`CHAT_DATASET_RULE`（dataset 省略時はチャットのデータセット）を含める。openai / mock（`gui/chat.py` の `_SYSTEM_PROMPT`）はコードを実行できないので `MOUNT_SAFE_EDITS` を含めない。
 - `save_text` に言及する（`work_dir` に任意のファイルを書く正規の経路）。
 - `set-description` / `set-completed` には言及しない（利用者が決める値で、エージェントに書かせない。CLI の `--help` からも隠してある）。
 - `tests/test_backend_prompts.py` が検査する（検査範囲は [§6.1](#61-llm-バックエンドの追加) の手順 7）。
@@ -301,7 +302,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 4. **表示名** — `i18n/en.toml` と `i18n/ja.toml` に `backend.engine.<…>` を追加する（`tests/test_engines.py` がラベルキーの解決を検査する）。
 5. **導入判定** — `llm_backend/preflight.py` の `_check_engine` に分岐を追加する。無いと「何も要らない」エンジン（mock と同じ）として表示される。判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う（トークンをリフレッシュするコマンドは、同じトークンを共有する他の環境をログアウトさせ得る）。
 6. **設定例** — `models.example.toml`（`model` / `thinking` / `effort` / `provider`）と `llm_backend/config.example.toml`（`bin` / `cwd` 等の運用設定）にセクションを追加する。
-7. **system プロンプト** — モジュール直下に名前が `_SYSTEM_PROMPT` で始まる定数を置く。`ANALYST_FRAMING` で始め、`GUI_DISPLAY_VERBS`・`NO_LOCAL_PERSISTENCE`・`MOUNT_SAFE_EDITS` を連結する（いずれも `llm_backend/base.py`。[§5.3](#53-エージェントの-system-プロンプト)）。ペルソナは `set_persona(text)` で受け取り、送信時に `compose_system_prompt(base, persona)` で合成する。
+7. **system プロンプト** — モジュール直下に名前が `_SYSTEM_PROMPT` で始まる定数を置く。`ANALYST_FRAMING` で始め、`GUI_DISPLAY_VERBS`・`NO_LOCAL_PERSISTENCE`・`MOUNT_SAFE_EDITS`・`CHAT_DATASET_RULE` を連結する（いずれも `llm_backend/base.py`。[§5.3](#53-エージェントの-system-プロンプト)）。ペルソナは `set_persona(text)` で受け取り、送信時に `compose_system_prompt(base, persona)` で合成する。
    `tests/test_backend_prompts.py` は `llm_backend/` の `_SYSTEM_PROMPT*` 定数を自動収集し、`save_text` の有無、`GUI_DISPLAY_VERBS` を含むこと、`ANALYST_FRAMING` で始まることを検査する。`NO_LOCAL_PERSISTENCE` / `MOUNT_SAFE_EDITS` を含むことと meta 書込 verb を載せないことはバックエンドごとの明示テストなので、**新バックエンド用のテストを追加する**。
 8. **任意の属性**（`gui/chat.py` が `hasattr` / `getattr` で使う）:
 
@@ -309,6 +310,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
    |---|---|
    | `_session_id` | ネイティブ resume token。セッション ID を運ぶイベントを受けたら代入する（claude は init を含め `session_id` を持つ全イベント、codex は `thread.started`、pi は `session` イベント）。`None` のターンは `build_prompt_with_history(messages, replay=True)` で履歴を丸ごと送る。保存と再充填は GUI が行い、失敗したターンの後は token を捨て、ユーザーの Stop の後は維持する（`gui/chat.py` の `_on_failed`） |
    | `set_persona(text)` | ペルソナ本文の注入（全バックエンドにある） |
+   | `set_chat_dataset(ds)` | チャットのデータセットの注入（全バックエンドにある。毎ターン呼ばれる）。CLI 系は `_session_id is None` のターンだけ `with_chat_context` でプロンプトに前置し、`_build_env` で `MYANALYSIS_CHAT_DATASET` を設定・削除する |
    | `cancel()` | Stop ボタンで呼ばれる中断 |
    | `kill()` | `cancel()` 後 2 秒で終わらないときの強制終了。claude はプロセスツリーを止める。codex は `kill = cancel`。pi は `cancel()` が既にプロセスツリーを止めるので持たない |
    | `last_usage` | `input` / `output` / `context` / `context_window`（分かれば `cost` / `total_cost` も）を持つ dict。チャットドックのステータス表示に出る。無い値は 0 か省略でよい |
@@ -353,6 +355,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 - claude / codex / pi は `tools` 引数を使わず、エージェント自身が `python -m llm_bridge` を実行する。`gui/tools.py` のツールを使うのは openai 互換バックエンドだけ。
 - 追加するのは 2 か所: `TOOLS`（OpenAI function calling の JSON スキーマ）と `_dispatch()` の分岐。`tests/test_registry_consistency.py` が、`TOOLS` の全ツールが `_dispatch()` で処理される（未知ツール扱いにならない）ことを検査する。
 - `_dispatch()` は `_StreamWorker` のスレッドで動く。ウィジェットに触る操作は `_via_bridge(tier, target, verb, args)` でコマンドキューを通す（既定 10 秒でタイムアウト、Stop で中断できる）。
+- `make_dispatch()` の `dispatch(name, args, cancelled=None, chat_dataset=None)` には `ChatWidget` がチャットのデータセットを渡す（`functools.partial`）。`_via_bridge` はそれを `commands.submit(caller_dataset=…)` に載せるので、`dataset` を省略した verb はチャットのデータセットが既定になる。`get_state` のように `_via_bridge` を通らないツールは `_CHAT_DATASET.get()` を既定にする（Issue #111）。
 - 戻り値は JSON 文字列。例外は `make_dispatch()` が `{"error": ...}` に変換する。1 回の送信でのツール往復は最大 8 回（`gui/chat.py` の `_MAX_TOOL_TURNS`）。
 - ツールの使い方の指示が要るなら `gui/chat.py` の `_SYSTEM_PROMPT` も更新する。これはチャット作成時にセッションへ保存されるので、既存のチャットには効かない（[§5.3](#53-エージェントの-system-プロンプト)）。
 
@@ -384,7 +387,7 @@ python -m llm_bridge window reload [scope=patch|tab|app|restart] [target=<タブ
 | scope | 対象 | 仕組み | 結果の返り方 |
 |---|---|---|---|
 | `patch`（既定） | `sys.modules` にあるリポジトリのモジュール（`__main__`・`devtools.*` と、リポジトリの下にあってもサードパーティのコード（`site-packages` / `dist-packages` の下＝リポジトリ直下の `.venv` など、および `sys.prefix` 等がリポジトリの内側を指す Python 本体）を除く。判定は `devtools/hotreload.py` の `is_project_module`） | 変更されたファイルを構文チェックし、1 つでも構文エラーがあれば何もしない。問題なければ in-place でパッチする（関数は `__code__` を移植、クラスは属性を移植）。表示状態は保たれる。開いている解析の `analysis.py` の変更は「scope=tab を使え」と報告するだけ | すぐ返る（要約文字列） |
-| `tab` | 1 つの解析タブの `analysis.py`。`target=<タブ名>` が必須。開いているデータセット全体でその名前のタブが 1 つだけなら、どのデータセットにあってもそのタブを対象にする。複数のデータセットにあればアクティブなデータセットのタブを対象にし、アクティブなデータセットに無ければエラーになる。図・画像ビューアのタブは拒否する | sandbox で新しいタブを組み立て、成功したら旧タブと差し替える。失敗したら旧タブが残る | すぐ返る |
+| `tab` | 1 つの解析タブの `analysis.py`。`target=<タブ名>` が必須。開いているデータセット全体でその名前のタブが 1 つだけなら、どのデータセットにあってもそのタブを対象にする。複数のデータセットにあればアクティブなデータセットのタブを対象にし、アクティブなデータセットに無ければエラーになる。`dataset=<ds>` を付けるとそのデータセットのタブだけを対象にする（チャットのエージェントが省略したときはチャットのデータセット）。図・画像ビューアのタブは拒否する | sandbox で新しいタブを組み立て、成功したら旧タブと差し替える。失敗したら旧タブが残る | すぐ返る |
 | `app` | 構造の変更（`__init__`、Signal、`__bases__`、長寿命のクロージャ等） | 構文チェック → 開いているデータセットのセッション保存 → manifest → リポジトリのモジュールを全パージ → 新しいコードで ToolWindow を作り直す。失敗したら旧ウィンドウに戻る | まず `reload-scheduled` が返り、後から同じ id で `"verb": "reload-result"`（`status` は ok / failed）の行が `command_log.jsonl` に追記される |
 | `restart` | `tool.py` 自体、PySide6 の更新、`app` の失敗後 | セッション保存 → manifest → `tool.py --resume-session` を起動して自分は終了 | まず `reload-scheduled` が返る。`reload-result` が記録されるのは失敗したとき（保存失敗、または実行の直前にチャットの応答中・モーダルダイアログの表示中になっていたとき）だけ。成功は、新しいウィンドウが出てから `python -m llm_bridge window list-tabs --wait` が `status: ok` を返すことで確かめる（新しい GUI の watcher が動き出す前に積まれたコマンドは `stale` として記録され、実行されない） |
 
@@ -430,6 +433,7 @@ python -m pytest tests/
 | FS 判定 | `MYANALYSIS_FS_OVERRIDE=<tmp_path>=local` を設定し、`MYANALYSIS_FORCE_FRAGILE` / `MYANALYSIS_WRITE_STRATEGY` を外す |
 | R2 設定同期 | `R2_AUTOSYNC=0`。`.env` の読込・状態ファイル・boto3 クライアントをスタブにする（ネットワーク禁止） |
 | session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
+| チャットのデータセットの環境変数 | `MYANALYSIS_CHAT_DATASET` を外す（チャットのエージェント内で pytest を実行しても継承しない） |
 
 **隔離されないもの** — `data/llm_state` の `commands/`、`command_log.jsonl`、`active.json`、`reload_manifest.json`。これらに触れるテストは、`llm_bridge.paths.global_state_dir`（または個別の `*_path` 関数）を自分で `tmp_path` にパッチする。`from ... import` で取り込まれた名前は、取り込んだ側のモジュールでパッチする。
 

@@ -755,3 +755,97 @@ def test_save_session_overwrite_unreadable_no(win, tmp_path, monkeypatch):
     win._save_session()
     assert (wd / "session.json").read_text(encoding="utf-8") == ""
     assert "dsU" in win.statusBar().currentMessage()
+
+
+# ---- Issue #111: コマンドキュー経由の dataset 既定（caller_dataset） ----
+
+@pytest.fixture()
+def queue_log(monkeypatch, tmp_path):
+    from llm_bridge import commands
+    log = tmp_path / "command_log.jsonl"
+    monkeypatch.setattr(commands, "command_log_path", lambda: log)
+    monkeypatch.setattr(commands, "rotated_command_log_path",
+                        lambda: tmp_path / "command_log.1.jsonl")
+    return log
+
+
+def _queue(win, log, tier, verb, args, *, target=None, caller=None) -> dict:
+    """commands._execute でキュー経路を通し、その監査ログ行を返す。"""
+    import uuid
+    from llm_bridge import commands
+    payload = {"id": uuid.uuid4().hex, "ts": "t", "tier": tier, "target": target,
+               "verb": verb, "args": args}
+    if caller is not None:
+        payload["caller_dataset"] = caller
+    commands._execute(win, payload)
+    entries = [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines()]
+    return next(e for e in entries if e["id"] == payload["id"])
+
+
+def _png(tmp_path, name="p.png"):
+    from PySide6.QtGui import QPixmap
+    p = tmp_path / name
+    assert QPixmap(10, 10).save(str(p))
+    return p
+
+
+def test_queue_show_resolves_dataset_with_and_without_caller(
+        win, tmp_path, monkeypatch, queue_log):
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsB", "b")
+    assert win.dispatch_command("add-tab", name="a", dataset="dsA") == "added:a"
+    assert win.dispatch_command("add-tab", name="b", dataset="dsB") == "added:b"
+    win.dispatch_command("set-active-dataset", name="dsB")
+    monkeypatch.setattr("llm_bridge.session.infer_dataset", lambda p: "dsA")
+    png = _png(tmp_path)
+
+    e1 = _queue(win, queue_log, "window", "show", {"path": str(png), "name": "fig1"})
+    assert e1["status"] == "ok", e1
+    assert win.find_tab("fig1", None).session_spec["dataset"] == "dsA"   # パス推定 > 前面
+
+    e2 = _queue(win, queue_log, "window", "show", {"path": str(png), "name": "fig2"},
+                caller="dsB")
+    assert e2["status"] == "ok", e2
+    assert win.find_tab("fig2", None).session_spec["dataset"] == "dsB"   # チャットの DS > 推定
+
+
+def test_queue_without_caller_keeps_existing_lookup(win, tmp_path, monkeypatch, queue_log):
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsB", "b")
+    assert win.dispatch_command("add-tab", name="a", dataset="dsA") == "added:a"
+    png = _png(tmp_path)
+    png2 = _png(tmp_path, "p2.png")
+    assert win.dispatch_command("show", path=str(png), name="fig", dataset="dsA") \
+        == "shown:fig"
+    fig = win.find_tab("fig", "dsA")
+    assert fig is not None
+    monkeypatch.setattr("llm_bridge.session.infer_dataset", lambda p: "dsB")
+
+    e = _queue(win, queue_log, "window", "show", {"path": str(png2), "name": "fig"})
+    assert e["status"] == "ok", e
+    assert e["result"] == "updated:fig"
+    assert win.find_tab("fig", "dsA") is fig
+    assert win.find_tab("fig", "dsB") is None
+
+    # 他 DS の唯一一致（前面は dsA のまま）
+    assert win.dispatch_command("add-tab", name="b", dataset="dsB") == "added:b"
+    win.dispatch_command("set-active-dataset", name="dsA")
+    e = _queue(win, queue_log, "tab", "list-panes", {}, target="b")
+    assert e["status"] == "ok", e
+
+
+def test_queue_defaulted_dataset_outcomes(win, tmp_path, queue_log):
+    _write_analysis(tmp_path, "dsA", "a")
+    _write_analysis(tmp_path, "dsB", "b")
+    assert win.dispatch_command("add-tab", name="a", dataset="dsA") == "added:a"
+    assert win.dispatch_command("add-tab", name="b", dataset="dsB") == "added:b"
+    win.dispatch_command("set-active-dataset", name="dsB")
+
+    e = _queue(win, queue_log, "window", "set-active-tab", {"name": "a"}, caller="dsB")
+    assert e["status"] == "ok", e
+    assert e["result"] is False
+    assert win.current_dataset == "dsB"     # dsA の a を前面にしない
+
+    e = _queue(win, queue_log, "window", "set-active-tab", {"name": "a"}, caller="dsZ")
+    assert e["status"] == "error"
+    assert "is not open" in e["error"]
