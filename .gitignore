@@ -46,8 +46,10 @@ llm_backend/config.toml.lock
 # pi runtime artifacts — track only the committed skill
 /.pi/*
 !/.pi/skills/
-
 !/.pi/skills/**
+
+# Claude Code のローカル設定・作業状態（PC ローカル）
+/.claude/
 
 # 壊れた TOML の退避（llm_backend/settings_store.py）と、config_share が .env.pulled を書くときのロック（Issue #102）
 *.toml.bak

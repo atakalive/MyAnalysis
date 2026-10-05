@@ -1,7 +1,7 @@
 """Path configuration: dataset registry with per-host full paths.
 
 各 dataset を「ホスト名 → その PC でのフルパス」で登録する。
-同じ cloud drive フォルダが PC ごとに別ドライブにマウントされるため。
+同じ同期フォルダ（クラウドストレージ等）が PC ごとに別ドライブにマウントされるため。
 
 登録データは **このファイルではなく** リポジトリ直下の `datasets.local.json`
 （Git 管理外・保存処理は [dataset_registry.py](dataset_registry.py)）にある。

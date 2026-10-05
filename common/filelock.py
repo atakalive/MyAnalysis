@@ -18,7 +18,7 @@ project's short GUI+CLI mutual exclusion; revisit if long holds are ever needed.
 2. **PC 間の排他はもともと成立していない**（ロックはローカルな機構で、同じ remote を
    2 台がマウントしていれば無関係）。したがって移設で失う機能は無い。
 3. ロックファイル自体が同期対象になり、取得のたびに upload チャーンを生んでいた
-   （実測で `meta.json.lock` が cloud drive 上まで同期されていた）。
+   （実測で `meta.json.lock` が クラウドストレージ上まで同期されていた）。
 
 マッピング先は `<repo>/data/locks/<sha1(絶対パス)>.lock`。`data/` は gitignored の
 PC ローカル状態で、`data/llm_state/` と同じ位置づけ。

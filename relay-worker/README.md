@@ -104,14 +104,14 @@ CLOUDFLARE_TUNNEL_HOSTNAME=relay.example.com
 組織ネットワークの DNS がトンネルのホスト名を NXDOMAIN で解決できない環境向けに、内部ゲストをトンネル経由でなく
 **ホスト PC へ LAN 直結**させる第2リンクを併発できる。共有ダイアログの「LAN リンクも出す」を ON にすると
 （既定 OFF）、同一 channel/secret のまま同一リレーを `0.0.0.0` にもバインドし、`base_url` をホストの
-LAN URL にした第2トークンを生成する。外部リンク（トンネル https）とLAN リンク（LAN http）は同時に有効で、
+LAN URL にした第2トークンを生成する。外部リンク（トンネル https）と LAN リンク（http）は同時に有効で、
 内外ゲストが同一会議に混在できる。CLI は `python -m llm_bridge window meeting-start lan=true --wait`＋
 `python -m llm_bridge window meeting-lan-link --wait`。
 
 **配布はフルリンクのみ（素トークンは配らない）**: LAN リンクは http。https ページから http を fetch すると
 ブラウザが mixed-content で強制ブロックするため、LAN 内ゲストは **http のディープリンク
 （`http://<ip>:<port>/#token=…`）でページごと開く**必要がある（ページ origin を http にする）。よって
-https のページ（外部リンクのページや任意の静的配置）に素トークンを貼る方法はLAN 内では使えない。
+https のページ（外部リンクのページや任意の静的配置）に素トークンを貼る方法は LAN 内では使えない。
 
 **固定ポート要求（`RELAY_LAN_PORT`）**: 告知済み URL / Firewall 規則 / ゲスト案内が固定ポート前提のとき、
 黙って別ポートに変わるとゲストが到達不能になる。よって**衝突時は ephemeral に落とさず `OSError`＝起動失敗**として

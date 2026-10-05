@@ -861,7 +861,7 @@ def _rewire_window(window) -> None:
     window.register_command("chat-list", lambda **kw: _chat_list_verb(window, **kw))
     window.register_command("chat-search", lambda **kw: _chat_search_verb(window, **kw))
     window.register_command("chat-show", lambda **kw: _chat_show_verb(window, **kw))
-    # meeting-start の lan=true でLAN リンクを併発する。CLI 単独起動は
+    # meeting-start の lan=true で LAN リンクを併発する。CLI 単独起動は
     # ホスト IP を渡せないため meeting_start が RELAY_LAN_HOST env を読む
     # （未設定で lan=true にすると LAN リンクは空＝トンネル失敗時も非致命分岐に入らない）。
     # 固定ポート要求 RELAY_LAN_PORT は衝突時 OSError で起動失敗（サイレント別ポート化しない）。

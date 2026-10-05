@@ -366,7 +366,7 @@
 "chat.search.mode.ai" = "AI"
 "chat.search.dialog.query" = "Keywords:"
 "chat.search.dialog.ai_query" = "What to find:"
-"chat.search.dialog.ai_query_placeholder" = "e.g. the settings and the conclusion when we corrected the peak offset"
+"chat.search.dialog.ai_query_placeholder" = "e.g. the settings and the conclusion when we corrected the peak position"
 "chat.search.dialog.hint" = "Words you remember:"
 "chat.search.dialog.hint_placeholder" = "Optional: identifiers, file names, numbers (space-separated)"
 "chat.search.dialog.scope" = "Scope:"

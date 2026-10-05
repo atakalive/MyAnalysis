@@ -572,6 +572,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 ```
 
 - `type` は `feat` / `fix` / `docs` / `test` / `refactor` / `chore` / `style` を使う。Issue に対応する変更では `feat(#<番号>):` のようにスコープへ Issue 番号を入れた形も使われている。
+- コード・ドキュメント・コミットメッセージ中の Issue #1〜#112 は、公開前に使っていた非公開トラッカーの番号で、公開リポジトリの Issue 番号とは別物。
 - 件名は日本語で、変更の結果が分かるように書く（例: `fix: …が…していた`、`feat: …できるようにする`）。
 - 本文には変更の要点と理由を書く。
 
