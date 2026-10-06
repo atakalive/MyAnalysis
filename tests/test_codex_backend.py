@@ -370,7 +370,7 @@ def test_session_following_global_effort_with_other_model(
         fake_popen, tmp_path, codex_home_dir, monkeypatch):
     """全体 ultra（モデル a）＋チャットだけモデル b・effort は「全体設定と同じ」: session_settings は
     全体の ultra を引き継ぐが、b が対応しないので codex には渡さない。疎通確認も送信も
-    session_settings → build_backend → stream を通る（euler code review R1 P1）。"""
+    session_settings → build_backend → stream を通る。"""
     from llm_backend import build_backend, engines
     _two_models(codex_home_dir)
     base = {"model": "a", "effort": "ultra",
