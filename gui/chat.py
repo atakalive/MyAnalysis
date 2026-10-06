@@ -33,6 +33,7 @@ from llm_backend.base import (
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER,
 )
+from llm_backend.unconfigured import NoEngineConfigured, UnconfiguredBackend
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
 from gui.tabbar import MultiRowTabBar
@@ -748,23 +749,18 @@ class ChatWidget(QWidget):
     def _build_global_backend(self) -> tuple[LLMBackend, str | None, str | None]:
         """全体設定のバックエンドを作る。never raise。戻り値は (backend, engine_id, error)。
 
-        factory が失敗したら（[backend].name / LLM_BACKEND の打ち間違い）、get_backend の
-        最終フォールバックと同じ既定で作り、error に理由を返す。engine_id はフォールバック
-        先に合わせる（mock なら "mock"、openai なら "openai-http"）。
+        エンジンが選ばれていなければ（NoEngineConfigured）UnconfiguredBackend と error=None。
+        factory が他の理由で失敗したら（[backend].name / LLM_BACKEND の打ち間違い等）
+        UnconfiguredBackend と error に理由を返す。どちらも engine_id は None。
+        別のエンジン（OpenAI 互換・モック）へは倒さない — 利用者が選んでいない宛先へ
+        送らないため（Issue #115）。
         """
         try:
             return self._backend_factory(), self._global_engine_id(), None
+        except NoEngineConfigured:
+            return UnconfiguredBackend(), None, None
         except Exception as e:
-            error = str(e) or type(e).__name__
-        from llm_backend import build_backend, default_backend_name
-        name = default_backend_name()
-        try:
-            backend = build_backend(name)
-        except Exception:
-            from llm_backend.mock import MockBackend
-            name = "mock"
-            backend = MockBackend(model="mock-omni")
-        return backend, ("mock" if name == "mock" else "openai-http"), error
+            return UnconfiguredBackend(), None, str(e) or type(e).__name__
 
     def _build_session_backend(self, sess: ChatSession) -> LLMBackend:
         """Build the backend for `sess`. The single construction site.
@@ -795,9 +791,11 @@ class ChatWidget(QWidget):
                 engine_id = engine.id
             except Exception as e:      # unknown backend key, bad settings, ...
                 backend = None
-                self._append_system_line(
-                    tr("chat.engine.build_failed", error=str(e))
-                )
+                note = tr("chat.engine.build_failed", error=str(e))
+                if sess is self._active:
+                    self._append_system_line(note)
+                else:
+                    self._status_note(note)
         if backend is None:
             backend, engine_id, _ = self._build_global_backend()
         backend._engine_id = engine_id
@@ -1147,6 +1145,9 @@ class ChatWidget(QWidget):
         """
         engine = self._effective_engine(sess)
         if engine is None:
+            if isinstance(self._backend, UnconfiguredBackend):
+                return (f"backend: {tr('chat.engine.none')}"
+                        f"  [{tr('chat.engine.mark_default')}]")
             # No override: the prototype already reflects the global selection, and
             # for claude its .model is the real one reported by the engine.
             return (f"backend: {self._backend.name} / model: {self._backend.model}"
@@ -1200,10 +1201,11 @@ class ChatWidget(QWidget):
         # getattr: Tier 1 patch は既存インスタンスを残し __init__ を再実行しないので、
         # patch 前に作られた ChatWidget には _backend_error が無い（_effective_engine と同じ理由）。
         backend_error = getattr(self, "_backend_error", None)
-        if backend_error is not None and self._effective_engine(sess) is None:
-            self._append_system_line(tr(
-                "chat.backend.fallback", error=backend_error, fallback=self._backend.name,
-            ))
+        if self._effective_engine(sess) is None:
+            if backend_error is not None:
+                self._append_system_line(tr("chat.backend.fallback", error=backend_error))
+            elif isinstance(self._backend, UnconfiguredBackend):
+                self._append_system_line(tr("chat.engine.unconfigured"))
         persona_line = self._persona_header(sess)
         if persona_line is not None:
             self._append_system_line(persona_line)
@@ -1335,6 +1337,10 @@ class ChatWidget(QWidget):
         from common import i18n
         from gui import chat_search as cs
         from llm_bridge import chat_search as core
+        if req.ai and cs.ai_search_engine()[0] is None \
+                and isinstance(self._backend, UnconfiguredBackend):
+            self._status_note(tr("chat.engine.unconfigured"))     # Issue #115
+            return
         if self._window is not None and hasattr(self._window, "current_chat_dataset"):
             ds = self._window.current_chat_dataset()
             if ds is not None:
@@ -1361,6 +1367,7 @@ class ChatWidget(QWidget):
         ds_arg = req.dataset if req.scope == "dataset" else None
         spec = {"scope": req.scope, "dataset": req.dataset,
                 "include_archived": req.include_archived, "ai": req.ai}
+        started = True
         hits: list = []
         initial: list = []
         if not req.ai:
@@ -1419,9 +1426,9 @@ class ChatWidget(QWidget):
                              hint=req.hint, scope=target_label)
             else:
                 display = tr("chat.search.ai_user_line", query=req.query, scope=target_label)
-            self._start_turn(sess, display, "local", wire_text=core.build_ai_prompt(
+            started = self._start_turn(sess, display, "local", wire_text=core.build_ai_prompt(
                 req, ctx, i18n.current_language(), search_sid=sess.id, initial_hits=initial))
-        if sess.dataset is not None:
+        if started and sess.dataset is not None:
             if not cs.record_search(req, ctx, dataset=sess.dataset,
                                     n_hits=(None if req.ai else len(hits)),
                                     session_id=sess.id, ts=now):
@@ -1972,13 +1979,12 @@ class ChatWidget(QWidget):
     # ----- send / receive -----
 
     def _on_send(self) -> None:
-        if self._active.id in self._turns:
+        sess = self._active
+        if sess.id in self._turns:
             return
         text = self._input.toPlainText()
         if not text.strip():
             return
-        self._input.clear()
-        self._active.draft = ""   # 送信済みテキストが後の退避/読込で復活しないように
         # Live-reference the current dataset from the window so a late
         # session_spec assignment (currentChanged fired before spec was set)
         # can't leave us with a stale cached _current_dataset.
@@ -1986,10 +1992,30 @@ class ChatWidget(QWidget):
             ds = self._window.current_chat_dataset()
             if ds is not None:
                 self._current_dataset = ds
-        self._start_turn(self._active, text, "local")
+        if not self._start_turn(sess, text, "local"):
+            return                # エンジン未設定（Issue #115）: 入力欄の文章を残す
+        self._input.clear()
+        sess.draft = ""   # 送信済みテキストが後の退避/読込で復活しないように
+
+    def _refuse_unconfigured(self, sess: ChatSession, origin: str) -> None:
+        """エンジン未設定で送信を断る（Issue #115）。セッション・履歴・入力欄には触れない。
+
+        案内は表示中のチャットなら transcript に 1 行、背景のチャットならステータスバーに出す。
+        ゲスト発言（origin="remote"）は返信せずログに残し、そのセッションに保留中の
+        ゲスト発言も捨てる（ターンが走らないので drain されず、後で遅れて流れるのを防ぐ）。
+        """
+        note = tr("chat.engine.unconfigured")
+        if sess is self._active:
+            self._append_system_line(note)
+        else:
+            self._status_note(note)
+        if origin == "remote":
+            _logger.warning(
+                "remote message not sent: no AI engine is selected (session %s)", sess.id)
+            self._pending_remote.pop(sess.id, None)
 
     def _start_turn(self, sess: ChatSession, text: str, origin: str = "local", *,
-                    wire_text: str | None = None) -> None:
+                    wire_text: str | None = None) -> bool:
         """Begin a streaming turn for `sess` with user message `text`.
 
         Extracted from `_on_send` so remote (guest) injections share the exact
@@ -2003,7 +2029,19 @@ class ChatWidget(QWidget):
         `wire_text` はバックエンドへ送る最後の user 本文だけを差し替える（セッション・
         transcript・messageAdded には `text` が残る）。None なら AI 検索タブの続きの
         質問に指示を付ける（`_search_followup_wire`。Issue #108）。
+
+        戻り値: ターンを始めたら True。バックエンドが UnconfiguredBackend に解決されたら
+        （エンジン未設定。Issue #115）何もせず False — セッションのメッセージ・タイトル・
+        dataset・messageAdded・worker のどれにも触れない。
         """
+        backend = self._session_backends.get(sess.id)
+        if backend is None:
+            backend = self._build_session_backend(sess)
+            if isinstance(backend, UnconfiguredBackend):
+                # キャッシュしない: 設定 → バックエンド/モデル設定… で選べば次の送信から通る。
+                self._refuse_unconfigured(sess, origin)
+                return False
+            self._session_backends[sess.id] = backend
         if wire_text is None:
             wire_text = self._search_followup_wire(sess, text)
         sess.messages.append(Message(role="user", content=text))
@@ -2027,10 +2065,6 @@ class ChatWidget(QWidget):
         if is_active:
             self._append_block("user", text, msg_index=len(sess.messages) - 1)
             self._append_block("assistant", "")
-        backend = self._session_backends.get(sess.id)
-        if backend is None:
-            backend = self._build_session_backend(sess)
-            self._session_backends[sess.id] = backend
         self._load_backend_session(backend, sess)
         if hasattr(backend, "set_chat_dataset"):   # チャットの DS（Issue #111。全バックエンド duck-typed）
             backend.set_chat_dataset(sess.dataset)
@@ -2061,10 +2095,11 @@ class ChatWidget(QWidget):
         if not self._spin_timer.isActive():
             self._spin_idx = 0
             self._spin_timer.start()
+        return True
 
     def inject_remote_message(
         self, text: str, sender: str, session_id: str | None = None
-    ) -> None:
+    ) -> bool | None:
         """Inject a remote (guest) message as a user turn into `session_id`.
 
         Used by the meeting relay. The text is prefixed with a localized
@@ -2072,6 +2107,11 @@ class ChatWidget(QWidget):
         explicit and auditable. If the target session is busy, the message is
         queued FIFO (`_pending_remote`) and drained on turn completion. An
         unknown `session_id` is a no-op (never falls back to the active session).
+
+        Returns False when the turn was refused because no AI engine is selected
+        (Issue #115: nothing is sent, the message is not recorded, and this session's
+        queued guest messages are dropped); None otherwise (started, queued, dropped
+        because the queue is full, or unknown session_id).
         """
         if session_id is not None:
             sess = self._session_by_id(session_id)
@@ -2092,7 +2132,9 @@ class ChatWidget(QWidget):
                 return
             queue.append((sender, text))
             return
-        self._start_turn(sess, inj_text, "remote")
+        if not self._start_turn(sess, inj_text, "remote"):
+            return False
+        return None
 
     def create_remote_session(self, dataset: str) -> str:
         """Mint a chat session on a guest's behalf (meeting relay) and return its id.

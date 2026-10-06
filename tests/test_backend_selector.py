@@ -319,11 +319,11 @@ def test_configured_value_is_listed_first_on_open(monkeypatch, parent_widget):
 # --------------------------------------------------------------------------- #
 
 def _session_dlg(monkeypatch, parent_widget, *, engine=None, model=None,
-                 provider=None, busy_ids=()):
+                 provider=None, busy_ids=(), global_engine_id="claude-vscode"):
     import gui.backend_selector_dialog as mod
     from llm_bridge import chat_store
 
-    _patch_config(monkeypatch, engine_id="claude-vscode", model="opus")
+    _patch_config(monkeypatch, engine_id=global_engine_id, model="opus")
     sess = chat_store.new_session("mock", "sys")
     sess.engine, sess.engine_model, sess.engine_provider = engine, model, provider
 
@@ -557,3 +557,75 @@ def test_main_apply_error_skips_search_and_stays_open(monkeypatch, parent_widget
     assert critical == ["denied"]
     dlg._search_spy.assert_not_called()
     assert dlg.result() != QDialog.DialogCode.Accepted
+
+
+# --------------------------------------------------------------------------- #
+# エンジン未設定（Issue #115）                                                 #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("cfg", [{}, {"backend": {"name": "claud"}}],
+                         ids=["unconfigured", "unknown-name"])
+def test_unconfigured_dialog_requires_explicit_choice(monkeypatch, parent_widget, cfg):
+    import gui.backend_selector_dialog as mod
+    import llm_backend.engines
+    from PySide6.QtWidgets import QDialogButtonBox
+    from llm_backend.engines import ENGINES
+
+    monkeypatch.delenv("LLM_BACKEND", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr(llm_backend.engines, "backend_config", lambda: cfg)
+    monkeypatch.setattr(mod, "current_model", lambda e: "")
+    monkeypatch.setattr(mod, "current_provider", lambda e: "")
+    apply_spy = MagicMock()
+    build_spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", apply_spy)
+    monkeypatch.setattr(mod, "build_backend", build_spy)
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self, *a, **k: None)
+
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    ok = dlg._buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert dlg._opened_engine_id is None
+    assert dlg._engine_combo.count() == len(ENGINES) + 1
+    assert dlg._engine_combo.currentIndex() == 0
+    assert dlg._engine_combo.currentData() == ""
+    assert dlg._engine_combo.itemText(0) == tr("backend.dialog.engine_unselected")
+    assert not ok.isEnabled()
+    assert not dlg._test_btn.isEnabled()
+    assert dlg._result_label.text() == tr("backend.dialog.unconfigured")
+    assert dlg._search_engine_combo.currentData() == ""
+
+    dlg._on_apply()
+    dlg._on_test()
+    apply_spy.assert_not_called()
+    build_spy.assert_not_called()
+
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("claude-vscode"))
+    assert ok.isEnabled()
+    assert dlg._test_btn.isEnabled()
+    dlg._search_follow.setChecked(False)
+    dlg._on_apply()
+    apply_spy.assert_called_once()
+    assert apply_spy.call_args.args[0].id == "claude-vscode"
+    assert apply_spy.call_args.kwargs["engine_changed"] is True
+    assert dlg._search_spy.call_args.args[0] is None
+
+
+def test_session_dialog_unconfigured_global(monkeypatch, parent_widget):
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    dlg, sess, chat, applied = _session_dlg(monkeypatch, parent_widget,
+                                            global_engine_id=None)
+    ok = dlg._buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert dlg._engine_combo.currentData() == ""
+    assert dlg._follow_default.isChecked()
+    assert ok.isEnabled()
+    assert not dlg._test_btn.isEnabled()
+    dlg._on_apply()
+    assert applied[0][0][1] is None
+
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, global_engine_id=None)
+    ok = dlg._buttons.button(QDialogButtonBox.StandardButton.Ok)
+    dlg._follow_default.setChecked(False)
+    assert not ok.isEnabled()
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("pi"))
+    assert ok.isEnabled()

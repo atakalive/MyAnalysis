@@ -80,7 +80,13 @@ guards that every prompt still contains it.
 **Chat dataset (Issue #111).** The claude / codex / pi prompts also append `CHAT_DATASET_RULE` (`llm_backend/base.py`). Every backend implements a duck-typed `set_chat_dataset(ds)` (called by `ChatWidget._start_turn` every turn): the CLI backends prepend `with_chat_context` to the prompt only when `_session_id is None` and set / pop `MYANALYSIS_CHAT_DATASET` in `_build_env`; openai composes a chat-dataset note into the system payload (`_payload_messages`); mock ignores it. A new backend must do the same.
 
 - **Selection order**: env `LLM_BACKEND` → `[backend].name` in
-  `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat.
+  `llm_backend/config.toml` → `OPENAI_BASE_URL` back-compat (`mock` → mock,
+  anything else → openai), resolved by `llm_backend.resolve_backend_name()`.
+  None of them = no engine: `get_backend()` raises `NoEngineConfigured`. In the
+  chat, that and any other failure to build the global backend (e.g. an unknown
+  name) leave `ChatWidget` holding an `UnconfiguredBackend`
+  (`llm_backend/unconfigured.py`): it shows a notice line and refuses to send,
+  never falling back to api.openai.com or the mock (Issue #115).
 - **Config file**: copy `llm_backend/config.example.toml` → `llm_backend/config.toml`
   (gitignored). Holds operational/transport settings — e.g. the `[pi]` section
   sets `cwd` (pi working directory), `bin`, `tools`.

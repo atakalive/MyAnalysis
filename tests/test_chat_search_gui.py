@@ -953,3 +953,31 @@ def test_run_search_all_window_unknown_bad_dataset(env):
     entries, _ = _history("dsA")
     assert entries[-1]["datasets"] == ["dsA"]
     assert w._active.messages[2].content.splitlines()[0] == _header("dsA", n=1)
+
+
+# ---- エンジン未設定（Issue #115） ----
+
+
+def test_run_search_ai_unconfigured_refuses(env):
+    from llm_backend.unconfigured import UnconfiguredBackend
+
+    w, win = env
+    _add(w, "dsA", [("user", "peak offset")])
+    w._backend = UnconfiguredBackend()
+    n = len(w._sessions)
+    w.run_search(_req(query="q", ai=True))
+    assert len(w._sessions) == n
+    assert w._turns == {}
+    assert tr("chat.engine.unconfigured") in _status_texts(win)
+    assert _history("dsA")[0] == []
+    w.run_search(_req())        # 標準検索は未設定でも検索タブを作る
+    assert len(w._sessions) == n + 1
+
+
+def test_dialog_ai_engine_label_unconfigured(env, monkeypatch):
+    import gui.chat_search as gcs
+
+    monkeypatch.setattr(gcs, "current_engine_id", lambda: None)
+    assert gcs.ai_engine_label_text() == tr(
+        "chat.search.dialog.ai_engine", engine=tr("chat.engine.none"), model="-",
+        mark=tr("chat.engine.mark_default"))

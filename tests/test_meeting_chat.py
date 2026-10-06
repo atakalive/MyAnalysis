@@ -263,3 +263,17 @@ def test_pending_remote_cap(qapp, widget, caplog):
     assert any("pending queue full" in r.getMessage() for r in caplog.records)
     widget._pending_remote.pop(sess.id, None)
     widget._turns.pop(sess.id, None)
+
+
+def test_chat_inject_verb_errors_when_refused():
+    """エンジン未設定で断られた chat-inject は injected: を返さず error にする（Issue #115）。"""
+    from unittest.mock import MagicMock
+
+    import llm_bridge
+
+    window = MagicMock()
+    window.chat_widget.return_value.inject_remote_message.return_value = False
+    with pytest.raises(RuntimeError, match="no AI engine"):
+        llm_bridge._chat_inject(window, "t", "g", "sid")
+    window.chat_widget.return_value.inject_remote_message.return_value = None
+    assert llm_bridge._chat_inject(window, "t", "g", "sid") == "injected:sid"

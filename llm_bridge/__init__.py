@@ -747,6 +747,13 @@ def _do_close_dataset(window, name: str) -> str:
     return f"closed:{name}:{n}"
 
 
+def _chat_inject(window, text, sender, session=None) -> str:
+    """meeting relay の chat-inject verb。エンジン未設定で断られたら error にする（Issue #115）。"""
+    if window.chat_widget().inject_remote_message(text, sender, session_id=session) is False:
+        raise RuntimeError("not sent: no AI engine is selected")
+    return f"injected:{session}"
+
+
 def _chat_search_ctx(window):
     cw = window.chat_widget()
     if cw is None or not hasattr(cw, "search_context"):
@@ -850,9 +857,7 @@ def _rewire_window(window) -> None:
     # the live relay instance.
     window.register_command(
         "chat-inject",
-        lambda text, sender, session=None:
-            window.chat_widget().inject_remote_message(text, sender, session_id=session)
-            or f"injected:{session}",
+        lambda text, sender, session=None: _chat_inject(window, text, sender, session),
     )
     window.register_command(
         "chat-list-sessions", lambda: window.chat_widget().session_summaries()

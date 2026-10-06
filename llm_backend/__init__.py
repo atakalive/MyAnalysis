@@ -15,6 +15,7 @@ from collections.abc import Callable
 from common.paths import repo_root
 from llm_backend.base import LLMBackend, Message, TextDelta, ToolCallRequest
 from llm_backend.model_settings import merged_settings
+from llm_backend.unconfigured import NoEngineConfigured
 
 __all__ = [
     "TextDelta",
@@ -25,6 +26,8 @@ __all__ = [
     "build_backend",
     "backend_config",
     "default_backend_name",
+    "resolve_backend_name",
+    "NoEngineConfigured",
 ]
 
 
@@ -122,23 +125,49 @@ def build_backend(name: str, settings: dict | None = None) -> LLMBackend:
     return factory(settings)
 
 
-def default_backend_name() -> str:
-    """LLM_BACKEND も [backend].name も無いときの既定（OPENAI_BASE_URL 後方互換）。"""
-    base_url = os.environ.get("OPENAI_BASE_URL") or ""
-    return "mock" if base_url.strip().lower() == "mock" else "openai"
+def default_backend_name() -> str | None:
+    """LLM_BACKEND も [backend].name も無いときの既定（OPENAI_BASE_URL 後方互換）。
+
+    OPENAI_BASE_URL が無い・空白だけなら None（エンジン未設定。Issue #115）。
+    "mock"（大小文字・前後の空白は無視）ならモック、それ以外は OpenAI 互換。
+    """
+    base_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+    if not base_url:
+        return None
+    return "mock" if base_url.lower() == "mock" else "openai"
+
+
+def resolve_backend_name(config: dict) -> str | None:
+    """使うバックエンドの名前。None = エンジン未設定。
+
+    env LLM_BACKEND → config["backend"]["name"] → default_backend_name() の順。
+    空文字は「無い」扱い（strip はしない。空白だけの値は未知の名前として build_backend が
+    弾く — 従来どおり）。[backend] が表でない・name が str でないときは名前無し扱い。
+    config を引数で受けるのは、llm_backend.engines が自分の名前空間の backend_config を
+    渡す（tests/test_engines.py がそれを差し替える）ため。
+    """
+    name = os.environ.get("LLM_BACKEND")
+    if name:
+        return name
+    section = config.get("backend")
+    if isinstance(section, dict):
+        name = section.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return default_backend_name()
 
 
 def get_backend() -> LLMBackend:
     """Construct the configured backend.
 
-    Selection order:
+    Selection order (resolve_backend_name):
       1. env LLM_BACKEND
       2. config.toml [backend].name
       3. OPENAI_BASE_URL back-compat ("mock" → mock, else openai)
+    None of them → NoEngineConfigured (Issue #115: never default to api.openai.com).
+    An unknown name raises RuntimeError from build_backend.
     """
-    name = os.environ.get("LLM_BACKEND")
-    if not name:
-        name = backend_config().get("backend", {}).get("name")
-    if not name:
-        name = default_backend_name()
+    name = resolve_backend_name(backend_config())
+    if name is None:
+        raise NoEngineConfigured()
     return build_backend(name)

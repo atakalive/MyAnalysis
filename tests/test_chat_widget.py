@@ -1234,7 +1234,7 @@ def test_new_session_clears_composer_and_keeps_old_draft(widget):
 
 def test_send_clears_active_draft(widget, monkeypatch):
     """送信したテキストが後の退避/読込で復活しないこと。"""
-    monkeypatch.setattr(widget, "_start_turn", lambda *a, **k: None)
+    monkeypatch.setattr(widget, "_start_turn", lambda *a, **k: True)
     widget.set_input_draft("hello")
     widget._on_send()
     assert widget.input_draft() == ""
@@ -2017,32 +2017,39 @@ def _make_raising_widget():
 
 
 def test_widget_survives_raising_backend_factory(qapp, _isolated_backend_config):
-    from llm_backend.openai_compat import OpenAICompatBackend
+    from llm_backend.unconfigured import UnconfiguredBackend
 
     w = _make_raising_widget()
-    assert isinstance(w._backend, OpenAICompatBackend)
+    assert isinstance(w._backend, UnconfiguredBackend)
     assert "unknown backend" in w._backend_error
     assert "unknown backend" in w._log.toPlainText()
+    assert tr("chat.engine.unconfigured") not in w._log.toPlainText()
 
 
-def test_raising_factory_falls_back_to_mock_when_base_url_is_mock(
+def test_raising_factory_is_unconfigured_even_when_base_url_is_mock(
     qapp, _isolated_backend_config, monkeypatch,
 ):
-    from llm_backend.mock import MockBackend
+    from llm_backend.unconfigured import UnconfiguredBackend
 
     monkeypatch.setenv("OPENAI_BASE_URL", "mock")
     w = _make_raising_widget()
-    assert isinstance(w._backend, MockBackend)
+    assert isinstance(w._backend, UnconfiguredBackend)
 
 
-def test_session_backend_fallback_tags_fallback_engine_id(
+def test_session_backend_fallback_is_unconfigured_without_engine_id(
     qapp, _isolated_backend_config, monkeypatch,
 ):
+    from llm_backend.unconfigured import UnconfiguredBackend
+
     w = _make_raising_widget()
     sess = _make_session(w)
-    assert w._build_session_backend(sess)._engine_id == "openai-http"
+    b = w._build_session_backend(sess)
+    assert isinstance(b, UnconfiguredBackend)
+    assert b._engine_id is None
     monkeypatch.setenv("OPENAI_BASE_URL", "mock")
-    assert w._build_session_backend(sess)._engine_id == "mock"
+    b = w._build_session_backend(sess)
+    assert isinstance(b, UnconfiguredBackend)
+    assert b._engine_id is None
 
 
 def test_apply_backend_change_clears_backend_error(qapp, _isolated_backend_config):
@@ -2073,6 +2080,7 @@ def test_backend_fallback_line_only_for_default_following_sessions(
     w._active = sess
     w._render_session(sess)
     assert "unknown backend" not in w._log.toPlainText()
+    assert tr("chat.engine.unconfigured") not in w._log.toPlainText()
 
 
 def test_render_session_without_backend_error_attribute(widget):
@@ -2421,3 +2429,159 @@ def test_error_line_does_not_inherit_quote(widget):
     last = _last_block(widget)
     assert last.text() == tr("chat.turn.error", error="boom")
     assert last.blockFormat().property(QTextFormat.Property.BlockQuoteLevel) is None
+
+
+# ---- エンジン未設定では送信しない（Issue #115） ----
+
+
+def test_unconfigured_send_is_refused_without_building_or_connecting(
+    qapp, _isolated_backend_config, monkeypatch,
+):
+    import socket
+    import subprocess
+    import urllib.request
+
+    import llm_backend
+    from gui.chat import ChatWidget
+    from llm_backend.unconfigured import UnconfiguredBackend
+    from llm_bridge import chat_store
+
+    calls: list = []
+
+    def _forbidden(name):
+        def f(*a, **k):
+            calls.append(name)
+            raise AssertionError(f"{name} must not be called")
+        return f
+
+    monkeypatch.setattr(llm_backend, "build_backend", _forbidden("build_backend"))
+    monkeypatch.setattr(socket.socket, "connect", _forbidden("connect"))
+    monkeypatch.setattr(socket, "create_connection", _forbidden("create_connection"))
+    monkeypatch.setattr(urllib.request, "urlopen", _forbidden("urlopen"))
+    monkeypatch.setattr(subprocess, "Popen", _forbidden("Popen"))
+    monkeypatch.setattr("gui.chat._StreamWorker.start",
+                        lambda self, *a, **k: calls.append("worker.start"))
+
+    w = ChatWidget(llm_backend.get_backend, dispatch=lambda *a, **k: None)
+    w.bind_window(MagicMock())
+    assert isinstance(w._backend, UnconfiguredBackend)
+    assert w._backend_error is None
+    assert f"backend: {tr('chat.engine.none')}" in w._log.toPlainText()
+
+    note = tr("chat.engine.unconfigured")
+    before = w._log.toPlainText().count(note)
+    added: list = []
+    w.messageAdded.connect(lambda *a: added.append(a))
+    sess = w._active
+    n_msgs = len(sess.messages)
+
+    w._input.setPlainText("hello")
+    w._on_send()
+    assert calls == []
+    assert w._turns == {}
+    assert len(sess.messages) == n_msgs
+    assert sess.title == chat_store._DEFAULT_TITLE
+    assert added == []
+    assert w._input.toPlainText() == "hello"
+    assert w._log.toPlainText().count(note) == before + 1
+
+    assert w.inject_remote_message("hi", "guest") is False
+    assert calls == []
+    assert w._turns == {}
+    assert len(sess.messages) == n_msgs
+    assert added == []
+
+
+def test_refused_remote_drops_pending_guest_messages(widget, monkeypatch):
+    from llm_backend.unconfigured import UnconfiguredBackend
+
+    sess = widget._active
+    n_msgs = len(sess.messages)
+    widget._pending_remote[sess.id] = [("g", "q1"), ("g", "q2")]
+    monkeypatch.setattr(widget, "_build_session_backend", lambda s: UnconfiguredBackend())
+    widget._drain_pending_remote(sess.id)
+    assert sess.id not in widget._pending_remote
+    assert widget._turns == {}
+    assert len(sess.messages) == n_msgs
+
+
+def test_refused_background_session_notes_status_bar(widget, monkeypatch):
+    from llm_backend.unconfigured import UnconfiguredBackend
+
+    b = _make_session(widget)
+    assert widget._active is not b
+    monkeypatch.setattr(widget, "_build_session_backend", lambda s: UnconfiguredBackend())
+    before = widget._log.toPlainText()
+    assert widget.inject_remote_message("q", "g", session_id=b.id) is False
+    texts = [c.args[0] for c in widget._window.statusBar().showMessage.call_args_list]
+    assert tr("chat.engine.unconfigured") in texts
+    assert widget._log.toPlainText() == before
+
+
+def test_unconfigured_global_still_builds_session_override(
+    qapp, _isolated_backend_config,
+):
+    import llm_backend
+    from gui.chat import ChatWidget
+    from llm_backend.mock import MockBackend
+
+    w = ChatWidget(llm_backend.get_backend, dispatch=lambda *a, **k: None)
+    sess = _make_session(w)
+    _override(w, sess, "mock")
+    b = w._build_session_backend(sess)
+    assert isinstance(b, MockBackend)
+    assert b._engine_id == "mock"
+    assert tr("chat.engine.mark_override") in w._engine_header(sess)
+
+
+def test_apply_backend_change_recovers_from_unconfigured(
+    qapp, _isolated_backend_config, monkeypatch,
+):
+    from gui.chat import ChatWidget
+    from llm_backend import NoEngineConfigured
+    from llm_backend.unconfigured import UnconfiguredBackend
+
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise NoEngineConfigured()
+        return _FakeBackend()
+
+    monkeypatch.setattr("gui.chat._StreamWorker.start", lambda self, *a, **k: None)
+    w = ChatWidget(factory, dispatch=lambda *a, **k: None)
+    w.bind_window(MagicMock())
+    assert isinstance(w._backend, UnconfiguredBackend)
+    w.apply_backend_change()
+    assert isinstance(w._backend, _FakeBackend)
+    assert w._backend_error is None
+    assert tr("chat.engine.unconfigured") not in w._log.toPlainText()
+    assert f"backend: {tr('chat.engine.none')}" not in w._log.toPlainText()
+    w._input.setPlainText("hello")
+    w._on_send()
+    assert len(w._turns) == 1
+    assert w._input.toPlainText() == ""
+
+
+def test_background_override_failure_notes_go_to_status_bar(widget, monkeypatch):
+    import llm_backend
+    from llm_backend.unconfigured import UnconfiguredBackend
+
+    b = _make_session(widget)
+    assert widget._active is not b
+    _override(widget, b, "pi")
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(llm_backend, "build_backend", _boom)
+    monkeypatch.setattr(widget, "_build_global_backend",
+                        lambda: (UnconfiguredBackend(), None, None))
+    before = widget._log.toPlainText()
+    assert widget.inject_remote_message("q", "g", session_id=b.id) is False
+    assert widget._log.toPlainText() == before
+    texts = [c.args[0] for c in widget._window.statusBar().showMessage.call_args_list]
+    assert tr("chat.engine.build_failed", error="boom") in texts
+    assert tr("chat.engine.unconfigured") in texts
+    assert widget._turns == {}

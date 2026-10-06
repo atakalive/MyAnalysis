@@ -83,9 +83,15 @@ class BackendSelectorDialog(QDialog):
         self._engine_combo = QComboBox(self)
         for e in ENGINES:
             self._engine_combo.addItem(tr(e.label_key), e.id)
-        idx = self._engine_combo.findData(self._opened_engine_id)
-        if idx >= 0:
-            self._engine_combo.setCurrentIndex(idx)
+        if self._opened_engine_id is None:
+            # エンジン未設定（Issue #115）: 先頭に「未選択」を置いて利用者に選ばせる。
+            # data は "" — engine_by_id("") は None なので _selected_engine() が None になる。
+            self._engine_combo.insertItem(0, tr("backend.dialog.engine_unselected"), "")
+            self._engine_combo.setCurrentIndex(0)
+        else:
+            idx = self._engine_combo.findData(self._opened_engine_id)
+            if idx >= 0:
+                self._engine_combo.setCurrentIndex(idx)
         self._form.addRow(tr("backend.dialog.engine"), self._engine_combo)
 
         self._model_combo = QComboBox(self)
@@ -113,7 +119,10 @@ class BackendSelectorDialog(QDialog):
 
         self._test_btn = QPushButton(tr("backend.dialog.test"), self)
         layout.addWidget(self._test_btn)
-        self._result_label = QLabel("", self)
+        self._result_label = QLabel(
+            tr("backend.dialog.unconfigured") if self._opened_engine_id is None else "",
+            self,
+        )
         self._result_label.setWordWrap(True)
         layout.addWidget(self._result_label)
 
@@ -128,6 +137,13 @@ class BackendSelectorDialog(QDialog):
 
         # initial population for the opened engine.
         self._sync_engine_widgets()
+        # 「未選択」で開いたら適用・疎通確認を止める（Issue #115）。_refresh_enabled は
+        # サブクラスの属性（SessionEngineDialog の _follow_default）がまだ無いので呼べない
+        # — _build_search_section と同じく初期状態を直接当てる。SessionEngineDialog は
+        # 自分の __init__ の末尾で _refresh_enabled() を呼び直す。
+        if self._selected_engine() is None:
+            self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+            self._test_btn.setEnabled(False)
 
         self._engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         self._test_btn.clicked.connect(self._on_test)
@@ -141,8 +157,13 @@ class BackendSelectorDialog(QDialog):
     # shutdown — and only swaps these five seams. They are overridden, not branched
     # on a `session=` flag, so each method keeps a single coherent contract.
 
-    def _baseline_engine_id(self) -> str:
-        """Engine the dialog opens on (also the engine_changed baseline)."""
+    def _baseline_engine_id(self) -> str | None:
+        """Engine the dialog opens on (also the engine_changed baseline).
+
+        None = no engine selected (Issue #115): the combo opens on a 未選択 entry
+        (data ""), and Apply / the connectivity check stay disabled until an engine
+        is picked.
+        """
         return current_engine_id()
 
     def _seed_value(self, engine, field: str) -> str:
@@ -183,9 +204,16 @@ class BackendSelectorDialog(QDialog):
 
         eng, model, provider = chat_search_selection()
         self._search_follow.setChecked(eng is None)
-        idx = self._search_engine_combo.findData(eng.id if eng else current_engine_id())
-        if idx >= 0:
-            self._search_engine_combo.setCurrentIndex(idx)
+        base_id = eng.id if eng else current_engine_id()
+        if base_id is None:
+            # 全体も未設定（Issue #115）: 「全体設定に従う」を外したときに勝手なエンジンを出さない。
+            self._search_engine_combo.insertItem(
+                0, tr("backend.dialog.engine_unselected"), "")
+            self._search_engine_combo.setCurrentIndex(0)
+        else:
+            idx = self._search_engine_combo.findData(base_id)
+            if idx >= 0:
+                self._search_engine_combo.setCurrentIndex(idx)
         self._search_override = (eng.id if eng else None, model, provider)
         self._sync_search_widgets()
         # _refresh_enabled はまだ _buttons が無いので呼べない — 初期状態を直接当てる。
@@ -200,6 +228,8 @@ class BackendSelectorDialog(QDialog):
     def _sync_search_widgets(self) -> None:
         e = engine_by_id(self._search_engine_combo.currentData())
         if e is None:
+            for combo in (self._search_model_combo, self._search_provider_combo):
+                self._search_form.setRowVisible(combo, False)
             return
         ov_id, ov_model, ov_provider = self._search_override
         for field, combo, ov, cur in (
@@ -310,7 +340,15 @@ class BackendSelectorDialog(QDialog):
     def _sync_engine_widgets(self) -> None:
         engine = self._selected_engine()
         if engine is None:
+            # 「未選択」（Issue #115）: モデル・プロバイダの行は出さない。
+            self._form.setRowVisible(self._model_row, False)
+            self._form.setRowVisible(self._provider_row, False)
+            self._provider_combo.setVisible(False)
+            for btn in self._provider_btns:
+                btn.setVisible(False)
+            self._update_warnings(None)
             return
+        self._form.setRowVisible(self._model_row, True)
         self._populate_choices(engine, "model")
         has_provider = "provider" in engine.fields
         if has_provider:
@@ -361,6 +399,7 @@ class BackendSelectorDialog(QDialog):
 
     def _on_engine_changed(self, _idx: int = 0) -> None:
         self._sync_engine_widgets()
+        self._refresh_enabled()
 
     def _set_selection_enabled(self, enabled: bool) -> None:
         """Lock/unlock the selection inputs + Apply while a ping is in flight so a
@@ -377,6 +416,10 @@ class BackendSelectorDialog(QDialog):
         to prevent."""
         return True
 
+    def _apply_allowed(self) -> bool:
+        """適用してよいか（ping のロックとは別の条件）。「未選択」のままでは不可（Issue #115）。"""
+        return self._selected_engine() is not None
+
     def _refresh_enabled(self) -> None:
         on = self._ping_unlocked and self._editable_by_mode()
         self._engine_combo.setEnabled(on)
@@ -384,10 +427,14 @@ class BackendSelectorDialog(QDialog):
         self._provider_combo.setEnabled(on)
         for btn in (*self._model_btns, *self._provider_btns):
             btn.setEnabled(on)
-        # Apply follows the ping lock only: in follow-default mode the inputs are
-        # greyed out but applying (= clearing the override) must stay possible.
+        # Apply follows the ping lock and _apply_allowed: never on the 未選択 entry
+        # (Issue #115), but in follow-default mode the inputs are greyed out while
+        # applying (= clearing the override) must stay possible.
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            self._ping_unlocked
+            self._ping_unlocked and self._apply_allowed()
+        )
+        self._test_btn.setEnabled(
+            self._ping_unlocked and self._selected_engine() is not None
         )
         if getattr(self, "_search_follow", None) is not None:
             self._search_follow.setEnabled(self._ping_unlocked)
@@ -492,11 +539,11 @@ class BackendSelectorDialog(QDialog):
     # ----- lifecycle -----
 
     def _on_apply(self) -> None:
+        if not self._apply_allowed():
+            return                     # 「未選択」のまま（Issue #115。ボタンも無効）
         engine = self._selected_engine()
-        if engine is None:
-            return
         model = self._current_model_text()
-        provider = self._current_provider_text(engine)
+        provider = self._current_provider_text(engine) if engine is not None else ""
         try:
             self._do_apply(engine, model, provider)
         except (RuntimeError, OSError) as e:
@@ -558,7 +605,7 @@ class SessionEngineDialog(BackendSelectorDialog):
 
     # ----- hooks -----
 
-    def _baseline_engine_id(self) -> str:
+    def _baseline_engine_id(self) -> str | None:
         """Open on the session's own engine when it has one, else the global."""
         eid = (getattr(self._session, "engine", None) or "").strip()
         return eid if engine_by_id(eid) is not None else current_engine_id()
@@ -606,6 +653,10 @@ class SessionEngineDialog(BackendSelectorDialog):
 
     def _editable_by_mode(self) -> bool:
         return not self._follow_default.isChecked()
+
+    def _apply_allowed(self) -> bool:
+        """「全体設定に従う」の適用（= 上書き解除）はエンジンを選ばなくてもできる。"""
+        return self._follow_default.isChecked() or super()._apply_allowed()
 
     def _build_search_section(self, layout) -> None:
         return   # AI 検索用モデルは全体ダイアログだけ（Issue #108）

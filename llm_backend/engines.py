@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from common.filelock import exclusive_lock
 from common.paths import atomic_write_text
-from llm_backend import backend_config, default_backend_name
+from llm_backend import backend_config, resolve_backend_name
 from llm_backend.model_settings import merged_settings, model_config
 from llm_backend.settings_store import (
     TomlWriteResult,
@@ -156,30 +156,28 @@ def engine_label(engine: Engine) -> str:
     return tr(engine.label_key)
 
 
-def _resolved_backend_name() -> str:
-    """Backend key with get_backend's precedence (env → config → OPENAI_BASE_URL)."""
-    name = os.environ.get("LLM_BACKEND")
-    if not name:
-        name = backend_config().get("backend", {}).get("name")
-    if not name:
-        name = default_backend_name()
-    return name
+def _resolved_backend_name() -> str | None:
+    """Backend key with get_backend's precedence (llm_backend.resolve_backend_name)."""
+    return resolve_backend_name(backend_config())
 
 
-def current_engine_id() -> str:
+def current_engine_id() -> str | None:
     """Resolve the currently-configured engine id (matches get_backend selection).
 
     claude splits on ``[claude_code].bin`` truthiness (empty/unset = claude-vscode,
-    non-empty = claude-cli). Unknown backend keys map to ``openai-http``.
+    non-empty = claude-cli). None = no engine selected, or a backend key no Engine
+    maps to (Issue #115: an unknown key is never mapped to a fallback engine).
     """
     name = _resolved_backend_name()
+    if name is None:
+        return None
     if name == "claude":
         bin_val = backend_config().get("claude_code", {}).get("bin", "")
         return "claude-cli" if str(bin_val).strip() else "claude-vscode"
     for e in ENGINES:
         if e.backend_key == name:
             return e.id
-    return "openai-http"
+    return None
 
 
 def current_model(engine: Engine) -> str:

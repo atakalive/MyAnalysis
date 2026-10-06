@@ -110,12 +110,12 @@ GUI で設定すれば手で書く必要はない。手で書く場合は、雛�
 | `models.toml` | [models.example.toml](../models.example.toml) | モデル設定（`model` / `thinking` / `effort` / `provider`） |
 | `.env` | [.env.example](../.env.example) | 秘密情報と環境変数（`OPENAI_*`, `LLM_BACKEND`, R2 同期、ミーティング共有、同期ドライブ用の設定） |
 
-- **エンジンの選択順**: 環境変数 `LLM_BACKEND` → `config.toml` の `[backend].name` → `OPENAI_BASE_URL`（`mock` ならモック、それ以外は OpenAI 互換）。どれも無ければ OpenAI 互換（api.openai.com）になる。
-- `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。それ以外の値だと OpenAI 互換（`OPENAI_BASE_URL=mock` ならモック）で起動し、チャットの先頭にエラーの行が出る（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない）。値を直すか、**設定 → バックエンド/モデル設定…** で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す）。
+- **エンジンの選択順**: 環境変数 `LLM_BACKEND` → `config.toml` の `[backend].name` → `OPENAI_BASE_URL`（`mock` ならモック、それ以外は OpenAI 互換）。どれも無ければエンジン未設定で、チャットは何も送らずに設定を促す（**設定 → バックエンド/モデル設定…** は「（未選択）」で開くので、エンジンを選んで **適用** する）。
+- `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。それ以外の値だとエンジン未設定として扱い（`OPENAI_BASE_URL` があっても同じ）、何も送らず、チャットの先頭にエラーの行が出る（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない）。値を直すか、**設定 → バックエンド/モデル設定…** で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す）。
 - `.env` に `LLM_BACKEND` を書くと、起動のたびに GUI での選択より優先される。
 - `models.toml` の Claude 用の値: `thinking` = `enabled` / `adaptive` / `disabled`。`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。Codex の `effort` は例 `low` / `medium` / `high`（使える値はモデルによる。検証せずそのまま渡す）。
 - 手で編集したら、再起動するか GUI で **適用** し直す（起動時に一度だけ読む）。ただし `[backend].name` / `model` / `provider` を手で変えた場合は再起動する（ダイアログは古い値を表示するので、そのまま適用すると元に戻る）。
-- TOML の構文が壊れていると黙って無視される。`config.toml` なら既定のエンジン（OpenAI 互換）に、`models.toml` ならエンジンの既定モデルに戻る。**適用** では壊れた `config.toml`（モック以外を選んだときは `models.toml` も）が、**追加** / **削除** では `models.toml` だけが `.bak` に退避して作り直される。**作り直したファイルには GUI が書くキーしか残らない**ので、手で書いた設定（`permission_mode` 等）は `.bak` から戻す。
+- TOML の構文が壊れていると黙って無視される。`config.toml` ならエンジン未設定（`.env` に `LLM_BACKEND` か `OPENAI_BASE_URL` があればそれに従う）に、`models.toml` ならエンジンの既定モデルに戻る。**適用** では壊れた `config.toml`（モック以外を選んだときは `models.toml` も）が、**追加** / **削除** では `models.toml` だけが `.bak` に退避して作り直される。**作り直したファイルには GUI が書くキーしか残らない**ので、手で書いた設定（`permission_mode` 等）は `.bak` から戻す。
 - [R2 設定同期](config_sync_ja.md#複数-pc-での設定同期) を使っていると、`config.toml` と `models.toml` の変更は他の PC にも配られる。
 - Windows のパスは `"C:/Users/..."` の形で書く。GUI が書き換えるキー（`name`, `bin`, `model`, `provider`, `[chat_search]` の `engine` / `model` / `provider`）に `'...'`（リテラル文字列）を使うと、GUI の **適用** が失敗する。`model_choices` / `provider_choices` を複数行の配列で書くと **追加** / **削除** が失敗する。
 - `.env` の注意:

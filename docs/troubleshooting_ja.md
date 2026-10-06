@@ -50,9 +50,9 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 | 症状 | 主な原因 | 対処 |
 |---|---|---|
 | `run.bat` でウィンドウが出ない | 依存不足・Python が古い・登録簿の破損 | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`） |
-| チャットの先頭に「全体設定のバックエンドを作れませんでした」と出る | `[backend].name` / `LLM_BACKEND` の値が不正（OpenAI 互換、`OPENAI_BASE_URL=mock` ならモックで起動している） | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直すか、設定 → バックエンド/モデル設定… で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す） |
+| チャットの先頭に「全体設定のバックエンドを作れませんでした」と出る | `[backend].name` / `LLM_BACKEND` の値が不正（エンジン未設定として扱われ、何も送らない） | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直すか、設定 → バックエンド/モデル設定… で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す） |
 | GUI の起動時に登録簿の破損を知らせるダイアログが出る / CLI が `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
-| 最初の送信が HTTP 401 / 接続拒否 | エンジン未設定、または `llm_backend/config.toml` の構文が壊れている（OpenAI API か `.env` の接続先に送っている） | [エンジンを設定](../README_ja.md#ai-エンジン) |
+| チャットに「AI エンジンが選ばれていないため送信できません」と出る | エンジン未設定、または `llm_backend/config.toml` の構文が壊れていて、`.env` にも `LLM_BACKEND` / `OPENAI_BASE_URL` が無い（このとき何も送らない） | [エンジンを設定](../README_ja.md#ai-エンジン)（`config.toml` が壊れていれば **適用** で `.bak` に退避して作り直される） |
 | `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code が見つからない | 拡張を入れる、`claude` を PATH に通す、または `[claude_code].bin` / `CLAUDE_CODE_BIN` を指定 |
 | `[エラー: … not found in PATH…]`（pi / codex） | CLI 未導入 | `npm i -g …`（バックエンドの状況ウィンドウからも可）。Codex は `codex login` も必要 |
 | チャットに `[エラー: …]` | エンジン側のエラー（認証切れ・レート制限等） | 多くはそのまま再送で回復。認証切れはログインし直す |

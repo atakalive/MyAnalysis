@@ -147,7 +147,7 @@ To restrict the agent's permissions, read [docs/security_ja.md](docs/security_ja
 | Symptom | What to do |
 |---|---|
 | No window appears with `run.bat` | A dialog shows the cause. If Python is too old, there is only the dialog (nothing is logged). Otherwise a traceback is left in `data/logs/gui-crash-*.log` (logs at warning level and above go to `data/logs/myanalysis.log`) |
-| The first send fails with HTTP 401 | No AI engine is configured → step 3 of [QuickStart](#quickstart) |
+| The chat says "No AI engine is selected, so nothing can be sent" | No AI engine is configured → step 3 of [QuickStart](#quickstart) |
 | `[error: RuntimeError('Claude Code engine not found…')]` | Install the Claude Code extension and sign in (or point to `claude` with `[claude_code].bin` in `llm_backend/config.toml` or the `CLAUDE_CODE_BIN` environment variable) |
 | The chat shows `[error: …]` | Expired authentication, rate limits, etc. Send again, or log in to the engine again |
 | "Save failed verification" | The sync drive is misbehaving. Common with mounts such as rclone → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) (includes the check-and-repair command `doctor`) |

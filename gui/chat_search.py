@@ -62,7 +62,11 @@ def ai_engine_label_text() -> str:
             return tr("chat.search.dialog.ai_engine", engine=engine_label(eng),
                       model=model.strip() or current_model(eng) or "-",
                       mark=tr("chat.engine.mark_override"))
-        e = engine_by_id(current_engine_id())
+        eid = current_engine_id()
+        if eid is None:
+            return tr("chat.search.dialog.ai_engine", engine=tr("chat.engine.none"),
+                      model="-", mark=tr("chat.engine.mark_default"))
+        e = engine_by_id(eid)
         return tr("chat.search.dialog.ai_engine",
                   engine=engine_label(e) if e is not None else "-",
                   model=(current_model(e) or "-") if e is not None else "-",

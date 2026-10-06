@@ -78,10 +78,36 @@ def test_current_engine_id_env_wins(monkeypatch):
     assert current_engine_id() == "mock"
 
 
-def test_current_engine_id_unknown_maps_to_openai_http(monkeypatch):
+def test_current_engine_id_unknown_is_none(monkeypatch):
     _no_env(monkeypatch)
     monkeypatch.setattr(engines, "backend_config", _cfg({"backend": {"name": "weird"}}))
+    assert current_engine_id() is None
+
+
+def test_current_engine_id_unconfigured_is_none(monkeypatch):
+    _no_env(monkeypatch)
+    monkeypatch.setattr(engines, "backend_config", _cfg({}))
+    assert current_engine_id() is None
+
+
+def test_current_engine_id_base_url_backcompat(monkeypatch):
+    _no_env(monkeypatch)
+    monkeypatch.setattr(engines, "backend_config", _cfg({}))
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://x")
     assert current_engine_id() == "openai-http"
+    monkeypatch.setenv("OPENAI_BASE_URL", "mock")
+    assert current_engine_id() == "mock"
+
+
+def test_current_engine_id_backend_not_a_table(monkeypatch):
+    _no_env(monkeypatch)
+    monkeypatch.setattr(engines, "backend_config", _cfg({"backend": "claude"}))
+    assert current_engine_id() is None
+
+
+def test_engine_by_id_empty_is_none():
+    # 設定ダイアログの「（未選択）」項目の data "" はどのエンジンにも解決されない（Issue #115）。
+    assert engine_by_id("") is None
 
 
 # --------------------------------------------------------------------------- #
