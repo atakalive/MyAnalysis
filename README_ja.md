@@ -77,9 +77,9 @@
 - 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
 - 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
 - **モデル欄に入れるもの**
-  - Claude・Codex: 空でよい（そのエンジンの既定モデル）。Claude で指定するなら `opus` / `sonnet` / `haiku` などのエイリアス。正式なモデル ID は、**疎通確認** の結果 `OK（…秒 / <モデル名>）` に出るものをそのまま使える。Codex はダイアログの候補から選ぶ。
+  - Claude・Codex: 空でよい（そのエンジンの既定モデル）。Claude で指定するなら `opus` / `sonnet` / `haiku` などのエイリアス。Claude では **疎通確認** の結果 `OK（…秒 / <モデル名>）` に正式なモデル ID が出るので、それをそのまま使える。Codex はダイアログの候補から選ぶ。
   - pi: **プロバイダ**（`openai-codex` / `github-copilot` / `llama.cpp`）を選び、モデルは `pi --list-models` に出る ID（ダイアログに候補あり）。
-  - OpenAI 互換 HTTP: サーバー側のモデル名を入れる（Ollama なら `ollama list` に出る名前）。空だと `gpt-4o-mini` になり、ローカルサーバーでは失敗する。
+  - OpenAI 互換 HTTP: サーバー側のモデル名を入れる（Ollama なら `ollama list` に出る名前）。空だと `.env` の `OPENAI_MODEL`、それも無ければ `gpt-4o-mini` になり、Ollama などでは失敗する。
 - thinking（推論の有無）と effort（考える量）は、通常は設定しなくてよい。変えるときは `models.toml` に書く（→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)）。
 
 Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
@@ -152,7 +152,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 
 | 症状 | 対処 |
 |---|---|
-| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。Windows の「pythonw が見つからない」エラーなら `.venv` が無い（QuickStart の手順 1）。詳しく見るには venv を有効にして `python tool.py` |
+| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。「必要なパッケージがありません」と出たら `MyAnalysis` フォルダで `.venv\Scripts\python -m pip install -r requirements.txt`（`.venv` が無ければ QuickStart の手順 1）。Windows の「pythonw が見つからない」エラーも `.venv` が無いとき。詳しく見るには venv を有効にして `python tool.py` |
 | 最初の送信が HTTP 401 | AI エンジンが設定されていない → [QuickStart](#quickstart) の手順 3 |
 | `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code の拡張を入れてサインインする（または `llm_backend/config.toml` の `[claude_code].bin` か環境変数 `CLAUDE_CODE_BIN` で `claude` の場所を指定する） |
 | チャットに `[エラー: …]` と出る | 認証切れ・レート制限など。再送するか、エンジンにログインし直す |
