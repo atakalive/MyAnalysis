@@ -73,6 +73,7 @@ The detailed documents under `docs/` are available in Japanese only.
 ## AI engines
 
 - Claude is recommended (it is the most tested).
+- Claude Code, Codex CLI, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
 - Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
 - The **model field** can be left empty; the engine's default model is used. To specify one: for Claude, an alias such as `opus` / `sonnet` or a name shown by `/model` in Claude Code; for Codex and pi, a catalog ID such as `gpt-6.1-sol` (the dialog's suggestions, or `pi --list-models`); for OpenAI-compatible engines, the server-side model name (`ollama list` for Ollama). For Claude / Codex / pi, **Fetch models** in Settings → Backend status… adds the IDs the engine knows and the dialog does not list yet to the suggestions. Effort can be chosen in the same dialog (Claude / Codex / pi; also per chat); values: [docs/engines_ja.md](docs/engines_ja.md#モデルの指定).
 
