@@ -20,8 +20,8 @@
 - **設定 → バックエンド/モデル設定…**: 「利用方法（エンジン）」「モデル」「プロバイダ」（pi のみ）を選んで **適用**。全チャット（「このチャットのモデル…」で個別に設定したチャットを除く）の次の送信から反映される（生成中の応答は古い設定のまま完了する）。
   - モデル欄は自由入力。**追加** / **削除** ボタンで候補リストを編集できる（`models.toml` に即保存）。空欄にするとエンジン側の既定モデルになる（OpenAI 互換では `OPENAI_MODEL`、それも無ければ `gpt-4o-mini`）。
   - **疎通確認** は実際に 1 ターン分を送って応答を確かめる。Claude では、結果の `OK（…秒 / <モデル名>）` にエンジンが実際に使ったモデルの正式な ID が出る（Codex / pi は入力した値か既定の表示名）。試すのは上段の全体設定だけで、「AI 検索用モデル」は試さない。**適用** は疎通確認をしない。
-  - thinking / effort は GUI に項目が無い。`models.toml` を手で編集し、再起動するか GUI で **適用** し直す（→ [設定ファイル](#設定ファイル手動設定)）。
-- **チャットごとの設定**: チャットタブを右クリック → **このチャットのモデル…**。「全体設定に従う」を外すと、そのチャットだけ別のエンジン・モデルにできる（チャットと一緒に保存・同期される）。
+  - **effort**（考える量）は Claude・Codex・pi で選べる（OpenAI 互換・モックには行が無い）。先頭の「既定」は何も指定しない（エンジン側の既定。`models.toml` の `effort` を空にし、`config.toml` に残った古い値も消す）。選べる値と、モデルが対応していない段階の扱いは [モデルの指定](#モデルの指定) を参照。Codex でモデル欄を変えたとき、選んでいた値が新しいモデルに無ければ「既定」に戻る。**疎通確認** は選んだ effort で送る（`ultracode` / `ultra` は時間がかかることがある）。
+- **チャットごとの設定**: チャットタブを右クリック → **このチャットのモデル…**。「全体設定に従う」を外すと、そのチャットだけ別のエンジン・モデル・effort にできる（チャットと一緒に保存・同期される）。effort の先頭の「全体設定と同じ」は、全体設定（`models.toml` のそのエンジンの `effort`）に従う。全体設定の effort を変えると、このチャットにも次の送信から効く。チャットの先頭の行の `effort:` は送る値（設定値）で、エンジン側で下げたり丸めたりした後の値ではない（「既定」のときは出ない）。
 
 ## モデルの指定
 
@@ -29,9 +29,9 @@
 
 | エンジン | モデル欄に入れるもの | ID の調べ方 | 追加の設定（`models.toml`） |
 |---|---|---|---|
-| Claude | 空、または `opus` / `sonnet` / `haiku` / `fable` などのエイリアス（1M コンテキストは `opus[1m]` など）、または正式なモデル ID | ダイアログの候補。**バックエンドの状況** の **モデル取得** で、エンジンが知っている ID（`opus` などのエイリアスを含む）を候補に追加できる。エイリアスのまま **疎通確認** を押すと、結果の `OK（…秒 / <モデル名>）` に正式な ID が出る | `thinking` = `enabled` / `adaptive` / `disabled`、`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`（`ultracode` は `xhigh` に Claude Code の ultracode を加えたもの。対応モデルが要る） |
-| Codex | 空、または `gpt-6.1-sol` などカタログの ID | ダイアログの候補（Codex の既定カタログ）。**バックエンドの状況** の **モデル取得** で、Codex が保存しているカタログ（`~/.codex/models_cache.json`）の ID を候補に追加できる | `effort`（例 `low` / `medium` / `high`。使える値はモデルによる。検証せずそのまま渡す） |
-| pi | **プロバイダ**欄に `openai-codex` / `github-copilot` / `llama.cpp`、モデル欄にモデル ID | `pi --list-models`（**バックエンドの状況** の **モデル取得** で候補に追加できる。`[pi].provider` を設定していればその provider の分だけ）。`llama.cpp` は llama-server に読み込んであるモデルだけが出る（接続先は `pi` を起動して `/login llama.cpp` で設定） | なし（`thinking` / `effort` は使わない） |
+| Claude | 空、または `opus` / `sonnet` / `haiku` / `fable` などのエイリアス（1M コンテキストは `opus[1m]` など）、または正式なモデル ID | ダイアログの候補。**バックエンドの状況** の **モデル取得** で、エンジンが知っている ID（`opus` などのエイリアスを含む）を候補に追加できる。エイリアスのまま **疎通確認** を押すと、結果の `OK（…秒 / <モデル名>）` に正式な ID が出る | `effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。`ultracode` は `xhigh` に Claude Code の ultracode を加えたもの（`max` との組み合わせは Claude Code 2.1.282 では ultracode が黙って外れるため、この形で送る）。モデルが対応していない段階は Claude Code が黙って `high` に下げる（例: opus-4-6 に `xhigh`）。Claude Code の設定 `maxEffortLevel` でも下がる。haiku-4-5 は effort を使わない。opus-4-6 と haiku-4-5 では ultracode は効かない。「既定」は `~/.claude/settings.json` の `effortLevel`、無ければモデルの既定。環境変数 `CLAUDE_CODE_EFFORT_LEVEL` は `--effort` より優先されるので、effort を選んだときはこの変数をエンジンに渡さない（「既定」のときは渡す）。`thinking`（`enabled` / `adaptive` / `disabled`）は GUI に項目が無く、普段は設定しない（思考は既定でオン） |
+| Codex | 空、または `gpt-6.1-sol` などカタログの ID | ダイアログの候補（Codex の既定カタログ）。**バックエンドの状況** の **モデル取得** で、Codex が保存しているカタログ（`~/.codex/models_cache.json`）の ID を候補に追加できる | `effort` = 選んでいるモデルが対応する段階（Codex が保存しているカタログ `~/.codex/models_cache.json` の値。`none` は出さない。例: `gpt-6-luna` には `ultra` が無い）。モデル欄が空なら Codex の既定モデル（`~/.codex/config.toml` の `model`）で引く。カタログが無い・モデルが載っていないときは `low` / `medium` / `high` / `xhigh` / `max` / `ultra`。「既定」は `~/.codex/config.toml` の `model_reasoning_effort`、無ければモデルの既定。`CODEX_HOME` があれば `~/.codex` の代わりにその下を読む |
+| pi | **プロバイダ**欄に `openai-codex` / `github-copilot` / `llama.cpp`、モデル欄にモデル ID | `pi --list-models`（**バックエンドの状況** の **モデル取得** で候補に追加できる。`[pi].provider` を設定していればその provider の分だけ）。`llama.cpp` は llama-server に読み込んであるモデルだけが出る（接続先は `pi` を起動して `/login llama.cpp` で設定） | `effort` = `minimal` / `low` / `medium` / `high` / `xhigh` / `max`（pi の `--thinking` として渡す。思考を切る `off` は出さない）。モデルが対応していない段階は pi が丸める（上の段階、無ければ下の段階。openai-codex の `minimal` は `low` として送る）。`llama.cpp` は、チャットテンプレートが `enable_thinking` に対応していれば何を選んでも `medium`、対応していなければ思考なし。「既定」は pi の設定（`modelThinkingLevels` → `defaultThinkingLevel`、無ければ `medium`）。**既存の会話を「既定」で続けると、その会話で最後に使った段階が引き継がれる** |
 | OpenAI 互換 HTTP | サーバー側のモデル名 | Ollama なら `ollama list`、それ以外はサーバーの一覧 | なし |
 
 ダイアログの候補リストは **追加** / **削除** で編集でき（**バックエンドの状況** の **モデル取得** でも追加される）、`models.toml` の `model_choices` / `provider_choices` に保存される。
@@ -47,7 +47,7 @@
 - 列: ドライバ / 前提（node と npm）/ 導入（バージョン）/ 認証 / 操作。記号は ✓ = OK、✗ = 無い、? = 確認できなかった（タイムアウト等。未導入という意味ではない）、— = 対象外。
 - **インストール / 更新**: どちらも `npm i -g <パッケージ>` を実行する。VS Code 同梱エンジンの行にはボタンが無い（拡張の更新で入手する）。「前提」が ✗（Node.js / npm が無い、pi には Node.js が古い）の行には出ないので、先に Node.js を入れる。「導入」が ? の行にも出ない（**再確認** するか、コマンドを手で実行して確かめる）。成功すると（終了コード 0）、再確認でそのエンジンが ✓ になったときに **モデル取得** を 1 回だけ自動で行う。この窓の **インストール / 更新**・**モデル取得**・**疎通確認** は同時に 1 つしか実行できない。どれかの実行中（インストール / 更新の後の自動のモデル取得が終わるまでを含む）は、全行のこの 3 つのボタンと **再確認** を押せない（Windows では、実行中のエンジンのファイルを npm が置き換えられないため。再確認も `--version` などでエンジンを起動する）。ウィンドウを閉じても、実行中のものが終わるまでは、開き直してもこの状態が続く。この窓の外で動いているエンジン（チャットの応答中など）は見ていないので、そのときに更新すると npm が失敗することがある。その場合は終了コードが 0 以外になり、自動のモデル取得は行わない。応答が終わってからもう一度押す。
 - **ログイン**: 導入済みの Claude（PATH の CLI）/ pi / Codex の行に出る。Windows では新しいコンソールを開く。他の OS では実行すべきコマンドをログ欄に表示する。
-- **疎通確認**: 実際にエンジンへ 1 ターン送って応答を確かめる。ウィンドウを開く・**再確認** は導入状況を調べるだけで、推論は走らない。
+- **疎通確認**: 実際にエンジンへ 1 ターン送って応答を確かめる。全体設定（`models.toml`）のモデルと effort で送る（`ultracode` / `ultra` は時間がかかることがある）。ウィンドウを開く・**再確認** は導入状況を調べるだけで、推論は走らない。
 - **モデル取得**: Claude（VS Code 同梱 / PATH の CLI）・Codex・pi の、導入済み（✓）の行に出る。そのエンジン自身が知っているモデル ID を読み、モデルの候補リスト（`models.toml` の `model_choices`）に**まだ無いものだけを追加**する（候補リストを一度も編集していなければ、既定の候補に足した形で保存される。新しいものが無ければ何も書かない）。消えた ID は削除しないので、不要なら **バックエンド/モデル設定…** の **削除** で外す。ただし、エンジンの一覧に今も載っている ID は、**削除** で外しても次のモデル取得でまた追加される。推論は走らず、追加した ID を試す送信もしない（試すのは **疎通確認** だけ）。取得元は次のとおり。
   - Claude: エンジンを起動して初期化の応答に含まれる一覧を読む（`default` 以外。`opus` などのエイリアスはそのまま追加し、ログに今の解決先を出す）。
   - Codex: `~/.codex/models_cache.json`（`CODEX_HOME` があればその下）を読むだけで、Codex は起動しない（Codex を一度も使っていないと無い）。
@@ -98,7 +98,7 @@
 
 - **Claude**: 実行ファイルは `[claude_code].bin` → 環境変数 `CLAUDE_CODE_BIN` → エディタ拡張の同梱版 → PATH 上の `claude` の順に探す。ログイン情報・設定は `~/.claude` を Claude Code と共有する。
 - **Codex**: ツールの実行は逐次表示されるが、応答の本文は一度にまとめて表示される。
-- **pi**: プロバイダの候補は `openai-codex` / `github-copilot` / `llama.cpp`（ローカル）。`thinking` / `effort` は使わない。Windows では bash（Git Bash 推奨）が無いとツール実行が失敗する。図を見て判断させるには、画像入力対応のモデルが必要。
+- **pi**: プロバイダの候補は `openai-codex` / `github-copilot` / `llama.cpp`（ローカル）。effort は `--thinking` として渡す（→ [モデルの指定](#モデルの指定)）。Windows では bash（Git Bash 推奨）が無いとツール実行が失敗する。図を見て判断させるには、画像入力対応のモデルが必要。
 - **OpenAI 互換 HTTP**（Ollama / LM Studio / llama.cpp server 等）:
   - `.env` に `OPENAI_BASE_URL`（`/v1` まで含める。例 `http://localhost:11434/v1`）、必要なら `OPENAI_API_KEY`。モデル名は `models.toml` の `[openai-compat].model`（無ければ `OPENAI_MODEL`）。
   - 毎回 GUI 操作用のツール定義を付けてストリーミングで送るので、**function calling に対応したサーバーとモデルが必要**。小さいモデルではツールをうまく使えない。
@@ -119,11 +119,11 @@ GUI で設定すれば手で書く必要はない。手で書く場合は、雛�
 - **エンジンの選択順**: 環境変数 `LLM_BACKEND` → `config.toml` の `[backend].name` → `OPENAI_BASE_URL`（`mock` ならモック、それ以外は OpenAI 互換）。どれも無ければエンジン未設定で、チャットは何も送らずに設定を促す（**設定 → バックエンド/モデル設定…** は「（未選択）」で開くので、エンジンを選んで **適用** する）。
 - `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。それ以外の値だとエンジン未設定として扱い（`OPENAI_BASE_URL` があっても同じ）、何も送らず、チャットの先頭にエラーの行が出る（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない）。値を直すか、**設定 → バックエンド/モデル設定…** で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す）。
 - `.env` に `LLM_BACKEND` を書くと、起動のたびに GUI での選択より優先される。
-- `models.toml` の Claude 用の値: `thinking` = `enabled` / `adaptive` / `disabled`。`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。Codex の `effort` は例 `low` / `medium` / `high`（使える値はモデルによる。検証せずそのまま渡す）。
-- 手で編集したら、再起動するか GUI で **適用** し直す（起動時に一度だけ読む）。ただし `[backend].name` / `model` / `provider` を手で変えた場合は再起動する（ダイアログは古い値を表示するので、そのまま適用すると元に戻る）。
+- `models.toml` の `effort` は **設定 → バックエンド/モデル設定…** で選べる（値は [モデルの指定](#モデルの指定)）。手で書いた値は選択肢に無くてもそのままエンジンに渡す（ダイアログも開いたときはその値を残して表示する。Codex でモデル欄を変えたとき、その値が新しいモデルの選択肢に無ければ「既定」に戻る）。Claude の `thinking` = `enabled` / `adaptive` / `disabled` は GUI に項目が無く、普段は設定しない。
+- 手で編集したら、再起動するか GUI で **適用** し直す（起動時に一度だけ読む）。ただし `[backend].name` / `model` / `provider` / `effort` を手で変えた場合は再起動する（ダイアログは古い値を表示するので、そのまま適用すると元に戻る）。
 - TOML の構文が壊れていると黙って無視される。`config.toml` ならエンジン未設定（`.env` に `LLM_BACKEND` か `OPENAI_BASE_URL` があればそれに従う）に、`models.toml` ならエンジンの既定モデルに戻る。**適用** では壊れた `config.toml`（モック以外を選んだときは `models.toml` も）が、**追加** / **削除** では `models.toml` だけが `.bak` に退避して作り直される。**作り直したファイルには GUI が書くキーしか残らない**ので、手で書いた設定（`permission_mode` 等）は `.bak` から戻す。
 - [R2 設定同期](config_sync_ja.md#複数-pc-での設定同期) を使っていると、`config.toml` と `models.toml` の変更は他の PC にも配られる。
-- Windows のパスは `"C:/Users/..."` の形で書く。GUI が書き換えるキー（`name`, `bin`, `model`, `provider`, `[chat_search]` の `engine` / `model` / `provider`）に `'...'`（リテラル文字列）を使うと、GUI の **適用** が失敗する。`model_choices` / `provider_choices` を複数行の配列で書くと **追加** / **削除** が失敗する。
+- Windows のパスは `"C:/Users/..."` の形で書く。GUI が書き換えるキー（`name`, `bin`, `model`, `provider`, `effort`, `[chat_search]` の `engine` / `model` / `provider`）に `'...'`（リテラル文字列）を使うと、GUI の **適用** が失敗する。`model_choices` / `provider_choices` を複数行の配列で書くと **追加** / **削除** が失敗する。
 - `.env` の注意:
   - 読むのはリポジトリ直下の `.env` だけで、起動時に一度だけ読む。シェルの環境変数の方が優先される。
   - **行末コメントは使えない**（`KEY=value # メモ` は値が `value # メモ` になる）。

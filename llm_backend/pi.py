@@ -113,6 +113,10 @@ class PiCodingAgentBackend:
         provider = config.get("provider", "")
         if provider:
             cmd += ["--provider", provider]
+        effort = config.get("effort", "")
+        if isinstance(effort, str) and effort.strip():
+            # models.toml の effort を pi の --thinking に変換する（Issue #117）。
+            cmd += ["--thinking", effort.strip()]
         tools_val = config.get("tools", "")
         if tools_val and tools_val != "none":
             cmd += ["--tools", tools_val]

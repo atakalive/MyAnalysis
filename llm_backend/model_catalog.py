@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from llm_backend import engines, preflight
+from llm_backend.codex import codex_home
 
 SUPPORTED: tuple[str, ...] = ("claude-vscode", "claude-cli", "pi", "codex")
 
@@ -144,9 +144,7 @@ def _fetch_pi(engine_id: str, settings: dict) -> ModelList:
 
 
 def _codex_cache_path() -> Path:
-    home = os.environ.get("CODEX_HOME", "").strip()
-    base = Path(home) if home else Path.home() / ".codex"
-    return base / "models_cache.json"
+    return codex_home() / "models_cache.json"
 
 
 def _priority(item: dict) -> int | float:

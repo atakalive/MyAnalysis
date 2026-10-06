@@ -132,3 +132,9 @@ def _no_chat_dataset_env(monkeypatch):
     """GUI がエージェントに渡す MYANALYSIS_CHAT_DATASET をテストに継承させない（Issue #111）。"""
     from common.chat_dataset import CHAT_DATASET_ENV
     monkeypatch.delenv(CHAT_DATASET_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_home(monkeypatch, tmp_path):
+    """実際の codex カタログ（`~/.codex/models_cache.json`）を読まない（Issue #117）。"""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex_home"))

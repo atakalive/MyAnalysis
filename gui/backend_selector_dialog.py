@@ -37,9 +37,11 @@ from llm_backend.engines import (
     candidate_settings,
     chat_search_selection,
     combo_choices,
+    current_effort,
     current_engine_id,
     current_model,
     current_provider,
+    effort_choices,
     engine_by_id,
     engine_label,
     session_settings,
@@ -108,6 +110,10 @@ class BackendSelectorDialog(QDialog):
         )
         self._form.addRow(tr("backend.dialog.provider"), self._provider_row)
 
+        self._effort_combo = QComboBox(self)        # 編集不可（固定の選択肢）
+        self._form.addRow(tr("backend.dialog.effort"), self._effort_combo)
+        self._effort_choices: tuple[str, ...] = ()  # 今の項目の effort_choices（モデル欄の変更で比べる）
+
         self._build_search_section(layout)
 
         self._env_warning = QLabel(tr("backend.dialog.env_warning"), self)
@@ -146,6 +152,7 @@ class BackendSelectorDialog(QDialog):
             self._test_btn.setEnabled(False)
 
         self._engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        self._model_combo.currentTextChanged.connect(self._on_model_text_changed)
         self._test_btn.clicked.connect(self._on_test)
         self._buttons.accepted.connect(self._on_apply)
         self._buttons.rejected.connect(self.reject)
@@ -154,7 +161,7 @@ class BackendSelectorDialog(QDialog):
     #
     # SessionEngineDialog (per-chat-session override) reuses this whole dialog —
     # combos, the Add/Remove choice lists, and the ping worker's cancel→wait→kill
-    # shutdown — and only swaps these five seams. They are overridden, not branched
+    # shutdown — and only swaps these six seams. They are overridden, not branched
     # on a `session=` flag, so each method keeps a single coherent contract.
 
     def _baseline_engine_id(self) -> str | None:
@@ -167,19 +174,25 @@ class BackendSelectorDialog(QDialog):
         return current_engine_id()
 
     def _seed_value(self, engine, field: str) -> str:
-        """Initial text for `field` — the value this dialog is editing."""
+        """Initial value for `field` ("model" / "provider" / "effort") — the value this dialog is editing."""
+        if field == "effort":
+            return current_effort(engine)
         return current_model(engine) if field == "model" else current_provider(engine)
 
-    def _probe_settings(self, engine, model: str, provider: str) -> dict:
+    def _effort_default_label(self) -> str:
+        """effort 行の先頭の項目（data ""）の表示名。全体では「既定」＝ CLI の既定。"""
+        return tr("backend.dialog.effort_default")
+
+    def _probe_settings(self, engine, model: str, provider: str, effort: str | None) -> dict:
         """Settings the connectivity check should build a backend from."""
         return candidate_settings(
-            engine, model, provider, engine_changed=self._engine_changed()
+            engine, model, provider, engine_changed=self._engine_changed(), effort=effort
         )
 
-    def _do_apply(self, engine, model: str, provider: str) -> None:
+    def _do_apply(self, engine, model: str, provider: str, effort: str | None) -> None:
         """Persist the selection. May raise RuntimeError/OSError."""
         apply_selection(
-            engine, model, provider, engine_changed=self._engine_changed()
+            engine, model, provider, engine_changed=self._engine_changed(), effort=effort
         )
 
     # ----- AI chat-search model (Issue #108) -----
@@ -277,6 +290,13 @@ class BackendSelectorDialog(QDialog):
             return ""
         return self._provider_combo.currentText().strip()
 
+    def _current_effort(self, engine) -> str | None:
+        """effort 行の値。行の無いエンジン（openai-http・mock）と未選択は None（＝触れない）。"""
+        if engine is None or not engine.effort_levels:
+            return None
+        v = self._effort_combo.currentData()
+        return v if isinstance(v, str) else ""
+
     # ----- choice-list rows (combo + add/remove) -----
 
     def _make_choice_row(self, combo, field: str) -> tuple[QWidget, list[QPushButton]]:
@@ -343,10 +363,12 @@ class BackendSelectorDialog(QDialog):
             self._provider_combo.setVisible(False)
             for btn in self._provider_btns:
                 btn.setVisible(False)
+            self._populate_effort(None)
             self._update_warnings(None)
             return
         self._form.setRowVisible(self._model_row, True)
         self._populate_choices(engine, "model")
+        self._populate_effort(engine)
         has_provider = "provider" in engine.fields
         if has_provider:
             self._populate_choices(engine, "provider")
@@ -382,6 +404,51 @@ class BackendSelectorDialog(QDialog):
         combo.addItems(items)
         combo.setEditText(text)
         combo.blockSignals(False)
+
+    def _populate_effort(self, engine, *, keep_current: bool = False) -> None:
+        """effort 行を作り直す。行の有無は ``engine.effort_levels`` で決める。
+
+        項目は先頭の「既定」/「全体設定と同じ」（data ""）、``effort_choices``、選択肢に無い値の順。
+        開いたとき・エンジン切替（``keep_current=False``）は ``_seed_value(engine, "effort")`` を
+        選び、それが選択肢に無ければ（手書き・別 PC から同期された値）末尾に加えて選ぶ。
+        モデル欄の変更（``keep_current=True``）は、選択肢が前回と同じなら何もしない（開いたときの
+        値もそのまま）。変わったら、今の値が新しい選択肢にあれば残し、無ければ先頭に戻す
+        （モデルの対応しない段階を GUI の操作で新たに選んだ状態にしない）。
+        """
+        has = engine is not None and bool(engine.effort_levels)
+        self._form.setRowVisible(self._effort_combo, has)
+        self._effort_combo.setVisible(has)
+        if not has:
+            self._effort_choices = ()
+            return
+        choices = effort_choices(engine, self._current_model_text())
+        if keep_current:
+            if choices == self._effort_choices:
+                return
+            cur = self._effort_combo.currentData()
+            value = cur if isinstance(cur, str) and cur in choices else ""
+        else:
+            value = self._seed_value(engine, "effort")
+        self._effort_choices = choices
+        combo = self._effort_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self._effort_default_label(), "")
+        for c in choices:
+            combo.addItem(c, c)
+        if value and value not in choices:
+            combo.addItem(value, value)
+        idx = combo.findData(value)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_model_text_changed(self, _text: str = "") -> None:
+        # 選択肢がモデルで変わるのは codex だけ（claude・pi は _populate_effort が何もしない）。
+        # モデル欄の作り直しは blockSignals 中なのでここには来ない（エンジン切替・初期化は
+        # _sync_engine_widgets が明示的に呼ぶ）。
+        engine = self._selected_engine()
+        if engine is not None:
+            self._populate_effort(engine, keep_current=True)
 
     def _update_warnings(self, engine=None) -> None:
         if engine is None:
@@ -422,6 +489,7 @@ class BackendSelectorDialog(QDialog):
         self._engine_combo.setEnabled(on)
         self._model_combo.setEnabled(on)
         self._provider_combo.setEnabled(on)
+        self._effort_combo.setEnabled(on)
         for btn in (*self._model_btns, *self._provider_btns):
             btn.setEnabled(on)
         # Apply follows the ping lock and _apply_allowed: never on the 未選択 entry
@@ -448,7 +516,8 @@ class BackendSelectorDialog(QDialog):
             return
         model = self._current_model_text()
         provider = self._current_provider_text(engine)
-        settings = self._probe_settings(engine, model, provider)
+        effort = self._current_effort(engine)
+        settings = self._probe_settings(engine, model, provider, effort)
         backend = build_backend(engine.backend_key, settings)
         self._test_btn.setEnabled(False)
         self._set_selection_enabled(False)
@@ -541,8 +610,9 @@ class BackendSelectorDialog(QDialog):
         engine = self._selected_engine()
         model = self._current_model_text()
         provider = self._current_provider_text(engine) if engine is not None else ""
+        effort = self._current_effort(engine) if engine is not None else None
         try:
-            self._do_apply(engine, model, provider)
+            self._do_apply(engine, model, provider, effort)
         except (RuntimeError, OSError) as e:
             # RuntimeError = set_toml_keys validation / rollback double-fault;
             # OSError (incl. PermissionError) = raw IO on either write. Both must
@@ -572,10 +642,10 @@ class BackendSelectorDialog(QDialog):
 
 
 class SessionEngineDialog(BackendSelectorDialog):
-    """Per-chat-session engine override — the same dialog, five seams swapped.
+    """Per-chat-session engine override — the same dialog, six seams swapped.
 
     Subclass rather than a ``session=`` flag: every method whose behaviour differs
-    has a single coherent contract this way, instead of five ``if self._session``
+    has a single coherent contract this way, instead of six ``if self._session``
     branches inside docstrings that assert global semantics. And not a dialog built
     from scratch, because the ping worker's cancel → wait → kill shutdown is ~70
     lines that must not be forked.
@@ -612,25 +682,36 @@ class SessionEngineDialog(BackendSelectorDialog):
 
         Carrying the session's model over to a different engine would seed e.g.
         "claude-opus-5" into a pi combo, so it only applies to the matching engine.
+        effort never falls back to the global value: "" is the「全体設定と同じ」entry,
+        which keeps following the global effort instead of pinning today's value.
         """
-        if (getattr(self._session, "engine", None) or "").strip() == engine.id:
-            key = "engine_model" if field == "model" else "engine_provider"
+        own = (getattr(self._session, "engine", None) or "").strip() == engine.id
+        if field == "effort":
+            return (getattr(self._session, "engine_effort", None) or "").strip() if own else ""
+        if own:
+            key = {"model": "engine_model", "provider": "engine_provider"}[field]
             val = (getattr(self._session, key, None) or "").strip()
             if val:
                 return val
         return super()._seed_value(engine, field)
 
-    def _probe_settings(self, engine, model: str, provider: str) -> dict:
+    def _effort_default_label(self) -> str:
+        """「全体設定に従う」チェックボックスと区別するため別の文言にする。"""
+        return tr("backend.dialog.effort_follow_global")
+
+    def _probe_settings(self, engine, model: str, provider: str, effort: str | None) -> dict:
         """Probe exactly what the session will run — engine_changed is meaningless
         here (see engines.session_settings), and pinging a different binary than the
         session uses would make the check worthless."""
-        return session_settings(engine, model, provider)
+        return session_settings(engine, model, provider, effort=effort or "")
 
-    def _do_apply(self, engine, model: str, provider: str) -> None:
+    def _do_apply(self, engine, model: str, provider: str, effort: str | None) -> None:
         if self._follow_default.isChecked():
             self._chat._set_session_engine(self._session, None)
         else:
-            self._chat._set_session_engine(self._session, engine.id, model, provider)
+            self._chat._set_session_engine(
+                self._session, engine.id, model, provider, effort=effort or ""
+            )
 
     def _update_warnings(self, engine=None) -> None:
         if engine is None:

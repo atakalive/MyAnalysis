@@ -99,10 +99,10 @@ guards that every prompt still contains it.
   fallback; for the `openai-compat` backend, `OPENAI_MODEL` env is the fallback). Adding a new
   backend = add a section here + wrap its config with `merged_settings(key, …)`.
   For the claude engine, `effort = "ultracode"` expands to
-  `--effort xhigh --settings '{"ultracode": true}'`. Both files load once (cached).
+  `--effort xhigh --settings '{"ultracode": true}'`. pi maps `effort` to `--thinking`, codex to `-c model_reasoning_effort=`. The dialog's effort row is a fixed dropdown (`Engine.effort_levels`; codex narrows it per model via `engines.effort_choices` → `codex.supported_efforts`, which reads `$CODEX_HOME/models_cache.json`); a value already set when the dialog opens (hand-written or synced) is kept as an extra item even if it is not in the list, but only until the list changes: when editing codex's model field changes the list, a selected value missing from the new list falls back to the first entry (既定 / 全体設定と同じ), so the GUI never newly selects a level the model does not support (`_populate_effort(keep_current=True)` compares against `_effort_choices`). The claude backend drops `CLAUDE_CODE_EFFORT_LEVEL` from the child env whenever an effort is set (that env var beats `--effort`). Both files load once (cached).
   Pick up edits by restarting, or live via **設定 → バックエンド/モデル設定**: the
   dialog rewrites `[backend].name` / `[claude_code].bin` in `config.toml` and the
-  `model`/`provider` keys in `models.toml` (comment-preserving), runs an optional
+  `model`/`provider`/`effort` keys in `models.toml` (comment-preserving; an empty effort also clears a leftover `effort` in `config.toml`), runs an optional
   connectivity check, then `cache_clear()`s both loaders + reseeds every chat
   session's backend so it applies from the next send — no restart (Issue #94).
   The model/provider dropdowns are user-editable: the 追加/削除 (Add/Remove) buttons next to each combo add or
@@ -185,21 +185,21 @@ catalog until llama-server has them loaded, which is why the list is editable.
     auto fetch).
 - **Per-chat-session engine override** — the dialog above sets the *global default*;
   each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
-  layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider`
+  layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider` / `engine_effort`
   in `chat_sessions/<id>.json`, where `engine` (an `ENGINES` id) is the sentinel —
-  `None` = follow the global. Empty model/provider mean "that engine's configured
+  `None` = follow the global. Empty model/provider/effort mean "that engine's configured
   default", so switching engine alone is expressible. The unit is the whole engine
   (エンジン=プロバイダ=モデル), so session A can run Claude while B runs pi+llama.cpp.
-  - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps five hooks
+  - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps six hooks
     (`_baseline_engine_id` / `_seed_value` / `_probe_settings` /
-    `_do_apply` / `_update_warnings`); the combos, 追加/削除 choice lists and ping shutdown are
+    `_do_apply` / `_update_warnings` / `_effort_default_label`); the combos, 追加/削除 choice lists and ping shutdown are
     shared. The ping lock and the「全体設定に従う」checkbox are **separate booleans
     AND-ed** — merging them would let un-checking mid-ping re-enable the combos and
     revive the stale-result race. **適用は応答中でもブロックしない**: 進行中ターンは
     自参照の backend（`turn.backend`）で完走し、次の送信から新設定が使われる（resume
     token は `_load_backend_session` の engine-id 突合で自然無効化）。応答中の適用は
     ステータスバーで「次の送信から反映」を通知する — transcript への追記は
-    `_flush_live_markdown` の anchor→末尾全置換に消されるため不可。
+    `_flush_live_markdown` の anchor→末尾全置換に消されるため不可。 The effort row's first entry is 既定 (= no flag, CLI default) in the global dialog and 全体設定と同じ (`engine_effort=None`, keeps following the global `models.toml` effort of that engine) in the session dialog; the session dialog never seeds the global value into the override.
   - Backends are built in exactly one place, `ChatWidget._build_session_backend`,
     via `engines.session_settings()` + `build_backend()`. `session_settings` applies
     `config_patch` **only when its truthiness disagrees with the base**, matching

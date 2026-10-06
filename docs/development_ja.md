@@ -300,7 +300,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 
 1. **実装** — `llm_backend/<name>.py` に `LLMBackend` Protocol（`llm_backend/base.py`）を満たすクラスを作る。属性 `name` / `model` と、`TextDelta` / `ToolCallRequest` を yield する `stream(messages, tools=None)`。転送エラーは例外で知らせる。
 2. **登録** — `llm_backend/__init__.py` の `_BACKENDS` にファクトリを追加する。`settings` が `None` なら `merged_settings("<セクション>", backend_config().get("<セクション>", {}))` で `config.toml` と `models.toml` を重ね、渡されたらそれを使う（疎通確認とチャット単位の上書きが使う）。
-3. **エンジン** — `llm_backend/engines.py` の `ENGINES` に `Engine` を追加する（`id`、`label_key`、`backend_key` = `_BACKENDS` のキー、`settings_key` = TOML のセクション名、`config_patch`、`fields`、候補の種）。`ENGINES` に無いバックエンドは `current_engine_id()` が `None`（未選択）を返し、設定ダイアログは「エンジンが選ばれていません」と表示する。設定ダイアログと状況ウィンドウは `ENGINES` を列挙するので、GUI 側の変更は要らない。
+3. **エンジン** — `llm_backend/engines.py` の `ENGINES` に `Engine` を追加する（`id`、`label_key`、`backend_key` = `_BACKENDS` のキー、`settings_key` = TOML のセクション名、`config_patch`、`fields`、候補の種、`effort_levels` = effort の選択肢（空なら設定ダイアログに effort の行を出さない。バックエンドは `models.toml` の `effort` を自分の CLI のフラグに変換する））。`ENGINES` に無いバックエンドは `current_engine_id()` が `None`（未選択）を返し、設定ダイアログは「エンジンが選ばれていません」と表示する。設定ダイアログと状況ウィンドウは `ENGINES` を列挙するので、GUI 側の変更は要らない。
 4. **表示名** — `i18n/en.toml` と `i18n/ja.toml` に `backend.engine.<…>` を追加する（`tests/test_engines.py` がラベルキーの解決を検査する）。
 5. **導入判定** — `llm_backend/preflight.py` の `_check_engine` に分岐を追加する。無いと「何も要らない」エンジン（mock と同じ）として表示される。判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う（トークンをリフレッシュするコマンドは、同じトークンを共有する他の環境をログアウトさせ得る）。モデル取得に対応させるなら `llm_backend/model_catalog.py` の `SUPPORTED` と `fetch_models` に分岐を足す（足さなければ状況ウィンドウにモデル取得ボタンが出ないだけ）。
 6. **設定例** — `models.example.toml`（`model` / `thinking` / `effort` / `provider`）と `llm_backend/config.example.toml`（`bin` / `cwd` 等の運用設定）にセクションを追加する。

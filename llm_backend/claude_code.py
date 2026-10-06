@@ -904,6 +904,11 @@ class ClaudeCodeBackend:
             child_env[CHAT_DATASET_ENV] = chat_ds
         else:
             child_env.pop(CHAT_DATASET_ENV, None)
+        # CLAUDE_CODE_EFFORT_LEVEL は --effort より優先される（2.1.282 / 2.1.286 で実測）。
+        # effort を選んだときだけ外す。「既定」のときは利用者の環境変数を残す（Issue #117）。
+        effort = self._config.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            child_env.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
         return child_env
 
     def _drain_stderr(self, proc: subprocess.Popen) -> None:

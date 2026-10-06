@@ -57,13 +57,14 @@ class ChatSession:
     archived: bool = False
     # Per-session engine override. `engine` (an engines.ENGINES id) is the sentinel:
     # None = follow the global backend/model selection, and the other two are then
-    # ignored. Empty model/provider mean "that engine's configured default", so
+    # ignored. Empty model/provider/effort mean "that engine's configured default", so
     # switching engine alone is expressible. Validated only as str here — the id is
     # resolved against the catalog at use time so that round-tripping through an
     # older build (or a PC lacking that engine) cannot silently erase the choice.
     engine: str | None = None
     engine_model: str | None = None
     engine_provider: str | None = None
+    engine_effort: str | None = None  # None = 全体設定と同じ（そのエンジンの models.toml の effort）
     # 3 状態: None=全体設定に従う / ""=明示的にペルソナなし / 非空=ペルソナ名。
     # engine 同様 str 検証のみ・解決は使用時。未解決名は「なし」に degrade し
     # フィールドは書き換えない（ストアは PC ローカル、別 PC でも選択を保持）。
@@ -157,6 +158,7 @@ def session_to_dict(sess: ChatSession) -> dict:
         "engine": getattr(sess, "engine", None),
         "engine_model": getattr(sess, "engine_model", None),
         "engine_provider": getattr(sess, "engine_provider", None),
+        "engine_effort": getattr(sess, "engine_effort", None),
         "persona": getattr(sess, "persona", None),
         "kind": kind,
         "search_spec": (normalize_search_spec(getattr(sess, "search_spec", None))
@@ -216,6 +218,7 @@ def session_from_dict(data: dict) -> ChatSession:
         engine=_opt_str("engine"),
         engine_model=_opt_str("engine_model"),
         engine_provider=_opt_str("engine_provider"),
+        engine_effort=_opt_str("engine_effort"),
         persona=persona,
         kind=kind,
         search_spec=search_spec,
@@ -295,6 +298,7 @@ def fork_session(src: ChatSession, cut: int, *, title: str) -> ChatSession:
         engine=getattr(src, "engine", None),
         engine_model=getattr(src, "engine_model", None),
         engine_provider=getattr(src, "engine_provider", None),
+        engine_effort=getattr(src, "engine_effort", None),
         # 口調（ペルソナ）も同様に引き継ぐ。
         persona=getattr(src, "persona", None),
         kind="chat",

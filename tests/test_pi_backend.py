@@ -192,6 +192,19 @@ class TestCommandAssembly:
         assert "--provider" in cmd
         assert cmd[cmd.index("--provider") + 1] == "openai"
 
+    def test_effort_maps_to_thinking_after_provider(self, monkeypatch):
+        cmd, _ = self._capture_cmd(
+            {"model": "gpt-5", "provider": "openai", "effort": "high"}, monkeypatch
+        )
+        i = cmd.index("--thinking")
+        assert cmd[i + 1] == "high"
+        assert i > cmd.index("--provider")
+
+    @pytest.mark.parametrize("config", [{"effort": ""}, {"effort": "  "}, {}])
+    def test_no_thinking_flag_without_effort(self, monkeypatch, config):
+        cmd, _ = self._capture_cmd(config, monkeypatch)
+        assert "--thinking" not in cmd
+
 
 # ---------------------------------------------------------------------------
 # JSONL parsing

@@ -8,14 +8,14 @@
 #
 # Conventional keys: model / thinking / effort / provider.
 # Applied on process start, or live via Settings → Backend/model settings
-# (設定 → バックエンド/モデル設定…), which rewrites the model/provider keys here +
+# (設定 → バックエンド/モデル設定…), which rewrites the model/provider/effort keys here +
 # [backend].name / [claude_code].bin in config.toml and refreshes the cache — no
 # restart needed.
 
 [claude_code]
 # Reuses the VS Code Claude Code engine (stream-json mode).
 model    = "opus"     # --model  ("opus"/"sonnet" alias or full name; empty = ~/.claude default)
-thinking = "enabled"  # --thinking: enabled | adaptive | disabled  (empty = CLI default; true/false also accepted)
+thinking = ""         # --thinking: enabled | adaptive | disabled  (empty = CLI default = on; normally leave empty. Not in the dialog)
 effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode  (empty = CLI default)
                       #   ultracode => --effort xhigh --settings '{"ultracode": true}'
                       #   (high token use; needs an ultracode-capable model)
@@ -23,6 +23,7 @@ effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode 
 [pi]
 provider = "openai-codex"  # --provider  (openai-codex | github-copilot | llama.cpp)
 model    = "gpt-6.1-sol"   # --model
+effort   = ""              # --thinking: minimal | low | medium | high | xhigh | max  (empty = pi default)
 # *_choices は「バックエンド/モデル設定」ダイアログのドロップダウン候補。
 # ダイアログの「追加」「削除」が書き換えるので手編集は不要 (してもよい)。キー自体が無ければ
 # engines.py の既定の種を出し、[] なら「候補なし」として尊重する。
@@ -33,8 +34,8 @@ model    = "gpt-6.1-sol"   # --model
 
 [codex]
 model  = ""     # --model (empty = codex default; 候補は ChatGPT 側 Codex カタログ)
-effort = ""     # -c model_reasoning_effort: low | medium | high | xhigh | max (使える値はモデルによる)
-                #   (empty = default; 値は無検証でそのまま渡す)
+effort = ""     # -c model_reasoning_effort: low | medium | high | xhigh | max | ultra (使える値はモデルによる)
+                #   (empty = default; ダイアログは ~/.codex/models_cache.json からそのモデルの値だけを出す)
 
 [openai-compat]
 model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)

@@ -787,6 +787,7 @@ class ChatWidget(QWidget):
                     engine,
                     getattr(sess, "engine_model", None) or "",
                     getattr(sess, "engine_provider", None) or "",
+                    effort=getattr(sess, "engine_effort", None) or "",
                 ))
                 engine_id = engine.id
             except Exception as e:      # unknown backend key, bad settings, ...
@@ -1075,12 +1076,17 @@ class ChatWidget(QWidget):
 
     def _set_session_engine(
         self, sess: ChatSession, engine_id: str | None,
-        model: str = "", provider: str = "",
+        model: str = "", provider: str = "", effort: str = "",
     ) -> None:
         """Apply a per-session engine override (engine_id None = follow default)."""
         sess.engine = (engine_id or "").strip() or None
         sess.engine_model = (model or "").strip() or None
         sess.engine_provider = (provider or "").strip() or None
+        eng = self._effective_engine(sess)
+        sess.engine_effort = (
+            (effort or "").strip() or None
+            if eng is not None and eng.effort_levels else None
+        )
         # merge_sessions replaces on strict `updated >`, so a change that touches no
         # message still has to win the merge.
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
@@ -1134,6 +1140,18 @@ class ChatWidget(QWidget):
 
     # ----- transcript render -----
 
+    def _global_effort_suffix(self) -> str:
+        """全体設定のエンジンの effort をヘッダ用に " / effort: …" で返す。無ければ ""。never raise."""
+        try:
+            from llm_backend.engines import current_effort, engine_by_id
+            engine = engine_by_id(self._global_engine_id() or "")
+            if engine is None or not engine.effort_levels:
+                return ""
+            effort = current_effort(engine)
+        except Exception:
+            return ""
+        return f" / effort: {effort}" if effort else ""
+
     def _engine_header(self, sess: ChatSession) -> str:
         """The 'backend: … / model: …' line for `sess`, marked 既定 or 個別.
 
@@ -1150,22 +1168,27 @@ class ChatWidget(QWidget):
                         f"  [{tr('chat.engine.mark_default')}]")
             # No override: the prototype already reflects the global selection, and
             # for claude its .model is the real one reported by the engine.
-            return (f"backend: {self._backend.name} / model: {self._backend.model}"
+            eff = self._global_effort_suffix()
+            return (f"backend: {self._backend.name} / model: {self._backend.model}{eff}"
                     f"  [{tr('chat.engine.mark_default')}]")
         try:
             from llm_backend.engines import (
-                current_model, current_provider, engine_label,
+                current_effort, current_model, current_provider, engine_label,
             )
             model = (getattr(sess, "engine_model", None) or "").strip() \
                 or current_model(engine)
             provider = (getattr(sess, "engine_provider", None) or "").strip() \
                 or current_provider(engine)
+            effort = ((getattr(sess, "engine_effort", None) or "").strip()
+                      or current_effort(engine)) if engine.effort_levels else ""
             label = engine_label(engine)
         except Exception:
             model = (getattr(sess, "engine_model", None) or "")
             provider, label = "", engine.id
+            effort = ""
         prov = f" / provider: {provider}" if provider else ""
-        return (f"backend: {label}{prov} / model: {model or '-'}"
+        eff = f" / effort: {effort}" if effort else ""
+        return (f"backend: {label}{prov} / model: {model or '-'}{eff}"
                 f"  [{tr('chat.engine.mark_override')}]")
 
     def _persona_header(self, sess: ChatSession) -> str | None:

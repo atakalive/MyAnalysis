@@ -1812,6 +1812,70 @@ def test_engine_header_does_not_build_a_backend(widget, monkeypatch):
     assert "qwen3-coder" in widget._engine_header(sess)
 
 
+# ---- セッションごとの effort（Issue #117）----
+
+
+def test_build_session_backend_passes_effort(widget, monkeypatch):
+    import llm_backend.engines as engines
+    seen = []
+    real = engines.session_settings
+
+    def _spy(engine, model, provider, *, effort=""):
+        seen.append(effort)
+        return real(engine, model, provider, effort=effort)
+
+    monkeypatch.setattr(engines, "session_settings", _spy)
+    sess = _make_session(widget)
+    widget._set_session_engine(sess, "pi", "", "", effort="low")
+    widget._build_session_backend(sess)
+    assert seen == ["low"]
+
+
+def test_set_session_engine_effort(widget):
+    sess = _make_session(widget)
+    widget._set_session_engine(sess, "pi", "", "", effort="low")
+    assert sess.engine_effort == "low"
+    widget._set_session_engine(sess, "openai-http", "m", "", effort="low")
+    assert sess.engine_effort is None
+    widget._set_session_engine(sess, "pi", "", "", effort="  ")
+    assert sess.engine_effort is None
+    widget._set_session_engine(sess, "pi", "", "", effort="high")
+    widget._set_session_engine(sess, None)
+    assert sess.engine_effort is None
+
+
+def test_changing_only_effort_keeps_the_resume_token(widget):
+    from llm_bridge.paths import read_backend_session
+    sess = _make_session(widget)
+    widget._set_session_engine(sess, "pi", "", "", effort="low")
+    widget._capture_backend_session(_TokenBackend("tok-1", "pi"), sess)
+    assert read_backend_session(sess.id) is not None
+    widget._set_session_engine(sess, "pi", "", "", effort="high")
+    assert read_backend_session(sess.id) is not None
+
+
+def test_engine_header_shows_session_effort(widget, monkeypatch):
+    import llm_backend.engines as engines
+    monkeypatch.setattr(engines, "current_effort", lambda e: "max")
+    sess = _make_session(widget)
+    widget._set_session_engine(sess, "pi", "", "", effort="low")
+    assert " / effort: low  [" in widget._engine_header(sess)
+    widget._set_session_engine(sess, "pi", "", "")
+    assert " / effort: max  [" in widget._engine_header(sess)
+    widget._set_session_engine(sess, "openai-http", "m", "")
+    assert "effort:" not in widget._engine_header(sess)
+
+
+def test_engine_header_shows_global_effort(widget, monkeypatch):
+    import llm_backend.engines as engines
+    monkeypatch.setattr(engines, "current_engine_id", lambda: "claude-vscode")
+    monkeypatch.setattr(engines, "current_effort", lambda e: "high")
+    sess = _make_session(widget)
+    assert " / effort: high  [" in widget._engine_header(sess)
+    monkeypatch.setattr(engines, "current_effort", lambda e: "")
+    assert "effort:" not in widget._engine_header(sess)
+
+
 # ---- セッションごとのペルソナ（応答口調）----
 #
 # 定義ストア（personas.json）と ui_prefs は conftest の autouse fixture で tmp へ

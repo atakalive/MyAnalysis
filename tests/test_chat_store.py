@@ -574,13 +574,14 @@ def test_engine_override_roundtrip():
 def test_engine_override_defaults_none():
     s = _sample_session()
     assert (s.engine, s.engine_model, s.engine_provider) == (None, None, None)
+    assert s.engine_effort is None
 
 
 def test_v1_dict_without_engine_keys_roundtrips():
     """新キーを持たない既存ファイルが読めること。version を上げると
     session_from_dict が ValueError → read_session_file が None → タブから全消滅する。"""
     d = session_to_dict(_sample_session())
-    for k in ("engine", "engine_model", "engine_provider"):
+    for k in ("engine", "engine_model", "engine_provider", "engine_effort"):
         del d[k]
     assert d["version"] == SCHEMA_VERSION == 1
     assert session_from_dict(d) == _sample_session()
@@ -597,9 +598,20 @@ def test_engine_id_is_not_whitelisted_against_the_catalog():
 def test_engine_override_non_str_degrades_to_none():
     d = session_to_dict(_sample_session())
     d["engine"], d["engine_model"], d["engine_provider"] = 7, ["x"], "   "
+    d["engine_effort"] = 3
     loaded = session_from_dict(d)
     assert (loaded.engine, loaded.engine_model, loaded.engine_provider) \
         == (None, None, None)
+    assert loaded.engine_effort is None
+    d["engine_effort"] = "   "
+    assert session_from_dict(d).engine_effort is None
+
+
+def test_engine_effort_roundtrips_and_forks():
+    src = _sample_session()
+    src.engine, src.engine_effort = "pi", "low"
+    assert session_from_dict(session_to_dict(src)).engine_effort == "low"
+    assert fork_session(src, cut=2, title="forked").engine_effort == "low"
 
 
 def test_fork_carries_engine_override():

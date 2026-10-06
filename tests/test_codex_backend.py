@@ -234,3 +234,98 @@ def test_reasoning_renders_full_thinking_line(fake_popen, tmp_path):
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert "\n💭 " + "x" * 300 + "\n" in text
     assert "…" not in text
+
+
+# ---------------------------------------------------------------------------
+# supported_efforts / codex_home（Issue #117）
+# ---------------------------------------------------------------------------
+
+def _write_catalog(home, models):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "models_cache.json").write_text(json.dumps({"models": models}), encoding="utf-8")
+
+
+def _levels(*names):
+    return [{"effort": n, "description": "d"} for n in names]
+
+
+@pytest.fixture
+def codex_home_dir(tmp_path, monkeypatch):
+    home = tmp_path / "ch"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
+def test_supported_efforts_filters_by_model(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "other", "supported_reasoning_levels": _levels("low")},
+        {"slug": "gpt-x", "supported_reasoning_levels":
+            _levels("none", "high", "low", "ultra", "high")},
+    ])
+    assert codex_mod.supported_efforts("gpt-x") == ("high", "low", "ultra")
+    assert codex_mod.supported_efforts(" gpt-x ") == ("high", "low", "ultra")
+
+
+def test_supported_efforts_empty_model_uses_config_default(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": _levels("low", "max")},
+    ])
+    (codex_home_dir / "config.toml").write_text('model = "gpt-x"\n', encoding="utf-8")
+    assert codex_mod.supported_efforts("") == ("low", "max")
+
+
+def test_supported_efforts_empty_model_without_default_is_none(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": _levels("low")},
+    ])
+    assert codex_mod.supported_efforts("") is None              # config.toml が無い
+    (codex_home_dir / "config.toml").write_text('approval = "x"\n', encoding="utf-8")
+    assert codex_mod.supported_efforts("") is None              # model が無い
+
+
+def test_supported_efforts_missing_or_broken_catalog_is_none(codex_home_dir):
+    assert codex_mod.supported_efforts("gpt-x") is None         # ファイルが無い
+    codex_home_dir.mkdir(parents=True, exist_ok=True)
+    (codex_home_dir / "models_cache.json").write_text("{not json", encoding="utf-8")
+    assert codex_mod.supported_efforts("gpt-x") is None
+
+
+@pytest.mark.parametrize("levels", [
+    "low",                                       # list でない
+    [],                                          # 空リスト
+    [{"x": 1}, 7, {"effort": "  "}],             # 有効な値が無い
+])
+def test_supported_efforts_bad_levels_is_none(codex_home_dir, levels):
+    _write_catalog(codex_home_dir, [{"slug": "gpt-x", "supported_reasoning_levels": levels}])
+    assert codex_mod.supported_efforts("gpt-x") is None
+
+
+def test_supported_efforts_unknown_model_is_none(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": _levels("low")},
+    ])
+    assert codex_mod.supported_efforts("gpt-y") is None
+
+
+def test_supported_efforts_none_only_is_empty(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": [{"effort": "none"}]},
+    ])
+    assert codex_mod.supported_efforts("gpt-x") == ()
+
+
+def test_supported_efforts_rereads_changed_file(codex_home_dir):
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": _levels("low")},
+    ])
+    assert codex_mod.supported_efforts("gpt-x") == ("low",)
+    _write_catalog(codex_home_dir, [
+        {"slug": "gpt-x", "supported_reasoning_levels": _levels("low", "medium", "ultra")},
+    ])
+    assert codex_mod.supported_efforts("gpt-x") == ("low", "medium", "ultra")
+
+
+def test_codex_home_blank_env_is_home_dot_codex(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", "   ")
+    monkeypatch.setattr(codex_mod.Path, "home", lambda: tmp_path)
+    assert codex_mod.codex_home() == tmp_path / ".codex"

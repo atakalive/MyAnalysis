@@ -24,6 +24,7 @@ ignored — same contract as the pi / claude backends.
 from __future__ import annotations
 
 import collections
+import functools
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -84,6 +86,88 @@ _MAX_LINE = 200
 def _one_line(s: str) -> str:
     s = " ".join(str(s).split())
     return s if len(s) <= _MAX_LINE else s[:_MAX_LINE - 1] + "…"
+
+
+def codex_home() -> Path:
+    """codex の設定ディレクトリ（$CODEX_HOME、空なら ~/.codex）。model_catalog と共有する。"""
+    home = os.environ.get("CODEX_HOME", "").strip()
+    return Path(home) if home else Path.home() / ".codex"
+
+
+def _parse_json(raw: bytes) -> object:
+    return json.loads(raw)
+
+
+def _parse_toml(raw: bytes) -> object:
+    return tomllib.loads(raw.decode("utf-8"))
+
+
+@functools.lru_cache(maxsize=8)
+def _read_at(path: str, mtime_ns: int, size: int, parse) -> object | None:
+    """(path, mtime, size) ごとに 1 回だけ読む。読めない・壊れているなら None。
+    戻り値はキャッシュで共有されるので、呼び出し側は書き換えないこと。"""
+    try:
+        with open(path, "rb") as f:
+            return parse(f.read())
+    except Exception:
+        return None
+
+
+def _read_cached(path: Path, parse) -> object | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return _read_at(str(path), st.st_mtime_ns, st.st_size, parse)
+
+
+def supported_efforts(model: str) -> tuple[str, ...] | None:
+    """codex のカタログにある、``model`` の effort の段階（カタログの並び・none を除く・重複なし）。
+
+    ``model`` が空なら codex の既定モデル（codex_home()/config.toml の ``model``）で引く。
+    None = 引けない（ファイルが無い・壊れている・モデルが載っていない・既定モデルが
+    分からない・段階が list でない・段階に有効な値（空白でない str）が 1 つも無い）。
+    モデルが載っていて、有効な値が none だけなら ()（＝「既定」だけを出す）。
+    設定ダイアログがモデル欄の入力のたびに呼ぶので、ファイルは mtime ごとにキャッシュする。
+    例外は外に出さない。
+    """
+    try:
+        home = codex_home()
+        slug = (model or "").strip()
+        if not slug:
+            cfg = _read_cached(home / "config.toml", _parse_toml)
+            default = cfg.get("model") if isinstance(cfg, dict) else None
+            slug = default.strip() if isinstance(default, str) else ""
+            if not slug:
+                return None
+        data = _read_cached(home / "models_cache.json", _parse_json)
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return None
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            s = item.get("slug")
+            if not (isinstance(s, str) and s.strip() == slug):
+                continue
+            levels = item.get("supported_reasoning_levels")
+            if not isinstance(levels, list):
+                return None
+            out: list[str] = []
+            seen_valid = False
+            for lv in levels:
+                v = lv.get("effort") if isinstance(lv, dict) else lv
+                v = v.strip() if isinstance(v, str) else ""
+                if not v:
+                    continue
+                seen_valid = True
+                if v != "none" and v not in out:
+                    out.append(v)
+            # 空リスト・不正な要素だけ（カタログ破損）は none だけ（正常）と区別して None。
+            return tuple(out) if seen_valid else None
+        return None
+    except Exception:
+        return None
 
 
 class CodexBackend:

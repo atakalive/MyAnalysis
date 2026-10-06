@@ -474,3 +474,18 @@ def test_thinking_liveness(monkeypatch, tmp_path):
     ]
     out = _run_events(_l1_events(), monkeypatch, tmp_path)
     assert (9, "\n💭 C") in out
+
+
+# --------------------------------------------------------------------------- #
+# CLAUDE_CODE_EFFORT_LEVEL（Issue #117）                                         #
+# --------------------------------------------------------------------------- #
+
+def test_build_env_drops_effort_env_when_effort_set(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in ClaudeCodeBackend({"effort": "high"})._build_env()
+
+
+@pytest.mark.parametrize("config", [{}, {"effort": "  "}])
+def test_build_env_keeps_effort_env_without_effort(monkeypatch, config):
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "low")
+    assert ClaudeCodeBackend(config)._build_env()["CLAUDE_CODE_EFFORT_LEVEL"] == "low"

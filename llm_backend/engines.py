@@ -39,6 +39,7 @@ class Engine:
     fields: tuple[str, ...]                            # dialog knobs ("model", "provider")
     model_suggestions: tuple[str, ...] = ()
     provider_suggestions: tuple[str, ...] = ()
+    effort_levels: tuple[str, ...] = ()
 
 
 # pi から使うことを想定している provider。**これが単一の真実ソース**で、
@@ -72,6 +73,14 @@ CLAUDE_MODELS: tuple[str, ...] = (
     "claude-haiku-4-5",
 )
 
+# effort の選択肢（弱い順）。設定ダイアログの effort 行に、先頭の「既定」（""）に続けて並べる。
+# 空のエンジン（openai-http・mock）には行を出さない。
+CLAUDE_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultracode")
+# codex はモデルごとの値をカタログ（codex.supported_efforts）から引く。これは引けないときの既定。
+CODEX_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+# pi の --thinking。off は出さない（thinking は常にオン）。
+PI_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+
 
 ENGINES: tuple[Engine, ...] = (
     Engine(
@@ -82,6 +91,7 @@ ENGINES: tuple[Engine, ...] = (
         config_patch=(("bin", ""),),
         fields=("model",),
         model_suggestions=CLAUDE_MODELS,
+        effort_levels=CLAUDE_EFFORTS,
     ),
     Engine(
         id="claude-cli",
@@ -91,6 +101,7 @@ ENGINES: tuple[Engine, ...] = (
         config_patch=(("bin", "claude"),),
         fields=("model",),
         model_suggestions=CLAUDE_MODELS,
+        effort_levels=CLAUDE_EFFORTS,
     ),
     Engine(
         id="pi",
@@ -108,6 +119,7 @@ ENGINES: tuple[Engine, ...] = (
         # しか catalog に出ないため静的な種は持てない
         # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。
         model_suggestions=OPENAI_CODEX_MODELS,
+        effort_levels=PI_EFFORTS,
     ),
     Engine(
         id="codex",
@@ -118,6 +130,7 @@ ENGINES: tuple[Engine, ...] = (
         fields=("model",),
         # 空欄 = codex 既定モデル。
         model_suggestions=OPENAI_CODEX_MODELS,
+        effort_levels=CODEX_EFFORTS,
     ),
     Engine(
         id="openai-http",
@@ -198,6 +211,34 @@ def current_provider(engine: Engine) -> str:
         engine.settings_key, backend_config().get(engine.settings_key, {})
     )
     return merged.get("provider", "") or ""
+
+
+def current_effort(engine: Engine) -> str:
+    """そのエンジンの今の effort（models.toml を config.toml に重ねた値。str 以外と空白は ""）。"""
+    if not engine.settings_key:
+        return ""
+    merged = merged_settings(
+        engine.settings_key, backend_config().get(engine.settings_key, {})
+    )
+    v = merged.get("effort", "")
+    return v.strip() if isinstance(v, str) else ""
+
+
+def effort_choices(engine: Engine, model: str) -> tuple[str, ...]:
+    """effort 行の選択肢（先頭の「既定」と、選択肢に無い今の値は含まない）。
+
+    codex は ``model``（空なら codex の既定モデル）のカタログの段階。引けなければ
+    ``engine.effort_levels``。
+    """
+    if not engine.effort_levels:
+        return ()
+    if engine.id == "codex":
+        # 関数内 import: テストは llm_backend.codex.supported_efforts を差し替える。
+        from llm_backend.codex import supported_efforts
+        found = supported_efforts(model)
+        if found is not None:
+            return found
+    return engine.effort_levels
 
 
 # ----- user-editable dropdown choices (persisted in models.toml) -----
@@ -309,14 +350,16 @@ def update_choices(
 
 
 def candidate_settings(
-    engine: Engine, model: str, provider: str, *, engine_changed: bool
+    engine: Engine, model: str, provider: str, *, engine_changed: bool,
+    effort: str | None = None,
 ) -> dict:
     """Settings dict for a *candidate* backend (for the connectivity check).
 
     Starts from the whole current merged settings (so thinking/effort/etc. are not
     dropped), applies ``config_patch`` ONLY when ``engine_changed`` (matching
     ``apply_selection`` exactly — so a model-only change keeps a hand-set custom
-    ``bin``), then overrides model/provider. Never touches global config/caches.
+    ``bin``), then overrides model/provider/effort (``effort=None`` leaves it as is,
+    ``""`` removes the key = CLI default). Never touches global config/caches.
     """
     if not engine.settings_key:
         return {"model": model}
@@ -328,6 +371,11 @@ def candidate_settings(
         settings["model"] = model
     if "provider" in engine.fields:
         settings["provider"] = provider
+    if effort is not None and engine.effort_levels:
+        if effort.strip():
+            settings["effort"] = effort.strip()
+        else:
+            settings.pop("effort", None)
     return settings
 
 
@@ -338,7 +386,9 @@ def _base_settings(engine: Engine) -> dict:
     ))
 
 
-def session_settings(engine: Engine, model: str, provider: str) -> dict:
+def session_settings(
+    engine: Engine, model: str, provider: str, *, effort: str = ""
+) -> dict:
     """Settings dict for a per-chat-session engine override.
 
     ``candidate_settings`` の ``engine_changed`` はここでは使えない。``False`` だと base の
@@ -354,7 +404,7 @@ def session_settings(engine: Engine, model: str, provider: str) -> dict:
     ``config_patch`` を持つのは claude 2 種だけで、そこで成立している。）
 
     ``model``/``provider`` が空ならそのエンジンの設定済み既定を使う（base 由来のまま残す）ので、
-    「エンジンだけ変えてモデルは既定」が自然に書ける。
+    「エンジンだけ変えてモデルは既定」が自然に書ける。``effort`` も同じく空なら base（全体設定）の値のまま。
     """
     if not engine.settings_key:
         return {"model": model}
@@ -367,11 +417,14 @@ def session_settings(engine: Engine, model: str, provider: str) -> dict:
         settings["model"] = model.strip()
     if "provider" in engine.fields and provider.strip():
         settings["provider"] = provider.strip()
+    if engine.effort_levels and effort.strip():
+        settings["effort"] = effort.strip()
     return settings
 
 
 def apply_selection(
-    engine: Engine, model: str, provider: str, *, engine_changed: bool
+    engine: Engine, model: str, provider: str, *, engine_changed: bool,
+    effort: str | None = None,
 ) -> None:
     """Persist the selection to the truth sources and refresh caches (no restart).
 
@@ -381,7 +434,11 @@ def apply_selection(
     ⇔ claude-cli makes reachable) never survives on disk. If another writer (the R2
     sync) has replaced models.toml since, the rollback is skipped and that content is
     kept.
+
+    ``effort``: None なら触れない（effort 行の無いエンジンも同じ）。"" は models.toml に "" を書き、
+    config.toml に残った値も消す。
     """
+    write_effort = effort is not None and bool(engine.effort_levels)
     models_path = models_toml_path()
     config_path = config_toml_path()
 
@@ -392,6 +449,8 @@ def apply_selection(
         model_changes: dict[str, str | bool] = {"model": model}
         if "provider" in engine.fields:
             model_changes["provider"] = provider
+        if write_effort:
+            model_changes["effort"] = effort.strip()
         models_write = set_toml_keys(models_path, {engine.settings_key: model_changes})
 
     # 2. config.toml: [backend].name always (idempotent) + config_patch (only on
@@ -412,6 +471,10 @@ def apply_selection(
             existing = backend_config().get(engine.settings_key, {}).get(field)
             if isinstance(existing, str) and existing.strip():
                 sec[field] = ""
+    if write_effort and not effort.strip():
+        existing = backend_config().get(engine.settings_key, {}).get("effort")
+        if isinstance(existing, str) and existing.strip():
+            sec["effort"] = ""
     if sec:
         config_changes[engine.settings_key] = sec
 

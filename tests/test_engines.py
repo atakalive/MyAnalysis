@@ -384,6 +384,9 @@ def test_engine_label_keys_and_dialog_keys_resolve():
         "backend.dialog.engine",
         "backend.dialog.model",
         "backend.dialog.provider",
+        "backend.dialog.effort",
+        "backend.dialog.effort_default",
+        "backend.dialog.effort_follow_global",
         "backend.dialog.apply",
         "backend.dialog.test",
         "backend.dialog.testing",
@@ -698,3 +701,111 @@ def test_update_choices_skips_engines_without_settings_and_unknown_fields(apply_
     assert update_choices(_CODEX, "nope", called.append) is None
     assert called == []
     assert not apply_env.mdl_p.exists()
+
+
+# --------------------------------------------------------------------------- #
+# effort（Issue #117）                                                          #
+# --------------------------------------------------------------------------- #
+
+def test_effort_levels_per_engine():
+    assert engine_by_id("claude-vscode").effort_levels == engines.CLAUDE_EFFORTS
+    assert engine_by_id("claude-cli").effort_levels == engines.CLAUDE_EFFORTS
+    assert engine_by_id("pi").effort_levels == engines.PI_EFFORTS
+    assert engine_by_id("codex").effort_levels == engines.CODEX_EFFORTS
+    assert engine_by_id("openai-http").effort_levels == ()
+    assert engine_by_id("mock").effort_levels == ()
+    for e in ENGINES:
+        assert "effort" not in e.fields
+
+
+@pytest.mark.parametrize("merged,expected", [
+    ({"effort": "  high "}, "high"),
+    ({"effort": True}, ""),
+    ({"effort": 3}, ""),
+    ({}, ""),
+])
+def test_current_effort(monkeypatch, merged, expected):
+    _base(monkeypatch, merged)
+    assert engines.current_effort(engine_by_id("claude-vscode")) == expected
+
+
+def test_current_effort_mock_is_empty(monkeypatch):
+    _base(monkeypatch, {"effort": "high"})
+    assert engines.current_effort(engine_by_id("mock")) == ""
+
+
+def test_effort_choices_codex_uses_catalog(monkeypatch):
+    import llm_backend.codex as codex_mod
+    codex = engine_by_id("codex")
+    monkeypatch.setattr(codex_mod, "supported_efforts", lambda m: ("low", "ultra"))
+    assert engines.effort_choices(codex, "x") == ("low", "ultra")
+    monkeypatch.setattr(codex_mod, "supported_efforts", lambda m: None)
+    assert engines.effort_choices(codex, "x") == engines.CODEX_EFFORTS
+    monkeypatch.setattr(codex_mod, "supported_efforts", lambda m: ())
+    assert engines.effort_choices(codex, "x") == ()
+
+
+def test_effort_choices_other_engines_skip_catalog(monkeypatch):
+    import llm_backend.codex as codex_mod
+
+    def _boom(m):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(codex_mod, "supported_efforts", _boom)
+    assert engines.effort_choices(engine_by_id("claude-vscode"), "x") == engines.CLAUDE_EFFORTS
+    assert engines.effort_choices(engine_by_id("pi"), "x") == engines.PI_EFFORTS
+    assert engines.effort_choices(engine_by_id("openai-http"), "x") == ()
+
+
+def test_apply_writes_effort(apply_env):
+    apply_selection(engine_by_id("claude-vscode"), "opus", "", engine_changed=False,
+                    effort="high")
+    mdld = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert mdld["claude_code"]["effort"] == "high"
+
+
+def test_apply_effort_none_leaves_models_line(apply_env):
+    seed = '[claude_code]\nmodel = "opus"\neffort = "max"  # keep\n'
+    apply_env.mdl_p.write_text(seed, encoding="utf-8")
+    apply_selection(engine_by_id("claude-vscode"), "opus", "", engine_changed=False,
+                    effort=None)
+    assert apply_env.mdl_p.read_text(encoding="utf-8") == seed
+
+
+def test_apply_effort_empty_clears_config_leftover(apply_env):
+    apply_env.cfg_p.write_text(
+        '[backend]\nname = "claude"\n\n[claude_code]\neffort = "max"\n', encoding="utf-8")
+    apply_env.bc.data = {"claude_code": {"effort": "max"}}
+    apply_selection(engine_by_id("claude-vscode"), "opus", "", engine_changed=False,
+                    effort="")
+    mdld = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert mdld["claude_code"]["effort"] == ""
+    cfgd = tomllib.loads(apply_env.cfg_p.read_text(encoding="utf-8"))
+    assert cfgd["claude_code"]["effort"] == ""
+
+
+def test_apply_effort_ignored_for_engine_without_levels(apply_env):
+    apply_selection(engine_by_id("openai-http"), "m", "", engine_changed=False,
+                    effort="high")
+    mdld = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert "effort" not in mdld["openai-compat"]
+
+
+def test_candidate_settings_effort(monkeypatch):
+    _base(monkeypatch, {"model": "opus", "effort": "xhigh"})
+    e = engine_by_id("claude-vscode")
+    assert candidate_settings(e, "opus", "", engine_changed=False)["effort"] == "xhigh"
+    assert candidate_settings(e, "opus", "", engine_changed=False,
+                              effort="max")["effort"] == "max"
+    assert "effort" not in candidate_settings(e, "opus", "", engine_changed=False,
+                                              effort="")
+
+
+def test_session_settings_effort(monkeypatch):
+    _base(monkeypatch, {"model": "opus", "effort": "xhigh"})
+    e = engine_by_id("claude-vscode")
+    assert session_settings(e, "", "", effort="")["effort"] == "xhigh"
+    assert session_settings(e, "", "", effort="low")["effort"] == "low"
+    _base(monkeypatch, {"model": "m"})
+    assert "effort" not in session_settings(engine_by_id("openai-http"), "", "",
+                                            effort="low")

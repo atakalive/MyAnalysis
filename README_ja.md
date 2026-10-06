@@ -80,7 +80,7 @@
   - Claude・Codex: 空でよい（そのエンジンの既定モデル）。Claude で指定するなら `opus` / `sonnet` / `haiku` などのエイリアス。Claude では **疎通確認** の結果 `OK（…秒 / <モデル名>）` に正式なモデル ID が出るので、それをそのまま使える。Claude・Codex ともダイアログに候補があり、**設定 → バックエンドの状況…** の **モデル取得** で、エンジンが知っている新しい ID を候補に追加できる。
   - pi: **プロバイダ**（`openai-codex` / `github-copilot` / `llama.cpp`）を選び、モデルは `pi --list-models` に出る ID（ダイアログに候補あり。**モデル取得** でも追加できる）。
   - OpenAI 互換 HTTP: サーバー側のモデル名を入れる（Ollama なら `ollama list` に出る名前）。空だと `.env` の `OPENAI_MODEL`、それも無ければ `gpt-4o-mini` になり、Ollama などでは失敗する。
-- thinking（推論の有無）と effort（考える量）は、通常は設定しなくてよい。変えるときは `models.toml` に書く（→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)）。
+- effort（考える量）は **設定 → バックエンド/モデル設定…** で選べる（Claude・Codex・pi。チャットごとにも変えられる）。通常は「既定」のままでよい（→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)）。
 
 Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
 

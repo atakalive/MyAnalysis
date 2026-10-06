@@ -23,12 +23,14 @@ def parent_widget(qapp):
     return QWidget()
 
 
-def _patch_config(monkeypatch, *, engine_id="claude-vscode", model="opus", provider=""):
+def _patch_config(monkeypatch, *, engine_id="claude-vscode", model="opus", provider="",
+                  effort=""):
     import gui.backend_selector_dialog as mod
 
     monkeypatch.setattr(mod, "current_engine_id", lambda: engine_id)
     monkeypatch.setattr(mod, "current_model", lambda e: model)
     monkeypatch.setattr(mod, "current_provider", lambda e: provider)
+    monkeypatch.setattr(mod, "current_effort", lambda e: effort)
 
 
 def _make_dialog(monkeypatch, parent_widget, *, busy=False, search_sel=("", "", "")):
@@ -325,13 +327,16 @@ def test_configured_value_is_listed_first_on_open(monkeypatch, parent_widget):
 # --------------------------------------------------------------------------- #
 
 def _session_dlg(monkeypatch, parent_widget, *, engine=None, model=None,
-                 provider=None, busy_ids=(), global_engine_id="claude-vscode"):
+                 provider=None, busy_ids=(), global_engine_id="claude-vscode",
+                 effort=None, global_effort=""):
     import gui.backend_selector_dialog as mod
     from llm_bridge import chat_store
 
-    _patch_config(monkeypatch, engine_id=global_engine_id, model="opus")
+    _patch_config(monkeypatch, engine_id=global_engine_id, model="opus",
+                  effort=global_effort)
     sess = chat_store.new_session("mock", "sys")
     sess.engine, sess.engine_model, sess.engine_provider = engine, model, provider
+    sess.engine_effort = effort
 
     chat = MagicMock()
     chat._turns = {i: object() for i in busy_ids}
@@ -423,10 +428,11 @@ def test_probe_uses_session_settings(monkeypatch, parent_widget):
     import gui.backend_selector_dialog as mod
     seen = []
     monkeypatch.setattr(mod, "session_settings",
-                        lambda e, m, p: seen.append((e.id, m, p)) or {"model": m})
+                        lambda e, m, p, *, effort="": seen.append((e.id, m, p, effort))
+                        or {"model": m})
     dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi")
-    dlg._probe_settings(dlg._selected_engine(), "qwen3-coder", "llama.cpp")
-    assert seen == [("pi", "qwen3-coder", "llama.cpp")]
+    dlg._probe_settings(dlg._selected_engine(), "qwen3-coder", "llama.cpp", "high")
+    assert seen == [("pi", "qwen3-coder", "llama.cpp", "high")]
 
 
 def test_seed_uses_session_value_only_for_its_own_engine(monkeypatch, parent_widget):
@@ -582,6 +588,7 @@ def test_unconfigured_dialog_requires_explicit_choice(monkeypatch, parent_widget
     monkeypatch.setattr(llm_backend.engines, "backend_config", lambda: cfg)
     monkeypatch.setattr(mod, "current_model", lambda e: "")
     monkeypatch.setattr(mod, "current_provider", lambda e: "")
+    monkeypatch.setattr(mod, "current_effort", lambda e: "")
     apply_spy = MagicMock()
     build_spy = MagicMock()
     monkeypatch.setattr(mod, "apply_selection", apply_spy)
@@ -599,6 +606,7 @@ def test_unconfigured_dialog_requires_explicit_choice(monkeypatch, parent_widget
     assert not dlg._test_btn.isEnabled()
     assert dlg._result_label.text() == tr("backend.dialog.unconfigured")
     assert dlg._search_engine_combo.currentData() == ""
+    assert dlg._effort_combo.isHidden()
 
     dlg._on_apply()
     dlg._on_test()
@@ -635,3 +643,215 @@ def test_session_dialog_unconfigured_global(monkeypatch, parent_widget):
     assert not ok.isEnabled()
     dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("pi"))
     assert ok.isEnabled()
+
+
+# --------------------------------------------------------------------------- #
+# effort（Issue #117）                                                          #
+# --------------------------------------------------------------------------- #
+
+def _effort_items(dlg) -> list:
+    c = dlg._effort_combo
+    return [c.itemData(i) for i in range(c.count())]
+
+
+def _select_effort(dlg, value: str) -> None:
+    dlg._effort_combo.setCurrentIndex(dlg._effort_combo.findData(value))
+
+
+@pytest.mark.parametrize("eid,shown", [
+    ("claude-vscode", True), ("claude-cli", True), ("codex", True), ("pi", True),
+    ("openai-http", False), ("mock", False),
+])
+def test_effort_row_visibility(monkeypatch, parent_widget, eid, shown):
+    _patch_config(monkeypatch, engine_id=eid)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._effort_combo.isHidden() is (not shown)
+
+
+def test_effort_seed_on_open(monkeypatch, parent_widget):
+    from llm_backend.engines import CLAUDE_EFFORTS
+    _patch_config(monkeypatch, effort="xhigh")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    c = dlg._effort_combo
+    assert c.currentData() == "xhigh"
+    assert c.itemText(0) == tr("backend.dialog.effort_default")
+    assert c.itemData(0) == ""
+    assert _effort_items(dlg) == ["", *CLAUDE_EFFORTS]
+    assert not c.isEditable()
+
+
+def test_effort_unknown_value_is_kept_once(monkeypatch, parent_widget):
+    from llm_backend.engines import CLAUDE_EFFORTS
+    _patch_config(monkeypatch, effort="bogus")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert _effort_items(dlg) == ["", *CLAUDE_EFFORTS, "bogus"]
+    assert dlg._effort_combo.currentData() == "bogus"
+
+
+def _patch_codex_choices(monkeypatch):
+    import gui.backend_selector_dialog as mod
+    monkeypatch.setattr(
+        mod, "effort_choices",
+        lambda e, m: ("low", "high") if m == "a" else ("low", "high", "ultra"))
+
+
+def test_codex_model_change_keeps_supported_effort(monkeypatch, parent_widget):
+    _patch_codex_choices(monkeypatch)
+    _patch_config(monkeypatch, engine_id="codex", model="x")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    _select_effort(dlg, "high")
+    dlg._model_combo.setEditText("a")
+    assert dlg._effort_combo.currentData() == "high"
+    assert "ultra" not in _effort_items(dlg)
+
+
+def test_codex_model_change_drops_unsupported_effort(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", spy)
+    _patch_codex_choices(monkeypatch)
+    _patch_config(monkeypatch, engine_id="codex", model="x")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    _select_effort(dlg, "ultra")
+    dlg._model_combo.setEditText("a")
+    assert dlg._effort_combo.currentData() == ""
+    assert "ultra" not in _effort_items(dlg)
+    dlg._on_apply()
+    assert spy.call_args.kwargs["effort"] == ""
+
+
+def test_codex_opened_value_kept_until_choices_change(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", spy)
+    _patch_codex_choices(monkeypatch)
+    _patch_config(monkeypatch, engine_id="codex", model="a", effort="ultra")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert _effort_items(dlg) == ["", "low", "high", "ultra"]
+    assert dlg._effort_combo.currentData() == "ultra"
+    dlg._on_apply()
+    assert spy.call_args.kwargs["effort"] == "ultra"
+
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._model_combo.setEditText("b")
+    assert dlg._effort_combo.currentData() == "ultra"
+    dlg._model_combo.setEditText("a")
+    assert dlg._effort_combo.currentData() == ""
+
+
+def test_model_change_with_same_choices_changes_nothing(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, effort="bogus")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    before = _effort_items(dlg)
+    dlg._model_combo.setEditText("sonnet")
+    assert dlg._effort_combo.currentData() == "bogus"
+    assert _effort_items(dlg) == before
+
+
+def test_engine_switch_rebuilds_effort(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from llm_backend.engines import PI_EFFORTS
+    _patch_config(monkeypatch)
+    monkeypatch.setattr(mod, "current_effort",
+                        lambda e: {"claude-vscode": "max", "pi": "low"}.get(e.id, ""))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._effort_combo.currentData() == "max"
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("pi"))
+    assert _effort_items(dlg) == ["", *PI_EFFORTS]
+    assert dlg._effort_combo.currentData() == "low"
+    monkeypatch.setattr(mod, "effort_choices", lambda e, m: ("high", "ultra"))
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("codex"))
+    assert _effort_items(dlg) == ["", "high", "ultra"]
+    assert dlg._effort_combo.currentData() == ""
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("openai-http"))
+    assert dlg._effort_combo.isHidden()
+
+
+@pytest.mark.parametrize("value", ["high", ""])
+def test_apply_passes_selected_effort(monkeypatch, parent_widget, value):
+    import gui.backend_selector_dialog as mod
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", spy)
+    _patch_config(monkeypatch, effort="max")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    _select_effort(dlg, value)
+    dlg._on_apply()
+    assert spy.call_args.kwargs["effort"] == value
+
+
+def test_apply_without_effort_row_passes_none(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    spy = MagicMock()
+    monkeypatch.setattr(mod, "apply_selection", spy)
+    _patch_config(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("openai-http"))
+    dlg._on_apply()
+    assert spy.call_args.kwargs["effort"] is None
+
+
+def test_probe_passes_selected_effort(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    seen = []
+    monkeypatch.setattr(
+        mod, "candidate_settings",
+        lambda e, m, p, *, engine_changed, effort=None: seen.append(effort) or {})
+    monkeypatch.setattr(mod, "build_backend", MagicMock())
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self, *a, **k: None)
+    _patch_config(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    _select_effort(dlg, "ultracode")
+    dlg._on_test()
+    assert seen == ["ultracode"]
+    dlg._ping_worker = None
+
+
+def test_effort_locked_during_ping_and_follow_default(monkeypatch, parent_widget):
+    _patch_config(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._effort_combo.isEnabled()
+    dlg._set_selection_enabled(False)
+    assert not dlg._effort_combo.isEnabled()
+    dlg._set_selection_enabled(True)
+    assert dlg._effort_combo.isEnabled()
+
+    sdlg, _, _, _ = _session_dlg(monkeypatch, parent_widget)
+    assert not sdlg._effort_combo.isEnabled()        # 全体設定に従う
+    sdlg._follow_default.setChecked(False)
+    assert sdlg._effort_combo.isEnabled()
+
+
+def test_choice_buttons_do_not_touch_effort(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, effort="high")
+    _patch_choices(monkeypatch)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    _select_effort(dlg, "max")
+    before = _effort_items(dlg)
+    dlg._model_combo.setEditText("new-model")
+    dlg._on_edit_choices("model", True)
+    dlg._model_combo.setEditText("a")
+    dlg._on_edit_choices("model", False)
+    assert _effort_items(dlg) == before
+    assert dlg._effort_combo.currentData() == "max"
+
+
+def test_session_effort_first_entry_and_no_global_seed(monkeypatch, parent_widget):
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, global_effort="xhigh")
+    assert dlg._effort_combo.itemText(0) == tr("backend.dialog.effort_follow_global")
+    assert dlg._effort_combo.currentData() == ""
+
+
+def test_session_effort_seed_only_for_own_engine(monkeypatch, parent_widget):
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="pi", effort="low",
+                                global_effort="max")
+    assert dlg._effort_combo.currentData() == "low"
+    dlg._engine_combo.setCurrentIndex(dlg._engine_combo.findData("claude-vscode"))
+    assert dlg._effort_combo.currentData() == ""
+
+
+@pytest.mark.parametrize("value", ["high", ""])
+def test_session_apply_passes_effort(monkeypatch, parent_widget, value):
+    dlg, _, _, applied = _session_dlg(monkeypatch, parent_widget, engine="pi", effort="low")
+    _select_effort(dlg, value)
+    dlg._on_apply()
+    assert applied[0][1]["effort"] == value
