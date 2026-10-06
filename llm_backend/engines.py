@@ -13,6 +13,7 @@ Adding a future engine = a backend module + a ``_BACKENDS`` entry
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from common.filelock import exclusive_lock
@@ -24,6 +25,7 @@ from llm_backend.settings_store import (
     config_toml_path,
     models_toml_path,
     set_toml_keys,
+    update_toml_keys,
 )
 
 
@@ -230,7 +232,10 @@ def saved_choices(engine: Engine, field: str) -> tuple[str, ...] | None:
     key = _CHOICE_KEY.get(field)
     if key is None or not engine.settings_key:
         return None
-    section = model_config().get(engine.settings_key)
+    return _choices_in(model_config().get(engine.settings_key), key)
+
+
+def _choices_in(section: object, key: str) -> tuple[str, ...] | None:
     if not isinstance(section, dict):
         return None
     raw = section.get(key)
@@ -254,12 +259,53 @@ def combo_choices(engine: Engine, field: str) -> tuple[str, ...]:
 
 
 def save_choices(engine: Engine, field: str, values) -> None:
-    """Persist ``values`` as the choice list for ``field`` and refresh the cache."""
+    """Persist ``values`` as the choice list for ``field`` and refresh the cache.
+
+    Blind write: it replaces the whole list without looking at what is on disk. Do NOT
+    build ``values`` from ``combo_choices`` / ``saved_choices`` (the ``model_config``
+    cache can be stale after an R2 sync or another process's write, and the write would
+    drop those changes) — any read-then-write edit (add / remove / append) goes through
+    ``update_choices``, which re-reads under the ``models.toml`` lock.
+    """
     key = _CHOICE_KEY.get(field)
     if key is None or not engine.settings_key:
         return
     set_toml_keys(models_toml_path(), {engine.settings_key: {key: _clean(values)}})
     model_config.cache_clear()
+
+
+def update_choices(
+    engine: Engine,
+    field: str,
+    edit: Callable[[tuple[str, ...]], Sequence[str] | None],
+) -> tuple[str, ...] | None:
+    """Read-modify-write the choice list for ``field`` under the models.toml lock.
+
+    ``edit`` receives the list as it is on disk right now (the seed when never
+    customised) and returns the list to write; ``None`` means "write nothing" (and
+    the return value is then ``None``). On a write the ``model_config`` cache is
+    cleared and the written list (``_clean``-ed) is returned. Every choice-list edit
+    that derives what to write from what it read must go through here — the cache
+    can be stale after an R2 sync or another process's write.
+    """
+    key = _CHOICE_KEY.get(field)
+    if key is None or not engine.settings_key:
+        return None
+    written: tuple[str, ...] | None = None
+
+    def _compute(current: dict) -> dict:
+        nonlocal written
+        base = _choices_in(current.get(engine.settings_key), key)
+        new = edit(base if base is not None else seed_choices(engine, field))
+        if new is None:
+            return {}
+        written = tuple(_clean(new))
+        return {engine.settings_key: {key: list(written)}}
+
+    update_toml_keys(models_toml_path(), _compute)
+    if written is not None:
+        model_config.cache_clear()
+    return written
 
 
 def candidate_settings(

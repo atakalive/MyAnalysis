@@ -195,14 +195,20 @@ def test_apply_io_error_shows_message(monkeypatch, parent_widget):
 # --------------------------------------------------------------------------- #
 
 def _patch_choices(monkeypatch, initial=("a", "b")):
-    """Stub combo_choices/save_choices with an in-memory store."""
+    """Stub combo_choices/update_choices with an in-memory store."""
     import gui.backend_selector_dialog as mod
 
     store = {"model": list(initial), "provider": list(initial)}
     monkeypatch.setattr(mod, "combo_choices", lambda e, f: tuple(store[f]))
-    monkeypatch.setattr(
-        mod, "save_choices", lambda e, f, vals: store.__setitem__(f, list(vals))
-    )
+
+    def _update(e, f, edit):
+        new = edit(tuple(store[f]))
+        if new is None:
+            return None
+        store[f] = list(new)
+        return tuple(new)
+
+    monkeypatch.setattr(mod, "update_choices", _update)
     return store
 
 
@@ -263,10 +269,10 @@ def test_save_failure_is_surfaced_not_raised(monkeypatch, parent_widget):
     _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
     _patch_choices(monkeypatch)
 
-    def _boom(e, f, vals):
+    def _boom(e, f, edit):
         raise RuntimeError("models.toml is read-only")
 
-    monkeypatch.setattr(mod, "save_choices", _boom)
+    monkeypatch.setattr(mod, "update_choices", _boom)
     dlg, _ = _make_dialog(monkeypatch, parent_widget)
     dlg._model_combo.setEditText("x")
     dlg._on_edit_choices("model", True)        # must not propagate

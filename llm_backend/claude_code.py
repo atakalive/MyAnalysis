@@ -437,6 +437,115 @@ class ClaudeCodeBackend:
         if proc is not None and proc.poll() is None:
             self._kill_tree(proc)
 
+    def list_models(self, timeout: float = 20.0) -> dict:
+        """Ask the engine for its model list without running a turn.
+
+        Spawns the engine in stream-json mode, sends only an ``initialize``
+        control_request (no ``user`` message, so no turn runs and no session file
+        is written) and returns the body of the matching control_response
+        (``event["response"]["response"]``; ``{}`` when not a dict). Every failure
+        is a ``RuntimeError``. Independent of ``stream()``: the process is not
+        stored in ``self._proc``, so ``cancel()`` / ``kill()`` never touch it.
+        """
+        claude_bin = self._discover_binary()
+        cmd = [
+            claude_bin,
+            "--output-format", "stream-json",
+            "--input-format", "stream-json",
+            "--verbose",
+        ]
+        if sys.platform == "win32" and claude_bin.lower().endswith((".cmd", ".bat")):
+            resolved = resolve_cmd_shim(claude_bin)
+            if resolved:
+                cmd = resolved + cmd[1:]
+            else:
+                cmd = ["cmd.exe", "/c"] + cmd
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self._config.get("cwd") or str(self._agent_home()),
+            env=self._build_env(),
+            start_new_session=(sys.platform != "win32"),
+            **no_window_kwargs(),
+        )
+        threading.Thread(
+            target=self._drain_stderr, args=(proc,), daemon=True
+        ).start()
+
+        timed_out = threading.Event()
+
+        def _expire() -> None:
+            timed_out.set()
+            self._kill_tree(proc)
+
+        timer = threading.Timer(timeout, _expire)
+        timer.daemon = True
+        timer.start()
+
+        rid = uuid.uuid4().hex
+        request = {
+            "type": "control_request",
+            "request_id": rid,
+            "request": {"subtype": "initialize"},
+        }
+        result: dict | None = None
+        error: str | None = None
+        try:
+            # stdin stays open until the answer arrives (EOF would end the engine).
+            try:
+                proc.stdin.write((json.dumps(request) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass    # child already gone — the exit code below reports why
+            for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or event.get("type") != "control_response":
+                    continue
+                response = event.get("response")
+                # request_id lives inside `response`, not at the top level.
+                if not isinstance(response, dict) or response.get("request_id") != rid:
+                    continue
+                subtype = response.get("subtype")
+                if subtype == "success":
+                    body = response.get("response")
+                    result = body if isinstance(body, dict) else {}
+                else:
+                    error = str(response.get("error") or subtype or "unknown error")
+                break
+        finally:
+            timer.cancel()
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._kill_tree(proc)
+                    proc.wait(timeout=5)
+
+        if result is not None:
+            return result
+        if error is not None:
+            raise RuntimeError(f"claude initialize failed: {error}")
+        if timed_out.is_set():
+            raise RuntimeError(f"claude initialize timed out after {timeout}s")
+        raise RuntimeError(
+            f"claude exited with code {proc.returncode} before answering initialize:\n"
+            + "\n".join(self._stderr_buf)
+        )
+
     # ----- internals -----
 
     def _handle_stream_event(self, ev: dict, parent: object = None) -> Iterator[TextDelta]:

@@ -565,3 +565,20 @@ def test_check_engine_passes_claude_binary_to_auth(monkeypatch):
     monkeypatch.setattr(preflight, "_claude_auth", _auth)
     check_engine("claude-cli")
     assert seen == ["/x/claude"]
+
+
+def test_parse_list_models_pairs_in_output_order():
+    """ヘッダと 1 トークンの行を飛ばし、(provider, model) を出力順に返す（重複は残す）。"""
+    text = (
+        "provider        model            context\n"
+        "\n"
+        "lonely\n"
+        "openai-codex    gpt-5.5          272K\n"
+        "github-copilot  gpt-5.5          1M\n"
+        "openai-codex    gpt-5.5          272K\n"
+    )
+    assert preflight._parse_list_models(text) == [
+        ("openai-codex", "gpt-5.5"),
+        ("github-copilot", "gpt-5.5"),
+        ("openai-codex", "gpt-5.5"),
+    ]

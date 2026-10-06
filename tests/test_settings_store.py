@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from llm_backend.settings_store import _apply_one, set_toml_keys
+from llm_backend import settings_store
+from llm_backend.settings_store import _apply_one, set_toml_keys, update_toml_keys
 
 CONFIG_SAMPLE = (
     "# LLM backend configuration.\n"
@@ -272,3 +273,112 @@ def test_set_toml_keys_returns_before_and_after(tmp_path, initial):
     if initial == "[x\n":
         with open(p.with_suffix(".toml.bak"), encoding="utf-8", newline="") as f:
             assert f.read() == initial
+
+
+# ---- 角括弧を含む要素の配列（モデル ID の opus[1m] 等） ----
+
+
+def test_array_with_bracketed_element_is_rewritable_repeatedly(tmp_path):
+    p = tmp_path / "m.toml"
+    set_toml_keys(p, {"claude_code": {"model_choices": ["opus[1m]", "sonnet"]}})
+    for vals in (["opus[1m]", "sonnet", "haiku"], ["sonnet"], ["x[2]", "opus[1m]"]):
+        set_toml_keys(p, {"claude_code": {"model_choices": vals}})
+        assert tomllib.loads(p.read_text(encoding="utf-8"))["claude_code"][
+            "model_choices"] == vals
+
+
+def test_array_with_escaped_quote_and_bracket_is_rewritable(tmp_path):
+    p = _write(tmp_path / "c.toml", '[s]\nk = ["a\\"]b", "c"]\n')
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == ['a"]b', "c"]
+    set_toml_keys(p, {"s": {"k": ["z"]}})
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == ["z"]
+
+
+def test_array_with_quoted_comment_keeps_comment(tmp_path):
+    p = _write(tmp_path / "c.toml", '[s]\nk = ["a"]  # say "hi"\n')
+    set_toml_keys(p, {"s": {"k": ["b"]}})
+    assert p.read_text(encoding="utf-8") == '[s]\nk = ["b"]  # say "hi"\n'
+
+
+def test_literal_string_element_with_bracket_refused_unchanged(tmp_path):
+    orig = "[s]\nk = ['opus[1m]']\n"
+    p = _write(tmp_path / "c.toml", orig)
+    with pytest.raises(RuntimeError):
+        set_toml_keys(p, {"s": {"k": ["x"]}})
+    assert p.read_text(encoding="utf-8") == orig
+
+
+# ---- update_toml_keys: ロック下の read-modify-write ----
+
+
+def test_update_toml_keys_compute_sees_current_file(tmp_path):
+    p = _write(tmp_path / "c.toml", '[s]\nk = ["a"]\n')
+    seen = []
+
+    def compute(cur):
+        seen.append(cur)
+        return {"s": {"k": cur["s"]["k"] + ["b"]}}
+
+    res = update_toml_keys(p, compute)
+    assert seen == [{"s": {"k": ["a"]}}]
+    assert res is not None and res.before == '[s]\nk = ["a"]\n'
+    assert tomllib.loads(p.read_text(encoding="utf-8"))["s"]["k"] == ["a", "b"]
+
+
+def test_update_toml_keys_missing_file_gives_empty_dict(tmp_path):
+    seen = []
+    p = tmp_path / "absent.toml"
+    assert update_toml_keys(p, lambda cur: seen.append(cur) or {}) is None
+    assert seen == [{}]
+    assert not p.exists()                     # 無変更なら作らない
+
+
+def test_update_toml_keys_empty_changes_writes_nothing(tmp_path):
+    orig = '[s]\nk = "v"   # keep\n'
+    p = _write(tmp_path / "c.toml", orig)
+    assert update_toml_keys(p, lambda cur: {}) is None
+    assert p.read_bytes() == orig.encode("utf-8")
+
+
+def test_update_toml_keys_compute_runs_under_the_lock(tmp_path, monkeypatch):
+    import contextlib
+
+    real = settings_store.exclusive_lock
+    inside = {"flag": False}
+
+    @contextlib.contextmanager
+    def _recording(path):
+        with real(path):
+            inside["flag"] = True
+            try:
+                yield
+            finally:
+                inside["flag"] = False
+
+    monkeypatch.setattr(settings_store, "exclusive_lock", _recording)
+    seen = []
+
+    def compute(cur):
+        seen.append(inside["flag"])
+        return {"s": {"k": "v"}}
+
+    update_toml_keys(tmp_path / "c.toml", compute)
+    assert seen == [True]
+    assert inside["flag"] is False
+
+
+def test_update_toml_keys_corrupt_file_backs_up(tmp_path):
+    p = _write(tmp_path / "c.toml", "not = = toml\n")
+    seen = []
+    update_toml_keys(p, lambda cur: seen.append(cur) or {"s": {"k": "v"}})
+    assert seen == [{}]
+    assert (tmp_path / "c.toml.bak").read_text(encoding="utf-8") == "not = = toml\n"
+    assert tomllib.loads(p.read_text(encoding="utf-8")) == {"s": {"k": "v"}}
+
+
+def test_update_toml_keys_bad_value_type_leaves_file(tmp_path):
+    orig = '[s]\nk = "v"\n'
+    p = _write(tmp_path / "c.toml", orig)
+    with pytest.raises(TypeError):
+        update_toml_keys(p, lambda cur: {"s": {"k": 3}})
+    assert p.read_text(encoding="utf-8") == orig

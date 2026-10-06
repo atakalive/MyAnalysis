@@ -108,12 +108,17 @@ guards that every prompt still contains it.
   The model/provider dropdowns are user-editable: the 追加/削除 (Add/Remove) buttons next to each combo add or
   remove the typed value and persist the list to `models.toml` as
   `[<section>].model_choices` / `provider_choices` (saved immediately, independent
-  of 適用). An absent key falls back to the seed in `engines.py`; `[]` means "no
+  of 適用). Every read-then-write edit of a choice list (追加/削除 and モデル取得) goes
+  through `engines.update_choices`, which re-reads the list from `models.toml` while
+  holding its lock (`settings_store.update_toml_keys`). The `model_config` cache can be
+  stale after an R2 sync or another process's write, and building the new list from the
+  cache would silently drop those changes. An absent key falls back to the seed in `engines.py`; `[]` means "no
   candidates" and is honoured. `merged_settings` overlays only bool/non-blank-str,
   so these list values never leak into a backend's settings. **`engines.PI_PROVIDERS`
   (`openai-codex` / `github-copilot` / `llama.cpp`) is the single source of truth for
-  which providers pi is meant to be used with** — it seeds the dropdown *and* filters
-  what the backend-status window reports. Keep them from diverging: pi's `auth.json`
+  which providers pi is meant to be used with** — it seeds the dropdown, filters
+  what the backend-status window reports, *and* limits which `pi --list-models` rows
+  モデル取得 appends. Keep them from diverging: pi's `auth.json`
   and `--list-models` can surface others (anthropic, google, …), and listing those
   implies "you can use these too" when they actually bill separately. Plain `openai`
   is not listed because it serves the same purpose as `openai-codex`. Local models
@@ -127,7 +132,9 @@ catalog until llama-server has them loaded, which is why the list is editable.
   when npm is missing would just fail.
   - **Nothing here bills.** No LLM turn runs on open/re-check; the per-row 疎通確認
     button (`ping.ping_backend`) is the only paid path and only fires on click. There is
-    deliberately no refresh timer (each probe spawns processes).
+    deliberately no refresh timer (each probe spawns processes). モデル取得 (fetch models)
+    runs no inference either, and never verifies the fetched IDs with a ping-pong turn —
+    spending tokens stays the user's 疎通確認 click alone.
   - **Never call `pi auth print-bearer-token`**: it refreshes tokens expiring within 30
     minutes, and when the same refresh token is shared across pi(WSL)/pi(Windows)/codex
     it logs the others out. Measured-safe probes: `--version`, `codex login status`,
@@ -147,6 +154,35 @@ catalog until llama-server has them loaded, which is why the list is editable.
   - **preflight returns no localised prose** — it feeds both CLI and GUI, so `*_detail`
     holds neutral facts (versions, provider names, tool output) and explanations are
     `(i18n key, params)` pairs in `notes`, translated by the caller.
+  - **モデル取得 (fetch models)** — Qt-free `llm_backend/model_catalog.py` (`fetch_models`,
+    never raises; `SUPPORTED` = claude-vscode / claude-cli / pi / codex) reads the IDs the
+    installed tool itself knows and **only appends** the new ones to
+    `[<section>].model_choices` (`append_new`). Nothing is removed (stale IDs are the user's
+    to remove with 削除), and nothing is written when there is nothing new, so an
+    uncustomised list stays on the seed. Sources: claude = spawn the engine in stream-json
+    mode, send only an `initialize` control_request, read `response.response.models[].value`
+    (minus `default`), close stdin — no `user` message, so no turn runs and no session file
+    is written (measured on 2.1.282); pi = `pi --list-models` rows whose provider is in
+    `PI_PROVIDERS` (only `[pi].provider` when set); codex = read
+    `$CODEX_HOME/models_cache.json` (default `~/.codex`) without spawning codex, which
+    refreshes that file from the server on each run. Safe because codex is a file read,
+    pi's probe leaves the auth files byte-identical, and claude's token is not shared with
+    other tools (the shared refresh-token hazard is pi ↔ codex only). It runs only on the
+    button and once after a successful (rc 0) install/update of that engine — never on
+    open/re-check, no timer. The OpenAI-compatible row has no button: no `/v1/models`, no
+    web scraping, no filtering UI for huge lists. The append goes through
+    `model_catalog.append_fetched` → `engines.update_choices`, so it lands on the list as it
+    is on disk at that moment, not on the list the fetch started from. An ID the tool still
+    lists comes back on the next fetch even if the user removed it (append-only). On win32
+    npm cannot replace a running `claude.exe` / pi (EBUSY), so the window's install/update,
+    fetch and 疎通確認 share one busy state (`_busy()` / `_apply_busy()`): only one runs at a
+    time, and 再確認 is disabled while busy too (the probe spawns `--version` etc.). A
+    worker still running after the window closes keeps its slot — and so busy — until it
+    finishes (`_stop_all` does not drop it), and an install's done only changes state when
+    its token matches `_install_token`, so a late done from before the close cannot clear or
+    re-arm a newer install. Engine processes outside this window (a chat turn, the settings dialog's 疎通確認,
+    other apps) are not tracked; an update then may fail with npm's own error (rc ≠ 0, no
+    auto fetch).
 - **Per-chat-session engine override** — the dialog above sets the *global default*;
   each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
   layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider`

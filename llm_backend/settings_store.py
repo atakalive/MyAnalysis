@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,6 +94,42 @@ def set_toml_keys(
     ``before`` を使い、ロックの外で読んだ内容は使わない）。
     """
     # 値型検証はロック取得前 (ファイルに触れる前) に行う。
+    _validate_changes(changes)
+    path = Path(path)
+    with exclusive_lock(path.with_name(path.name + ".lock")):
+        return _write_locked(path, changes)
+
+
+def update_toml_keys(
+    path: Path,
+    compute: Callable[[dict], dict[str, dict[str, str | bool | list[str]]]],
+) -> TomlWriteResult | None:
+    """ロックを持ったまま「読む → 決める → 書く」を行う。
+
+    ``compute`` は今のファイル内容（``tomllib`` で読んだ dict。ファイルが無い・TOML として
+    壊れているときは ``{}``）を受け、``set_toml_keys`` と同じ形の changes を返す。空なら
+    何も書かず None を返す。書き方・検証・壊れたファイルの ``.bak`` 退避は ``set_toml_keys``
+    と同じ。読んだ値から書く値を決める呼び出し側は、キャッシュや事前の読み取りではなく
+    これを使う（ロックの外で読むと、その間の R2 同期や別プロセスの書込を上書きで消す）。
+    ``FileNotFoundError`` 以外の ``OSError`` はそのまま送出する。
+    """
+    path = Path(path)
+    with exclusive_lock(path.with_name(path.name + ".lock")):
+        try:
+            with open(path, "rb") as f:
+                current = tomllib.load(f)
+        except (FileNotFoundError, tomllib.TOMLDecodeError):
+            current = {}
+        changes = compute(current)
+        if not changes:
+            return None
+        _validate_changes(changes)
+        return _write_locked(path, changes)
+
+
+def _validate_changes(
+    changes: dict[str, dict[str, str | bool | list[str]]],
+) -> None:
     for section, kv in changes.items():
         for key, value in kv.items():
             if isinstance(value, list):
@@ -107,73 +144,75 @@ def set_toml_keys(
                     f"or list[str], got {type(value).__name__}"
                 )
 
-    path = Path(path)
-    lock = path.with_name(path.name + ".lock")
-    with exclusive_lock(lock):
+
+def _write_locked(
+    path: Path, changes: dict[str, dict[str, str | bool | list[str]]]
+) -> TomlWriteResult:
+    """set_toml_keys の本体。呼び出し側がロックを持っていること。"""
+    try:
+        # newline="" → no newline translation, so CRLF/LF is detectable below.
+        with open(path, encoding="utf-8", newline="") as f:
+            text: str | None = f.read()
+    except FileNotFoundError:
+        text = None
+    before = text
+    if text is not None:
         try:
-            # newline="" → no newline translation, so CRLF/LF is detectable below.
-            with open(path, encoding="utf-8", newline="") as f:
-                text: str | None = f.read()
-        except FileNotFoundError:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            # ユーザーの手編集で全体が壊れている → 退避して最小再生成する
+            # (壊れた TOML が GUI からの正常な適用を恒久ブロックしないため)。
+            bak = path.with_suffix(path.suffix + ".bak")
+            atomic_write_text(bak, text, newline="")
             text = None
-        before = text
-        if text is not None:
-            try:
-                tomllib.loads(text)
-            except tomllib.TOMLDecodeError:
-                # ユーザーの手編集で全体が壊れている → 退避して最小再生成する
-                # (壊れた TOML が GUI からの正常な適用を恒久ブロックしないため)。
-                bak = path.with_suffix(path.suffix + ".bak")
-                atomic_write_text(bak, text, newline="")
-                text = None
 
-        if text is None:
-            newline = "\n"
-            trailing = True
-            lines: list[str] = []
-        else:
-            newline = "\r\n" if "\r\n" in text else "\n"
-            trailing = text.endswith("\n")
-            lines = text.splitlines()
+    if text is None:
+        newline = "\n"
+        trailing = True
+        lines: list[str] = []
+    else:
+        newline = "\r\n" if "\r\n" in text else "\n"
+        trailing = text.endswith("\n")
+        lines = text.splitlines()
 
-        for section, kv in changes.items():
-            for key, value in kv.items():
-                _apply_one(lines, section, key, _format_value(value), path)
+    for section, kv in changes.items():
+        for key, value in kv.items():
+            _apply_one(lines, section, key, _format_value(value), path)
 
-        new_text = newline.join(lines)
-        if lines and trailing:
-            new_text += newline
+    new_text = newline.join(lines)
+    if lines and trailing:
+        new_text += newline
 
-        # 安全網: 要求した全キーがラウンドトリップ一致することを検証。壊すくらいなら拒否。
-        try:
-            parsed = tomllib.loads(new_text)
-        except tomllib.TOMLDecodeError as e:  # pragma: no cover - 生成ミスの保険
-            raise RuntimeError(
-                f"set_toml_keys: generated TOML for {path} is invalid: {e}"
-            ) from e
-        for section, kv in changes.items():
-            sec = parsed.get(section)
-            for key, value in kv.items():
-                if not isinstance(sec, dict) or sec.get(key) != value:
-                    raise RuntimeError(
-                        f"set_toml_keys: round-trip check failed for "
-                        f"[{section}].{key} in {path} (file left unchanged)"
-                    )
+    # 安全網: 要求した全キーがラウンドトリップ一致することを検証。壊すくらいなら拒否。
+    try:
+        parsed = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:  # pragma: no cover - 生成ミスの保険
+        raise RuntimeError(
+            f"set_toml_keys: generated TOML for {path} is invalid: {e}"
+        ) from e
+    for section, kv in changes.items():
+        sec = parsed.get(section)
+        for key, value in kv.items():
+            if not isinstance(sec, dict) or sec.get(key) != value:
+                raise RuntimeError(
+                    f"set_toml_keys: round-trip check failed for "
+                    f"[{section}].{key} in {path} (file left unchanged)"
+                )
 
-        atomic_write_text(path, new_text, newline="")
-        return TomlWriteResult(before=before, after=new_text)
+    atomic_write_text(path, new_text, newline="")
+    return TomlWriteResult(before=before, after=new_text)
 
 
 def _apply_one(
     lines: list[str], section: str, key: str, new_val: str, path: Path
 ) -> None:
     """1 つの (section, key) を lines に適用 (in-place)。"""
-    # val は「単一行の basic string / bool / 文字列配列」のみ。配列は要素に [ ] を
-    # 含まない単一行のものだけが一致する (multiline 配列は閉じ括弧が同じ行に無いので
+    # val は「単一行の basic string / bool / 文字列配列」のみ。配列は単一行のものだけが
+    # 一致する（二重引用の要素の中の [ ] は可） (multiline 配列は閉じ括弧が同じ行に無いので
     # 一致せず、下の RuntimeError で fail-closed になる)。
     key_re = re.compile(
         r"^(?P<indent>\s*)" + re.escape(key)
-        + r'(?P<eq>\s*=\s*)(?P<val>"(?:[^"\\]|\\.)*"|true|false|\[[^\[\]]*\])'
+        + r'(?P<eq>\s*=\s*)(?P<val>"(?:[^"\\]|\\.)*"|true|false|\[(?:"(?:[^"\\]|\\.)*"|[^\[\]"])*\])'
         + r"(?P<pad>\s*)(?P<cmt>#.*)?$"
     )
     assign_re = re.compile(r"^\s*" + re.escape(key) + r"\s*=")

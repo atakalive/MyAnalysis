@@ -75,7 +75,7 @@ def test_update_and_install_run_the_same_command(no_probe, parent_widget,
                                                  monkeypatch):
     w = _win(no_probe, parent_widget)
     seen = []
-    monkeypatch.setattr(w, "_run_install", lambda cmd: seen.append(list(cmd)))
+    monkeypatch.setattr(w, "_run_install", lambda cmd, engine_id: seen.append(list(cmd)))
     for state in ("missing", "ok"):
         w._paint(_st("pi", prereq_state="ok", binary_state=state,
                      install=("npm", "i", "-g", "x")))
@@ -256,3 +256,324 @@ def test_close_stops_workers(no_probe, parent_widget):
     w._stop_all = lambda: stopped.append(True)
     w.close()
     assert stopped == [True]
+
+
+# ---- モデル取得 ----
+
+
+def _ok_codex(**kw):
+    from llm_backend.model_catalog import ModelList
+    return ModelList("codex", "ok", **kw)
+
+
+@pytest.fixture()
+def models_toml(tmp_path, monkeypatch):
+    from llm_backend import engines
+    p = tmp_path / "models.toml"
+    monkeypatch.setattr(engines, "models_toml_path", lambda: p)
+    return p
+
+
+@pytest.fixture()
+def no_start(no_probe, monkeypatch):
+    """ワーカーを起動させない（start の呼び出しだけ記録する）。"""
+    started = {"models": [], "ping": [], "cmd": []}
+    monkeypatch.setattr(no_probe._ModelsWorker, "start",
+                        lambda self: started["models"].append(self))
+    monkeypatch.setattr(no_probe._PingWorker, "start",
+                        lambda self: started["ping"].append(self))
+    monkeypatch.setattr(no_probe._CmdWorker, "start",
+                        lambda self: started["cmd"].append(self))
+    return started
+
+
+def _choices(p):
+    import tomllib
+    return tomllib.loads(p.read_text(encoding="utf-8"))["codex"]["model_choices"]
+
+
+def _write_choices(p, vals):
+    from llm_backend.settings_store import set_toml_keys
+    set_toml_keys(p, {"codex": {"model_choices": vals}})
+
+
+def _buttons(w):
+    return [row[k] for row in w._rows.values() for k in ("action", "models", "ping")]
+
+
+def test_models_button_visibility(no_probe, parent_widget):
+    w = _win(no_probe, parent_widget)
+    for eid in ("claude-vscode", "claude-cli", "pi", "codex"):
+        w._paint(_st(eid, binary_state="ok"))
+        assert not w._rows[eid]["models"].isHidden(), eid
+        for state in ("missing", "unknown"):
+            w._paint(_st(eid, binary_state=state))
+            assert w._rows[eid]["models"].isHidden(), (eid, state)
+    w._paint(_st("openai-http", binary_state="n/a"))
+    w._paint(_st("mock", binary_state="ok"))
+    assert w._rows["openai-http"]["models"].isHidden()
+    assert w._rows["mock"]["models"].isHidden()
+
+
+def test_models_click_appends_to_file(no_probe, no_start, parent_widget,
+                                      models_toml, monkeypatch):
+    _write_choices(models_toml, ["A"])
+    monkeypatch.setattr(no_probe.model_catalog, "fetch_models",
+                        lambda eid: _ok_codex(models=("A", "B")))
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    assert len(no_start["models"]) == 1
+    w._models.run()
+    assert _choices(models_toml) == ["A", "B"]
+    assert "B" in w._log.toPlainText()
+
+
+def test_models_click_nothing_new_leaves_file(no_probe, no_start, parent_widget,
+                                              models_toml, monkeypatch):
+    _write_choices(models_toml, ["A"])
+    before = models_toml.read_bytes()
+    monkeypatch.setattr(no_probe.model_catalog, "fetch_models",
+                        lambda eid: _ok_codex(models=("A",)))
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    w._models.run()
+    assert models_toml.read_bytes() == before
+
+
+def test_models_result_keeps_changes_made_during_fetch(no_probe, no_start, parent_widget,
+                                                       models_toml, monkeypatch):
+    _write_choices(models_toml, ["A", "X"])
+    monkeypatch.setattr(no_probe.model_catalog, "fetch_models",
+                        lambda eid: _ok_codex(models=("A", "B")))
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    _write_choices(models_toml, ["A", "Y"])           # ダイアログ・同期を模す
+    w._models.run()
+    assert _choices(models_toml) == ["A", "Y", "B"]
+
+
+def test_models_save_failure_is_logged(no_probe, no_start, parent_widget,
+                                       models_toml, monkeypatch):
+    monkeypatch.setattr(no_probe.model_catalog, "fetch_models",
+                        lambda eid: _ok_codex(models=("B",)))
+
+    def _boom(eng, ml):
+        raise RuntimeError("read-only fs")
+    monkeypatch.setattr(no_probe.model_catalog, "append_fetched", _boom)
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    w._models.run()
+    assert "read-only fs" in w._log.toPlainText()
+
+
+def test_models_result_after_close_is_dropped(no_probe, no_start, parent_widget,
+                                              models_toml, monkeypatch):
+    _write_choices(models_toml, ["A"])
+    before = models_toml.read_bytes()
+    w = _win(no_probe, parent_widget)
+    gen = w._models_gen
+    w.close()
+    w._on_models_result(gen, _ok_codex(models=("A", "B")))
+    assert models_toml.read_bytes() == before
+
+
+def test_opening_or_ok_row_without_flag_does_not_fetch(parent_widget, monkeypatch):
+    import gui.backend_status_window as mod
+    started = []
+    monkeypatch.setattr(mod._ModelsWorker, "start", lambda self: started.append(self))
+    monkeypatch.setattr(mod, "_ProbeWorker", MagicMock())
+    w = mod.BackendStatusWindow(MagicMock(), parent_widget)
+    w._on_row(w._generation, _st("codex", binary_state="ok"))
+    assert started == []
+
+
+def _install(w, eid="pi"):
+    w._paint(_st(eid, prereq_state="ok", binary_state="ok",
+                 install=("npm", "i", "-g", "x")))
+    w._on_action(eid)
+
+
+def _finish_install(w, rc):
+    """npm の終了を模す。実際と同じく done（今のインストールの番号）→ finished（_forget）の順。"""
+    cmd = w._cmd
+    w._on_install_done(w._install_token, rc)
+    w._forget(cmd)
+
+
+def test_auto_fetch_once_after_successful_install(no_probe, no_start, parent_widget):
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    assert len(no_start["cmd"]) == 1
+    _finish_install(w, 0)
+    w._on_row(w._generation, _st("codex", binary_state="ok"))     # 別エンジン
+    assert no_start["models"] == []
+    w._on_row(w._generation, _st("pi", binary_state="ok"))
+    assert len(no_start["models"]) == 1
+    assert no_start["models"][0]._engine_id == "pi"
+    w._forget(w._models)
+    w._on_row(w._generation, _st("pi", binary_state="ok"))
+    assert len(no_start["models"]) == 1
+
+
+def test_failed_install_does_not_fetch_and_unbusies(no_probe, no_start, parent_widget):
+    from llm_backend.engines import engine_by_id, engine_label
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    _finish_install(w, 1)
+    w._on_row(w._generation, _st("pi", binary_state="ok"))
+    assert no_start["models"] == []
+    assert all(b.isEnabled() for b in _buttons(w))
+    w._on_probe_done(w._generation)
+    skipped = no_probe.tr("backend.status.models.install_skipped",
+                          name=engine_label(engine_by_id("pi")))
+    assert skipped not in w._log.toPlainText()
+
+
+def test_install_still_missing_skips_and_unbusies(no_probe, no_start, parent_widget):
+    from llm_backend.engines import engine_by_id, engine_label
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    _finish_install(w, 0)
+    w._on_row(w._generation, _st("pi", binary_state="missing"))
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._on_probe_done(w._generation)
+    assert no_start["models"] == []
+    assert all(b.isEnabled() for b in _buttons(w))
+    expected = no_probe.tr("backend.status.models.install_skipped",
+                           name=engine_label(engine_by_id("pi")))
+    assert expected in w._log.toPlainText()
+
+
+def test_busy_during_install(no_probe, no_start, parent_widget):
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._paint(_st("codex", binary_state="ok"))
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._on_ping("mock")
+    assert no_start["ping"] == []
+
+
+def test_busy_during_models_and_released_on_finish(no_probe, no_start, parent_widget):
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._paint(_st("codex", binary_state="ok"))
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._forget(w._models)
+    assert all(b.isEnabled() for b in _buttons(w))
+
+
+def test_busy_during_ping(no_probe, no_start, parent_widget, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(no_probe, "build_backend", lambda k, s: MagicMock())
+    w = _win(no_probe, parent_widget)
+    w._on_ping("mock")
+    assert len(no_start["ping"]) == 1
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._on_models("codex")
+    w._run_install(["npm", "i", "-g", "x"], engine_id="pi")
+    assert no_start["models"] == [] and no_start["cmd"] == []
+    w._on_ping_result(0, SimpleNamespace(ok=True, elapsed=0.1, text="pong"))
+    assert all(b.isEnabled() for b in _buttons(w))
+
+
+def test_models_paths_never_ping_or_build(no_probe, no_start, parent_widget,
+                                          models_toml, monkeypatch):
+    calls = []
+    monkeypatch.setattr(no_probe, "ping_backend", lambda b: calls.append("ping"))
+    monkeypatch.setattr(no_probe, "build_backend", lambda *a: calls.append("build"))
+    monkeypatch.setattr(no_probe.model_catalog, "fetch_models",
+                        lambda eid: _ok_codex(models=("Z",)))
+    w = _win(no_probe, parent_widget)
+    w._on_models("codex")
+    w._models.run()
+    w._forget(w._models)
+    _install(w, "codex")
+    _finish_install(w, 0)
+    w._on_row(w._generation, _st("codex", binary_state="ok"))
+    w._models.run()
+    assert calls == []
+
+
+def _still_running(monkeypatch, mod, worker):
+    """kill / wait しても終わらないワーカーを模す（win32 の cmd.exe /c npm.cmd で子の node が
+    stdout を握ったまま、など）。"""
+    monkeypatch.setattr(mod.BackendStatusWindow, "_running",
+                        staticmethod(lambda wk: wk is not None and wk is worker))
+    monkeypatch.setattr(worker, "wait", lambda *a: False)
+
+
+def test_close_keeps_a_still_running_install_busy_and_ignores_its_late_done(
+        no_probe, no_start, parent_widget, monkeypatch):
+    """閉じる → 旧 npm が終わらない → 再表示 → 別の操作 → 旧 done、の順。"""
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    old, old_token = w._cmd, w._install_token
+    _still_running(monkeypatch, no_probe, old)
+    w.close()
+    assert w._cmd is old                        # 枠を残す
+    w.refresh()                                 # 再表示（_open_backend_status と同じ）
+    assert not any(b.isEnabled() for b in _buttons(w))
+    assert not w._refresh_btn.isEnabled()
+    w._on_models("codex")
+    w._on_ping("mock")
+    w._on_action("pi")
+    assert no_start["models"] == [] and no_start["ping"] == [] and len(no_start["cmd"]) == 1
+    w._on_install_done(old_token, 0)            # 閉じる前のインストールの完了
+    assert w._models_after_install is None
+    assert not any(b.isEnabled() for b in _buttons(w))
+    monkeypatch.setattr(no_probe.BackendStatusWindow, "_running", staticmethod(lambda wk: False))
+    w._forget(old)                              # 旧ワーカーがやっと終わった
+    assert all(b.isEnabled() for b in _buttons(w))
+    assert w._refresh_btn.isEnabled()
+
+
+def test_late_done_of_an_old_install_does_not_touch_the_current_one(
+        no_probe, no_start, parent_widget):
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    old_token = w._install_token
+    w._on_install_done(old_token, 1)
+    w._forget(w._cmd)
+    _install(w, "codex")
+    new_token = w._install_token
+    assert new_token != old_token
+    w._on_install_done(old_token, 0)            # 古い完了が遅れてもう一度届く
+    assert w._install_eid == "codex" and w._install_token == new_token
+    assert w._models_after_install is None
+    _finish_install(w, 0)
+    assert w._models_after_install == "codex"
+
+
+def test_close_keeps_a_still_running_ping_busy(no_probe, no_start, parent_widget,
+                                              monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(no_probe, "build_backend", lambda k, s: MagicMock())
+    w = _win(no_probe, parent_widget)
+    w._on_ping("mock")
+    old = w._ping
+    _still_running(monkeypatch, no_probe, old)
+    w.close()
+    assert w._ping is old
+    assert not any(b.isEnabled() for b in _buttons(w))
+    w._on_ping_result(0, SimpleNamespace(ok=True, elapsed=0.1, text="pong"))
+    assert all(b.isEnabled() for b in _buttons(w))
+
+
+def test_recheck_is_disabled_while_busy_and_while_probing(no_probe, no_start,
+                                                         parent_widget):
+    """再確認も --version 等でエンジンを起動するので、npm の実行中に押させない。"""
+    w = _win(no_probe, parent_widget)
+    assert w._refresh_btn.isEnabled()
+    _install(w)
+    assert not w._refresh_btn.isEnabled()
+    w._paint(_st("codex", binary_state="ok"))
+    assert not w._refresh_btn.isEnabled()
+    _finish_install(w, 1)
+    assert w._refresh_btn.isEnabled()
+    w._probe = MagicMock()                      # 判定中
+    w._apply_busy()
+    assert not w._refresh_btn.isEnabled()
+    w._forget(w._probe)
+    assert w._refresh_btn.isEnabled()

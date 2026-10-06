@@ -21,6 +21,7 @@ _SCAN_DIRS = (
 
 # tr(変数) を許すファイルと、その呼び出し数（増減したらテストが落ちる）。
 # キーの出どころ: ENGINES.label_key → test_engines、preflight の note → test_preflight、
+# model_catalog の note → test_model_catalog、
 # それ以外は同じファイル内のリテラル（下のキー形リテラル検査で存在を確認する）。
 DYNAMIC_TR_CALLS = {
     "gui/backend_selector_dialog.py": 3,

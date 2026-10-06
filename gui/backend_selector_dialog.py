@@ -42,8 +42,8 @@ from llm_backend.engines import (
     current_provider,
     engine_by_id,
     engine_label,
-    save_choices,
     session_settings,
+    update_choices,
 )
 from llm_backend.ping import ping_backend
 
@@ -321,17 +321,14 @@ class BackendSelectorDialog(QDialog):
         value = combo.currentText().strip()
         if not value:
             return
-        current = list(combo_choices(engine, field))
-        if add:
-            if value in current:
-                return
-            current.append(value)
-        else:
-            if value not in current:
-                return
-            current.remove(value)
+        def _edit(current: tuple[str, ...]) -> list[str] | None:
+            if add:
+                return None if value in current else [*current, value]
+            return [v for v in current if v != value] if value in current else None
+
         try:
-            save_choices(engine, field, current)
+            if update_choices(engine, field, _edit) is None:
+                return
         except Exception as e:
             self._result_label.setText(tr("backend.dialog.choice_failed", error=str(e)))
             return

@@ -16,6 +16,7 @@ from llm_backend.engines import (
     save_choices,
     saved_choices,
     session_settings,
+    update_choices,
 )
 from llm_backend.settings_store import set_toml_keys as _real_set_toml_keys
 
@@ -646,3 +647,54 @@ def test_apply_chat_search_selection_unchanged_no_write(apply_env):
     assert apply_env.cfg_p.read_bytes() == before
     assert os.stat(apply_env.cfg_p).st_mtime_ns == mtime
     assert apply_env.bc.cleared == 0
+
+
+# ---- update_choices: ロック下で読み直したディスクの内容を土台にする ----
+
+_CODEX = engine_by_id("codex")
+
+
+def test_update_choices_edits_the_disk_list_not_the_cache(apply_env):
+    apply_env.mc.data = {"codex": {"model_choices": ["stale"]}}
+    _real_set_toml_keys(apply_env.mdl_p, {"codex": {"model_choices": ["disk1", "disk2"]}})
+    seen = []
+
+    def edit(cur):
+        seen.append(cur)
+        return [*cur, "new"]
+
+    out = update_choices(_CODEX, "model", edit)
+    assert seen == [("disk1", "disk2")]
+    assert out == ("disk1", "disk2", "new")
+    data = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert data["codex"]["model_choices"] == ["disk1", "disk2", "new"]
+    assert apply_env.mc.cleared >= 1
+
+
+def test_update_choices_unset_key_passes_the_seed(apply_env):
+    seen = []
+    update_choices(_CODEX, "model", lambda cur: seen.append(cur))
+    assert seen == [engines.OPENAI_CODEX_MODELS]
+
+
+def test_update_choices_none_writes_nothing(apply_env):
+    _real_set_toml_keys(apply_env.mdl_p, {"codex": {"model_choices": ["a"]}})
+    before = apply_env.mdl_p.read_bytes()
+    assert update_choices(_CODEX, "model", lambda cur: None) is None
+    assert apply_env.mdl_p.read_bytes() == before
+    assert apply_env.mc.cleared == 0
+
+
+def test_update_choices_cleans_the_written_list(apply_env):
+    out = update_choices(_CODEX, "model", lambda cur: [" a ", "", "a", "b"])
+    assert out == ("a", "b")
+    data = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert data["codex"]["model_choices"] == ["a", "b"]
+
+
+def test_update_choices_skips_engines_without_settings_and_unknown_fields(apply_env):
+    called = []
+    assert update_choices(engine_by_id("mock"), "model", called.append) is None
+    assert update_choices(_CODEX, "nope", called.append) is None
+    assert called == []
+    assert not apply_env.mdl_p.exists()

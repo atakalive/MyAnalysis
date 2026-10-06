@@ -210,8 +210,9 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `unconfigured.py` | エンジン未設定を表す送れないプレースホルダ `UnconfiguredBackend`（`stream()` は常に例外）と例外 `NoEngineConfigured` |
 | `engines.py` | GUI で選べるエンジンの一覧 `ENGINES` と、選択の適用・チャット単位の設定解決 |
 | `model_settings.py` | `models.toml` の読み込みと `merged_settings()` |
-| `settings_store.py` | TOML のキーだけをコメントを保ったまま書き換える |
+| `settings_store.py` | TOML のキーだけをコメントを保ったまま書き換える（`set_toml_keys`。読んだ値から書く値を決めるときは、ロックを持ったまま読み直す `update_toml_keys`） |
 | `preflight.py` | ドライバの導入・認証状況の判定（`engines` CLI と状況ウィンドウが使う） |
+| `model_catalog.py` | 状況ウィンドウの「モデル取得」。ツール自身が知っているモデル ID を読み、候補リストへの追記分を計算する（推論しない・例外を出さない） |
 | `ping.py` | 疎通確認（1 ターン実行する。課金される唯一の判定） |
 
 ### `llm_bridge/`（トップレベルで PySide6 を import しない）
@@ -301,7 +302,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 2. **登録** — `llm_backend/__init__.py` の `_BACKENDS` にファクトリを追加する。`settings` が `None` なら `merged_settings("<セクション>", backend_config().get("<セクション>", {}))` で `config.toml` と `models.toml` を重ね、渡されたらそれを使う（疎通確認とチャット単位の上書きが使う）。
 3. **エンジン** — `llm_backend/engines.py` の `ENGINES` に `Engine` を追加する（`id`、`label_key`、`backend_key` = `_BACKENDS` のキー、`settings_key` = TOML のセクション名、`config_patch`、`fields`、候補の種）。`ENGINES` に無いバックエンドは `current_engine_id()` が `None`（未選択）を返し、設定ダイアログは「エンジンが選ばれていません」と表示する。設定ダイアログと状況ウィンドウは `ENGINES` を列挙するので、GUI 側の変更は要らない。
 4. **表示名** — `i18n/en.toml` と `i18n/ja.toml` に `backend.engine.<…>` を追加する（`tests/test_engines.py` がラベルキーの解決を検査する）。
-5. **導入判定** — `llm_backend/preflight.py` の `_check_engine` に分岐を追加する。無いと「何も要らない」エンジン（mock と同じ）として表示される。判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う（トークンをリフレッシュするコマンドは、同じトークンを共有する他の環境をログアウトさせ得る）。
+5. **導入判定** — `llm_backend/preflight.py` の `_check_engine` に分岐を追加する。無いと「何も要らない」エンジン（mock と同じ）として表示される。判定には認証ファイルを変更しない読み取り専用のコマンドだけを使う（トークンをリフレッシュするコマンドは、同じトークンを共有する他の環境をログアウトさせ得る）。モデル取得に対応させるなら `llm_backend/model_catalog.py` の `SUPPORTED` と `fetch_models` に分岐を足す（足さなければ状況ウィンドウにモデル取得ボタンが出ないだけ）。
 6. **設定例** — `models.example.toml`（`model` / `thinking` / `effort` / `provider`）と `llm_backend/config.example.toml`（`bin` / `cwd` 等の運用設定）にセクションを追加する。
 7. **system プロンプト** — モジュール直下に名前が `_SYSTEM_PROMPT` で始まる定数を置く。`ANALYST_FRAMING` で始め、`GUI_DISPLAY_VERBS`・`NO_LOCAL_PERSISTENCE`・`MOUNT_SAFE_EDITS`・`CHAT_DATASET_RULE` を連結する（いずれも `llm_backend/base.py`。[§5.3](#53-エージェントの-system-プロンプト)）。ペルソナは `set_persona(text)` で受け取り、送信時に `compose_system_prompt(base, persona)` で合成する。
    `tests/test_backend_prompts.py` は `llm_backend/` の `_SYSTEM_PROMPT*` 定数を自動収集し、`save_text` の有無、`GUI_DISPLAY_VERBS` を含むこと、`ANALYST_FRAMING` で始まることを検査する。`NO_LOCAL_PERSISTENCE` / `MOUNT_SAFE_EDITS` を含むことと meta 書込 verb を載せないことはバックエンドごとの明示テストなので、**新バックエンド用のテストを追加する**。
@@ -455,7 +456,7 @@ python -m pytest tests/
 | window / tab verb と GUI | `test_show`, `test_show_image`, `test_attach_tab_dataset`, `test_current_dataset_gui`, `test_workspace_gui`, `test_floating_tab`, `test_tabbar`, `test_tab_context_menu`, `test_dataset_context_menu`, `test_open_dataset_dialog`, `test_imageviewer`, `test_image_io`, `test_nested_split`, `test_slots` |
 | チャット UI・ツール呼び出し | `test_chat_widget`, `test_chat_persona`, `test_llm_tool_use` |
 | LLM バックエンド | `test_backend_registry`, `test_backend_prompt`, `test_backend_prompts`, `test_claude_code`, `test_claude_system_prompt`, `test_pi_backend`, `test_codex_backend`, `test_cmd_shim`, `test_proc`, `test_persona_prompt`, `test_registry_consistency` |
-| エンジン設定・状況・ペルソナ | `test_engines`, `test_model_settings`, `test_settings_store`, `test_backend_selector`, `test_backend_status_window`, `test_preflight`, `test_ping`, `test_personas`, `test_persona_dialog` |
+| エンジン設定・状況・ペルソナ | `test_engines`, `test_model_settings`, `test_settings_store`, `test_backend_selector`, `test_backend_status_window`, `test_preflight`, `test_model_catalog`, `test_ping`, `test_personas`, `test_persona_dialog` |
 | i18n | `test_i18n`, `test_i18n_catalog`, `test_i18n_gui`, `test_qt_translation` |
 | ホットリロード | `test_hotreload`（Qt 非依存コア）, `test_hotreload_qt` |
 | 会議共有 | `test_local_relay`, `test_meeting_relay`, `test_meeting_chat` |

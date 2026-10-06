@@ -306,16 +306,27 @@ def _pi_providers_from_list_models(pi_bin: str) -> tuple[str, ...] | None:
     if r is None or r[0] != 0:
         return None
     out: list[str] = []
-    for line in r[1].splitlines():
-        tok = line.split()
-        if not tok:
-            continue
-        name = tok[0]
-        if name == "provider":          # ヘッダ行
-            continue
+    for name, _model in _parse_list_models(r[1]):
         if name not in out:
             out.append(name)
     return tuple(out) if out else None
+
+
+def _parse_list_models(text: str) -> list[tuple[str, str]]:
+    """``pi --list-models`` の出力を ``(provider, model)`` の組に分ける（出力順・重複あり）。
+
+    トークンが 2 個未満の行と、先頭が ``provider`` の行（ヘッダ）は飛ばす。
+    状況ウィンドウの「モデル取得」（model_catalog）も同じパーサを使う。
+    """
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        tok = line.split()
+        if len(tok) < 2:
+            continue
+        if tok[0] == "provider":        # ヘッダ行
+            continue
+        pairs.append((tok[0], tok[1]))
+    return pairs
 
 
 def _pi_providers_from_authfile() -> tuple[str, ...] | None:
