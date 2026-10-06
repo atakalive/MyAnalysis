@@ -35,7 +35,8 @@ effort   = ""              # --thinking: minimal | low | medium | high | xhigh |
 [codex]
 model  = ""     # --model (empty = codex default; 候補は ChatGPT 側 Codex カタログ)
 effort = ""     # -c model_reasoning_effort: low | medium | high | xhigh | max | ultra (使える値はモデルによる)
-                #   (empty = default; ダイアログは ~/.codex/models_cache.json からそのモデルの値だけを出す)
+                #   (empty = default; ダイアログは ~/.codex/models_cache.json からそのモデルの値だけを出し、
+                #    そのモデルが対応しない値は送らない)
 
 [openai-compat]
 model    = ""   # request model name (empty = OPENAI_MODEL env, then gpt-4o-mini)

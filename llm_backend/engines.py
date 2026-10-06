@@ -241,6 +241,22 @@ def effort_choices(engine: Engine, model: str) -> tuple[str, ...]:
     return engine.effort_levels
 
 
+def sent_effort(engine: Engine, model: str, effort: str) -> str:
+    """``engine`` に ``model`` で送るとき MyAnalysis が実際に渡す effort（"" = 渡さない）。
+
+    effort 行の無いエンジンは ""。codex はカタログ上そのモデルが対応しない段階を渡さない
+    （``codex.sendable_effort``。送る直前の ``CodexBackend.stream`` と同じ判定）。
+    チャット先頭のヘッダが使う。
+    """
+    if not engine.effort_levels:
+        return ""
+    ev = effort.strip() if isinstance(effort, str) else ""
+    if engine.id == "codex":
+        from llm_backend.codex import sendable_effort
+        return sendable_effort(model, ev)
+    return ev
+
+
 # ----- user-editable dropdown choices (persisted in models.toml) -----
 #
 # ``model_suggestions``/``provider_suggestions`` above are only the *seed*. The

@@ -1141,13 +1141,15 @@ class ChatWidget(QWidget):
     # ----- transcript render -----
 
     def _global_effort_suffix(self) -> str:
-        """全体設定のエンジンの effort をヘッダ用に " / effort: …" で返す。無ければ ""。never raise."""
+        """全体設定のエンジンに送る effort をヘッダ用に " / effort: …" で返す。無ければ ""。never raise."""
         try:
-            from llm_backend.engines import current_effort, engine_by_id
+            from llm_backend.engines import (
+                current_effort, current_model, engine_by_id, sent_effort,
+            )
             engine = engine_by_id(self._global_engine_id() or "")
             if engine is None or not engine.effort_levels:
                 return ""
-            effort = current_effort(engine)
+            effort = sent_effort(engine, current_model(engine), current_effort(engine))
         except Exception:
             return ""
         return f" / effort: {effort}" if effort else ""
@@ -1174,13 +1176,17 @@ class ChatWidget(QWidget):
         try:
             from llm_backend.engines import (
                 current_effort, current_model, current_provider, engine_label,
+                sent_effort,
             )
             model = (getattr(sess, "engine_model", None) or "").strip() \
                 or current_model(engine)
             provider = (getattr(sess, "engine_provider", None) or "").strip() \
                 or current_provider(engine)
-            effort = ((getattr(sess, "engine_effort", None) or "").strip()
-                      or current_effort(engine)) if engine.effort_levels else ""
+            # 送る値（codex はカタログ上そのモデルが対応しない段階を送らない）。
+            effort = sent_effort(engine, model, (
+                (getattr(sess, "engine_effort", None) or "").strip()
+                or current_effort(engine)
+            )) if engine.effort_levels else ""
             label = engine_label(engine)
         except Exception:
             model = (getattr(sess, "engine_model", None) or "")

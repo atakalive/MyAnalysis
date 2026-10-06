@@ -757,6 +757,23 @@ def test_effort_choices_other_engines_skip_catalog(monkeypatch):
     assert engines.effort_choices(engine_by_id("openai-http"), "x") == ()
 
 
+def test_sent_effort(monkeypatch, tmp_path):
+    """ヘッダに出す送る値。codex はカタログ上そのモデルが対応しない段階を送らない。"""
+    import json
+    home = tmp_path / "ch"
+    home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": "b", "supported_reasoning_levels": [{"effort": "high"}]},
+    ]}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    codex = engine_by_id("codex")
+    assert engines.sent_effort(codex, "b", "ultra") == ""
+    assert engines.sent_effort(codex, "b", " high ") == "high"
+    assert engines.sent_effort(codex, "unknown", "ultra") == "ultra"    # 判定できない → そのまま
+    assert engines.sent_effort(engine_by_id("pi"), "b", " ultra ") == "ultra"
+    assert engines.sent_effort(engine_by_id("openai-http"), "b", "high") == ""
+
+
 def test_apply_writes_effort(apply_env):
     apply_selection(engine_by_id("claude-vscode"), "opus", "", engine_changed=False,
                     effort="high")

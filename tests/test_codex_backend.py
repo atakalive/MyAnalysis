@@ -329,3 +329,58 @@ def test_codex_home_blank_env_is_home_dot_codex(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", "   ")
     monkeypatch.setattr(codex_mod.Path, "home", lambda: tmp_path)
     assert codex_mod.codex_home() == tmp_path / ".codex"
+
+
+# ---------------------------------------------------------------------------
+# 送る effort: カタログ上そのモデルが対応しない段階は渡さない（Issue #117）
+# ---------------------------------------------------------------------------
+
+def _effort_flag(cmd):
+    return next((a for a in cmd if str(a).startswith("model_reasoning_effort=")), None)
+
+
+def _two_models(home):
+    _write_catalog(home, [
+        {"slug": "a", "supported_reasoning_levels": _levels("low", "high", "ultra")},
+        {"slug": "b", "supported_reasoning_levels": _levels("low", "high")},
+    ])
+
+
+def test_sendable_effort(codex_home_dir):
+    _two_models(codex_home_dir)
+    assert codex_mod.sendable_effort("b", "ultra") == ""              # 対応しない段階
+    assert codex_mod.sendable_effort("b", " high ") == "high"
+    assert codex_mod.sendable_effort("a", "ultra") == "ultra"
+    assert codex_mod.sendable_effort("unknown", "ultra") == "ultra"   # 判定できない → そのまま
+    assert codex_mod.sendable_effort("b", "  ") == ""
+    assert codex_mod.sendable_effort("b", None) == ""
+    (codex_home_dir / "config.toml").write_text('model = "b"\n', encoding="utf-8")
+    assert codex_mod.sendable_effort("", "ultra") == ""               # 空 → codex の既定モデルで判定
+
+
+def test_effort_the_model_lacks_is_not_sent(fake_popen, tmp_path, codex_home_dir):
+    _two_models(codex_home_dir)
+    _run(_backend(tmp_path, model="b", effort="ultra"))
+    assert _effort_flag(fake_popen.last.cmd) is None
+    _run(_backend(tmp_path, model="b", effort="high"))
+    assert _effort_flag(fake_popen.last.cmd) == "model_reasoning_effort=high"
+
+
+def test_session_following_global_effort_with_other_model(
+        fake_popen, tmp_path, codex_home_dir, monkeypatch):
+    """全体 ultra（モデル a）＋チャットだけモデル b・effort は「全体設定と同じ」: session_settings は
+    全体の ultra を引き継ぐが、b が対応しないので codex には渡さない。疎通確認も送信も
+    session_settings → build_backend → stream を通る（euler code review R1 P1）。"""
+    from llm_backend import build_backend, engines
+    _two_models(codex_home_dir)
+    base = {"model": "a", "effort": "ultra",
+            "bin": str(tmp_path / "codex.exe"), "cwd": str(tmp_path)}
+    monkeypatch.setattr(engines, "backend_config", lambda: {})
+    monkeypatch.setattr(engines, "merged_settings", lambda key, cfg: dict(base))
+    codex = engines.engine_by_id("codex")
+    settings = engines.session_settings(codex, "b", "", effort="")
+    assert settings["effort"] == "ultra"                  # 設定としては全体を引き継ぐ
+    _run(build_backend("codex", settings))
+    assert _effort_flag(fake_popen.last.cmd) is None
+    _run(build_backend("codex", engines.session_settings(codex, "a", "", effort="")))
+    assert _effort_flag(fake_popen.last.cmd) == "model_reasoning_effort=ultra"

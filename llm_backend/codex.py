@@ -170,6 +170,23 @@ def supported_efforts(model: str) -> tuple[str, ...] | None:
         return None
 
 
+def sendable_effort(model: object, effort: object) -> str:
+    """codex に ``model`` で渡す effort（"" = 渡さない＝codex の既定）。
+
+    カタログにそのモデルの段階が載っていて（``supported_efforts`` が None でない）、そこに
+    無い値は渡さない。カタログで判定できないときは今までどおりそのまま渡す。
+    チャットごとの「全体設定と同じ」は全体の effort を引き継ぐので、チャットで別のモデルを
+    選ぶと、そのモデルの対応しない段階になり得る（設定ダイアログの選択肢だけでは防げない）。
+    だから送る直前の 1 か所（``CodexBackend.stream``）で判定する。ヘッダも
+    ``engines.sent_effort`` 経由で同じ判定を使う（Issue #117）。例外は外に出さない。
+    """
+    ev = effort.strip() if isinstance(effort, str) else ""
+    if not ev:
+        return ""
+    levels = supported_efforts(model if isinstance(model, str) else "")
+    return ev if levels is None or ev in levels else ""
+
+
 class CodexBackend:
     name = "codex"
 
@@ -217,10 +234,11 @@ class CodexBackend:
         model = config.get("model", "")
         if model:
             flags += ["--model", model]
-        effort = config.get("effort", "")
-        if isinstance(effort, str) and effort.strip():
+        # カタログ上そのモデルが対応しない段階は渡さない（sendable_effort, Issue #117）。
+        effort = sendable_effort(model, config.get("effort", ""))
+        if effort:
             # codex has no --effort flag; the config key is the knob.
-            flags += ["-c", f"model_reasoning_effort={effort.strip()}"]
+            flags += ["-c", f"model_reasoning_effort={effort}"]
 
         # resume inherits the session's cwd, so --cd exists only on fresh exec.
         # "-" = read the prompt from stdin (avoids argv length/quoting limits).

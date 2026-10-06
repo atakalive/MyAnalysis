@@ -1876,6 +1876,66 @@ def test_engine_header_shows_global_effort(widget, monkeypatch):
     assert "effort:" not in widget._engine_header(sess)
 
 
+def _two_codex_models(monkeypatch, tmp_path):
+    import json
+    home = tmp_path / "ch"
+    home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": "a", "supported_reasoning_levels": [{"effort": "high"}, {"effort": "ultra"}]},
+        {"slug": "b", "supported_reasoning_levels": [{"effort": "high"}]},
+    ]}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+
+
+def test_session_codex_following_global_effort_skips_level_the_model_lacks(
+        widget, monkeypatch, tmp_path):
+    """チャットだけ codex のモデル b、effort は「全体設定と同じ」（全体はモデル a・ultra）:
+    適用して作ったバックエンドは ultra を codex に渡さず、ヘッダにも出さない（Issue #117）。"""
+    import llm_backend.engines as engines
+    from llm_backend import codex as codex_mod
+    from llm_backend.base import Message
+
+    _two_codex_models(monkeypatch, tmp_path)
+    base = {"model": "a", "effort": "ultra",
+            "bin": str(tmp_path / "codex.exe"), "cwd": str(tmp_path)}
+    monkeypatch.setattr(engines, "backend_config", lambda: {})
+    monkeypatch.setattr(engines, "merged_settings", lambda key, cfg: dict(base))
+    sess = _make_session(widget)
+    widget._set_session_engine(sess, "codex", "b", "", effort="")
+    assert sess.engine_effort is None
+    assert "effort:" not in widget._engine_header(sess)
+
+    class _Stop(Exception):
+        pass
+
+    seen = []
+
+    def _popen(cmd, **kw):
+        seen.append(cmd)
+        raise _Stop
+
+    monkeypatch.setattr(codex_mod.subprocess, "Popen", _popen)
+    backend = widget._build_session_backend(sess)
+    with pytest.raises(_Stop):
+        list(backend.stream([Message(role="user", content="hi")]))
+    assert not any(str(a).startswith("model_reasoning_effort=") for a in seen[0])
+
+    widget._set_session_engine(sess, "codex", "a", "", effort="")
+    assert " / effort: ultra  [" in widget._engine_header(sess)
+
+
+def test_engine_header_global_codex_hides_level_the_model_lacks(widget, monkeypatch, tmp_path):
+    import llm_backend.engines as engines
+    _two_codex_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(engines, "current_engine_id", lambda: "codex")
+    monkeypatch.setattr(engines, "current_effort", lambda e: "ultra")
+    monkeypatch.setattr(engines, "current_model", lambda e: "b")
+    sess = _make_session(widget)
+    assert "effort:" not in widget._engine_header(sess)
+    monkeypatch.setattr(engines, "current_model", lambda e: "a")
+    assert " / effort: ultra  [" in widget._engine_header(sess)
+
+
 # ---- セッションごとのペルソナ（応答口調）----
 #
 # 定義ストア（personas.json）と ui_prefs は conftest の autouse fixture で tmp へ

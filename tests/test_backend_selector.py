@@ -855,3 +855,48 @@ def test_session_apply_passes_effort(monkeypatch, parent_widget, value):
     _select_effort(dlg, value)
     dlg._on_apply()
     assert applied[0][1]["effort"] == value
+
+
+def test_session_probe_codex_drops_inherited_effort_the_model_lacks(
+        monkeypatch, parent_widget, tmp_path):
+    """全体 ultra（モデル a）＋チャットだけモデル b・effort は「全体設定と同じ」: 疎通確認の
+    設定は全体の ultra を引き継ぐが、b が対応しないので codex には渡さない（Issue #117）。"""
+    import json
+
+    import gui.backend_selector_dialog as mod
+    import llm_backend.engines as engines
+    from llm_backend import codex as codex_mod
+    from llm_backend.base import Message
+
+    home = tmp_path / "ch"
+    home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({"models": [
+        {"slug": "a", "supported_reasoning_levels": [{"effort": "high"}, {"effort": "ultra"}]},
+        {"slug": "b", "supported_reasoning_levels": [{"effort": "high"}]},
+    ]}), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    base = {"model": "a", "effort": "ultra",
+            "bin": str(tmp_path / "codex.exe"), "cwd": str(tmp_path)}
+    monkeypatch.setattr(engines, "backend_config", lambda: {})
+    monkeypatch.setattr(engines, "merged_settings", lambda key, cfg: dict(base))
+    dlg, _, _, _ = _session_dlg(monkeypatch, parent_widget, engine="codex", model="b")
+    engine = dlg._selected_engine()
+    assert dlg._current_effort(engine) == ""                     # 「全体設定と同じ」
+    settings = dlg._probe_settings(
+        engine, dlg._current_model_text(), "", dlg._current_effort(engine))
+    assert (settings["model"], settings["effort"]) == ("b", "ultra")
+
+    class _Stop(Exception):
+        pass
+
+    seen = []
+
+    def _popen(cmd, **kw):
+        seen.append(cmd)
+        raise _Stop
+
+    monkeypatch.setattr(codex_mod.subprocess, "Popen", _popen)
+    with pytest.raises(_Stop):
+        list(mod.build_backend("codex", settings).stream(
+            [Message(role="user", content="hi")]))
+    assert not any(str(a).startswith("model_reasoning_effort=") for a in seen[0])
