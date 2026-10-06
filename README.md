@@ -96,13 +96,7 @@ To remove a registration, select the dataset in **File → Open dataset…** and
 
 ## Usage
 
-**The agent produces three kinds of output.**
-
-| Kind | Kept? | Location |
-|---|---|---|
-| Code written and run on the spot | **Not kept**. If you want to look at it later, ask "save the code too" | — |
-| Figures, code, and reports you had it save | Kept. The figures shown are usually files saved here | the dataset's `_work/` (`figures/`, `code/`, etc.) |
-| Analysis modules (interactive analysis tabs) | Kept. There is no menu to open them; ask in the chat, e.g. "open `<analysis name>`" | the dataset's `analyses/<analysis name>/analysis.py` (→ [docs/analysis_module_ja.md](docs/analysis_module_ja.md)) |
+**Everything the agent produces (figures, code, reports) is saved under the dataset's `_work/` (`figures/`, `code/`, etc.).** The figures shown are usually files saved there.
 
 - The agent uses the Python in `.venv` and may pip install missing packages (such as scipy) into `.venv`.
 - Right-click a chat tab → **Close** **deletes** the chat. To keep it, use **Archive**.
