@@ -1,5 +1,5 @@
 # Runtime dependencies (required). Versions are not pinned;
-# tested versions are listed in README_ja.md.
+# tested versions are listed in README.md / README_ja.md.
 PySide6
 pyqtgraph
 numpy

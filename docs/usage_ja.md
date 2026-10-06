@@ -2,7 +2,7 @@
 
 [← README に戻る](../README_ja.md)
 
-README の [データセット](../README_ja.md#データセット)・[使い方](../README_ja.md#使い方)・[保存と再開](../README_ja.md#保存と再開)・[アンインストール](../README_ja.md#アンインストール)・[Limitations](../README_ja.md#limitations) を補う参照用。
+README の [データセット](../README_ja.md#データセット)・[使い方](../README_ja.md#使い方)・[保存と再開](../README_ja.md#保存と再開)・[アンインストール](../README_ja.md#アンインストール)・[制限事項](../README_ja.md#制限事項) を補う参照用。
 
 ## データセット
 

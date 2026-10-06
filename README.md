@@ -85,11 +85,11 @@ To use an engine other than Claude (Codex CLI / pi / an OpenAI-compatible HTTP s
 A dataset is a pair of "one folder containing measurement data" and "its name". Registration is per PC.
 
 - **Name**: names containing whitespace, `/`, `\`, or starting with `.` cannot be registered. **Avoid names that contain symbols (`"` `'` `&` `$`) or start with `-`.** They can be registered and opened from the GUI, but agent and CLI commands may treat them as options or break the quoting, so you cannot specify them there.
-- **Data format**: any layout (the agent inspects it before reading). A layout where each subfolder has one CSV file with the same name can be read as-is by the standard loader.
+- **Data format**: any layout (the agent inspects it before reading). A layout where every subfolder contains one CSV file with the same file name (e.g. `data.csv`) can be read as-is by the standard loader.
 - **What the app creates in the folder**: `myanalysis.toml` (settings), `meta.json` (for the list view), `analyses/` (analysis modules), `_work/` (outputs, chat history, tab layout). You need write permission on the folder. The app itself does not modify measurement files. The agent is instructed not to modify them, but this is not enforced mechanically.
 - **Using a dataset on several PCs via a sync drive**: register it with the same name on each PC. **Do not open the same dataset on two PCs at the same time** (there is no locking between PCs; for the tab layout, and for a chat changed on both PCs, the later save wins). The first send on another PC resends the whole chat history.
 
-To remove a registration, select the dataset in **File → Open dataset…** and press **Remove registration** (files in the folder are not deleted). A row shown as "No path on this host" (registered on another PC and synced here) becomes openable once you press **Register path on this PC…** in the same list and select the folder on this PC. To register from the CLI, or to change the output location or read format (`myanalysis.toml`), read [docs/usage_ja.md](docs/usage_ja.md#データセット).
+To remove a registration, select the dataset in **File → Open dataset…** and press **Remove registration** (this removes the registration on every PC; files in the folder are not deleted). A row shown as "No path on this host" (registered on another PC and synced here) becomes openable once you press **Register path on this PC…** in the same list and select the folder on this PC. To register from the CLI, or to change the output location or read format (`myanalysis.toml`), read [docs/usage_ja.md](docs/usage_ja.md#データセット).
 
 ---
 
@@ -114,7 +114,7 @@ To view microscope images and the like as in ImageJ (16-bit / multi-dimensional 
 ## Saving and resuming
 
 - **The tab layout and chats are not saved automatically.** Save them with **File → Save session** or **Save and quit**. After a crash or a forced exit, chats since the last save are lost.
-- Closing with unsaved changes asks for confirmation. However, chats used without opening any dataset are not saved, and no confirmation is shown for them.
+- Closing with unsaved changes asks for confirmation. However, a chat that never became attached to a dataset is not saved, and no confirmation is shown for it (when a chat gets attached: [docs/usage_ja.md](docs/usage_ja.md#チャット)).
 - To resume, use **File → Open dataset…** (restores that dataset's tabs and chats) or **File → Restore last session** (opens all datasets that were open at the last save).
 
 What is saved in which file: [docs/usage_ja.md](docs/usage_ja.md#保存データと再開).
