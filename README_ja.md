@@ -14,23 +14,25 @@
 
 ## QuickStart
 
-**前提**: Windows 11 / Python 3.11 以上 / Git for Windows / VS Code に Claude Code 拡張を入れてサインイン済み。他のエンジンを使う場合 → [AI エンジン](#ai-エンジン)
+**前提**: Windows 11 / Python 3.11 以上（動作確認は 3.12。python.org 版）/ Git for Windows（clone と更新、Claude Code の Bash ツールに使う）/ VS Code に Claude Code 拡張を入れてサインイン済み。他のエンジンを使う場合 → [AI エンジン](#ai-エンジン)
 
 > [!WARNING]
 > エージェントは、あなたのユーザー権限で、確認なしにコマンドを実行する。依頼内容と読んだデータはエンジンの提供元に送られる。→ [セキュリティ](#セキュリティ)
 
-1. **インストール**（コマンドプロンプトで、OneDrive などの同期フォルダではないローカルのフォルダで実行）
+1. **インストール**: コマンドプロンプト（Win+R → `cmd`）で実行する。置き場所は OneDrive などの同期フォルダ以外。
 
    ```bat
+   cd /d %USERPROFILE%
    git clone https://github.com/atakalive/MyAnalysis.git
    cd MyAnalysis
    py -3 -m venv .venv
-   .venv\Scripts\activate
-   python -m pip install -r requirements.txt
+   .venv\Scripts\python -m pip install -r requirements.txt
    ```
 
-2. **起動**: `run.bat` をダブルクリックする。UI は英語で起動する（日本語にするには **Settings → Language / 言語 → 日本語**）。ウィンドウが出なければ → [トラブルシューティング](#トラブルシューティング)
-3. **AI エンジン**: **設定 → バックエンド/モデル設定…** で「Claude（VS Code 同梱エンジン）」を選び、**適用** を押す。[R2 設定同期](docs/config_sync_ja.md) を使う 2 台目以降の PC では、先に [2 台目以降](docs/config_sync_ja.md#2-台目以降) を読む。
+   `py` が無い（Microsoft Store 版の Python）ときは `python -m venv .venv`。
+
+2. **起動**: `MyAnalysis` フォルダの `run.bat` をダブルクリックする（venv の有効化は不要）。UI は英語で起動するので、先に **Settings → Language / 言語 → 日本語** に切り替える。以降の手順は日本語表示のメニュー名で書く。ウィンドウが出なければ → [トラブルシューティング](#トラブルシューティング)
+3. **AI エンジン**: **設定 → バックエンド/モデル設定…** を開き、「利用方法（エンジン）」で **Claude（VS Code 同梱エンジン）** を選ぶ。モデル欄は空のままでよい。**疎通確認** を押して `OK（…秒 / <モデル名>）` と出たら **適用**。失敗と出たら、VS Code の Claude Code 拡張にサインインしているか確かめる。[R2 設定同期](docs/config_sync_ja.md) を使う 2 台目以降の PC では、先に [2 台目以降](docs/config_sync_ja.md#2-台目以降) を読む。
 4. **データセット**: **ファイル → データセットを新規登録** で計測データのフォルダを選ぶ。名前にはフォルダ名が入るので、記号入り・`-` 始まりなら変える（→ [データセット](#データセット)）。登録が済むと、そのデータセットが開く。
 5. **依頼**: 右のチャット欄に「このデータセットの中身を説明して」「`<列A>` と `<列B>` の関係を図にして」などと書いて **Ctrl+Enter**。応答には数十秒〜数分かかることがあり、図は左側のタブに開く。その場で書いたコードは残らないので、再現に使うなら「コードも保存して」と頼む（→ [使い方](#使い方)）。`[エラー: …]`（英語表示では `[error: …]`）が出たら → [トラブルシューティング](#トラブルシューティング)
 6. **保存**: タブ構成とチャットは自動保存されない。こまめに **ファイル → セッションを保存** し、終わったら **ファイル → 保存して終了**（→ [保存と再開](#保存と再開)）。
@@ -56,23 +58,29 @@
 
 ## インストールと起動
 
-- venv の名前は `.venv` にする。`run.bat` はこの名前だけを探す。
-- `python` で始まるコマンドは、venv を有効にして、リポジトリ直下で実行する。
-- 更新するときは `git pull` して再起動する。データセットには影響しない。
+- venv の名前は `.venv` にする。`run.bat` はこの名前だけを探し、自分で有効化する。
+- `python` で始まるコマンド（CLI など）は、コマンドプロンプトを開くたびに `MyAnalysis` フォルダで `.venv\Scripts\activate` を実行してから打つ。
+- 更新するときは、アプリを閉じて `git pull` → `.venv\Scripts\python -m pip install -r requirements.txt` → 起動。データセットには影響しない。
 
 - PowerShell で `activate` が失敗するときは、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を実行するか、コマンドプロンプトを使う。
-- TIFF 画像を開くときは `pip install tifffile` も入れる。
-- パッケージの版は固定していないので、動かないときは動作確認済みの版に合わせる（Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2）。
+- TIFF 画像を開くときは `.venv\Scripts\python -m pip install tifffile` も入れる。
+- パッケージの版は固定していない。動かないときは動作確認済みの版に合わせる（Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2 / Pillow 10.3.0。これらは Python 3.12 向け）。
 - データなしで画面を試すときは `python tool.py --demo`。
-- macOS / Linux で使うときは `python3 -m venv .venv` → `. .venv/bin/activate` → `pip install -r requirements.txt` → `python tool.py`（動作は未検証）。
+- macOS / Linux で使うときは `python3 -m venv .venv` → `.venv/bin/python -m pip install -r requirements.txt` → `.venv/bin/python tool.py`（動作は未検証）。
 
 ---
 
 ## AI エンジン
 
-- 推奨は Claude（動作確認が最も多い）。
-- 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi だけ。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
-- **モデル欄**は空でよく、そのエンジンの既定モデルが使われる。指定するなら、Claude は `opus` / `sonnet` などのエイリアスか Claude Code の `/model` に出る名前、Codex と pi は `gpt-5.5` のようなカタログの ID（ダイアログの候補、または `pi --list-models`）、OpenAI 互換はサーバー側のモデル名（Ollama なら `ollama list`）。thinking / effort の値は [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)。
+設定は [QuickStart](#quickstart) の手順 3。
+
+- 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
+- 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
+- **モデル欄に入れるもの**
+  - Claude・Codex: 空でよい（そのエンジンの既定モデル）。Claude で指定するなら `opus` / `sonnet` / `haiku` などのエイリアス。正式なモデル ID は、**疎通確認** の結果 `OK（…秒 / <モデル名>）` に出るものをそのまま使える。Codex はダイアログの候補から選ぶ。
+  - pi: **プロバイダ**（`openai-codex` / `github-copilot` / `llama.cpp`）を選び、モデルは `pi --list-models` に出る ID（ダイアログに候補あり）。
+  - OpenAI 互換 HTTP: サーバー側のモデル名を入れる（Ollama なら `ollama list` に出る名前）。空だと `gpt-4o-mini` になり、ローカルサーバーでは失敗する。
+- thinking（推論の有無）と effort（考える量）は、通常は設定しなくてよい。変えるときは `models.toml` に書く（→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)）。
 
 Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
 
@@ -87,7 +95,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 - **アプリがフォルダに作るもの**: `myanalysis.toml`（設定）、`meta.json`（一覧表示用）、`analyses/`（解析モジュール）、`_work/`（出力・チャット履歴・タブ構成）。フォルダへの書き込み権限が要る。アプリ本体は計測ファイルを書き換えない。エージェントには書き換えないよう指示しているが、機械的な制限ではない。
 - **同期ドライブに置いて複数の PC で使う場合**: 各 PC で同じ名前で登録する。**同じデータセットを 2 台で同時に開かない**（PC 間の排他制御は無く、タブ構成と、両方で変更したチャットは後から保存した方が勝つ）。別の PC で最初に送信すると、チャットの全履歴を送り直す。
 
-登録を消すときは、**ファイル → データセットを開く…** で選んで **登録を削除** を押す（全 PC 分の登録が消える。フォルダのファイルは消えない）。他の PC の登録が届いていて「このホストにパス無し」と出る行は、同じ一覧の **この PC のパスを登録…** でこの PC のフォルダを選べば開けるようになる。CLI で登録するとき、出力先や読み込み形式（`myanalysis.toml`）を変えるときは [docs/usage_ja.md](docs/usage_ja.md#データセット) を読む。
+登録を消すときは、**ファイル → データセットを開く…** で選んで **登録を削除** を押す（この PC の登録簿から全ホスト分のパスごと消える。R2 同期を使っていれば他の PC の登録も消える。フォルダのファイルは消えない）。他の PC の登録が届いていて「このホストにパス無し」と出る行は、同じ一覧の **この PC のパスを登録…** でこの PC のフォルダを選べば開けるようになる。CLI で登録するとき、出力先や読み込み形式（`myanalysis.toml`）を変えるときは [docs/usage_ja.md](docs/usage_ja.md#データセット) を読む。
 
 ---
 
@@ -144,7 +152,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 
 | 症状 | 対処 |
 |---|---|
-| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`） |
+| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。Windows の「pythonw が見つからない」エラーなら `.venv` が無い（QuickStart の手順 1）。詳しく見るには venv を有効にして `python tool.py` |
 | 最初の送信が HTTP 401 | AI エンジンが設定されていない → [QuickStart](#quickstart) の手順 3 |
 | `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code の拡張を入れてサインインする（または `llm_backend/config.toml` の `[claude_code].bin` か環境変数 `CLAUDE_CODE_BIN` で `claude` の場所を指定する） |
 | チャットに `[エラー: …]` と出る | 認証切れ・レート制限など。再送するか、エンジンにログインし直す |

@@ -38,7 +38,7 @@ Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次�
 - GUI の起動時と、CLI の `register-dataset` の後に自動で双方向同期する。GUI でのデータセットの登録と**登録の削除**は、その場で R2 へ送る（送信のみ。バックグラウンドで行い、完了は待たない）。設定ファイル（`models.toml` / `llm_backend/config.toml`）の変更は、この PC の次回起動時か次の送信、または `config-sync` のときに一緒に送られる。他の PC には、その PC の次回起動時（か `config-sync`）に届く。
 - 失敗しても起動も登録・削除も止まらない（通常は数秒で打ち切り、何も表示しない。送れなかった変更は次回起動時の同期で送られる）。止めるには `.env` に `R2_AUTOSYNC=0`（起動時・登録・削除の後の自動同期をすべて止める）。
 - 手動: `config-sync`（双方向）/ `config-push`（R2 側だけ書く）/ `config-pull`（ローカル側だけ書く）。どれもマージした結果を書くもので、片側で強制的に上書きするものではない。`--dry-run` で予定だけ表示。`--include-env` は `config-sync` / `config-push` だけ。
-- 自動同期が効かないときは、まず `python -m llm_bridge config-sync --dry-run` でエラーと警告を確認する。自動同期（起動時・登録・削除の後）の例外を見るには `R2_DEBUG=1` を設定し、`python tool.py` をコンソールから起動する（`run.bat` では表示されない。起動時は `auto-sync skipped:`、GUI での登録・削除の後は `auto-push skipped:` で始まる行）。
+- 自動同期が効かないときは、まず `python -m llm_bridge config-sync --dry-run` でエラーと警告を確認する。自動同期（起動時・登録・削除の後）の例外を見るには `R2_DEBUG=1` を設定し、`python tool.py` をコンソールから起動する（`run.bat` では表示されない。起動時は `auto-sync skipped:`、GUI での登録・削除の後は `auto-push skipped:` を含む行）。
 - `R2_BUCKET` のバケットが存在しないと、`config-sync` / `config-push` / `config-pull` は `error: R2 bucket '…' not found` で終了コード 1 になる（何も書かない）。自動同期ではこれも表示されない。
 - Cloudflare R2 専用。他の S3 互換ストレージは未検証。
 

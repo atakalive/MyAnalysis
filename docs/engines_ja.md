@@ -2,7 +2,7 @@
 
 [← README に戻る](../README_ja.md)
 
-最初の設定は README の [AI エンジン](../README_ja.md#ai-エンジン) だけで足りる。この文書は、別のエンジンを使う・チャットごとに変える・設定ファイルを手で書くときの参照用。
+最初の設定は README の [QuickStart](../README_ja.md#quickstart) の手順 3 だけで足りる（要点は [AI エンジン](../README_ja.md#ai-エンジン)）。この文書は、別のエンジンを使う・チャットごとに変える・設定ファイルを手で書くときの参照用。
 
 ## エンジン一覧
 
@@ -19,26 +19,26 @@
 
 - **設定 → バックエンド/モデル設定…**: 「利用方法（エンジン）」「モデル」「プロバイダ」（pi のみ）を選んで **適用**。全チャット（「このチャットのモデル…」で個別に設定したチャットを除く）の次の送信から反映される（生成中の応答は古い設定のまま完了する）。
   - モデル欄は自由入力。＋ / － で候補リストに追加・削除できる（`models.toml` に即保存）。空欄にするとエンジン側の既定モデルになる（OpenAI 互換では `OPENAI_MODEL`、それも無ければ `gpt-4o-mini`）。
-  - **疎通確認** は実際に 1 ターン分を送って応答を確かめる。**適用** は疎通確認をしない。
+  - **疎通確認** は実際に 1 ターン分を送って応答を確かめる。結果の `OK（…秒 / <モデル名>）` には、エンジンが実際に使ったモデルの正式な ID が出る。試すのは上段の全体設定だけで、「AI 検索用モデル」は試さない。**適用** は疎通確認をしない。
   - thinking / effort は GUI に項目が無い。`models.toml` を手で編集し、再起動するか GUI で **適用** し直す（→ [設定ファイル](#設定ファイル手動設定)）。
 - **チャットごとの設定**: チャットタブを右クリック → **このチャットのモデル…**。「全体設定に従う」を外すと、そのチャットだけ別のエンジン・モデルにできる（チャットと一緒に保存・同期される）。
 
 ## モデルの指定
 
-モデル欄は空でよく、そのエンジンの既定モデルが使われる。
+モデル欄は、Claude と Codex では空でよい（そのエンジンの既定モデル）。pi は **プロバイダ** を選ぶ。OpenAI 互換はサーバーのモデル名を入れる（空だと `OPENAI_MODEL`、それも無ければ `gpt-4o-mini` になり、ローカルサーバーでは失敗する）。
 
 | エンジン | モデル欄に入れるもの | ID の調べ方 | 追加の設定（`models.toml`） |
 |---|---|---|---|
-| Claude | `opus` / `sonnet` などのエイリアス、または正式なモデル名 | Claude Code の `/model` に出る名前 | `thinking` = `enabled` / `adaptive` / `disabled`、`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode` |
-| Codex | `gpt-5.5` などカタログの ID | ダイアログの候補（Codex の既定カタログ） | `effort` = `minimal` / `low` / `medium` / `high` |
-| pi | プロバイダ（`openai-codex` / `github-copilot` / `llama.cpp`）とモデル ID | `pi --list-models`。`llama.cpp` は llama-server に読み込んであるモデルだけが出る | なし（`thinking` / `effort` は使わない） |
+| Claude | 空、または `opus` / `sonnet` / `haiku` / `fable` などのエイリアス（1M コンテキストは `opus[1m]` など）、または正式なモデル ID | エイリアスのまま **疎通確認** を押すと、結果の `OK（…秒 / <モデル名>）` に正式な ID が出る | `thinking` = `enabled` / `adaptive` / `disabled`、`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`（`ultracode` は `xhigh` に Claude Code の ultracode を加えたもの。対応モデルが要る） |
+| Codex | 空、または `gpt-5.5` などカタログの ID | ダイアログの候補（Codex の既定カタログ） | `effort`（例 `low` / `medium` / `high`。使える値はモデルによる。検証せずそのまま渡す） |
+| pi | **プロバイダ**欄に `openai-codex` / `github-copilot` / `llama.cpp`、モデル欄にモデル ID | `pi --list-models`。`llama.cpp` は llama-server に読み込んであるモデルだけが出る（接続先は `pi` を起動して `/login llama.cpp` で設定） | なし（`thinking` / `effort` は使わない） |
 | OpenAI 互換 HTTP | サーバー側のモデル名 | Ollama なら `ollama list`、それ以外はサーバーの一覧 | なし |
 
 ダイアログの候補リストは ＋ / － で編集でき、`models.toml` の `model_choices` / `provider_choices` に保存される。
 
 ## AI 検索用モデル
 
-チャット検索（Ctrl+F）の **AI 検索** に使うエンジンとモデルは、**設定 → バックエンド/モデル設定…** の「AI 検索用モデル」で指定する。「全体設定に従う」のときは全体設定と同じ。指定は `llm_backend/config.toml` の `[chat_search]`（`engine` / `model` / `provider`）に保存され、次に始める AI 検索から使われる。AI 検索のタブは、そのとき使ったエンジンとモデルをそのチャットの個別設定として持つので、後から **このチャットのモデル…** で変えられる。
+チャット検索（Ctrl+F）の **AI 検索** に使うエンジンとモデルは、**設定 → バックエンド/モデル設定…** の「AI 検索用モデル」で指定する。「全体設定に従う」のときは全体設定と同じ。指定は `llm_backend/config.toml` の `[chat_search]`（`engine` / `model` / `provider`）に保存され、次に始める AI 検索から使われる。「AI 検索用モデル」を指定しているときは、AI 検索のタブはそのエンジン（とモデル。空ならそのエンジンの既定）をそのチャットの個別設定として持つ。「全体設定に従う」のときは普通のチャットと同じく全体設定に従う。どちらも後から **このチャットのモデル…** で変えられる。`[chat_search].engine` に書くのはエンジン ID（`claude-vscode` / `claude-cli` / `pi` / `codex` / `openai-http` / `mock`）で、`[backend].name` の値（`claude` など）ではない。不明な値は「全体設定に従う」として扱われる。この欄には ＋ / － が無く、**疎通確認** も試さない。
 
 ## バックエンドの状況ウィンドウ
 
@@ -97,7 +97,7 @@
   - `.env` に `OPENAI_BASE_URL`（`/v1` まで含める。例 `http://localhost:11434/v1`）、必要なら `OPENAI_API_KEY`。モデル名は `models.toml` の `[openai-compat].model`（無ければ `OPENAI_MODEL`）。
   - 毎回 GUI 操作用のツール定義を付けてストリーミングで送るので、**function calling に対応したサーバーとモデルが必要**。小さいモデルではツールをうまく使えない。
   - 通信のタイムアウトは 30 秒（応答の途中で 30 秒以上止まった場合も含む）。モデルの読み込みが遅いと失敗する。
-  - このエンジンでは Python の実行・データの読み込み・図の保存はできない。ローカル LLM で解析まで行いたい場合は、pi + `llama.cpp` を使う。
+  - このエンジンでは Python の実行・データの読み込み・図の保存はできない。ローカル LLM で解析まで行いたい場合は、pi + `llama.cpp` を使う（`pi` を起動して `/login llama.cpp` で llama-server の接続先を設定し、プロバイダ欄に `llama.cpp` を選ぶ）。
 - **モック**: 入力に関係なく定型文を返す動作確認用。応答のたびに stooq.com へ接続する。
 
 ## 設定ファイル（手動設定）
@@ -113,11 +113,11 @@ GUI で設定すれば手で書く必要はない。手で書く場合は、雛�
 - **エンジンの選択順**: 環境変数 `LLM_BACKEND` → `config.toml` の `[backend].name` → `OPENAI_BASE_URL`（`mock` ならモック、それ以外は OpenAI 互換）。どれも無ければ OpenAI 互換（api.openai.com）になる。
 - `[backend].name`（と環境変数 `LLM_BACKEND`）に書けるのは `claude` / `codex` / `pi` / `openai` / `mock` だけ。それ以外の値だと OpenAI 互換（`OPENAI_BASE_URL=mock` ならモック）で起動し、チャットの先頭にエラーの行が出る（`claude_code` や `openai-compat` はセクション名で、エンジン名ではない）。値を直すか、**設定 → バックエンド/モデル設定…** で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す）。
 - `.env` に `LLM_BACKEND` を書くと、起動のたびに GUI での選択より優先される。
-- `models.toml` の Claude 用の値: `thinking` = `enabled` / `adaptive` / `disabled`。`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。Codex の `effort` = `minimal` / `low` / `medium` / `high`。
+- `models.toml` の Claude 用の値: `thinking` = `enabled` / `adaptive` / `disabled`。`effort` = `low` / `medium` / `high` / `xhigh` / `max` / `ultracode`。Codex の `effort` は例 `low` / `medium` / `high`（使える値はモデルによる。検証せずそのまま渡す）。
 - 手で編集したら、再起動するか GUI で **適用** し直す（起動時に一度だけ読む）。ただし `[backend].name` / `model` / `provider` を手で変えた場合は再起動する（ダイアログは古い値を表示するので、そのまま適用すると元に戻る）。
 - TOML の構文が壊れていると黙って無視される。`config.toml` なら既定のエンジン（OpenAI 互換）に、`models.toml` ならエンジンの既定モデルに戻る。**適用** では壊れた `config.toml`（モック以外を選んだときは `models.toml` も）が、＋ / － では `models.toml` だけが `.bak` に退避して作り直される。**作り直したファイルには GUI が書くキーしか残らない**ので、手で書いた設定（`permission_mode` 等）は `.bak` から戻す。
 - [R2 設定同期](config_sync_ja.md#複数-pc-での設定同期) を使っていると、`config.toml` と `models.toml` の変更は他の PC にも配られる。
-- Windows のパスは `"C:/Users/..."` の形で書く。GUI が書き換えるキー（`name`, `bin`, `model`, `provider`, `[chat_search]` の `engine`）に `'...'`（リテラル文字列）を使うと、GUI の **適用** が失敗する。
+- Windows のパスは `"C:/Users/..."` の形で書く。GUI が書き換えるキー（`name`, `bin`, `model`, `provider`, `[chat_search]` の `engine` / `model` / `provider`）に `'...'`（リテラル文字列）を使うと、GUI の **適用** が失敗する。`model_choices` / `provider_choices` を複数行の配列で書くと ＋ / － が失敗する。
 - `.env` の注意:
   - 読むのはリポジトリ直下の `.env` だけで、起動時に一度だけ読む。シェルの環境変数の方が優先される。
   - **行末コメントは使えない**（`KEY=value # メモ` は値が `value # メモ` になる）。

@@ -60,14 +60,14 @@ def apply_state(tab, state):               # 任意: 前回の表示状態を復
   - `AnalysisTab`（`gui.tab`）: `add_panel(key, widget, "top"|"left"|"right")`、`set_split_orientation("horizontal"|"vertical")`、`set_split_ratio(l, r)`、`register_command(verb, handler)` など。
   - `gui.panels`: `SelectorPanel`（コンボボックス）、`TrajectoryPanel`（散布図）、`ImagePanel`（配列画像）、`FigurePanel`（PNG 表示）。
   - `gui.imageviewer.attach_image_viewer(tab, image, panel="left")`（画像ビューア）。
-- **独自コマンド**: `tab.register_command("select", handler)` で登録すると、`python -m llm_bridge tab <解析名> select session=... --wait` やエージェントから呼べる。`k=v` はキーワード引数として渡されるので、ハンドラの引数名をキーに合わせる。値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキー（`llm_bridge/__main__.py` の `_STRING_KEYS`）では文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。独自コマンドの引数名が `_STRING_KEYS` に入っていると、数字でも文字列のまま届く。`true` / `false` は文字列のまま。返り値は結果の `result` に入り、例外は `status: error` になる。`set-split` / `close-pane` / `list-panes` / `snapshot` / `refresh-state` は予約済み。用途は解析の `README.md` に書いておく。
+- **独自コマンド**: `tab.register_command("select", handler)` で登録すると、`python -m llm_bridge tab <解析名> select session=... --wait` やエージェントから呼べる。`k=v` はキーワード引数として渡されるので、ハンドラの引数名をキーに合わせる。値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキー（`llm_bridge/__main__.py` の `_STRING_KEYS`）では文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。独自コマンドの引数名が `_STRING_KEYS` に入っていると、数字でも文字列のまま届く。`true` / `false` は文字列のまま。返り値は結果の `result` に入り、例外は `status: error` になる。`set-split` / `close-pane` / `list-panes` / `snapshot` / `refresh-state` は予約済み。`dataset=` はタブの指定に使われ、ハンドラには渡らない。用途は解析の `README.md` に書いておく。
 - **import**: `common.*` / `core.*` / `gui.*` / `config` は使える。同じフォルダに置いた補助 `.py` は import できないので、1 ファイルにまとめる。追加パッケージは GUI と同じ venv に入れる（Qt 以外はモジュール先頭で import してよい）。
 - **`@dataclass` と型注釈**: `@dataclass` や型注釈はそのまま使える（雛形の `from __future__ import annotations` も外さなくてよい）。ただし `analysis.py` は開くときだけモジュールとして登録されるので、解析のオブジェクトの pickle と、Windows の multiprocessing（spawn）は使えない。タブを開いた後に関数の中で `@dataclass` を定義するのも避ける。注釈の評価（`typing.get_type_hints`）やソースの取得（`inspect.getsource`）は、開いた後だと解析の中で定義した名前を解決できず失敗するので、`load()` / `build_tab()` の中で済ませる。BOM 付きで保存した `analysis.py` は GUI では開けない（`U+FEFF` の構文エラー）ので、BOM 無しの UTF-8 で保存する。
 
 ## 編集後の反映
 
 - タブを右クリック → **タブを閉じる** → 開き直す。
-- または `python -m llm_bridge window reload scope=tab target=<解析名> --wait`。成否は出力の `result`（`reloaded-tab:…` / `reload-tab-error:…`）で確認する。失敗すると古いタブが残る。同じ名前のタブが複数のデータセットにあるときは `dataset=<ds>` で対象を選ぶ（省略時はアクティブなデータセットのもの。チャットのエージェントが実行したときはチャットのデータセットのもの）。
+- または `python -m llm_bridge window reload scope=tab target=<解析名> --wait`。成否は出力の `result`（`reloaded-tab:…` / `reload-tab-error:…`。モーダルダイアログを開いている間は `reload-busy:…`）で確認する。失敗すると古いタブが残る。1 つのデータセットにしか無い名前なら、どのデータセットが前面でもそのタブが対象。同じ名前のタブが複数のデータセットにあるときは `dataset=<ds>` で対象を選ぶ（省略時はアクティブなデータセットのもの。チャットのエージェントが実行したときはチャットのデータセットのもの）。
 
 ## 同期ドライブ上で安全に編集する
 

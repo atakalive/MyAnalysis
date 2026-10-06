@@ -9,7 +9,7 @@ python -m llm_bridge <verb> ...
 - リポジトリ直下で、GUI と同じ venv の Python で実行する（別の場所からなら `PYTHONPATH=<リポジトリ>` を設定）。
 - `window` / `tab` は、起動中の GUI にコマンドを渡して実行させる。仕組みは `data/llm_state/commands/` にファイルを置くだけなので、次の点に注意する。
   - **GUI が起動していなくてもエラーにならない**（ID を表示して終了コード 0）。そのコマンドは次回起動時に捨てられる。起動確認には `python -m llm_bridge window list-tabs --wait 3`（終了コード 1 なら未起動か無応答）。
-  - `--wait [秒]`（既定 30 秒）は**必ず末尾に置く**。結果の JSON を表示する。タイムアウトすると終了コード 1 だが、GUI が動いていればコマンドは後で実行される（未起動なら次回起動時に捨てられる）。`--wait` を付けないと、結果は `data/llm_state/command_log.jsonl` に記録されるだけ。ただし `meeting-start` / `meeting-token` / `meeting-lan-link` の結果はログでは `<redacted>` になり、本体は `--wait` で受け取るまで `data/llm_state/results/` に残る。
+  - `--wait [秒]`（既定 30 秒）は**必ず末尾に置く**。結果の JSON を表示する。タイムアウトすると終了コード 1 だが、GUI が動いていればコマンドは後で実行される（未起動なら次回起動時に捨てられる）。`--wait` を付けないと、結果は `data/llm_state/command_log.jsonl` に記録されるだけ。ただし `meeting-start` / `meeting-token` / `meeting-lan-link` の結果はログでは `<redacted>` になり、本体は `--wait` で受け取るまで（最大 1 時間）`data/llm_state/results/` に残る。
   - **終了コード 0 でも成功とは限らない。** JSON の `status` が `ok` 以外（`error` / `rejected` / `stale` など）なら理由は `error` にある。`ok` でも `result` が `error:…` や `false` なら失敗。
   - `path=` は絶対パスで渡す。`k=v` の値は、`name` / `dataset` / `path` / `slot` / `text` などの名前・パス・自由文のキーでは文字列のまま、それ以外は普通の 10 進数（`12`・`-3`・`0.5`・`1e3`）のときだけ数値に変換される。`true` / `false` は文字列のまま。
 - 出力をファイルやパイプに流すときに日本語が化ける場合は、環境変数 `PYTHONUTF8=1` を設定する。
@@ -32,8 +32,9 @@ python -m llm_bridge <verb> ...
 | `state` | `[解析名] [--dataset DS]` | 不要※ | 解析の表示状態（`current.json`） |
 | `window` | `<サブコマンド> [k=v …] [--wait [秒]]` | **必要** | ウィンドウ操作（→ [`window` のサブコマンド](#window-のサブコマンド)） |
 | `tab` | `<タブ名> <サブコマンド> [k=v …] [--wait [秒]]` | **必要** | タブ操作（→ [`tab` のサブコマンド](#tab-のサブコマンド)） |
+| `list-commands` | `[タブ名]` | 不要 | window / tab のサブコマンドの一覧 |
 
-※ GUI が最後に書いた状態ファイル（`active.json`）を使う。GUI を閉じた後は前回の状態が出る。`--dataset` を省略すると、GUI で最後に前面（アクティブ）だったデータセットが対象になるので、書き込む verb では明示する。データセットのあるチャットのエージェントが実行したときは、`--dataset` 省略時の対象はそのチャットのデータセットになる（名前なしの `state` と `list-analyses` を除く。GUI でそのデータセットが閉じていても、`--dataset` を明示したときと同じく読み書きする）。window / tab verb の `dataset=` 省略時も同じ（`add-tab` / `close-tab` / `set-active-tab` / `show` / `show-image` / `reload scope=tab` と `tab` コマンド）だが、こちらはチャットのデータセットが開いていなければエラーになる。`--dataset` / `dataset=` に空の値を明示するとエラー。`active` の出力には `chat_dataset` が加わる（チャット外とデータセットの無いチャットでは `null`）。`active.json` が読めないときは `{"active_tab": null, "error": "active.json is unreadable", "chat_dataset": …}` を出す。
+※ GUI が最後に書いた状態ファイル（`active.json`）を使う。GUI を閉じた後は前回の状態が出る。`--dataset` を省略すると、GUI で最後に前面（アクティブ）だったデータセットが対象になるので、書き込む verb では明示する（`list-analyses` は例外で、省略すると開いている全データセットを列挙する）。データセットのあるチャットのエージェントが実行したときは、`--dataset` 省略時の対象はそのチャットのデータセットになる（名前なしの `state` と `list-analyses` を除く。GUI でそのデータセットが閉じていても、`--dataset` を明示したときと同じく読み書きする）。window / tab verb の `dataset=` 省略時も同じ（`add-tab` / `close-tab` / `set-active-tab` / `show` / `show-image` / `reload scope=tab` と `tab` コマンド）だが、こちらはチャットのデータセットが開いていなければエラーになる。`--dataset` / `dataset=` に空の値を明示するとエラー（`list-analyses` は省略と同じ）。`active` の出力には `chat_dataset` が加わる（チャット外とデータセットの無いチャットでは `null`）。`active.json` が読めないときは `{"active_tab": null, "error": "active.json is unreadable", "chat_dataset": …}` を出す。
 
 ## `window` のサブコマンド
 
@@ -46,10 +47,10 @@ python -m llm_bridge <verb> ...
 | `add-tab` | `name=<解析名> [dataset=<ds>]` | `added:` / `already-present:`（先に `open-dataset` する） |
 | `close-tab` / `set-active-tab` | `name=<タブ名> [dataset=<ds>]` | `true` / `false` |
 | `list-tabs` | `[detail=1]` | タブの一覧 |
-| `show` | `path=<絶対パス> [name=viewer] [slot=<パス>] [dataset=<ds>]` | 図ビューアに表示。`slot=right` / `bottom` で 2 枚目を並べる。`top/left` のように `/` で繋ぐと入れ子分割（2×2 など、深さ 6 まで） → `shown:<名前>` / `updated:<名前>` |
-| `show-image` | `path=<絶対パス> [name=image] [panel=left\|right] [slot=<パス>] [dataset=<ds>]` | 画像ビューアに表示。`slot=` は `show` と同じ分割パス（図と生画像をペインごとに混在可）。`slot` 省略時は最初の画像ペインをその場で更新 |
+| `show` | `path=<絶対パス> [name=viewer] [slot=<パス>] [dataset=<ds>]` | 図ビューアに表示。`slot=right` / `bottom` で 2 枚目を並べる。`top/left` のように `/` で繋ぐと入れ子分割（2×2 など、深さ 6 まで）。`slot` 省略時はそのタブを 1 枚に戻す（他のペインは閉じる） → `shown:<名前>` / `updated:<名前>` |
+| `show-image` | `path=<絶対パス> [name=image] [panel=left\|right] [slot=<パス>] [dataset=<ds>]` | 画像ビューアに表示。`slot=` は `show` と同じ分割パス（図と生画像をペインごとに混在可）。`slot` 省略時は最初の画像ペインをその場で更新（画像ペインが無ければ 1 枚の画像ペインに戻す）。`panel=` は `slot` 無しで新しいタブを作るときだけ効く |
 | `toggle-chat-float` | — | チャットの切り離し/格納 |
-| `chat-list` | `[dataset=<ds>\|scope=all\|scope=unbound\|search_tab=<sid>] [archived=true] [limit=200] [offset=<n>]` | チャットの一覧 → `{"chats": [{sid, title, dataset, updated, archived, n, first_user}], "total": N, "next_offset": n\|null}`（新しい順。`next_offset` が null でなければ `offset=<next_offset>` で続き）。検索の結果タブは含まない。`dataset` と `scope` を省略すると前面のデータセット、`scope=unbound` はどのデータセットにも紐づかないチャットだけ、`search_tab=<検索タブの sid>` はその検索タブの範囲・アーカイブ指定を使う（`dataset`・`scope`・`archived` より優先）。GUI のメモリ上のチャットを読むので未保存の分も入る。ページ送りの途中で他のチャットが更新されると順番が変わり、重複・取りこぼしがあり得る |
+| `chat-list` | `[dataset=<ds>\|scope=all\|scope=unbound\|search_tab=<sid>] [archived=true] [limit=200] [offset=<n>]` | チャットの一覧 → `{"chats": [{sid, title, dataset, updated, archived, n, first_user}], "total": N, "next_offset": n\|null}`（新しい順。`next_offset` が null でなければ `offset=<next_offset>` で続き）。検索の結果タブは含まない。`dataset` と `scope` を省略すると前面のデータセット（どのデータセットにも紐づかないチャットも含む。`dataset=` を指定したときも同じ）、`scope=all` は開いている全データセットと紐づかないチャット、`scope=unbound` はどのデータセットにも紐づかないチャットだけ、`search_tab=<検索タブの sid>` はその検索タブの範囲・アーカイブ指定を使う（`dataset`・`scope`・`archived` より優先）。GUI のメモリ上のチャットを読むので未保存の分も入る。ページ送りの途中で他のチャットが更新されると順番が変わり、重複・取りこぼしがあり得る |
 | `chat-search` | `query=<語> [dataset=<ds>\|scope=all\|scope=unbound\|search_tab=<sid>] [archived=true] [limit=50] [offset=<n>]` | 空白区切りのすべての語を含むメッセージ（大文字・小文字を区別しない。ツール呼び出しの行と思考（💭）の行は対象外）→ `{"hits": [{sid, idx, title, dataset, role, snippet, updated}], "total": N, "next_offset": n\|null}` |
 | `chat-show` | `sid=<sid> [start=<idx>] [end=<idx>] [char_offset=<n>] [max_chars=20000] [raw=true]` | チャットの本文。`idx` はメッセージの番号（`chat-search` の `idx` と同じ）で、`end` を含む。`truncated` が true なら `start=<next> char_offset=<next_char_offset>` で、長いメッセージの途中からでも続きを読める。`raw=true` でツール呼び出しの行と思考（💭）の行も含める |
 | `meeting-start` / `meeting-token` / `meeting-lan-link` / `meeting-stop` | → [ミーティング共有](meeting_share_ja.md#コマンドから操作する) | |
@@ -57,10 +58,10 @@ python -m llm_bridge <verb> ...
 
 ## `tab` のサブコマンド
 
-- 全タブ共通: `set-split left=<n> right=<n> [slot=<領域>]`（比率。`top=`/`bottom=` も可。`slot` 省略時は最外側の分割）、`close-pane slot=<パス>`（ペイン/領域を閉じる。最後の 1 枚は閉じられない → `close-tab`）、`list-panes`（現在のペインを `[{slot, key, kind, path}]` で木の順に返す）、`snapshot`（解析タブの表示を `<work_dir>/analyses/<解析名>/state/current_view.png` に保存。図・画像ビューアのタブでは何もしない）。
+- 全タブ共通: `set-split left=<n> right=<n> [slot=<領域>]`（比率。`top=`/`bottom=` も可。`slot` 省略時は最外側の分割）、`close-pane slot=<パス>`（`show` / `show-image` で置いたペイン・領域を閉じる。解析のパネルを含む領域は閉じられない。最後の 1 枚は閉じられない → `close-tab`）、`list-panes`（現在のペインを `[{slot, key, kind, path}]` で木の順に返す）、`snapshot`（解析タブの表示を `<work_dir>/analyses/<解析名>/state/current_view.png` に保存。図・画像ビューアのタブでは何もしない）。
 - **slot は分割パス**: `left|right` はその段を左右に、`top|bottom` は上下に分ける（`left`≡`top` が 1 番目、`right`≡`bottom` が 2 番目）。配置（`show`/`show-image`）はその段の向きを書いた側に変える——向きが変わると他ペインの slot 名も変わる（`top/left` → `left/top` など）ので `list-panes` で確認する。同じ slot に再表示すると、その場で更新。埋まっているペインを通るパスは、そのペインを分割して旧内容を反対側へ寄せる。パネル key（`figure`/`figure-2`/`viewer-2`…）は構築順の識別子で位置を表さない。ペインは必ず slot で指す。
 - 画像ビューアのタブ: `set-lut lut=<Grays|Red|Green|Blue|Magenta|Cyan|Yellow|Fire|Ice|Spectrum> [invert=true]`、`set-range min= max=`、`auto-contrast [low=0.35] [high=99.65]`、`set-channel index=`、`set-mode mode=single|composite`、`set-z index=`、`set-t index=`、`set-visible channel= visible=true|false`、`load-image path=`。`set-lut` / `set-range` / `auto-contrast` は `channel=<n>` も取る（省略時は選択中のチャンネル）。番号は 0 から。いずれも `slot=<パス>` で対象ペインを指定できる（省略時は最初の画像ペイン。これらは向きを変えず、実際の分割と合わない slot はエラーになり現在の slot 一覧を返す）。
-- 解析タブ: 各 `analysis.py` が登録したコマンド。
+- 解析タブ: `refresh-state`（表示状態を `current.json` に書き直す）と、各 `analysis.py` が登録したコマンド。
 - `tab` コマンドは対象のタブを前面に出す。同じ名前のタブが複数のデータセットにあるときは `dataset=<ds>` を付ける。
 - `dataset=` に開いていないデータセットを指定して出したタブ（`add-tab` / `show` / `show-image`）は、そのデータセットに保存済みのタブ構成（`session.json`）があると保存されない（上書きを防ぐため）。先に `open-dataset` する。
 
