@@ -46,6 +46,30 @@ class Engine:
 # なお `openai`（API キー）は実質 `openai-codex`（ChatGPT サブスク）と同じ用途なので並べない。
 PI_PROVIDERS: tuple[str, ...] = ("openai-codex", "github-copilot", "llama.cpp")
 
+# ChatGPT サブスク側 Codex カタログの表示対象モデル (codex の priority 順)。codex と
+# pi の openai-codex provider は同じモデル群なので、両エンジンの種がここを参照する。
+# codex の ~/.codex/models_cache.json (サーバー取得) と pi --list-models で確認。
+OPENAI_CODEX_MODELS: tuple[str, ...] = (
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
+
+# claude-vscode / claude-cli 共通の種 (両者は models.toml の [claude_code] も共有する)。
+# 同梱エンジンと PATH の CLI の両方で実ターンを流して確認済み。
+CLAUDE_MODELS: tuple[str, ...] = (
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+)
+
 
 ENGINES: tuple[Engine, ...] = (
     Engine(
@@ -55,6 +79,7 @@ ENGINES: tuple[Engine, ...] = (
         settings_key="claude_code",
         config_patch=(("bin", ""),),
         fields=("model",),
+        model_suggestions=CLAUDE_MODELS,
     ),
     Engine(
         id="claude-cli",
@@ -63,6 +88,7 @@ ENGINES: tuple[Engine, ...] = (
         settings_key="claude_code",
         config_patch=(("bin", "claude"),),
         fields=("model",),
+        model_suggestions=CLAUDE_MODELS,
     ),
     Engine(
         id="pi",
@@ -76,17 +102,10 @@ ENGINES: tuple[Engine, ...] = (
         # そのもの (`/login llama.cpp`, LLAMA_BASE_URL)。
         # 上の PI_PROVIDERS を使う（表示フィルタと共通）。
         provider_suggestions=PI_PROVIDERS,
-        # openai-codex の実在 ID (pi --list-models で確認)。ローカルモデルは
-        # llama-server にロード済みのものしか catalog に出ないため静的な種は持てない
+        # openai-codex の実在 ID。ローカルモデルは llama-server にロード済みのもの
+        # しか catalog に出ないため静的な種は持てない
         # ＝ダイアログの追加/削除で models.toml に貯める運用が本筋。
-        model_suggestions=(
-            "gpt-5.6-sol",
-            "gpt-5.6-luna",
-            "gpt-5.6-terra",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-        ),
+        model_suggestions=OPENAI_CODEX_MODELS,
     ),
     Engine(
         id="codex",
@@ -95,16 +114,8 @@ ENGINES: tuple[Engine, ...] = (
         settings_key="codex",
         config_patch=(),
         fields=("model",),
-        # ChatGPT サブスク側の Codex カタログ (pi の openai-codex provider と同じ
-        # モデル群)。空欄 = codex 既定モデル。
-        model_suggestions=(
-            "gpt-5.6-sol",
-            "gpt-5.6-luna",
-            "gpt-5.6-terra",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-        ),
+        # 空欄 = codex 既定モデル。
+        model_suggestions=OPENAI_CODEX_MODELS,
     ),
     Engine(
         id="openai-http",

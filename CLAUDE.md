@@ -99,7 +99,7 @@ guards that every prompt still contains it.
   `model`/`provider` keys in `models.toml` (comment-preserving), runs an optional
   connectivity check, then `cache_clear()`s both loaders + reseeds every chat
   session's backend so it applies from the next send — no restart (Issue #94).
-  The model/provider dropdowns are user-editable: ＋/－ next to each combo add or
+  The model/provider dropdowns are user-editable: the 追加/削除 (Add/Remove) buttons next to each combo add or
   remove the typed value and persist the list to `models.toml` as
   `[<section>].model_choices` / `provider_choices` (saved immediately, independent
   of 適用). An absent key falls back to the seed in `engines.py`; `[]` means "no
@@ -150,7 +150,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
   (エンジン=プロバイダ=モデル), so session A can run Claude while B runs pi+llama.cpp.
   - `SessionEngineDialog` subclasses `BackendSelectorDialog` and swaps five hooks
     (`_baseline_engine_id` / `_seed_value` / `_probe_settings` /
-    `_do_apply` / `_update_warnings`); the combos, ＋/－ lists and ping shutdown are
+    `_do_apply` / `_update_warnings`); the combos, 追加/削除 choice lists and ping shutdown are
     shared. The ping lock and the「全体設定に従う」checkbox are **separate booleans
     AND-ed** — merging them would let un-checking mid-ping re-enable the combos and
     revive the stale-result race. **適用は応答中でもブロックしない**: 進行中ターンは

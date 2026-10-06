@@ -22,18 +22,18 @@ effort   = "xhigh"    # --effort: low | medium | high | xhigh | max | ultracode 
 
 [pi]
 provider = "openai-codex"  # --provider  (openai-codex | github-copilot | llama.cpp)
-model    = "gpt-5.5"       # --model
+model    = "gpt-6.1-sol"   # --model
 # *_choices は「バックエンド/モデル設定」ダイアログのドロップダウン候補。
-# ダイアログの ＋/－ が書き換えるので手編集は不要 (してもよい)。キー自体が無ければ
+# ダイアログの「追加」「削除」が書き換えるので手編集は不要 (してもよい)。キー自体が無ければ
 # engines.py の既定の種を出し、[] なら「候補なし」として尊重する。
 # ローカルモデルは llama-server にロード済みのものしか pi の catalog に出ないため、
 # 名前をここに貯めておくのが実質的な使い方。
-# model_choices    = ["gpt-5.6-sol", "gpt-5.5"]
+# model_choices    = ["gpt-6.1-sol", "gpt-6-sol"]
 # provider_choices = ["openai-codex", "llama.cpp"]
 
 [codex]
 model  = ""     # --model (empty = codex default; 候補は ChatGPT 側 Codex カタログ)
-effort = ""     # -c model_reasoning_effort: minimal | low | medium | high
+effort = ""     # -c model_reasoning_effort: low | medium | high | xhigh | max (使える値はモデルによる)
                 #   (empty = default; 値は無検証でそのまま渡す)
 
 [openai-compat]

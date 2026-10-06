@@ -137,7 +137,7 @@ class BackendSelectorDialog(QDialog):
     # ----- subclass hooks -----
     #
     # SessionEngineDialog (per-chat-session override) reuses this whole dialog —
-    # combos, the ＋/－ choice lists, and the ping worker's cancel→wait→kill
+    # combos, the Add/Remove choice lists, and the ping worker's cancel→wait→kill
     # shutdown — and only swaps these five seams. They are overridden, not branched
     # on a `session=` flag, so each method keeps a single coherent contract.
 
@@ -250,7 +250,7 @@ class BackendSelectorDialog(QDialog):
     # ----- choice-list rows (combo + add/remove) -----
 
     def _make_choice_row(self, combo, field: str) -> tuple[QWidget, list[QPushButton]]:
-        """Wrap ``combo`` with ＋/－ buttons that edit the persisted choice list.
+        """Wrap ``combo`` with Add/Remove buttons that edit the persisted choice list.
 
         The row's field widget is the returned container, so row visibility is
         toggled on *it*; ``_sync_engine_widgets`` additionally sets the combo's own
@@ -267,7 +267,6 @@ class BackendSelectorDialog(QDialog):
         ):
             btn = QPushButton(tr(label_key), row)
             btn.setToolTip(tr(tip_key))
-            btn.setFixedWidth(28)
             btn.setAutoDefault(False)   # else Enter in the combo would fire it
             btn.clicked.connect(
                 lambda _checked=False, f=field, add=slot: self._on_edit_choices(f, add)
@@ -280,7 +279,7 @@ class BackendSelectorDialog(QDialog):
         return self._model_combo if field == "model" else self._provider_combo
 
     def _on_edit_choices(self, field: str, add: bool) -> None:
-        """＋: add the typed value to the list. －: remove it. Persisted at once.
+        """Add: add the typed value to the list. Remove: remove it. Persisted at once.
 
         This edits the *dropdown contents*, which is independent of the selection
         being applied — so it is saved immediately rather than waiting for 適用.
@@ -326,9 +325,9 @@ class BackendSelectorDialog(QDialog):
     def _populate_choices(self, engine, field: str, *, keep_text: bool = False) -> None:
         """Rebuild ``field``'s dropdown from the choice list.
 
-        ``keep_text`` retains what the user typed (used after ＋/－, which must not
+        ``keep_text`` retains what the user typed (used after Add/Remove, which must not
         reset the selection back to the persisted one). It also suppresses the
-        "current value first" rule: right after a －, the removed value is still in
+        "current value first" rule: right after a Remove, the removed value is still in
         the edit box, and listing it would make the removal look like it failed.
         Opening the dialog does prepend the configured value, so a model that is
         active but absent from the list is never invisible.
@@ -537,7 +536,7 @@ class SessionEngineDialog(BackendSelectorDialog):
     from scratch, because the ping worker's cancel → wait → kill shutdown is ~70
     lines that must not be forked.
 
-    Applying writes the ChatSession, not the TOMLs. The ＋/－ dropdown lists still
+    Applying writes the ChatSession, not the TOMLs. The Add/Remove dropdown lists still
     write models.toml — those are shared candidate lists, and sharing them between
     the global dialog and every session is the point (note they persist immediately,
     so they survive Cancel; same as the global dialog).

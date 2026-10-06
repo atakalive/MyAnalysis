@@ -74,7 +74,7 @@ The detailed documents under `docs/` are available in Japanese only.
 
 - Claude is recommended (it is the most tested).
 - Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
-- The **model field** can be left empty; the engine's default model is used. To specify one: for Claude, an alias such as `opus` / `sonnet` or a name shown by `/model` in Claude Code; for Codex and pi, a catalog ID such as `gpt-5.5` (the dialog's suggestions, or `pi --list-models`); for OpenAI-compatible engines, the server-side model name (`ollama list` for Ollama). Values for thinking / effort: [docs/engines_ja.md](docs/engines_ja.md#モデルの指定).
+- The **model field** can be left empty; the engine's default model is used. To specify one: for Claude, an alias such as `opus` / `sonnet` or a name shown by `/model` in Claude Code; for Codex and pi, a catalog ID such as `gpt-6.1-sol` (the dialog's suggestions, or `pi --list-models`); for OpenAI-compatible engines, the server-side model name (`ollama list` for Ollama). Values for thinking / effort: [docs/engines_ja.md](docs/engines_ja.md#モデルの指定).
 
 To use an engine other than Claude (Codex CLI / pi / an OpenAI-compatible HTTP server such as Ollama), to change the model per chat, or to write the configuration file by hand, read [docs/engines_ja.md](docs/engines_ja.md).
 

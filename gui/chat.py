@@ -1680,7 +1680,7 @@ class ChatWidget(QWidget):
     def _open_session_engine_dialog(self, sess: ChatSession) -> None:
         """タブ右クリック →「このチャットのモデル…」。
 
-        全体設定ダイアログと同じ UI（エンジン/モデル/プロバイダのコンボ、＋/－ の候補編集、
+        全体設定ダイアログと同じ UI（エンジン/モデル/プロバイダのコンボ、追加/削除による候補編集、
         疎通確認）を SessionEngineDialog が継承し、適用先だけを TOML から
         このセッションに差し替える。
         """

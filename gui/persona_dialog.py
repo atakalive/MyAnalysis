@@ -7,7 +7,7 @@
 規律:
 
 - **選択は適用時のみ反映、定義編集は境界で即保存**（combo 切替・追加・削除・
-  適用の各境界で ``_commit_body_edit``。backend_selector の ＋/－ 候補リスト
+  適用の各境界で ``_commit_body_edit``。backend_selector の追加/削除による候補リスト
   即時保存と同じ — Cancel しても保存済みの定義編集は残る）。
 - **名前変更は v1 では非対応**: セッション上書き・全体 pref に残る dangling
   参照を fixup する機構が無いため（削除＋追加で代替する）。

@@ -191,7 +191,7 @@ def test_apply_io_error_shows_message(monkeypatch, parent_widget):
 
 
 # --------------------------------------------------------------------------- #
-# choice-list ＋/－ controls                                                    #
+# choice-list Add/Remove controls                                              #
 # --------------------------------------------------------------------------- #
 
 def _patch_choices(monkeypatch, initial=("a", "b")):
@@ -284,7 +284,7 @@ def test_choice_buttons_locked_during_ping(monkeypatch, parent_widget):
 
 
 def test_removed_value_leaves_the_dropdown_immediately(monkeypatch, parent_widget):
-    """After －, the removed value must not still be listed (it only stays typed)."""
+    """After Remove, the removed value must not still be listed (it only stays typed)."""
     _patch_config(monkeypatch, engine_id="pi", model="a", provider="")
     _patch_choices(monkeypatch, initial=("a", "b"))
     dlg, _ = _make_dialog(monkeypatch, parent_widget)
