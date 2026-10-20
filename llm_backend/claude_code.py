@@ -25,14 +25,17 @@ from __future__ import annotations
 import collections
 import json
 import logging
+import math
 import os
 import platform
+import queue
 import re
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -41,7 +44,8 @@ from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
-    Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
+    Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown,
+    NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS, CHAT_DATASET_RULE, with_chat_context,
     apply_agent_stage,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
@@ -104,8 +108,9 @@ _SYSTEM_PROMPT = (
 ) + "\n" + GUI_DISPLAY_VERBS + "\n" + NO_LOCAL_PERSISTENCE + "\n" + MOUNT_SAFE_EDITS + "\n" + CHAT_DATASET_RULE
 
 # Default permission mode. GUI driving needs the Bash tool to run
-# `python -m llm_bridge`, which the interactive modes would prompt for — and we
-# close stdin after sending the prompt, so an interactive prompt would deadlock.
+# `python -m llm_bridge`, which the interactive modes would prompt for — and
+# nothing answers a permission prompt (stdin carries only this turn's messages
+# and Stop), so an interactive prompt would deadlock.
 # bypassPermissions keeps it non-interactive. Override in config for a tighter
 # allowlist (then also set allowed_tools).
 _DEFAULT_PERMISSION_MODE = "bypassPermissions"
@@ -150,6 +155,51 @@ _TOOL_INPUT_KEYS = ("command", "file_path", "path", "pattern", "query", "url", "
 
 # Valid --thinking modes; anything else is ignored (CLI default).
 _THINKING_MODES = frozenset({"enabled", "adaptive", "disabled"})
+
+_REPLAY_MIN_VERSION = (2, 1, 282)      # --replay-user-messages を受け付ける最小の版（Issue #119）
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_VERSION_CACHE: dict[str, tuple[int, int, int]] = {}   # bin → `--version` で読めた版
+_VERSION_LOCK = threading.Lock()
+
+
+def _wrap_shim(cmd: list[str]) -> list[str]:
+    """Windows の .cmd/.bat シムを実体の argv に解決する（cmd.exe は複数行引数を最初の改行で切る）。
+    解決できない自作シムだけ cmd.exe /c で包む。"""
+    if sys.platform == "win32" and cmd[0].lower().endswith((".cmd", ".bat")):
+        resolved = resolve_cmd_shim(cmd[0])
+        if resolved:
+            return resolved + cmd[1:]
+        return ["cmd.exe", "/c"] + cmd
+    return cmd
+
+
+def _replay_supported(claude_bin: str) -> bool:
+    """claude_bin が --replay-user-messages を受け付ける版か（Issue #119）。never raise。
+
+    パスに VS Code 拡張の版（_VER_RE）があればそれで決め、プロセスを起動しない。無ければ
+    `<bin> --version` を 1 回だけ実行し、出力の最初の a.b.c を読む。読めた版だけ _VERSION_CACHE に
+    入れる（失敗はキャッシュせず、そのターンは非対応として扱う）。stream() の中（ワーカースレッド）で呼ぶ。"""
+    m = _VER_RE.search(claude_bin)
+    if m:
+        return (int(m[1]), int(m[2]), int(m[3])) >= _REPLAY_MIN_VERSION
+    with _VERSION_LOCK:
+        ver = _VERSION_CACHE.get(claude_bin)
+    if ver is None:
+        try:
+            out = subprocess.run(
+                _wrap_shim([claude_bin, "--version"]),
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                **no_window_kwargs(),
+            ).stdout.decode("utf-8", errors="replace")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+        m = _VERSION_RE.search(out)
+        if m is None:
+            return False
+        ver = (int(m[1]), int(m[2]), int(m[3]))
+        with _VERSION_LOCK:
+            _VERSION_CACHE[claude_bin] = ver
+    return ver >= _REPLAY_MIN_VERSION
 
 
 def _generation_flags(config: dict) -> list[str]:
@@ -221,6 +271,68 @@ def _system_prompt_args(use_provider_default: bool, persona: str = "") -> list[s
     return [flag, compose_system_prompt(_SYSTEM_PROMPT, persona)]
 
 
+_OutEvent = TextDelta | UserAbsorbed | UserUnknown   # _out を通る出力（Issue #119）
+
+_CLOSE = object()       # 書き手のキューに積む「stdin を閉じる」印（Issue #119）
+# result の後に、書いた足し分が片付くのを待つときの見張り（秒）。使うたびに読む（テストで短くする）。
+_STALL_SEC = 10         # 待機中に、どのフレームも来ない時間
+_WAIT_MAX_SEC = 30      # 待機に入ってからの上限（フレームが来ても延びない）
+_DRAIN_SEC = 5          # あきらめて interrupt と close を積んでから kill するまで
+
+
+def _user_line(text: str, message_uuid: str | None) -> bytes:
+    """stdin に書く user の 1 行。message_uuid が None なら今までと同じ形（uuid なし）。"""
+    message = {"role": "user", "content": [{"type": "text", "text": text}]}
+    if message_uuid is None:
+        msg: dict = {"type": "user", "message": message}
+    else:
+        msg = {"type": "user", "uuid": message_uuid, "session_id": "",
+               "parent_tool_use_id": None, "message": message}
+    return (json.dumps(msg) + "\n").encode("utf-8")
+
+
+class _Send:
+    """1 回の stream（最初の発言、その間の追加送信、それによる続きのターン）の状態（Issue #119）。
+
+    stream ごとに作る。後始末・書き手・タイマーは自分の _Send だけに触る。中身の読み書きは
+    ClaudeCodeBackend._lock の中で行う（ロックを持ったまま stdin への書き込み・kill・yield をしない）。"""
+
+    __slots__ = (
+        "replay", "accepting", "injected", "unwritten", "written", "outstanding", "announced",
+        "confirmed", "started", "receipt_cancelled", "tracked", "stopping", "first_uuid", "wq",
+        "writer", "closing", "interrupt_rid", "waiting", "wait_deadline", "timer", "timer_gen",
+        "stalled", "writing", "cost_seen", "proc", "stderr",
+    )
+
+    def __init__(self) -> None:
+        self.replay = False                        # この stream で --replay-user-messages を使う
+        self.accepting = False                     # True の間だけ inject を受け付ける
+        self.injected: dict[str, str] = {}         # uid → 本文（足した順）
+        self.unwritten: list[str] = []             # 受け付けたが、まだ書き手のキューに積んでいない uid
+        self.written: set[str] = set()             # キューに積んだ足し分（書き始める前に捨てたら外す）
+        self.outstanding: set[str] = set()         # 積んだ uid（最初の発言を含む）のうち片付いていないもの
+        self.announced: set[str] = set()           # UserAbsorbed を出した uid
+        self.confirmed: set[str] = set()           # 取り込みが確定した（completed・result の uuid 一覧）
+        self.started: set[str] = set()             # started かエコーを見た（取り込まれた形跡がある）
+        self.receipt_cancelled: set[str] = set()   # 自分の interrupt の応答の cancelled にあった
+        self.tracked = False                       # 最初の uuid の command_lifecycle を受けた
+        self.stopping = False                      # cancel() 済み
+        self.first_uuid: str | None = None
+        self.wq: queue.SimpleQueue = queue.SimpleQueue()
+        self.writer: threading.Thread | None = None
+        self.closing = False                       # _CLOSE を積んだ
+        self.interrupt_rid: str | None = None
+        self.waiting = False                       # result の後、書いた足し分が片付くのを待っている
+        self.wait_deadline = 0.0
+        self.timer: threading.Timer | None = None
+        self.timer_gen = 0
+        self.stalled = False                       # 待機をあきらめた
+        self.writing = False                       # 最初の発言を stdin に書いている途中
+        self.cost_seen = 0.0                       # この stream で受けた total_cost_usd の最大
+        self.proc: subprocess.Popen | None = None
+        self.stderr: collections.deque[str] = collections.deque(maxlen=50)   # この stream の stderr の末尾
+
+
 class ClaudeCodeBackend:
     name = "claude-code"
 
@@ -238,6 +350,10 @@ class ClaudeCodeBackend:
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
         self._chat_dataset: str | None = None
+        # 応答中の追加送信（Issue #119）。_cur は今の（最後の）stream の状態。
+        self._lock = threading.Lock()
+        self._cur: _Send | None = None
+        self._inject_supported: bool | None = None   # None = まだ版を判定していない
 
     def set_use_provider_system_prompt(self, value: bool) -> None:
         self._use_provider_system_prompt = bool(value)
@@ -251,7 +367,7 @@ class ClaudeCodeBackend:
 
     def stream(
         self, messages: list[Message], tools: list | None = None
-    ) -> Iterator[TextDelta | ToolCallRequest]:
+    ) -> Iterator[TextDelta | ToolCallRequest | UserAbsorbed | UserUnknown]:
         config = self._config
 
         self._thinking_open = False             # 💭 行を開いたまま（末尾の改行をまだ出していない）
@@ -260,7 +376,7 @@ class ClaudeCodeBackend:
         self._thinking_matched: list[bool] = [] # 同じ位置のブロックを assistant イベントの thinking と突き合わせ済みか
         self._thinking_cur: int | None = None   # いま受けている思考ブロックの位置（ブロックの外なら None）
         self._pending: list[int] = []           # 本文が流れずに終わった思考ブロックの位置（未解決の枠。古い順）
-        self._queue: list[str | int] = []       # 未解決の枠（int）がある間の出力（str）を、出力順のまま溜める
+        self._queue: list[_OutEvent | int] = [] # 未解決の枠（int）がある間の出力を、出力順のまま溜める
         fresh = self._session_id is None     # 新規ネイティブセッション（replay と同じ条件）
         prompt = build_prompt_with_history(messages, replay=fresh)
         if not prompt:
@@ -269,167 +385,297 @@ class ClaudeCodeBackend:
             # チャットの DS は新規セッションの最初の送信でだけ伝える（Issue #111）。
             prompt = with_chat_context(prompt, getattr(self, "_chat_dataset", None))
 
-        claude_bin = self._discover_binary()
-
-        cmd = [
-            claude_bin,
-            "--output-format", "stream-json",
-            "--input-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            # Repo is reachable (helper APIs) but is NOT the cwd, so the engine
-            # is not framed as a developer of it (see _agent_home).
-            "--add-dir", str(repo_root()),
-        ]
-        # getattr: ホットリロードで旧インスタンスに _persona が無いケースのガード。
-        cmd += _system_prompt_args(
-            self._use_provider_system_prompt, getattr(self, "_persona", "")
-        )
-        cmd += ["--permission-mode", _resolve_permission_mode(config)]
-        cmd += _generation_flags(config)
-        settings = _settings_payload(config)
-        if settings:
-            cmd += ["--settings", json.dumps(settings)]
-        allowed = config.get("allowed_tools", "")
-        if allowed:
-            # space/comma-separated allowlist → variadic --allowedTools
-            cmd += ["--allowedTools", *re.split(r"[ ,]+", allowed.strip())]
-        if self._session_id:
-            cmd += ["--resume", self._session_id]
-
-        # Windows: CreateProcess can't run .cmd/.bat shims with shell=False.
-        # The bundled engine is a real .exe, but a configured bin override
-        # (bin="claude" = npm CLI) resolves to a shim. cmd.exe は複数行引数を
-        # 最初の改行で切断する（system プロンプトの 2 行目以降と後続の --resume
-        # 等が全部消える）ため、シムは実体に解決して直接 spawn する。
-        if sys.platform == "win32" and claude_bin.lower().endswith((".cmd", ".bat")):
-            resolved = resolve_cmd_shim(claude_bin)
-            if resolved:
-                cmd = resolved + cmd[1:]
-            else:
-                cmd = ["cmd.exe", "/c"] + cmd
-
-        child_env = self._build_env()
-        cwd = config.get("cwd") or str(self._agent_home())
-
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-            env=child_env,
-            start_new_session=(sys.platform != "win32"),
-            **no_window_kwargs(),
-        )
-        user_msg = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}],
-            },
-        }
-        # Drain stderr in a daemon thread to avoid pipe-buffer deadlock.
-        threading.Thread(
-            target=self._drain_stderr, args=(proc,), daemon=True
-        ).start()
-
-        self._proc = proc
-        deferred_error = None
+        send = _Send()
+        with self._lock:
+            self._cur = send
         try:
-            # Inside the try: a rejected --resume makes claude exit instantly, and
-            # writing to the dead pipe raises BrokenPipeError. Outside, that escaped
-            # before `finally` could reap the child or attach the stderr tail, so the
-            # user saw a bare BrokenPipeError with no clue why. Keep stdin OPEN for
-            # the whole turn so cancel() can inject an `interrupt` control_request
-            # (VS Code CC's stop mechanism); it is closed in the finally (turn end)
-            # or by cancel() (stop).
-            try:
-                proc.stdin.write((json.dumps(user_msg) + "\n").encode("utf-8"))
-                proc.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError):
-                pass    # child already gone — the exit-code check below reports why
-            for raw_line in proc.stdout:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # non-JSON line → skip
-                sid = event.get("session_id")
-                if sid:
-                    self._session_id = sid
-                etype = event.get("type")
-                if etype == "system":
-                    # init event carries the resolved model name
-                    m = event.get("model")
-                    if event.get("subtype") == "init" and m:
-                        self.model = m
-                elif etype == "stream_event":
-                    yield from self._handle_stream_event(
-                        event.get("event", {}), event.get("parent_tool_use_id"))
-                elif etype == "assistant":
-                    yield from self._handle_tool_calls(event)
-                elif etype == "user":
-                    yield from self._handle_tool_results(event)
-                elif etype == "result":
-                    self._capture_usage(event)
-                    if event.get("is_error") or event.get("subtype") != "success":
-                        detail = event.get("result") or event.get("subtype") \
-                            or "unknown error"
-                        deferred_error = RuntimeError(
-                            f"claude result error: {detail}"
-                        )
-                    break
-        finally:
-            # Close stdin (EOF) so the engine exits, then reap. cancel() may
-            # have closed it already — guard the double close.
-            try:
-                if proc.stdin and not proc.stdin.closed:
-                    proc.stdin.close()
-            except (OSError, ValueError):
-                pass
-            if proc.poll() is None:
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._kill_tree(proc)
-                    proc.wait(timeout=5)
-            self._proc = None
+            claude_bin = self._discover_binary()
+            # 応答中の追加送信（Issue #119）は --replay-user-messages を受け付ける版だけ。
+            # 非対応なら argv・stdin に書く行・interrupt の形は今までと同じ。
+            replay = _replay_supported(claude_bin)
+            self._inject_supported = replay
 
-        yield from self._release_all()   # 安全弁: ターン終了で未解決の枠を捨てて溜めた分を出す
-        if deferred_error is not None:
-            raise deferred_error
-        if proc.returncode not in (0, None):
-            stderr_tail = "\n".join(self._stderr_buf)
-            raise RuntimeError(
-                f"claude exited with code {proc.returncode}:\n{stderr_tail}"
+            cmd = [
+                claude_bin,
+                "--output-format", "stream-json",
+                "--input-format", "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ]
+            if replay:
+                cmd.append("--replay-user-messages")
+            cmd += [
+                # Repo is reachable (helper APIs) but is NOT the cwd, so the engine
+                # is not framed as a developer of it (see _agent_home).
+                "--add-dir", str(repo_root()),
+            ]
+            # getattr: ホットリロードで旧インスタンスに _persona が無いケースのガード。
+            cmd += _system_prompt_args(
+                self._use_provider_system_prompt, getattr(self, "_persona", "")
             )
+            cmd += ["--permission-mode", _resolve_permission_mode(config)]
+            cmd += _generation_flags(config)
+            settings = _settings_payload(config)
+            if settings:
+                cmd += ["--settings", json.dumps(settings)]
+            allowed = config.get("allowed_tools", "")
+            if allowed:
+                # space/comma-separated allowlist → variadic --allowedTools
+                cmd += ["--allowedTools", *re.split(r"[ ,]+", allowed.strip())]
+            if self._session_id:
+                cmd += ["--resume", self._session_id]
+
+            # Windows: CreateProcess can't run .cmd/.bat shims with shell=False.
+            # The bundled engine is a real .exe, but a configured bin override
+            # (bin="claude" = npm CLI) resolves to a shim. cmd.exe は複数行引数を
+            # 最初の改行で切断する（system プロンプトの 2 行目以降と後続の --resume
+            # 等が全部消える）ため、シムは実体に解決して直接 spawn する。
+            cmd = _wrap_shim(cmd)
+
+            child_env = self._build_env()
+            cwd = config.get("cwd") or str(self._agent_home())
+
+            with self._lock:
+                send.replay = replay
+                if replay:
+                    send.first_uuid = str(uuid.uuid4())
+                    send.accepting = not send.stopping
+
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                env=child_env,
+                start_new_session=(sys.platform != "win32"),
+                **no_window_kwargs(),
+            )
+            # Drain stderr in a daemon thread to avoid pipe-buffer deadlock.
+            threading.Thread(
+                target=self._drain_stderr, args=(proc, send.stderr), daemon=True
+            ).start()
+            with self._lock:
+                send.writing = True       # proc より先に立てる（cancel が stdin のロックで止まらないよう kill に回す）
+                send.proc = proc
+                self._proc = proc
+                stop_now = send.stopping
+
+            deferred_error = None
+            result_seen = False
+            try:
+                # Inside the try: a rejected --resume makes claude exit instantly, and
+                # writing to the dead pipe raises BrokenPipeError. Outside, that escaped
+                # before `finally` could reap the child or attach the stderr tail, so the
+                # user saw a bare BrokenPipeError with no clue why. Keep stdin OPEN for
+                # the whole turn so cancel() can inject an `interrupt` control_request
+                # (VS Code CC's stop mechanism) and inject() can add messages; after the
+                # first line only the writer thread writes to or closes it.
+                wrote = False
+                if stop_now:
+                    # Popen の後・公開の前に Stop された（そのときの cancel() は proc を見ずに戻った）。
+                    self._kill_tree(proc)
+                    with self._lock:
+                        send.writing = False
+                else:
+                    try:
+                        if replay:
+                            with self._lock:
+                                send.outstanding.add(send.first_uuid)
+                        proc.stdin.write(_user_line(prompt, send.first_uuid))
+                        proc.stdin.flush()
+                        wrote = True
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass    # child already gone — the exit-code check below reports why
+                    finally:
+                        with self._lock:
+                            send.writing = False
+                if wrote:
+                    writer = threading.Thread(
+                        target=self._write_loop, args=(send, proc), daemon=True)
+                    with self._lock:
+                        send.writer = writer
+                    writer.start()
+                for raw_line in proc.stdout:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue  # non-JSON line → skip
+                    if not isinstance(event, dict):
+                        continue
+                    etype = event.get("type")
+                    announce: list[str] = []
+                    done = False
+                    with self._lock:
+                        if send.waiting:
+                            self._arm_stall_locked(send)    # フレームが来た
+                    # lifecycle は init より前に来る。再開を拒否された result は渡した id を持つ。
+                    # これらの id を resume token にしない。
+                    sid = event.get("session_id")
+                    if isinstance(sid, str) and sid and etype not in (
+                            "command_lifecycle", "control_response", "result"):
+                        self._session_id = sid
+                    if etype == "system":
+                        # init event carries the resolved model name
+                        if event.get("subtype") == "init":
+                            m = event.get("model")
+                            if m:
+                                self.model = m
+                            with self._lock:
+                                self._leave_waiting_locked(send)   # 続きのターンが始まった
+                    elif etype == "stream_event":
+                        yield from self._handle_stream_event(
+                            event.get("event", {}), event.get("parent_tool_use_id"))
+                    elif etype == "assistant":
+                        yield from self._handle_tool_calls(event)
+                    elif etype == "user":
+                        if event.get("isReplay"):
+                            # 自分の足し分のエコーだけ知らせる（最初の発言のエコーなどは無視）。
+                            uid = event.get("uuid")
+                            if isinstance(uid, str):
+                                with self._lock:
+                                    if uid in send.injected:
+                                        send.started.add(uid)
+                                        announce = self._announce_locked(send, [uid])
+                        else:
+                            yield from self._handle_tool_results(event)
+                    elif etype == "command_lifecycle":
+                        with self._lock:
+                            announce = self._on_lifecycle_locked(send, event)
+                            done = self._settled_locked(send)
+                    elif etype == "control_response":
+                        with self._lock:
+                            self._on_control_response_locked(send, event)
+                            done = self._settled_locked(send)
+                    elif etype == "result":
+                        yield from self._release_all()
+                        # 思考の突き合わせを続きのターンへ持ち越さない
+                        self._thinking_raw = []
+                        self._thinking_matched = []
+                        self._thinking_cur = None
+                        uids = event.get("user_message_uuids")
+                        if not isinstance(uids, list):
+                            uids = [event.get("user_message_uuid")]
+                        with self._lock:
+                            got = [u for u in uids if isinstance(u, str)]
+                            send.outstanding.difference_update(got)
+                            send.confirmed.update(got)
+                            announce = self._announce_locked(send, got)
+                            stalled = send.stalled
+                        if not stalled:
+                            # stalled の後の result は使用量もエラーも捨て、EOF まで読む
+                            # （close は積んであり、_DRAIN_SEC 後に kill される）。
+                            result_seen = True
+                            self._capture_usage(event, send)
+                            if event.get("is_error") or event.get("subtype") != "success":
+                                detail = event.get("result") or event.get("subtype") \
+                                    or "unknown error"
+                                deferred_error = RuntimeError(
+                                    f"claude result error: {detail}"
+                                )
+                            with self._lock:
+                                if send.stopping or not (
+                                        send.tracked and (send.outstanding & send.written)):
+                                    send.accepting = False
+                                    done = True
+                                else:
+                                    # 書いた足し分が片付くのを待つ（最初の uuid の片付きは待たない）
+                                    send.waiting = True
+                                    send.wait_deadline = time.monotonic() + _WAIT_MAX_SEC
+                                    self._arm_stall_locked(send)
+                    for uid in announce:
+                        yield from self._out(UserAbsorbed(uid=uid))
+                    if done:
+                        break
+            finally:
+                # Stop のとき GUI はジェネレーターを close し（GeneratorExit でここが走る）、その
+                # done を受けて同じ backend で次の stream を始めうる。だからこの finally と、ここから
+                # 動く書き手・タイマー・stderr の drain が触ってよいのは、自分の send・自分の proc・
+                # self._proc（自分の proc を指すときだけ None にする）・send.stderr だけ。_queue /
+                # _pending / _thinking_* / _session_id / model / last_usage / total_cost には触らない。
+                self._shut_stdin(send, proc)
+                if proc.poll() is None:
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self._kill_tree(proc)
+                        proc.wait(timeout=5)
+                with self._lock:
+                    if self._proc is proc:
+                        self._proc = None
+
+            yield from self._release_all()   # 安全弁: ターン終了で未解決の枠を捨てて溜めた分を出す
+            for uid in self._unknown_uids(send):
+                yield from self._out(UserUnknown(uid=uid))
+            if deferred_error is not None:
+                raise deferred_error
+            # result を 1 回でも受けていれば、見張りや遅い hook の後の kill で終了コードが
+            # 非 0 になっても失敗にしない。
+            if not result_seen and proc.returncode not in (0, None):
+                stderr_tail = "\n".join(send.stderr)
+                raise RuntimeError(
+                    f"claude exited with code {proc.returncode}:\n{stderr_tail}"
+                )
+        finally:
+            with self._lock:
+                send.accepting = False
+                send.waiting = False
+                send.timer_gen += 1
+                if send.timer is not None:
+                    send.timer.cancel()
+                    send.timer = None
+
+    def supports_inject(self) -> bool:
+        """応答中の追加送信を受け付けうるか（Issue #119。GUI スレッドから呼ぶ。起動・走査をしない）。
+        最初の stream で版を判定するまでは True、判定後はその結果。"""
+        return self._inject_supported is not False
+
+    def inject(self, text: str) -> str | None:
+        """走っている送信に発言を足す（Issue #119）。受け付けたら uid、受け付けられなければ None。never raise。
+        stdin には書かない（書き手のキューに積むか、CLI が最初の uuid を追跡していると分かるまで預かる）。"""
+        try:
+            with self._lock:
+                send = self._cur
+                if send is None or not send.accepting:
+                    return None
+                uid = str(uuid.uuid4())
+                send.injected[uid] = text
+                send.unwritten.append(uid)
+                try:
+                    self._flush_unwritten_locked(send)
+                except Exception:
+                    send.injected.pop(uid, None)
+                    if uid in send.unwritten:
+                        send.unwritten.remove(uid)
+                    send.written.discard(uid)
+                    send.outstanding.discard(uid)
+                    raise
+                return uid
+        except Exception:  # noqa: BLE001 — GUI スレッドから呼ばれる。受け付けなかったことにする
+            return None
 
     def cancel(self) -> None:
-        """Gracefully interrupt the current turn the way the VS Code CC
-        extension does: send an `interrupt` control_request on stdin (no kill),
-        then close stdin (EOF) so the reader unblocks even if the engine emits
-        no further events. A hard kill is the caller's last resort — see kill().
-        """
-        proc = self._proc  # 退避(TOCTOU 回避)
-        if proc is None or proc.poll() is not None:
-            return
-        msg = {
-            "request_id": uuid.uuid4().hex,
-            "type": "control_request",
-            "request": {"subtype": "interrupt"},
-        }
-        try:
-            proc.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
-            proc.stdin.flush()
-        except (OSError, ValueError):
-            pass
-        try:
-            proc.stdin.close()
-        except (OSError, ValueError):
-            pass
+        """Stop（Issue #119）: 書き手のキューに interrupt（対応時は cancel_queued: true 付き）と close を
+        積むだけで、待たずに返る（GUI スレッドから呼ばれるので stdin に触らない）。閉じる前に片付いて
+        いない足し分があれば必ず取り消しを先に積む（_close_locked）。最初の発言を書いている途中なら、
+        stdin のロックで GUI が止まらないよう kill する。強制終了の最後の手段は kill()。"""
+        with self._lock:
+            send = self._cur
+            if send is None:
+                return
+            send.stopping = True
+            send.accepting = False
+            proc = send.proc
+            if proc is None or proc.poll() is not None:
+                return
+            if not send.writing:
+                self._send_interrupt_locked(send)
+                self._close_locked(send)
+                return
+        self._kill_tree(proc)
 
     def kill(self) -> None:
         """Last-resort hard stop: kill the engine process tree. Used as an
@@ -455,12 +701,7 @@ class ClaudeCodeBackend:
             "--input-format", "stream-json",
             "--verbose",
         ]
-        if sys.platform == "win32" and claude_bin.lower().endswith((".cmd", ".bat")):
-            resolved = resolve_cmd_shim(claude_bin)
-            if resolved:
-                cmd = resolved + cmd[1:]
-            else:
-                cmd = ["cmd.exe", "/c"] + cmd
+        cmd = _wrap_shim(cmd)
 
         proc = subprocess.Popen(
             cmd,
@@ -549,7 +790,187 @@ class ClaudeCodeBackend:
 
     # ----- internals -----
 
-    def _handle_stream_event(self, ev: dict, parent: object = None) -> Iterator[TextDelta]:
+    def _flush_unwritten_locked(self, send: _Send) -> None:
+        """預かっている足し分を、積める状態ならキューに積む。積んだ時点で「書いた」と数える。"""
+        if send.writer is None or not send.tracked or send.stopping or send.closing:
+            return
+        for uid in send.unwritten:
+            send.wq.put((_user_line(send.injected[uid], uid), uid))
+            send.written.add(uid)
+            send.outstanding.add(uid)
+        send.unwritten = []
+
+    def _send_interrupt_locked(self, send: _Send) -> None:
+        """interrupt を積む（1 つの stream で 1 回だけ）。対応時だけ cancel_queued を付ける。"""
+        if send.interrupt_rid is not None or send.closing:
+            return
+        rid = uuid.uuid4().hex
+        send.interrupt_rid = rid
+        request: dict = {"subtype": "interrupt"}
+        if send.replay:
+            request["cancel_queued"] = True
+        line = {"request_id": rid, "type": "control_request", "request": request}
+        send.wq.put(((json.dumps(line) + "\n").encode("utf-8"), None))
+
+    def _close_locked(self, send: _Send) -> None:
+        """stdin を閉じる印を積む。書いた足し分が残っていれば先に取り消す（取り消さずに閉じると、
+        閉じた後も CLI が待っていた発言を実行し、GUI の自動送信と二重になる）。"""
+        if send.closing:
+            return
+        if send.outstanding & send.written:
+            self._send_interrupt_locked(send)
+        send.wq.put(_CLOSE)
+        send.closing = True
+
+    def _write_loop(self, send: _Send, proc: subprocess.Popen) -> None:
+        """書き手: キューの行を順に書き、_CLOSE で stdin を閉じて終わる。"""
+        failed = False
+        while True:
+            item = send.wq.get()
+            if item is _CLOSE:
+                try:
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
+                return
+            data, uid = item
+            if failed:
+                if uid is not None:   # 1 バイトも書いていないので、渡っていない
+                    with self._lock:
+                        send.written.discard(uid)
+                        send.outstanding.discard(uid)
+                continue
+            try:
+                proc.stdin.write(data)
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                failed = True          # 書きかけの行は written に残す（一部がパイプへ渡ったかもしれない）
+                with self._lock:
+                    send.accepting = False
+
+    def _shut_stdin(self, send: _Send, proc: subprocess.Popen) -> None:
+        """後始末: 閉じる印を積んで書き手を 1 秒待つ。詰まっていれば kill してもう一度待つ。"""
+        with self._lock:
+            self._close_locked(send)
+            writer = send.writer
+        if writer is None:
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+            return
+        writer.join(timeout=1)
+        if writer.is_alive():
+            self._kill_tree(proc)
+            writer.join(timeout=1)
+
+    def _announce_locked(self, send: _Send, uids: list[str]) -> list[str]:
+        """まだ知らせていない自分の足し分を知らせ済みにして返す。"""
+        out = []
+        for uid in uids:
+            if uid in send.injected and uid not in send.announced:
+                send.announced.add(uid)
+                out.append(uid)
+        return out
+
+    def _on_lifecycle_locked(self, send: _Send, event: dict) -> list[str]:
+        cu = event.get("command_uuid")
+        state = event.get("state")
+        if not isinstance(cu, str):
+            return []
+        if cu == send.first_uuid and not send.tracked:
+            send.tracked = True
+            self._flush_unwritten_locked(send)
+        if state not in ("queued", "started"):
+            # 終わりの状態（completed / cancelled / discarded / …）。片付けるだけで、「渡っていない」の根拠にはしない
+            send.outstanding.discard(cu)
+        if state == "started":
+            self._leave_waiting_locked(send)
+        if cu not in send.injected:
+            return []
+        if state == "started":
+            send.started.add(cu)      # 取り込まれた形跡だけ。started だけでは知らせない
+        elif state == "completed":
+            send.confirmed.add(cu)
+            return self._announce_locked(send, [cu])
+        return []
+
+    def _on_control_response_locked(self, send: _Send, event: dict) -> None:
+        response = event.get("response")
+        if not isinstance(response, dict) or send.interrupt_rid is None \
+                or response.get("request_id") != send.interrupt_rid:
+            return
+        body = response.get("response")
+        if not isinstance(body, dict):
+            return
+        cancelled = body.get("cancelled")
+        for uid in cancelled if isinstance(cancelled, list) else []:
+            if isinstance(uid, str):
+                send.receipt_cancelled.add(uid)   # 取り込まれる前に取り消された
+                send.outstanding.discard(uid)
+
+    def _settled_locked(self, send: _Send) -> bool:
+        """待機中に終えてよくなったら、待機と受付を閉じて True。"""
+        if not send.waiting:
+            return False
+        if not send.stopping and send.tracked and (send.outstanding & send.written):
+            return False
+        self._leave_waiting_locked(send)
+        send.accepting = False
+        return True
+
+    def _unknown_uids(self, send: _Send) -> list[str]:
+        """渡ったとも渡っていないとも言えない足し分（書いたが未確定で、「取り消し済みで形跡なし」でない）。"""
+        with self._lock:
+            return [uid for uid in send.injected
+                    if uid not in send.confirmed and uid in send.written
+                    and not (uid in send.receipt_cancelled and uid not in send.started)]
+
+    def _arm_stall_locked(self, send: _Send) -> None:
+        send.timer_gen += 1
+        if send.timer is not None:
+            send.timer.cancel()
+        delay = max(0.0, min(_STALL_SEC, send.wait_deadline - time.monotonic()))
+        send.timer = threading.Timer(delay, self._on_stall, args=(send, send.timer_gen))
+        send.timer.daemon = True
+        send.timer.start()
+
+    def _leave_waiting_locked(self, send: _Send) -> None:
+        if not send.waiting:
+            return
+        send.waiting = False
+        send.timer_gen += 1
+        if send.timer is not None:
+            send.timer.cancel()
+            send.timer = None
+
+    def _on_stall(self, send: _Send, gen: int) -> None:
+        """待機の期限切れ: あきらめて取り消しと close を積み、_DRAIN_SEC 後の kill を予約する。"""
+        with self._lock:
+            if gen != send.timer_gen or not send.waiting:
+                return
+            send.stalled = True
+            send.waiting = False
+            send.accepting = False
+            self._send_interrupt_locked(send)
+            self._close_locked(send)
+            send.timer_gen += 1
+            send.timer = threading.Timer(_DRAIN_SEC, self._on_drain_timeout,
+                                         args=(send, send.timer_gen))
+            send.timer.daemon = True
+            send.timer.start()
+
+    def _on_drain_timeout(self, send: _Send, gen: int) -> None:
+        """取り消しと close の後も EOF を返さない CLI を止める。"""
+        with self._lock:
+            if gen != send.timer_gen:
+                return
+            proc = send.proc
+        if proc is not None and proc.poll() is None:
+            self._kill_tree(proc)
+
+    def _handle_stream_event(self, ev: dict, parent: object = None) -> Iterator[_OutEvent]:
         """Stream live assistant text and thinking from partial-message events.
 
         ``text_delta`` chunks are surfaced as body text, ``thinking_delta`` (and
@@ -569,7 +990,7 @@ class ClaudeCodeBackend:
                 text = delta.get("text", "")
                 if text:
                     yield from self._close_thinking()
-                    yield from self._out(text)
+                    yield from self._out(TextDelta(text=text))
             elif dtype == "thinking_delta" and not parent:
                 if self._thinking_cur is None:          # start の無い delta も 1 ブロックとして数える
                     self._begin_thinking_block()
@@ -588,27 +1009,29 @@ class ClaudeCodeBackend:
                 self._begin_thinking_block()
                 yield from self._thinking_piece(block.get("thinking"))   # webview と同じく初期値も拾う
 
-    def _out(self, text: str) -> Iterator[TextDelta]:
-        """出力の唯一の出口。未解決の枠がある間は出力順のまま溜める。"""
+    def _out(self, ev: _OutEvent) -> Iterator[_OutEvent]:
+        """出力の唯一の出口。未解決の枠がある間は出力順のまま溜める（UserAbsorbed / UserUnknown も）。"""
         if self._queue:
-            self._queue.append(text)
+            self._queue.append(ev)
         else:
-            yield TextDelta(text=text)
+            yield ev
 
-    def _flush_queue(self) -> Iterator[TextDelta]:
+    def _flush_queue(self) -> Iterator[_OutEvent]:
         """溜めた出力を、先頭から最初の未解決の枠の手前まで出す。"""
-        while self._queue and isinstance(self._queue[0], str):
-            text = self._queue.pop(0)
-            if text:
-                yield TextDelta(text=text)
+        while self._queue and not isinstance(self._queue[0], int):
+            ev = self._queue.pop(0)
+            if isinstance(ev, TextDelta) and not ev.text:
+                continue
+            yield ev
 
-    def _release_all(self) -> Iterator[TextDelta]:
+    def _release_all(self) -> Iterator[_OutEvent]:
         """未解決の枠を空として捨て、溜めた出力を全部出す。"""
-        texts = [t for t in self._queue if isinstance(t, str) and t]
+        evs = [e for e in self._queue
+               if not isinstance(e, int) and not (isinstance(e, TextDelta) and not e.text)]
         self._pending = []
         self._queue = []
-        for text in texts:
-            yield TextDelta(text=text)
+        for ev in evs:
+            yield ev
 
     def _begin_thinking_block(self) -> None:
         self._thinking_raw.append("")
@@ -623,7 +1046,7 @@ class ClaudeCodeBackend:
             self._pending.append(cur)
             self._queue.append(cur)       # ここから後の出力は、この枠が解決するまで溜める
 
-    def _thinking_piece(self, piece: object) -> Iterator[TextDelta]:
+    def _thinking_piece(self, piece: object) -> Iterator[_OutEvent]:
         """思考の 1 片を生テキストに積み、💭 行に流す。空白の並びは片の境目をまたいでも
         1 つの空白に畳み、行頭・行末の空白は出さない。str でない片・空白だけの片
         （signature だけ・estimated_tokens だけの delta）では行を開かない。"""
@@ -642,13 +1065,13 @@ class ClaudeCodeBackend:
         else:
             text = (" " if self._thinking_space or piece[0].isspace() else "") + body
         self._thinking_space = piece[-1].isspace()
-        yield from self._out(text)
+        yield from self._out(TextDelta(text=text))
 
-    def _close_thinking(self) -> Iterator[TextDelta]:
+    def _close_thinking(self) -> Iterator[_OutEvent]:
         if self._thinking_open:
             self._thinking_open = False
             self._thinking_space = False  # 行末の保留空白は捨てる
-            yield from self._out("\n")
+            yield from self._out(TextDelta(text="\n"))
 
     def _match_streamed_thinking(self, text: str) -> bool:
         """assistant イベントの thinking の本文（空白を畳んだもの）が、未使用のストリーム済み
@@ -662,7 +1085,7 @@ class ClaudeCodeBackend:
                 return True
         return False
 
-    def _handle_tool_calls(self, event: dict) -> Iterator[TextDelta]:
+    def _handle_tool_calls(self, event: dict) -> Iterator[_OutEvent]:
         """Render each tool_use block as a 🔧 call line (name + input) and each
         thinking block as a 💭 line.
 
@@ -683,11 +1106,11 @@ class ClaudeCodeBackend:
                 line = format_thinking_line(text)
                 if self._pending:                              # 最も古い未解決の枠に入れる（空なら空のまま）
                     pos = self._pending.pop(0)
-                    self._queue[self._queue.index(pos)] = line
+                    self._queue[self._queue.index(pos)] = TextDelta(text=line)
                     yield from self._flush_queue()
                 elif line:                                     # 枠が無い（partial の無い engine 版・安全弁の後）
                     yield from self._close_thinking()
-                    yield from self._out(line)
+                    yield from self._out(TextDelta(text=line))
             elif btype == "tool_use":
                 name = block.get("name", "tool")
                 summary = self._tool_input_summary(block.get("input"))
@@ -695,9 +1118,9 @@ class ClaudeCodeBackend:
                 if summary:
                     line += f"  {summary}"
                 yield from self._close_thinking()
-                yield from self._out(line + "\n")
+                yield from self._out(TextDelta(text=line + "\n"))
 
-    def _handle_tool_results(self, event: dict) -> Iterator[TextDelta]:
+    def _handle_tool_results(self, event: dict) -> Iterator[_OutEvent]:
         """Render each tool_result block as an indented result line."""
         content = event.get("message", {}).get("content", [])
         if not isinstance(content, list):
@@ -708,9 +1131,9 @@ class ClaudeCodeBackend:
                 if text:
                     mark = TOOL_ERROR_MARKER if block.get("is_error") else TOOL_RESULT_MARKER
                     yield from self._close_thinking()
-                    yield from self._out(f"{TOOL_RESULT_INDENT}{mark} {text}\n")
+                    yield from self._out(TextDelta(text=f"{TOOL_RESULT_INDENT}{mark} {text}\n"))
 
-    def _capture_usage(self, event: dict) -> None:
+    def _capture_usage(self, event: dict, send: _Send) -> None:
         """Pull token/cost telemetry from a `result` event into last_usage.
 
         context = the full prompt the model saw this turn (fresh input + cache
@@ -728,14 +1151,26 @@ class ClaudeCodeBackend:
         cw = 0
         for mu in (event.get("modelUsage") or {}).values():
             cw = max(cw, mu.get("contextWindow") or 0)
-        cost = event.get("total_cost_usd") or 0.0
-        self.total_cost += cost
+        # total_cost_usd はプロセス内の累計（1 stream = 1 プロセス）。続きのターンの result で
+        # 二重に足さないよう、この stream で受けた最大との差分だけ足す（Issue #119）。
+        raw = event.get("total_cost_usd")
+        cost = 0.0
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            try:
+                cost = float(raw)        # JSON の巨大な整数（10**1000 など）は OverflowError
+            except OverflowError:
+                cost = 0.0
+            if not math.isfinite(cost):
+                cost = 0.0
+        delta = max(0.0, cost - send.cost_seen)   # 続きのターンの result で二重に足さない
+        send.cost_seen = max(send.cost_seen, cost)
+        self.total_cost += delta
         self.last_usage = {
             "input": in_tok,
             "output": out_tok,
             "context": context,
             "context_window": cw,
-            "cost": cost,
+            "cost": send.cost_seen,
             "total_cost": self.total_cost,
         }
 
@@ -914,9 +1349,12 @@ class ClaudeCodeBackend:
             child_env.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
         return child_env
 
-    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+    def _drain_stderr(self, proc: subprocess.Popen, buf=None) -> None:
+        """stderr を buf（None なら self._stderr_buf。list_models 用）に積む。"""
+        if buf is None:
+            buf = self._stderr_buf
         for raw in proc.stderr:
-            self._stderr_buf.append(
+            buf.append(
                 raw.decode("utf-8", errors="replace").rstrip("\n")
             )
 

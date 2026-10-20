@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from llm_backend.base import (
-    LLMBackend, Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE,
+    LLMBackend, Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown,
+    NO_LOCAL_PERSISTENCE,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER,
 )
@@ -311,6 +312,8 @@ class _StreamWorker(QThread):
     chunk  = Signal(str, str)   # (session_id, text)
     done   = Signal(str)        # (session_id,)
     failed = Signal(str, str)   # (session_id, error_msg)
+    absorbed = Signal(str, str)  # (session_id, uid) 追加送信が取り込まれた（Issue #119）
+    unknown = Signal(str, str)   # (session_id, uid) 追加送信が渡ったか分からない（Issue #119）
 
     def __init__(self, session_id: str, backend: LLMBackend, messages: list[Message],
                  dispatch: Callable, parent: QWidget | None = None):
@@ -338,6 +341,10 @@ class _StreamWorker(QThread):
                         self.chunk.emit(self._sid, event.text)  # live: stream as it arrives
                     elif isinstance(event, ToolCallRequest):
                         pending_calls.append(event)
+                    elif isinstance(event, UserAbsorbed):
+                        self.absorbed.emit(self._sid, event.uid)
+                    elif isinstance(event, UserUnknown):
+                        self.unknown.emit(self._sid, event.uid)
                 if not pending_calls:
                     self.done.emit(self._sid)
                     return
@@ -2098,6 +2105,14 @@ class ChatWidget(QWidget):
             self._status_note(tr("chat.queue.slash_refused"))   # どのエンジンでも（Issue 本文）
             return
         extra = _Extra(text, "deferred")
+        if self._send_kind(sess) == "add":
+            uid = None
+            try:
+                uid = turn.backend.inject(text)
+            except Exception:
+                _logger.exception("inject failed (session %s)", sess.id)
+            if isinstance(uid, str) and uid:
+                extra = _Extra(text, "pending", uid)
         turn.extra.append(extra)
         self._input.clear()
         sess.draft = ""
@@ -2195,6 +2210,8 @@ class ChatWidget(QWidget):
         worker.chunk.connect(self._on_chunk)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
+        worker.absorbed.connect(self._on_absorbed)
+        worker.unknown.connect(self._on_unknown)
         # Delete the QThread only after run() fully returns (finished).
         worker.finished.connect(worker.deleteLater)
         worker.start()
@@ -2359,6 +2376,43 @@ class ChatWidget(QWidget):
                     _LIVE_MD_INTERVAL_MS + len(turn.buffer) // 200)
             )
             self._live_timer.start()
+
+    def _on_absorbed(self, sid: str, uid: str) -> None:
+        """追加送信がターンに取り込まれた（Issue #119）。その位置で前半の応答を確定し、発言を入れる。"""
+        turn = self._turns.get(sid)
+        if turn is None or turn.session not in self._sessions:
+            return    # 削除したセッションの turn は _turns に残る（orphan）
+        extra = next((x for x in turn.extra if x.state == "pending" and x.uid == uid), None)
+        if extra is None:
+            return
+        extra.state = "delivered"
+        sess = turn.session
+        if turn.buffer.strip():
+            sess.messages.append(Message(role="assistant", content=turn.buffer))
+            self.messageAdded.emit(sid, "assistant", turn.buffer, "local")   # relay は今の stream_id を確定する
+        sess.messages.append(Message(role="user", content=extra.text))
+        self.messageAdded.emit(sid, "user", extra.text, "local")
+        turn.buffer = ""
+        turn.rendered = ""
+        turn.stream_id = uuid.uuid4().hex
+        sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+        if sid == self._active.id:
+            self._live_timer.stop()
+            self._render_session(sess)      # anchor を張り直す
+        self._update_turn_ui()
+
+    def _on_unknown(self, sid: str, uid: str) -> None:
+        """追加送信が渡ったか分からないまま終わった（Issue #119）。会話には残したまま、入力欄へ戻す対象にする。"""
+        turn = self._turns.get(sid)
+        if turn is None or turn.session not in self._sessions:
+            return
+        for x in turn.extra:
+            if x.uid == uid and x.state in ("pending", "delivered"):
+                x.state = "unknown"
+                break
+        self._update_turn_ui()
 
     def _on_done(self, sid: str) -> None:
         turn = self._turns.pop(sid, None)

@@ -2347,7 +2347,7 @@ def test_start_turn_bumps_updated(widget, monkeypatch):
 
     class _FakeWorker:
         def __init__(self, *a, **k):
-            self.chunk = self.done = self.failed = self.finished = _Sig()
+            self.chunk = self.done = self.failed = self.finished = self.absorbed = self.unknown = _Sig()
 
         def start(self):
             pass
@@ -2393,7 +2393,7 @@ def test_start_turn_passes_chat_dataset(qapp, monkeypatch, dataset):
         def __init__(self, sid, backend, msgs, dispatch, parent):
             self.backend = backend
             self.dispatch = dispatch
-            self.chunk = self.done = self.failed = self.finished = _Sig()
+            self.chunk = self.done = self.failed = self.finished = self.absorbed = self.unknown = _Sig()
             workers.append(self)
 
         def start(self):
@@ -3043,5 +3043,106 @@ def test_render_session_draws_note_before_inflight_block(widget):
         widget._flush_live_markdown()
         text = widget._log.toPlainText()
         assert "NOTE" in text and "hello" in text
+    finally:
+        _cleanup(widget)
+
+
+def test_inject_none_becomes_deferred_and_then_queue(widget):
+    from gui.chat import _Turn
+    sess = widget._active
+    backend = _InjectBackend(uid=None)
+    turn = _Turn(sess, backend, MagicMock(), MagicMock())
+    widget._turns[sess.id] = turn
+    try:
+        widget._update_turn_ui()
+        assert widget._send_kind(sess) == "add"
+        _send(widget, "A")
+        assert backend.injected == ["A"]
+        assert [(x.text, x.state) for x in turn.extra] == [("A", "deferred")]
+        backend.uid = "u9"
+        assert widget._send_kind(sess) == "queue"
+        assert widget._send_btn.text() == tr("chat.btn.queue")
+        _send(widget, "B")
+        assert backend.injected == ["A"]               # 予約の後の発言は追加送信にしない
+        assert [x.state for x in turn.extra] == ["deferred", "deferred"]
+    finally:
+        _cleanup(widget)
+
+
+def test_absorbed_splits_assistant_and_inserts_user(widget, monkeypatch):
+    sess, turn, _ = _begin(widget, monkeypatch, backend=_InjectBackend(uid="u1"))
+    try:
+        emitted: list = []
+        widget.messageAdded.connect(lambda *a: emitted.append(a))
+        widget._on_chunk(sess.id, "前半")
+        _send(widget, "追加")
+        assert [(x.text, x.state, x.uid) for x in turn.extra] == [("追加", "pending", "u1")]
+        assert widget._pending_label.text() == tr("chat.pending.add", count=1, gist="追加")
+        old_stream = turn.stream_id
+        widget._on_absorbed(sess.id, "u1")
+        assert [(m.role, m.content) for m in sess.messages[-2:]] == [
+            ("assistant", "前半"), ("user", "追加")]
+        assert emitted == [(sess.id, "assistant", "前半", "local"),
+                           (sess.id, "user", "追加", "local")]
+        assert turn.stream_id != old_stream
+        assert turn.buffer == ""
+        assert turn.extra[0].state == "delivered"
+        assert widget._pending_label.isHidden()
+        widget._on_chunk(sess.id, "後半")
+        widget._on_done(sess.id)
+        assert [(m.role, m.content) for m in sess.messages[-3:]] == [
+            ("assistant", "前半"), ("user", "追加"), ("assistant", "後半")]
+        assert sess.id not in widget._turns          # 取り込み済みは自動送信しない
+    finally:
+        _cleanup(widget)
+
+
+def test_absorbed_ignored_for_orphan_turn(widget):
+    from gui.chat import _Extra, _Turn
+    bg = _make_session(widget)
+    turn = _Turn(bg, _InjectBackend(), MagicMock(), MagicMock())
+    turn.buffer = "途中"
+    turn.extra = [_Extra("A", "pending", "u1"), _Extra("B", "pending", "u2")]
+    widget._turns[bg.id] = turn
+    widget._sessions.remove(bg)
+    n = len(bg.messages)
+    try:
+        widget._on_absorbed(bg.id, "u1")
+        widget._on_unknown(bg.id, "u2")
+        assert len(bg.messages) == n
+        assert [(x.state, x.uid) for x in turn.extra] == [("pending", "u1"), ("pending", "u2")]
+        assert turn.buffer == "途中"
+    finally:
+        _cleanup(widget)
+
+
+def test_unknown_returns_it_and_later_sends_earlier(widget, monkeypatch):
+    from gui.chat import _Extra
+    sess, turn, _ = _begin(widget, monkeypatch, backend=_InjectBackend())
+    try:
+        turn.extra = [_Extra("A", "pending", "u1"), _Extra("B", "pending", "u2"),
+                      _Extra("C", "deferred")]
+        widget._input.setPlainText("D")
+        widget._on_unknown(sess.id, "u2")
+        assert turn.extra[1].state == "unknown"
+        calls = _spy_start_turn(widget, monkeypatch)
+        widget._on_done(sess.id)
+        assert widget._input.toPlainText() == "B\n\nC\n\nD"
+        assert [(c[1], c[2]) for c in calls] == [("A", "local")]
+        assert widget._log.toPlainText().count(tr("chat.queue.unknown_and_later_returned")) == 1
+    finally:
+        _cleanup(widget)
+
+    # B だけが unknown で最後なら unknown_returned
+    sess, turn, _ = _begin(widget, monkeypatch, backend=_InjectBackend())
+    try:
+        turn.extra = [_Extra("A", "pending", "u1"), _Extra("B", "pending", "u2")]
+        widget._on_unknown(sess.id, "u2")
+        calls = _spy_start_turn(widget, monkeypatch)
+        widget._input.clear()
+        widget._on_done(sess.id)
+        assert widget._input.toPlainText() == "B"
+        assert [(c[1], c[2]) for c in calls] == [("A", "local")]
+        assert widget._log.toPlainText().count(tr("chat.queue.unknown_returned")) == 1
     finally:
         _cleanup(widget)

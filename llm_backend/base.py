@@ -237,6 +237,18 @@ class ToolCallRequest:
     arguments: dict  # parsed JSON
 
 
+@dataclass
+class UserAbsorbed:
+    """追加送信（inject）した発言がターンに取り込まれた（Issue #119。claude だけが出す）。"""
+    uid: str
+
+
+@dataclass
+class UserUnknown:
+    """追加送信した発言が、渡ったか分からないまま送信が終わった（Issue #119。claude だけが出す）。"""
+    uid: str
+
+
 _VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -378,5 +390,5 @@ class LLMBackend(Protocol):
     def stream(
         self, messages: list[Message], tools: list | None = None
     ) -> Iterator[TextDelta | ToolCallRequest]:
-        """Yield TextDelta / ToolCallRequest events. Raises on transport error."""
+        """Yield TextDelta / ToolCallRequest events (claude may also yield UserAbsorbed / UserUnknown; consumers ignore types they do not know). Raises on transport error."""
         ...

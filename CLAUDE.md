@@ -250,7 +250,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
   (auto-detected; override via `[claude_code].bin` or `CLAUDE_CODE_BIN`). It is
   driven exactly as the extension drives it: spawned in bidirectional stream-json
   mode (`--output-format stream-json --input-format stream-json --verbose
-  --include-partial-messages`), **not** `claude -p`. Auth/history/settings are
+  --include-partial-messages`, plus `--replay-user-messages` when the CLI is 2.1.282 or newer), **not** `claude -p`. Auth/history/settings are
   shared via `~/.claude`, so whoever is logged into VS Code answers here. Turns
   continue via `--resume <session_id>`; the engine's own Bash tool runs
   `python -m llm_bridge` to drive the GUI — no separate skill needed. **cwd is a
@@ -260,8 +260,9 @@ catalog until llama-server has them loaded, which is why the list is editable.
   any cwd inside the repo loads this developer-oriented file. The repo stays
   reachable via `--add-dir` + `PYTHONPATH` for `common/explore.py` and
   `llm_bridge`. `[claude_code].permission_mode` defaults to `bypassPermissions` so
-  GUI-driving tool calls run unattended (stdin is closed after the prompt, so an
-  interactive permission prompt would deadlock); to tighten, set `permission_mode`
+  GUI-driving tool calls run unattended (stdin stays open during the turn for Stop
+  and added messages, but nothing answers a permission prompt, so an interactive
+  permission mode would deadlock); to tighten, set `permission_mode`
   to a mode other than `bypassPermissions` (`allowed_tools` alone does not restrict
   under `bypassPermissions`). An empty, whitespace-only or non-string value falls back to
   `bypassPermissions` (warning + a note in the backend status window); any other string is passed to `--permission-mode` as is.
@@ -270,6 +271,22 @@ catalog until llama-server has them loaded, which is why the list is editable.
   default so only MyAnalysis's instructions remain (`--system-prompt` instead of
   `--append-system-prompt`; also toggleable per-launch via the 設定 menu).
   **External dependency**: the VS Code Claude Code extension installed + logged in.
+- **Sending while a reply is running (Issue #119)**: while a chat is generating, Send
+  becomes **Add** or **Queue** (`ChatWidget._send_kind`). Add (claude only, CLI 2.1.282 or
+  newer) writes the text to the running process's stdin as a `user` line with a uuid
+  (`ClaudeCodeBackend.inject`); the CLI takes it in at the next break between tool calls,
+  or answers it right after the reply in the same stream. Queue (every other engine, an
+  AI-search chat, and everything after the first queued message) sends when the reply
+  ends: all queued messages go out once, joined with blank lines; guest messages held
+  during the turn go out once more after that (host first, never mixed — the relay
+  forwards by origin). Stop or a failed turn returns every undelivered message to the
+  input box (a background chat: its draft); a message whose delivery cannot be confirmed
+  (`UserUnknown`) is never resent automatically. The version is read from the bundled
+  binary's path or from one `<bin> --version` (`_replay_supported`); an older CLI is
+  driven exactly as before and the GUI falls back to Queue. The interrupt sent on Stop
+  carries `cancel_queued: true` so the CLI drops messages it still holds instead of
+  running them after stdin closes. A message starting with `/` is refused during any reply
+  (on every engine: joined with later queued messages, they would become its arguments).
 - **pi backend** runs `python -m llm_bridge` via the `.pi/skills/myanalysis-bridge`
   skill to drive the GUI live. **External dependency**: Node + pi
   (`npm i -g @earendil-works/pi-coding-agent` — the old `@mariozechner/…` name is

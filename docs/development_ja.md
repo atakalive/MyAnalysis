@@ -311,11 +311,13 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 
    | 属性 | 意味 |
    |---|---|
-   | `_session_id` | ネイティブ resume token。セッション ID を運ぶイベントを受けたら代入する（claude は init を含め `session_id` を持つ全イベント、codex は `thread.started`、pi は `session` イベント）。`None` のターンは `build_prompt_with_history(messages, replay=True)` で履歴を丸ごと送る。保存と再充填は GUI が行い、失敗したターンの後は token を捨て、ユーザーの Stop の後は維持する（`gui/chat.py` の `_on_failed`） |
+   | `_session_id` | ネイティブ resume token。セッション ID を運ぶイベントを受けたら代入する（claude は init を含め `session_id` を持つイベントのうち `command_lifecycle` / `control_response` / `result` 以外、codex は `thread.started`、pi は `session` イベント）。`None` のターンは `build_prompt_with_history(messages, replay=True)` で履歴を丸ごと送る。保存と再充填は GUI が行い、失敗したターンの後は token を捨て、ユーザーの Stop の後は維持する（`gui/chat.py` の `_on_failed`） |
    | `set_persona(text)` | ペルソナ本文の注入（全バックエンドにある） |
    | `set_chat_dataset(ds)` | チャットのデータセットの注入（全バックエンドにある。毎ターン呼ばれる）。CLI 系は `_session_id is None` のターンだけ `with_chat_context` でプロンプトに前置し、`_build_env` で `MYANALYSIS_CHAT_DATASET` を設定・削除する |
    | `cancel()` | Stop ボタンで呼ばれる中断 |
    | `kill()` | `cancel()` 後 2 秒で終わらないときの強制終了。claude はプロセスツリーを止める。codex は `kill = cancel`。pi は `cancel()` が既にプロセスツリーを止めるので持たない |
+   | `supports_inject()` | 応答中の追加送信を受け付けうるか（claude だけ。GUI スレッドから呼ぶので、プロセスの起動もファイルの走査もしない）。無いバックエンドでは応答中の送信が予約になる |
+   | `inject(text)` | 走っているターンに発言を足す（claude だけ）。受け付けたら uid、受け付けられなければ `None`。例外を投げない。取り込まれたら `stream()` が `UserAbsorbed(uid)` を、渡ったか分からないまま終われば `UserUnknown(uid)` を yield する |
    | `last_usage` | `input` / `output` / `context` / `context_window`（分かれば `cost` / `total_cost` も）を持つ dict。チャットドックのステータス表示に出る。無い値は 0 か省略でよい |
 
 9. **子プロセスを起動する場合**（既存 3 バックエンドの `_build_env` / `_kill_tree` と同じにする）:
@@ -439,6 +441,7 @@ python -m pytest tests/
 | session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
 | チャットのデータセットの環境変数 | `MYANALYSIS_CHAT_DATASET` を外す（チャットのエージェント内で pytest を実行しても継承しない） |
 | エージェントの stage | `common.paths.agent_stage_dir` を `tmp_path / "agent_stage"` に向け、`MYANALYSIS_AGENT_STAGE` を外す |
+| claude の `--replay-user-messages` 対応判定 | `llm_backend.claude_code._replay_supported` を常に `False` に差し替える（判定の `--version` の起動が、Popen を捕まえるテストに混ざらない）。追加送信のテストは対応側に上書きする |
 
 **隔離されないもの** — `data/llm_state` の `commands/`、`command_log.jsonl`、`active.json`、`reload_manifest.json`。これらに触れるテストは、`llm_bridge.paths.global_state_dir`（または個別の `*_path` 関数）を自分で `tmp_path` にパッチする。`from ... import` で取り込まれた名前は、取り込んだ側のモジュールでパッチする。
 

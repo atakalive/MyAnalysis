@@ -152,3 +152,14 @@ def _isolate_agent_stage(monkeypatch, tmp_path):
     import common.paths
     monkeypatch.setattr(common.paths, "agent_stage_dir", lambda: tmp_path / "agent_stage")
     monkeypatch.delenv(common.paths.AGENT_STAGE_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _claude_replay_unsupported(monkeypatch):
+    """claude の --replay-user-messages 対応判定を「非対応」にする（Issue #119）。
+
+    判定は `<bin> --version` を subprocess で起動しうる。subprocess.Popen を捕まえて cmd を
+    検査するテスト（test_cmd_shim など）に紛れ込まないよう、全テストで止める。追加送信の
+    テストはこの上から対応側（True）に差し替える。"""
+    from llm_backend import claude_code
+    monkeypatch.setattr(claude_code, "_replay_supported", lambda claude_bin: False)
