@@ -277,3 +277,23 @@ def test_chat_inject_verb_errors_when_refused():
         llm_bridge._chat_inject(window, "t", "g", "sid")
     window.chat_widget.return_value.inject_remote_message.return_value = None
     assert llm_bridge._chat_inject(window, "t", "g", "sid") == "injected:sid"
+
+
+def test_pending_remote_drained_once_after_host_continuation(qapp, widget):
+    """ホストの予約はまとめて 1 ターン、ゲストの保留発言はその後にまとめて 1 ターン（Issue #119）。"""
+    from common.i18n import tr
+    from gui.chat import _Extra
+    sess = widget._active
+    _mark_busy(widget, sess)
+    widget._turns[sess.id].extra = [_Extra("host", "deferred")]
+    for q in ("q1", "q2", "q3"):
+        widget.inject_remote_message(q, "X", session_id=sess.id)
+    widget._on_done(sess.id)
+    assert sess.id in widget._turns          # ホストの自動送信が始まった
+    assert widget._pending_remote[sess.id] == [("X", "q1"), ("X", "q2"), ("X", "q3")]
+    _drain(qapp, widget)
+    users = [m.content for m in sess.messages if m.role == "user"]
+    joined = "\n\n".join(
+        tr("meeting.remote_message_prefix", sender="X", text=q) for q in ("q1", "q2", "q3"))
+    assert users[-2:] == ["host", joined]
+    assert sess.id not in widget._pending_remote

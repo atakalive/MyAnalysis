@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from typing import Callable
@@ -284,6 +285,28 @@ def _simplify_tool_text(content: str, mode: str) -> str:
     return "\n".join(out)
 
 
+_GIST_CHARS = 40   # 待ち表示に出す本文の 1 行目の字数（Issue #119）
+
+
+@dataclass(slots=True)
+class _Extra:
+    """応答中に送った発言 1 件（Issue #119）。
+
+    state は "pending"（エンジンが受け付けた。uid を持つ）/ "deferred"（応答の後に送る）/
+    "delivered"（エンジンが取り込んだ）/ "unknown"（渡ったか分からない）。"""
+
+    text: str
+    state: str
+    uid: str | None = None
+
+
+def _gist(text: str) -> str:
+    """待ち表示の要約: 前後の空白を除いた本文の最初の行を _GIST_CHARS 字まで（超えたら末尾を … にする）。"""
+    lines = text.strip().splitlines()
+    line = lines[0] if lines else ""
+    return line if len(line) <= _GIST_CHARS else line[:_GIST_CHARS - 1] + "…"
+
+
 class _StreamWorker(QThread):
     chunk  = Signal(str, str)   # (session_id, text)
     done   = Signal(str)        # (session_id,)
@@ -349,7 +372,7 @@ class _Turn:
     """Per-session in-flight turn state. Not a QObject — timers/worker are
     owned by ChatWidget so they live on the GUI thread."""
     __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped",
-                 "anchor", "rendered", "stream_id")
+                 "anchor", "rendered", "stream_id", "extra")
 
     def __init__(self, session: ChatSession, backend: LLMBackend,
                  worker: _StreamWorker, kill_timer: QTimer):
@@ -367,6 +390,7 @@ class _Turn:
         # 安定した stream 相関 ID（_start_turn で採番）。ストリーミング中の partial
         # 配信と完了時の最終配信を同一 in-flight メッセージへ紐付けるためにリレーへ送る。
         self.stream_id = ""
+        self.extra: list[_Extra] = []   # 応答中に送った発言（Issue #119。送った順）
 
 
 def _role_label(role: str) -> str:
@@ -462,6 +486,7 @@ class ChatWidget(QWidget):
         self._last_active_by_ds: dict[str | None, str] = {}
         self._deleted: set[tuple[str, str]] = set()
         self._turns: dict[str, _Turn] = {}
+        self._shutting_down = False   # アプリ終了中（_shutdown_worker が立てる。Issue #119）
         self._session_backends: dict[str, LLMBackend] = {}
         self._turn_notes: dict[str, str] = {}
         # Remote (guest) messages that arrived while a session was busy, queued
@@ -535,6 +560,14 @@ class ChatWidget(QWidget):
         self._split_save_timer.timeout.connect(self._flush_split_state)
         self._io_split.splitterMoved.connect(self._on_io_split_moved)
 
+        # 応答中に送った発言の待ち表示（Issue #119）。中身と表示は _update_pending_label が決める。
+        self._pending_label = QLabel("")
+        self._pending_label.setStyleSheet("color:#888888;font-style:italic")
+        self._pending_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._pending_label.setMinimumWidth(1)   # 長い要約でドックを広げない
+        self._pending_label.setVisible(False)
+        layout.addWidget(self._pending_label)
+
         row = QHBoxLayout()
         self._status = QLabel("")
         self._status.setStyleSheet("color:#888888;font-style:italic")
@@ -547,6 +580,7 @@ class ChatWidget(QWidget):
         row.addWidget(self._stop_btn)
         self._send_btn = QPushButton(tr("chat.btn.send"))
         self._send_btn.clicked.connect(self._on_send)
+        self._fit_send_button()
         row.addWidget(self._send_btn)
         layout.addLayout(row)
 
@@ -1250,6 +1284,12 @@ class ChatWidget(QWidget):
                 if body.strip():
                     self._append_block("assistant", body, markdown=True,
                                        msg_index=i, actions=("fork",))
+        # Show stashed completion note from a background-finished turn. In-flight
+        # ブロックより前に描く（背景で自動送信したセッションは note を持ったまま進行中に
+        # なり、後に描くと _flush_live_markdown の全置換で消える。Issue #119）。
+        note = self._turn_notes.pop(sess.id, None)
+        if note:
+            self._append_system_line(note)
         # If a turn is in-flight for this session, show assistant placeholder +
         # partial buffer. Condition is `is not None` (not `turn.buffer`) so an
         # empty-buffer turn still gets the assistant header — later _on_chunk
@@ -1266,10 +1306,6 @@ class ChatWidget(QWidget):
                 cursor.setCharFormat(QTextCharFormat())
                 self._insert_markdown(cursor, body)
                 self._scroll_to_bottom()
-        # Show stashed completion note from a background-finished turn.
-        note = self._turn_notes.pop(sess.id, None)
-        if note:
-            self._append_system_line(note)
         self._apply_search_highlight(sess)
 
     # ----- chat search (Issue #108) -----
@@ -1521,9 +1557,9 @@ class ChatWidget(QWidget):
                 break
 
     def retranslate(self) -> None:
-        self._input.setPlaceholderText(tr("chat.input.placeholder"))
         self._stop_btn.setText(tr("chat.btn.stop"))
-        self._send_btn.setText(tr("chat.btn.send"))
+        self._fit_send_button()
+        self._update_send_controls()
         # 非破壊: 既存タブのテキストだけ訳し直す（_rebuild_tab_bar は使わない）
         for i in range(self._tab_bar.count()):
             sess = self._session_by_id(self._tab_bar.tabData(i))
@@ -2002,6 +2038,7 @@ class ChatWidget(QWidget):
                 # フラグが旧 active を hidden 化）場合、rebuild は QSignalBlocker 内なので
                 # currentChanged が飛ばず transcript が旧いまま残る → 明示再描画する。
                 self._render_session(self._active)
+                self._update_turn_ui()
             self._switch_active_composer(prev_id)
         return adopted
 
@@ -2009,7 +2046,9 @@ class ChatWidget(QWidget):
 
     def _on_send(self) -> None:
         sess = self._active
-        if sess.id in self._turns:
+        turn = self._turns.get(sess.id)
+        if turn is not None:
+            self._send_during_turn(sess, turn)   # 応答中は追加か予約（Issue #119）
             return
         text = self._input.toPlainText()
         if not text.strip():
@@ -2025,6 +2064,44 @@ class ChatWidget(QWidget):
             return                # エンジン未設定（Issue #115）: 入力欄の文章を残す
         self._input.clear()
         sess.draft = ""   # 送信済みテキストが後の退避/読込で復活しないように
+
+    @staticmethod
+    def _supports_inject(backend) -> bool:
+        """backend が応答中の追加送信を受け付けうるか（Issue #119）。メソッドが無い・例外・True 以外は偽。"""
+        fn = getattr(backend, "supports_inject", None)
+        if not callable(fn):
+            return False
+        try:
+            return fn() is True
+        except Exception:
+            return False
+
+    def _send_kind(self, sess: ChatSession) -> str:
+        """送信ボタンを押したら起きること: "send" / "add"（追加送信）/ "queue"（予約送信）。"""
+        turn = self._turns.get(sess.id)
+        if turn is None:
+            return "send"
+        if (self._supports_inject(turn.backend)
+                and getattr(sess, "kind", "chat") != "search"
+                and not any(x.state == "deferred" for x in turn.extra)):
+            return "add"
+        return "queue"
+
+    def _send_during_turn(self, sess: ChatSession, turn: _Turn) -> None:
+        """応答中の送信（Issue #119）。追加送信か予約送信として turn.extra に積み、入力欄を空にする。"""
+        if turn.stopped:
+            return
+        text = self._input.toPlainText()
+        if not text.strip():
+            return
+        if text.lstrip().startswith("/"):
+            self._status_note(tr("chat.queue.slash_refused"))   # どのエンジンでも（Issue 本文）
+            return
+        extra = _Extra(text, "deferred")
+        turn.extra.append(extra)
+        self._input.clear()
+        sess.draft = ""
+        self._update_turn_ui()
 
     def _refuse_unconfigured(self, sess: ChatSession, origin: str) -> None:
         """エンジン未設定で送信を断る（Issue #115）。セッション・履歴・入力欄には触れない。
@@ -2044,7 +2121,7 @@ class ChatWidget(QWidget):
             self._pending_remote.pop(sess.id, None)
 
     def _start_turn(self, sess: ChatSession, text: str, origin: str = "local", *,
-                    wire_text: str | None = None) -> bool:
+                    wire_text: str | None = None, adopt_dataset: bool = True) -> bool:
         """Begin a streaming turn for `sess` with user message `text`.
 
         Extracted from `_on_send` so remote (guest) injections share the exact
@@ -2058,6 +2135,9 @@ class ChatWidget(QWidget):
         `wire_text` はバックエンドへ送る最後の user 本文だけを差し替える（セッション・
         transcript・messageAdded には `text` が残る）。None なら AI 検索タブの続きの
         質問に指示を付ける（`_search_followup_wire`。Issue #108）。
+
+        `adopt_dataset=False` なら、未束縛のセッションに `_current_dataset` を採用しない
+        （応答中に溜まった発言の自動送信。Issue #119）。
 
         戻り値: ターンを始めたら True。バックエンドが UnconfiguredBackend に解決されたら
         （エンジン未設定。Issue #115）何もせず False — セッションのメッセージ・タイトル・
@@ -2087,7 +2167,7 @@ class ChatWidget(QWidget):
                 if sess.dataset is not None:
                     self._mark_chat_dirty()
         # Adopt the current dataset into an as-yet-unbound scratch session.
-        if self._current_dataset is not None and sess.dataset is None:
+        if adopt_dataset and self._current_dataset is not None and sess.dataset is None:
             sess.dataset = self._current_dataset
             self._mark_chat_dirty()
         is_active = sess is self._active
@@ -2239,21 +2319,29 @@ class ChatWidget(QWidget):
         return sess is not None and self._has_history(sess)
 
     def _drain_pending_remote(self, sid: str) -> None:
-        """Pop one queued remote message for `sid` and start it (FIFO). Called at
-        the tail of _on_done/_on_failed, after `_turns.pop(sid)`."""
+        """保留中のゲスト発言を全部まとめて 1 ターンで送る（Issue #119）。_on_done/_on_failed の末尾で
+        `_turns.pop(sid)` と `_after_turn` の後に呼ぶ。ホストの自動送信でターンが続いていれば何もしない
+        （そのターンが終わったときにまた呼ばれる）。"""
+        if sid in self._turns:
+            return
         # 保留中の発言は _on_remote_message を通らないので、実行の直前にも会議の
         # 公開範囲かを確かめる（Issue #107 B-6）。範囲外ならキューごと捨てる。
         gate = getattr(self, "_remote_gate", None)
         if gate is not None and not gate(sid):
             self._pending_remote.pop(sid, None)
             return
-        pend = self._pending_remote.get(sid)
+        pend = self._pending_remote.pop(sid, None)
         if not pend:
             return
-        sender, text = pend.pop(0)
-        if not pend:
-            self._pending_remote.pop(sid, None)
-        self.inject_remote_message(text, sender, session_id=sid)
+        sess = self._session_by_id(sid)
+        if sess is None:
+            return
+        joined = "\n\n".join(
+            tr("meeting.remote_message_prefix",
+               sender=(sender or tr("meeting.guest_default")), text=text)
+            for sender, text in pend
+        )
+        self._start_turn(sess, joined, "remote")   # 断られたら _refuse_unconfigured がログに残す
 
     def _on_chunk(self, sid: str, piece: str) -> None:
         turn = self._turns.get(sid)
@@ -2308,6 +2396,7 @@ class ChatWidget(QWidget):
                 note = self._format_usage(turn.backend)
                 if note:
                     self._turn_notes[sid] = note
+        self._after_turn(sess, turn, ok=not turn.stopped)
         self._refresh_tab_for(sess)
         self._notify_dataset_busy_changed()   # ● clears for this DS if now idle
         self._drain_pending_remote(sid)
@@ -2358,6 +2447,7 @@ class ChatWidget(QWidget):
             self._update_turn_ui()
         else:
             self._turn_notes[sid] = error_text.strip()
+        self._after_turn(sess, turn, ok=False)
         self._refresh_tab_for(sess)
         self._notify_dataset_busy_changed()   # ● clears for this DS if now idle
         self._drain_pending_remote(sid)
@@ -2391,7 +2481,6 @@ class ChatWidget(QWidget):
         """Update Send/Stop/status for the currently visible session's turn state."""
         turn = self._turns.get(self._active.id)
         has_turn = turn is not None
-        self._send_btn.setEnabled(not has_turn)
         if has_turn and turn.stopped:
             self._stop_btn.setEnabled(False)
             self._status.setText(tr("chat.status.stopping"))
@@ -2400,6 +2489,103 @@ class ChatWidget(QWidget):
         else:
             self._stop_btn.setEnabled(False)
             self._status.setText("")
+        self._update_send_controls()
+
+    def _update_send_controls(self) -> None:
+        """送信ボタン（有効・ラベル・ツールチップ）・入力欄の薄字・待ち表示を、表示中のチャットに合わせる
+        （Issue #119）。_status には触れない（retranslate からも呼ぶので、使用量の行を消さない）。"""
+        sess = self._active
+        turn = self._turns.get(sess.id)
+        self._send_btn.setEnabled(not (turn is not None and turn.stopped))
+        kind = self._send_kind(sess)
+        if kind == "add":
+            label, hint, tip = (tr("chat.btn.add"), tr("chat.input.placeholder_add"),
+                                tr("chat.tip.add"))
+        elif kind == "queue":
+            label, hint, tip = (tr("chat.btn.queue"), tr("chat.input.placeholder_queue"),
+                                tr("chat.tip.queue"))
+        else:
+            label, hint, tip = tr("chat.btn.send"), tr("chat.input.placeholder"), ""
+        self._send_btn.setText(label)
+        self._input.setPlaceholderText(hint)
+        self._send_btn.setToolTip(tip)
+        self._update_pending_label()
+
+    def _fit_send_button(self) -> None:
+        """ラベル（送信 / 追加 / 予約）で幅が揺れないよう、最も広いものに最小幅を合わせる（Issue #119）。"""
+        btn = self._send_btn
+        current = btn.text()
+        width = 0
+        for label in (tr("chat.btn.send"), tr("chat.btn.add"), tr("chat.btn.queue")):
+            btn.setText(label)
+            width = max(width, btn.sizeHint().width())
+        btn.setText(current)
+        btn.setMinimumWidth(width)
+
+    def _update_pending_label(self) -> None:
+        """待ち表示（Issue #119）: 表示中のチャットのターンの、まだ渡っていない発言。"""
+        turn = self._turns.get(self._active.id)
+        extra = turn.extra if turn is not None else []
+        adds = [x for x in extra if x.state in ("pending", "unknown")]
+        queued = [x for x in extra if x.state == "deferred"]
+        parts = []
+        if adds:
+            parts.append(tr("chat.pending.add", count=len(adds), gist=_gist(adds[0].text)))
+        if queued:
+            parts.append(tr("chat.pending.queue", count=len(queued), gist=_gist(queued[0].text)))
+        waiting = [x.text for x in extra if x.state != "delivered"]
+        self._pending_label.setText("   ".join(parts))
+        self._pending_label.setToolTip(
+            '<p style="white-space:pre-wrap">' + html.escape("\n\n".join(waiting)) + "</p>"
+            if waiting else "")
+        self._pending_label.setVisible(bool(parts))
+
+    def _restore_to_input(self, sess: ChatSession, items: list[_Extra]) -> None:
+        """渡っていない発言を入力欄に戻す（Issue #119）。送った順に空行でつなぎ、今の入力はその後ろ。
+        表示中のチャットなら入力欄、背景のチャットなら sess.draft（タブを切り替えると入力欄に出る）。"""
+        active = sess is self._active
+        current = self._input.toPlainText() if active else (getattr(sess, "draft", "") or "")
+        merged = "\n\n".join([x.text for x in items] + ([current] if current.strip() else []))
+        if active:
+            self._input.setPlainText(merged)
+        else:
+            sess.draft = merged
+
+    def _notify_turn_note(self, sess: ChatSession, text: str) -> None:
+        """ターンの終わりの案内: 表示中のチャットなら transcript に 1 行、背景ならステータスバー。"""
+        if sess is self._active:
+            self._append_system_line(text)
+        else:
+            self._status_note(text)
+
+    @staticmethod
+    def _returned_note(ok: bool, back: list[_Extra]) -> str:
+        if not ok:
+            if any(x.state == "unknown" for x in back):
+                return tr("chat.queue.returned_unknown")
+            return tr("chat.queue.returned")
+        if len(back) == 1:
+            return tr("chat.queue.unknown_returned")
+        return tr("chat.queue.unknown_and_later_returned")
+
+    def _after_turn(self, sess: ChatSession, turn: _Turn, ok: bool) -> None:
+        """ターンの終わりに、応答中に送った発言を片付ける（Issue #119。仕様は Issue 本文）。"""
+        if getattr(self, "_shutting_down", False):
+            return
+        leftover = [x for x in turn.extra if x.state != "delivered"]
+        if not leftover:
+            return
+        cut = next((i for i, x in enumerate(leftover) if x.state == "unknown"), len(leftover))
+        auto, back = (leftover[:cut], leftover[cut:]) if ok else ([], leftover)
+        if back:
+            self._restore_to_input(sess, back)
+            self._notify_turn_note(sess, self._returned_note(ok, back))
+        if auto:
+            # セッションの今の dataset のまま送る（前面を読み直さず、未束縛でも採用しない。Issue 本文）
+            if not self._start_turn(sess, "\n\n".join(x.text for x in auto), "local",
+                                    adopt_dataset=False):
+                self._restore_to_input(sess, auto)
+                self._notify_turn_note(sess, tr("chat.queue.returned"))
 
     def _tick_spinner(self) -> None:
         turn = self._turns.get(self._active.id)
@@ -2453,6 +2639,7 @@ class ChatWidget(QWidget):
         場合、先に pi プロセスを kill しないと proc.stdout 読取が EOF を返さず
         ハングするため、cancel() を先頭に置く。
         """
+        self._shutting_down = True
         turns = list(self._turns.values())
         # Cancel all backends first (unblock pipe reads).
         for turn in turns:
@@ -2480,8 +2667,8 @@ class ChatWidget(QWidget):
         Markdown で全置換再描画する（全モード共通）。常に self._active の turn を見るので、
         保留タイマーは発火時点のアクティブ turn を描く（タブ切替は _render_session が
         再 anchor するため自己修復）。anchor 未設定 / turn 無しなら no-op。in-flight
-        ブロックが _log 末尾である前提（スピナーは _log に書かず、in-flight セッションに
-        _turn_notes は付かない）に依存。"""
+        ブロックが _log 末尾である前提（スピナーは _log に書かない。_turn_notes は _render_session が
+        in-flight ブロックより前に描き、応答中の案内は _status_note に出す）に依存。"""
         turn = self._turns.get(self._active.id)
         if turn is None or turn.anchor is None:
             return

@@ -2709,3 +2709,339 @@ def test_background_override_failure_notes_go_to_status_bar(widget, monkeypatch)
     assert tr("chat.engine.build_failed", error="boom") in texts
     assert tr("chat.engine.unconfigured") in texts
     assert widget._turns == {}
+
+
+# ---- Issue #119: 応答中の送信（予約送信 Queue / 追加送信 Add） ----
+
+class _InjectBackend(_FakeBackend):
+    """追加送信を受け付ける backend（claude の代わり）。inject は uid を返す。"""
+
+    def __init__(self, uid: str | None = "u1"):
+        super().__init__()
+        self.uid = uid
+        self.injected: list[str] = []
+        self.chat_dataset_calls: list = []
+
+    def supports_inject(self) -> bool:
+        return True
+
+    def inject(self, text: str):
+        self.injected.append(text)
+        return self.uid
+
+    def set_chat_dataset(self, value) -> None:
+        self.chat_dataset_calls.append(value)
+
+
+class _DSRecBackend(_FakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.chat_dataset_calls: list = []
+
+    def set_chat_dataset(self, value) -> None:
+        self.chat_dataset_calls.append(value)
+
+
+class _Sig119:
+    def connect(self, *a, **k):
+        pass
+
+
+def _fake_workers(monkeypatch):
+    """_StreamWorker を、スレッドを起動しない偽物（6 シグナル）に差し替える。"""
+    import gui.chat as gc
+
+    workers: list = []
+
+    class _W:
+        def __init__(self, sid, backend, msgs, dispatch, parent):
+            self.sid, self.backend, self.msgs = sid, backend, msgs
+            self.chunk = self.done = self.failed = self.finished = _Sig119()
+            self.absorbed = self.unknown = _Sig119()
+            workers.append(self)
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+        def requestInterruption(self):
+            pass
+
+    monkeypatch.setattr(gc, "_StreamWorker", _W)
+    return workers
+
+
+def _begin(widget, monkeypatch, sess=None, backend=None, text="first"):
+    """偽の worker で sess（既定は active）の 1 ターン目を _on_send で始める。"""
+    workers = _fake_workers(monkeypatch)
+    monkeypatch.setattr(widget, "_load_backend_session", lambda *a, **k: None)
+    sess = sess or widget._active
+    widget._session_backends[sess.id] = backend or _FakeBackend()
+    widget._window.current_chat_dataset.return_value = None
+    widget._input.setPlainText(text)
+    widget._on_send()
+    assert sess.id in widget._turns
+    return sess, widget._turns[sess.id], workers
+
+
+def _send(widget, text):
+    widget._input.setPlainText(text)
+    widget._on_send()
+
+
+def _spy_start_turn(widget, monkeypatch):
+    calls: list = []
+    orig = widget._start_turn
+
+    def spy(sess, text, origin="local", **kw):
+        calls.append((sess, text, origin, kw))
+        return orig(sess, text, origin, **kw)
+
+    monkeypatch.setattr(widget, "_start_turn", spy)
+    return calls
+
+
+def _cleanup(widget):
+    widget._turns.clear()
+    widget._spin_timer.stop()
+
+
+def test_queue_label_and_pending_while_running(widget, monkeypatch):
+    sess, turn, _ = _begin(widget, monkeypatch)
+    try:
+        assert widget._send_kind(sess) == "queue"
+        assert widget._send_btn.text() == tr("chat.btn.queue")
+        assert widget._send_btn.isEnabled()
+        _send(widget, "予約その1\n2 行目")
+        assert [(x.text, x.state) for x in turn.extra] == [("予約その1\n2 行目", "deferred")]
+        assert widget._input.toPlainText() == ""
+        assert not widget._pending_label.isHidden()
+        assert widget._pending_label.text() == tr("chat.pending.queue", count=1, gist="予約その1")
+    finally:
+        _cleanup(widget)
+
+
+def test_queued_three_sent_once_after_success(widget, monkeypatch):
+    sess, turn, workers = _begin(widget, monkeypatch)
+    try:
+        for t in ("A", "B", "C"):
+            _send(widget, t)
+        calls = _spy_start_turn(widget, monkeypatch)
+        busy: list[bool] = []
+        monkeypatch.setattr(widget, "_notify_dataset_busy_changed",
+                            lambda: busy.append(sess.id in widget._turns))
+        widget._on_done(sess.id)
+        assert [(c[1], c[2]) for c in calls] == [("A\n\nB\n\nC", "local")]
+        assert busy and all(busy)
+        assert len(workers) == 2
+        assert widget._input.toPlainText() == ""
+        assert sess.messages[-1].content == "A\n\nB\n\nC"
+    finally:
+        _cleanup(widget)
+
+
+def test_stop_returns_all_before_current_input(widget, monkeypatch):
+    from gui.chat import _Extra
+    sess, turn, _ = _begin(widget, monkeypatch)
+    try:
+        turn.extra = [_Extra("A", "pending", "u1"), _Extra("B", "deferred")]
+        widget._input.setPlainText("C")
+        turn.stopped = True
+        calls = _spy_start_turn(widget, monkeypatch)
+        widget._on_done(sess.id)
+        assert widget._input.toPlainText() == "A\n\nB\n\nC"
+        assert calls == []
+        assert widget._log.toPlainText().count(tr("chat.queue.returned")) == 1
+    finally:
+        _cleanup(widget)
+
+
+def test_failed_returns_all_with_one_note(widget, monkeypatch):
+    from gui.chat import _Extra
+    for with_unknown in (False, True):
+        sess, turn, _ = _begin(widget, monkeypatch)
+        try:
+            turn.extra = [_Extra("A", "unknown" if with_unknown else "pending", "u1"),
+                          _Extra("B", "deferred")]
+            calls = _spy_start_turn(widget, monkeypatch)
+            widget._on_failed(sess.id, "boom")
+            assert widget._input.toPlainText() == "A\n\nB"
+            assert calls == []
+            key = "chat.queue.returned_unknown" if with_unknown else "chat.queue.returned"
+            assert widget._log.toPlainText().count(tr(key)) == 1
+        finally:
+            _cleanup(widget)
+            widget._input.clear()
+
+
+def test_background_restore_goes_to_draft(widget, monkeypatch):
+    from gui.chat import _Extra, _Turn
+    bg = _make_session(widget)
+    assert widget._active is not bg
+    turn = _Turn(bg, _FakeBackend(), MagicMock(), MagicMock())
+    turn.extra = [_Extra("X", "deferred")]
+    widget._turns[bg.id] = turn
+    bg.draft = "old"
+    widget._input.setPlainText("active text")
+    widget._on_failed(bg.id, "boom")
+    assert bg.draft == "X\n\nold"
+    assert widget._input.toPlainText() == "active text"
+    texts = [c.args[0] for c in widget._window.statusBar().showMessage.call_args_list]
+    assert tr("chat.queue.returned") in texts
+
+
+def test_auto_send_refused_returns_all_to_input(widget, monkeypatch):
+    sess, turn, _ = _begin(widget, monkeypatch)
+    try:
+        _send(widget, "A")
+        _send(widget, "B")
+
+        def fake(*a, **k):
+            return False
+
+        monkeypatch.setattr(widget, "_start_turn", fake)
+        widget._on_done(sess.id)
+        assert widget._input.toPlainText() == "A\n\nB"
+        assert widget._log.toPlainText().count(tr("chat.queue.returned")) == 1
+    finally:
+        _cleanup(widget)
+
+
+def _auto_send_dataset_case(qapp, monkeypatch, case):
+    from gui.chat import ChatWidget
+    w = ChatWidget(_FakeBackend, dispatch=lambda *a, **k: None)
+    w.bind_window(MagicMock())
+    backend = _DSRecBackend()
+    w._current_dataset = None
+    S, turn, _ = _begin(w, monkeypatch, backend=backend)
+    try:
+        assert S.dataset is None
+        _send(w, "Q")
+        if case == "background":
+            other = _make_session(w)
+            w._active = other
+            w._current_dataset = "dsB"
+        else:
+            w.set_current_dataset("dsB")     # 生成中なので S は採用されない
+            assert w._active is S
+        w._window.current_chat_dataset.return_value = "dsB"
+        backend.chat_dataset_calls.clear()
+        w._on_done(S.id)
+        assert S.id in w._turns              # 自動送信のターンが始まった
+        assert S.dataset is None
+        assert backend.chat_dataset_calls == [None]
+    finally:
+        _cleanup(w)
+
+
+def test_auto_send_keeps_session_dataset(qapp, monkeypatch):
+    """(a) 背景で前面が dsB に変わった (b) 表示中のまま dsB に切り替えた — どちらも未束縛のまま送る。"""
+    _auto_send_dataset_case(qapp, monkeypatch, "background")
+    _auto_send_dataset_case(qapp, monkeypatch, "switched_while_running")
+
+
+def test_shutdown_discards_extras(widget, monkeypatch):
+    sess, turn, _ = _begin(widget, monkeypatch)
+    try:
+        _send(widget, "A")
+        widget._shutting_down = True
+        calls = _spy_start_turn(widget, monkeypatch)
+        widget._on_done(sess.id)
+        assert widget._input.toPlainText() == ""
+        assert calls == []
+        assert sess.id not in widget._turns
+    finally:
+        _cleanup(widget)
+
+
+def test_slash_refused_during_any_reply(widget, monkeypatch):
+    from gui.chat import _Turn
+    sess = widget._active
+    for case in ("inject", "plain", "search"):
+        sess.kind = "search" if case == "search" else "chat"
+        backend = _FakeBackend() if case == "plain" else _InjectBackend()
+        turn = _Turn(sess, backend, MagicMock(), MagicMock())
+        widget._turns[sess.id] = turn
+        widget._window.statusBar().showMessage.reset_mock()
+        try:
+            _send(widget, "  /compact")
+            assert turn.extra == []
+            assert backend.__dict__.get("injected", []) == []
+            assert widget._input.toPlainText() == "  /compact"
+            texts = [c.args[0] for c in widget._window.statusBar().showMessage.call_args_list]
+            assert tr("chat.queue.slash_refused") in texts
+        finally:
+            _cleanup(widget)
+    sess.kind = "chat"
+    # 応答中でなければ今までどおり送る
+    calls: list = []
+    monkeypatch.setattr(widget, "_start_turn",
+                        lambda s, t, o="local", **k: calls.append(t) or True)
+    widget._window.current_chat_dataset.return_value = None
+    _send(widget, "/compact")
+    assert calls == ["/compact"]
+
+
+def test_search_session_uses_queue(widget):
+    from gui.chat import _Turn
+    sess = widget._active
+    widget._turns[sess.id] = _Turn(sess, _InjectBackend(), MagicMock(), MagicMock())
+    try:
+        assert widget._send_kind(sess) == "add"
+        sess.kind = "search"
+        assert widget._send_kind(sess) == "queue"
+    finally:
+        _cleanup(widget)
+
+
+def test_stopped_turn_ignores_send(widget):
+    from gui.chat import _Turn
+    sess = widget._active
+    turn = _Turn(sess, _FakeBackend(), MagicMock(), MagicMock())
+    turn.stopped = True
+    widget._turns[sess.id] = turn
+    try:
+        widget._update_turn_ui()
+        _send(widget, "x")
+        assert turn.extra == []
+        assert widget._input.toPlainText() == "x"
+        assert not widget._send_btn.isEnabled()
+    finally:
+        _cleanup(widget)
+
+
+def test_retranslate_keeps_add_queue_label(widget):
+    from gui.chat import _Turn
+    sess = widget._active
+    widget._turns[sess.id] = _Turn(sess, _InjectBackend(), MagicMock(), MagicMock())
+    try:
+        widget._update_turn_ui()
+        assert widget._send_btn.text() == tr("chat.btn.add")
+        widget.retranslate()
+        assert widget._send_btn.text() == tr("chat.btn.add")
+        assert widget._input.placeholderText() == tr("chat.input.placeholder_add")
+    finally:
+        _cleanup(widget)
+
+
+def test_render_session_draws_note_before_inflight_block(widget):
+    from gui.chat import _Turn, _role_label
+    sess = widget._active
+    turn = _Turn(sess, _FakeBackend(), MagicMock(), MagicMock())
+    widget._turns[sess.id] = turn
+    widget._turn_notes[sess.id] = "NOTE"
+    try:
+        widget._render_session(sess)
+        text = widget._log.toPlainText()
+        assert text.index("NOTE") < text.rindex(_role_label("assistant"))
+        widget._on_chunk(sess.id, "hello")
+        widget._flush_live_markdown()
+        text = widget._log.toPlainText()
+        assert "NOTE" in text and "hello" in text
+    finally:
+        _cleanup(widget)
