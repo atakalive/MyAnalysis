@@ -44,7 +44,7 @@ from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
-    Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown,
+    Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown, InjectSupport,
     NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS, CHAT_DATASET_RULE, with_chat_context,
     apply_agent_stage,
@@ -367,7 +367,7 @@ class ClaudeCodeBackend:
 
     def stream(
         self, messages: list[Message], tools: list | None = None
-    ) -> Iterator[TextDelta | ToolCallRequest | UserAbsorbed | UserUnknown]:
+    ) -> Iterator[TextDelta | ToolCallRequest | UserAbsorbed | UserUnknown | InjectSupport]:
         config = self._config
 
         self._thinking_open = False             # 💭 行を開いたまま（末尾の改行をまだ出していない）
@@ -394,6 +394,10 @@ class ClaudeCodeBackend:
             # 非対応なら argv・stdin に書く行・interrupt の形は今までと同じ。
             replay = _replay_supported(claude_bin)
             self._inject_supported = replay
+            # 判定の結果を GUI に知らせる（起動の前に 1 回だけ）。supports_inject() はここまで
+            # True を返すので、GUI はこれを受けて送信ボタンの「追加 / 予約」を合わせ直す。
+            # 表示の順番に関わらないので _out を通さない（この時点で _queue は空）。
+            yield InjectSupport(supported=replay)
 
             cmd = [
                 claude_bin,
@@ -630,7 +634,8 @@ class ClaudeCodeBackend:
 
     def supports_inject(self) -> bool:
         """応答中の追加送信を受け付けうるか（Issue #119。GUI スレッドから呼ぶ。起動・走査をしない）。
-        最初の stream で版を判定するまでは True、判定後はその結果。"""
+        最初の stream で版を判定するまでは True、判定後はその結果（判定したら stream が
+        InjectSupport を yield するので、GUI はそれを受けて表示を合わせ直す）。"""
         return self._inject_supported is not False
 
     def inject(self, text: str) -> str | None:

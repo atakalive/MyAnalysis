@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from llm_backend.base import (
-    LLMBackend, Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown,
+    LLMBackend, Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown, InjectSupport,
     NO_LOCAL_PERSISTENCE,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER,
@@ -314,6 +314,7 @@ class _StreamWorker(QThread):
     failed = Signal(str, str)   # (session_id, error_msg)
     absorbed = Signal(str, str)  # (session_id, uid) 追加送信が取り込まれた（Issue #119）
     unknown = Signal(str, str)   # (session_id, uid) 追加送信が渡ったか分からない（Issue #119）
+    inject_support = Signal(str)  # (session_id,) backend が追加送信の可否を判定し終えた（Issue #119）
 
     def __init__(self, session_id: str, backend: LLMBackend, messages: list[Message],
                  dispatch: Callable, parent: QWidget | None = None):
@@ -345,6 +346,8 @@ class _StreamWorker(QThread):
                         self.absorbed.emit(self._sid, event.uid)
                     elif isinstance(event, UserUnknown):
                         self.unknown.emit(self._sid, event.uid)
+                    elif isinstance(event, InjectSupport):
+                        self.inject_support.emit(self._sid)
                 if not pending_calls:
                     self.done.emit(self._sid)
                     return
@@ -2212,6 +2215,7 @@ class ChatWidget(QWidget):
         worker.failed.connect(self._on_failed)
         worker.absorbed.connect(self._on_absorbed)
         worker.unknown.connect(self._on_unknown)
+        worker.inject_support.connect(self._on_inject_support)
         # Delete the QThread only after run() fully returns (finished).
         worker.finished.connect(worker.deleteLater)
         worker.start()
@@ -2402,6 +2406,13 @@ class ChatWidget(QWidget):
             self._live_timer.stop()
             self._render_session(sess)      # anchor を張り直す
         self._update_turn_ui()
+
+    def _on_inject_support(self, sid: str) -> None:
+        """backend が追加送信の可否を判定し終えた（Issue #119）。claude は最初の stream で CLI の版を
+        判定するまで supports_inject() が True なので、表示中のチャットなら送信ボタン・薄字・
+        ツールチップ・待ち表示を合わせ直す（非対応の版なら「追加」→「予約」になる）。"""
+        if sid == self._active.id:
+            self._update_send_controls()
 
     def _on_unknown(self, sid: str, uid: str) -> None:
         """追加送信が渡ったか分からないまま終わった（Issue #119）。会話には残したまま、入力欄へ戻す対象にする。"""

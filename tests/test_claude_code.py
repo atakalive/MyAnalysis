@@ -7,6 +7,7 @@ with replay=(session_id is None).
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import logging
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from llm_backend import claude_code
-from llm_backend.base import Message, UserAbsorbed, UserUnknown
+from llm_backend.base import InjectSupport, Message, UserAbsorbed, UserUnknown
 from llm_backend.claude_code import (
     _DEFAULT_PERMISSION_MODE,
     ClaudeCodeBackend,
@@ -28,6 +29,17 @@ from llm_backend.claude_code import (
 )
 # conftest の autouse スタブより前に束縛される本物（判定そのもののテスト用。Issue #119）
 from llm_backend.claude_code import _replay_supported as _real_replay_supported
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _collect_garbage_on_main_thread():
+    """前のモジュールの GUI テストが残したごみ（Qt オブジェクトを含む）を、メインスレッドで回収しておく。
+
+    このファイルのテストは stream の書き手・stderr の読み手のスレッドを動かす。ごみが残ったままだと
+    そのスレッドで循環 GC が走って Qt オブジェクトを破棄しうる。全体の実行（worktree）で、_shut_stdin が
+    書き手を join している最中の segfault が 3 回中 2 回起きた（2026-10-20）ので、先に回収する。"""
+    gc.collect()
+    yield
 
 
 def _capture_prompt(msgs, monkeypatch, tmp_path, *, session_id=None, chat_dataset=None):
@@ -616,8 +628,9 @@ def result_with(first, uuids=None, **kw):
 
 
 class ScriptedRun:
-    def __init__(self, backend, created, events, errors, thread, killed):
+    def __init__(self, backend, created, events, errors, thread, killed, supports):
         self.backend = backend
+        self.supports = supports    # InjectSupport.supported（events とは分けて記録する）
         self._created = created
         self.events = events
         self.errors = errors
@@ -682,11 +695,15 @@ def scripted(monkeypatch, tmp_path):
         monkeypatch.setattr(claude_code.subprocess, "Popen", factory)
         events: list = []
         errors: list = []
+        supports: list = []
         gen = backend.stream([Message(role="user", content="hello")])
 
         def run():
             try:
                 for ev in gen:
+                    if isinstance(ev, InjectSupport):
+                        supports.append(ev.supported)
+                        continue
                     events.append(ev)
                     if close_when is not None and close_when.is_set():
                         gen.close()        # GUI の Stop と同じ: 次のイベントで抜けて close
@@ -696,7 +713,7 @@ def scripted(monkeypatch, tmp_path):
 
         t = threading.Thread(target=run, daemon=True)
         t.start()
-        return ScriptedRun(backend, created, events, errors, t, killed)
+        return ScriptedRun(backend, created, events, errors, t, killed, supports)
 
     return start
 
@@ -1004,3 +1021,56 @@ def test_exit_error_uses_own_stderr(scripted):
     msg = str(r2.errors[0])
     assert "claude exited with code 1" in msg
     assert "two" in msg and "one" not in msg
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_inject_support_yielded_before_launch(monkeypatch, tmp_path, supported):
+    """版の判定の直後、起動の前に InjectSupport を 1 回だけ出す（GUI が送信ボタンを合わせ直す）。"""
+    monkeypatch.setattr(claude_code, "_replay_supported", lambda claude_bin: supported)
+    launched: list = []
+    monkeypatch.setattr(claude_code.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append(cmd) or ScriptedPopen(cmd, **kw))
+    backend = ClaudeCodeBackend({"bin": "/fake/claude", "cwd": str(tmp_path)})
+    assert backend.supports_inject() is True              # 判定前は楽観的に True
+    gen = backend.stream([Message(role="user", content="hello")])
+    assert next(gen) == InjectSupport(supported=supported)
+    assert launched == []                                 # まだ起動していない
+    assert backend.supports_inject() is supported
+    gen.close()
+    assert launched == []
+
+
+def test_scripted_run_reports_one_inject_support(scripted):
+    r = scripted()
+    u0 = r.track()
+    r.proc.push(TD("ok"), result_with(u0, [u0]))
+    assert r.join() == [TextDelta(text="ok")]
+    assert r.supports == [True]
+
+
+def test_wait_max_ends_wait_even_with_frames(scripted, monkeypatch):
+    """待機中にフレームが _STALL_SEC より短い間隔で来続けても、_WAIT_MAX_SEC であきらめて
+    interrupt（cancel_queued）と close を書く（フレームで上限は延びない）。"""
+    monkeypatch.setattr(claude_code, "_STALL_SEC", 0.3)
+    monkeypatch.setattr(claude_code, "_WAIT_MAX_SEC", 0.8)
+    monkeypatch.setattr(claude_code, "_DRAIN_SEC", 0.05)
+    r = scripted()
+    u0 = r.track()
+    x = r.backend.inject("追加")
+    r.written(2)
+    r.proc.push(result_with(u0, [u0]))
+    assert wait_until(lambda: r.backend._cur.waiting)
+    t0 = time.monotonic()
+    while not r.proc.stdin.closed and time.monotonic() - t0 < 3.0:
+        r.proc.push({"type": "system", "subtype": "status", "session_id": SID})  # init でも started でもないフレーム
+        time.sleep(0.1)
+    elapsed = time.monotonic() - t0
+    assert r.proc.stdin.closed
+    assert 0.6 <= elapsed < 2.0          # 0.3 秒の無フレームでは切れず（フレームが来続ける）、0.8 秒の上限で切れる
+    msgs = r.proc.stdin.messages()
+    assert msgs[2]["request"] == {"subtype": "interrupt", "cancel_queued": True}
+    assert r.backend._cur.stalled
+    assert wait_until(lambda: r.proc in r.killed)
+    r.proc.end()
+    assert r.join() == [UserUnknown(uid=x)]
+    assert r.errors == []

@@ -2348,6 +2348,7 @@ def test_start_turn_bumps_updated(widget, monkeypatch):
     class _FakeWorker:
         def __init__(self, *a, **k):
             self.chunk = self.done = self.failed = self.finished = self.absorbed = self.unknown = _Sig()
+            self.inject_support = _Sig()
 
         def start(self):
             pass
@@ -2394,6 +2395,7 @@ def test_start_turn_passes_chat_dataset(qapp, monkeypatch, dataset):
             self.backend = backend
             self.dispatch = dispatch
             self.chunk = self.done = self.failed = self.finished = self.absorbed = self.unknown = _Sig()
+            self.inject_support = _Sig()
             workers.append(self)
 
         def start(self):
@@ -2743,8 +2745,11 @@ class _DSRecBackend(_FakeBackend):
 
 
 class _Sig119:
-    def connect(self, *a, **k):
-        pass
+    def __init__(self):
+        self.slots: list = []      # connect された先（配線の確認用）
+
+    def connect(self, slot, *a, **k):
+        self.slots.append(slot)
 
 
 def _fake_workers(monkeypatch):
@@ -2758,6 +2763,7 @@ def _fake_workers(monkeypatch):
             self.sid, self.backend, self.msgs = sid, backend, msgs
             self.chunk = self.done = self.failed = self.finished = _Sig119()
             self.absorbed = self.unknown = _Sig119()
+            self.inject_support = _Sig119()
             workers.append(self)
 
         def start(self):
@@ -3146,3 +3152,58 @@ def test_unknown_returns_it_and_later_sends_earlier(widget, monkeypatch):
         assert widget._log.toPlainText().count(tr("chat.queue.unknown_returned")) == 1
     finally:
         _cleanup(widget)
+
+
+class _LateInjectBackend(_InjectBackend):
+    """CLI の版を判定するまで True を返し、判定後は supported の値を返す backend（claude の代わり）。"""
+
+    def __init__(self):
+        super().__init__(uid="u1")
+        self.supported = True
+
+    def supports_inject(self) -> bool:
+        return self.supported
+
+
+def test_inject_support_known_updates_label(widget, monkeypatch):
+    """版の判定が「非対応」と分かったら、応答中の送信ボタン・薄字が「予約」に変わり、実際の送信も予約になる。"""
+    backend = _LateInjectBackend()
+    sess, turn, workers = _begin(widget, monkeypatch, backend=backend)
+    try:
+        assert workers[-1].inject_support.slots == [widget._on_inject_support]
+        assert widget._send_btn.text() == tr("chat.btn.add")          # 判定前は楽観的に「追加」
+        assert widget._input.placeholderText() == tr("chat.input.placeholder_add")
+        backend.supported = False                                      # 判定の結果: 非対応
+        widget._on_inject_support("other-session")                     # 表示中でないチャットの通知は無視
+        assert widget._send_btn.text() == tr("chat.btn.add")
+        widget._on_inject_support(sess.id)
+        assert widget._send_btn.text() == tr("chat.btn.queue")
+        assert widget._input.placeholderText() == tr("chat.input.placeholder_queue")
+        assert widget._send_btn.toolTip() == tr("chat.tip.queue")
+        _send(widget, "次")
+        assert backend.injected == []
+        assert [(x.text, x.state) for x in turn.extra] == [("次", "deferred")]
+    finally:
+        _cleanup(widget)
+
+
+def test_stream_worker_emits_inject_support(qapp):
+    """_StreamWorker.run は backend の InjectSupport を inject_support(sid) にする（他のイベントと同じ順で）。"""
+    from gui.chat import _StreamWorker
+    from llm_backend.base import InjectSupport, Message, TextDelta
+
+    class _B:
+        name = "claude-code"
+        model = "m"
+
+        def stream(self, messages, tools=None):
+            yield InjectSupport(supported=False)
+            yield TextDelta(text="ok")
+
+    got: list = []
+    w = _StreamWorker("sid1", _B(), [Message(role="user", content="hi")], lambda *a, **k: None)
+    w.inject_support.connect(lambda sid: got.append(("support", sid)))
+    w.chunk.connect(lambda sid, text: got.append(("chunk", sid, text)))
+    w.done.connect(lambda sid: got.append(("done", sid)))
+    w.run()        # スレッドを起動せずに同じスレッドで回す（直接接続で届く）
+    assert got == [("support", "sid1"), ("chunk", "sid1", "ok"), ("done", "sid1")]

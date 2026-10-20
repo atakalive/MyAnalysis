@@ -249,6 +249,15 @@ class UserUnknown:
     uid: str
 
 
+@dataclass
+class InjectSupport:
+    """この stream が追加送信（inject）を受け付けるかが分かった（Issue #119。claude だけが出す）。
+
+    claude は CLI の版を stream の中で判定し、判定の直後（起動の前）に 1 回だけ出す。それまで
+    supports_inject() は True を返すので、GUI はこれを受けて送信ボタンの表示を合わせ直す。"""
+    supported: bool
+
+
 _VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
@@ -389,6 +398,6 @@ class LLMBackend(Protocol):
 
     def stream(
         self, messages: list[Message], tools: list | None = None
-    ) -> Iterator[TextDelta | ToolCallRequest]:
-        """Yield TextDelta / ToolCallRequest events (claude may also yield UserAbsorbed / UserUnknown; consumers ignore types they do not know). Raises on transport error."""
+    ) -> Iterator[TextDelta | ToolCallRequest | UserAbsorbed | UserUnknown | InjectSupport]:
+        """Yield TextDelta / ToolCallRequest events (claude may also yield UserAbsorbed / UserUnknown / InjectSupport; consumers ignore types they do not know). Raises on transport error."""
         ...
