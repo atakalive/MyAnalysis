@@ -54,7 +54,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 
 - `data/` is gitignored — safe scratch space for local outputs, caches, exports. Don't commit anything inside.
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
-- `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started. `MYANALYSIS_CHAT_DATASET` is set by the GUI for agent subprocesses only — never put it in `.env`.
+- `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started. `MYANALYSIS_CHAT_DATASET` and `MYANALYSIS_AGENT_STAGE` are set by the GUI for agent subprocesses only — never put them in `.env`.
 - Dataset registration (per-host paths) lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
 - Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
 
@@ -340,10 +340,11 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   同じ失敗経路に乗る（実測で rename 失敗の 16%）。
 - **claude エンジンでは、チャットエージェントの `Write`/`Edit` がマウント上で機械的に拒否される**（PreToolUse hook →
   `python -m llm_bridge guard-write`。codex / pi にこの hook は無く、プロンプト `MOUNT_SAFE_EDITS` の指示だけ）。エージェントのツールは我々の chokepoint を通らないため。
-  claude で拒否されたときは安全な経路（`save_text` / `save_code` / `save_fig` と draft→apply verb）が案内される。
+  claude で拒否されたときは安全な経路（このチャットの stage に Write → `save_text` / `save_code` の `src=`、`save_fig`、draft→apply verb）が案内される。
   例外は `analysis.draft.py` — draft は Write/Edit を許可する（`apply-analysis` が strip /
   `ast.parse` / `build_tab` 束縛の 3 ゲートを通してからしか昇格させないので、draft が
   0 バイト化しても `analysis.py` に伝播しない）。hook は内部エラー時に必ず fail-open する。
+  stage（`data/agent_stage/` 配下）は、`data/` と `data/agent_stage` がリンクを経ずにローカルの FS（fs_kind で fragile でない）にあると確かめられたときだけ案内する。hook は stage を特別扱いしない（ローカルなので通常の FS 判定で許可される）。`MYANALYSIS_FORCE_FRAGILE` などで repo も fragile と判定される環境では stage を案内せず、従来の `content` の案内に戻る。
 
 診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`
 （0 バイトファイル・primary/.bak の乖離・空 TOML・rclone キャッシュの孤児 tmp・
@@ -382,6 +383,8 @@ to discover registered dataset names.
 **拡張子付きも含む予約デバイス名**（`nul.txt` は NUL デバイス）を拒否し、work_dir 配下への
 封じ込めを `safe_resolve` で再チェックする（symlink 脱出もここで落ちる）。深さ上限は設けない。
 `<work_dir>/session.json` と `chat_sessions/`、および任意の `*.bak` は GUI の live 状態なので拒否する。
+
+`save_text` / `save_code` は `content` の代わりに `src=<ファイル名>` も受ける（どちらか一方。Issue #118）。チャットのエージェント専用: stage は claude / codex / pi のバックエンドのインスタンス（＝チャット 1 つ）ごとの `common.paths.agent_stage_dir()/<token>`（`<repo>/data/agent_stage/`、Git 管理外）で、`_build_env` の `apply_agent_stage` が作って環境変数 `MYANALYSIS_AGENT_STAGE` で渡す（`current_agent_stage()` が検証して読む。`data/` か `data/agent_stage` がリンクを経ているとき、解決できず判定できないとき、root が fs_kind で fragile のとき（`MYANALYSIS_FORCE_FRAGILE` を含む）は渡さない。リンクの判定には字句に倒れる `safe_resolve` ではなく `Path.resolve()` を使い、失敗したら使わない側に倒す）。新しい stage は `secrets.token_hex(8)` の名前で排他的に作り（既にある名前は使わない）、自動では消さない（使用中のチャットの stage を消さないため）。src はその中のファイル名だけ（パスは拒否）で、UTF-8 のテキストとして読み、改行は `content=` と同じ扱いになる（CRLF が Windows で `\r\r\n` にならない）。0 バイト・UTF-8 でないもの・リンク（symlink・ハードリンク）は ValueError。書込に成功したら src を消す（保存先と同じ実体なら消さない）。stage の分離は取り違えを防ぐ仕組みで、悪意あるエージェントに対する境界ではない（エージェントは任意のコマンドを実行でき、環境変数も変えられる）。長い本文をシェルコマンドに埋め込むと Claude Code（Windows）の Bash ツールが約 8K 文字でコマンドを切るので、エージェントは Write ツールで stage に書いて `src=` で渡す（`MOUNT_SAFE_EDITS` の末尾と guard-write の拒否理由が案内する）。
 
 ## Session save/restore
 

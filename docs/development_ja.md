@@ -99,7 +99,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | pi | `pi --mode json --no-context-files --skill .pi/skills/myanalysis-bridge` | `--session <id>` | リポジトリ直下（既存セッションの互換のため。AGENTS.md / CLAUDE.md は読まない） | `--append-system-prompt` |
 | openai / mock | 子プロセスなし（HTTP / 定型文） | 毎回履歴を送る | — | チャット作成時に保存した system メッセージ（`gui/chat.py` の `_SYSTEM_PROMPT`） |
 
-- 3 つの子プロセスには `PYTHONPATH`（リポジトリ）と `PYTHONPYCACHEPREFIX`（`data/pycache`）が設定され、エージェントは `common.explore` と `python -m llm_bridge` を使える。cwd は `config.toml` の各セクションの `cwd` で変更できる。チャットにデータセットがあれば `MYANALYSIS_CHAT_DATASET` も設定する（無ければ継承値も消す。内部用で `.env` には書かない。Issue #111）。
+- 3 つの子プロセスには `PYTHONPATH`（リポジトリ）と `PYTHONPYCACHEPREFIX`（`data/pycache`）が設定され、エージェントは `common.explore` と `python -m llm_bridge` を使える。cwd は `config.toml` の各セクションの `cwd` で変更できる。チャットにデータセットがあれば `MYANALYSIS_CHAT_DATASET` も設定する（無ければ継承値も消す。内部用で `.env` には書かない。Issue #111）。チャットごとの stage（`data/agent_stage/<token>/`。長い本文を Write で置き、`save_text` / `save_code` の `src=` にファイル名を渡す一時置き場。Issue #118）を作って `MYANALYSIS_AGENT_STAGE` に設定する（使えなければ継承値も消す。これも `.env` には書かない）。
 - claude / codex の cwd をリポジトリ外にしているのは、リポジトリ内だと開発者向けの CLAUDE.md 等を拾って「アプリ開発役」として振る舞うため。
 - resume token は PC ローカルの `data/llm_state/backend_sessions.json` にだけ保存し、同期しない（指す先のセッション実体が各 PC の `~/.claude` 等にあるため）。token が無いターンは全履歴を送り直す。
 
@@ -122,6 +122,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `data/locks/` | 同期ドライブ上のファイルを守るロックの実体 |
 | `data/logs/` | クラッシュログ（`gui-crash-*.log`）と warning 以上のログ（`myanalysis.log`。1 MB で回転、3 世代） |
 | `data/pycache/` | `PYTHONPYCACHEPREFIX` の退避先 |
+| `data/agent_stage/<token>/` | チャットごとの stage。エージェントが長いコード・テキストを Write で置く一時置き場（`save_text` / `save_code` の `src=` が保存に成功するとファイルを消す。フォルダは自動では消さない） |
 | `~/.myanalysis/agent_home/` | claude の cwd |
 | `~/.myanalysis/codex_home/` | codex の cwd（`AGENTS.md` を自動生成・上書き） |
 | `~/.myanalysis/config_share_state.json` | R2 設定同期の状態（登録時刻 `entry_meta`・登録削除の記録 tombstone を含む。同期前に消すと削除した登録が復活する） |
@@ -282,7 +283,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
 
 ### 5.3 エージェントの system プロンプト
 
-- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE`（作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない）を含める。コードを実行できる claude / codex / pi は、さらに `ANALYST_FRAMING`（先頭。アプリの開発ではなくデータ解析の担当）、`GUI_DISPLAY_VERBS`（表示系 verb）、`MOUNT_SAFE_EDITS`（既存の `analysis.py` は draft → apply で編集する）、`CHAT_DATASET_RULE`（dataset 省略時はチャットのデータセット）を含める。openai / mock（`gui/chat.py` の `_SYSTEM_PROMPT`）はコードを実行できないので `MOUNT_SAFE_EDITS` を含めない。
+- 各バックエンドのプロンプトは `llm_backend/base.py` の `NO_LOCAL_PERSISTENCE`（作業はデータセットの `work_dir` にだけ保存し、ローカルには何も残さない）を含める。コードを実行できる claude / codex / pi は、さらに `ANALYST_FRAMING`（先頭。アプリの開発ではなくデータ解析の担当）、`GUI_DISPLAY_VERBS`（表示系 verb）、`MOUNT_SAFE_EDITS`（既存の `analysis.py` は draft → apply で編集する。長い本文はチャットの stage に Write して `src=` で渡す）、`CHAT_DATASET_RULE`（dataset 省略時はチャットのデータセット）を含める。openai / mock（`gui/chat.py` の `_SYSTEM_PROMPT`）はコードを実行できないので `MOUNT_SAFE_EDITS` を含めない。
 - `save_text` に言及する（`work_dir` に任意のファイルを書く正規の経路）。
 - `set-description` / `set-completed` には言及しない（利用者が決める値で、エージェントに書かせない。CLI の `--help` からも隠してある）。
 - `tests/test_backend_prompts.py` が検査する（検査範囲は [§6.1](#61-llm-バックエンドの追加) の手順 7）。
@@ -321,6 +322,7 @@ rclone / WinFsp のような同期マウントでは、**直前に読んだフ�
    - Windows の npm シム（`.cmd`）を `cmd.exe /c` で包まない。cmd.exe は引数中の最初の改行で残りを切り捨てる。`common.proc.resolve_cmd_shim()` で実体の argv に解決し、解決できない自作シムだけ従来のラップに戻す。
    - `common.proc.no_window_kwargs()` を渡す（`pythonw` 起動時にコンソール窓を出さない）。
    - 環境変数: `PYTHONPATH` の先頭にリポジトリ、`PYTHONPYCACHEPREFIX` に `common.paths.pycache_prefix()`（setdefault）、`PYTHONUTF8=1`、`PATH` の先頭に `sys.executable` のディレクトリ。
+   - `llm_backend.base.apply_agent_stage(self, child_env)` を呼ぶ（チャットごとの stage を用意して `MYANALYSIS_AGENT_STAGE` に入れる。Issue #118）。
    - cwd はリポジトリの外にする（[§3.3](#33-エージェント子プロセス)）。
    - 子プロセスは無人で動く（権限確認に答える UI が無く、確認待ちになるとターンが止まる）ので、対話的な権限確認が出ない設定で起動する（claude は `bypassPermissions`、codex は既定で承認・サンドボックスを迂回）。
    - エージェント側のツール実行は、`base.py` の `TOOL_CALL_MARKER` / `TOOL_RESULT_MARKER` を使った行として `TextDelta` で流す。UI のツール表示切替と、履歴を送り直すときのツール行の除去がこの形式に依存する。pi は共通マーカーではなく `[<ツール名>...]` の行を出す例外で、これは真似しない。
@@ -436,6 +438,7 @@ python -m pytest tests/
 | R2 設定同期 | `R2_AUTOSYNC=0`。`.env` の読込・状態ファイル・boto3 クライアントをスタブにする（ネットワーク禁止） |
 | session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
 | チャットのデータセットの環境変数 | `MYANALYSIS_CHAT_DATASET` を外す（チャットのエージェント内で pytest を実行しても継承しない） |
+| エージェントの stage | `common.paths.agent_stage_dir` を `tmp_path / "agent_stage"` に向け、`MYANALYSIS_AGENT_STAGE` を外す |
 
 **隔離されないもの** — `data/llm_state` の `commands/`、`command_log.jsonl`、`active.json`、`reload_manifest.json`。これらに触れるテストは、`llm_bridge.paths.global_state_dir`（または個別の `*_path` 関数）を自分で `tmp_path` にパッチする。`from ... import` で取り込まれた名前は、取り込んだ側のモジュールでパッチする。
 
@@ -455,7 +458,7 @@ python -m pytest tests/
 | セッションとチャット履歴の保存 | `test_session`, `test_session_meta_hooks`, `test_chat_store`, `test_backend_session_store` |
 | window / tab verb と GUI | `test_show`, `test_show_image`, `test_attach_tab_dataset`, `test_current_dataset_gui`, `test_workspace_gui`, `test_floating_tab`, `test_tabbar`, `test_tab_context_menu`, `test_dataset_context_menu`, `test_open_dataset_dialog`, `test_imageviewer`, `test_image_io`, `test_nested_split`, `test_slots` |
 | チャット UI・ツール呼び出し | `test_chat_widget`, `test_chat_persona`, `test_llm_tool_use` |
-| LLM バックエンド | `test_backend_registry`, `test_backend_prompt`, `test_backend_prompts`, `test_claude_code`, `test_claude_system_prompt`, `test_pi_backend`, `test_codex_backend`, `test_cmd_shim`, `test_proc`, `test_persona_prompt`, `test_registry_consistency` |
+| LLM バックエンド | `test_backend_registry`, `test_backend_prompt`, `test_backend_prompts`, `test_claude_code`, `test_claude_system_prompt`, `test_pi_backend`, `test_codex_backend`, `test_cmd_shim`, `test_proc`, `test_persona_prompt`, `test_registry_consistency`, `test_agent_stage` |
 | エンジン設定・状況・ペルソナ | `test_engines`, `test_model_settings`, `test_settings_store`, `test_backend_selector`, `test_backend_status_window`, `test_preflight`, `test_model_catalog`, `test_ping`, `test_personas`, `test_persona_dialog` |
 | i18n | `test_i18n`, `test_i18n_catalog`, `test_i18n_gui`, `test_qt_translation` |
 | ホットリロード | `test_hotreload`（Qt 非依存コア）, `test_hotreload_qt` |

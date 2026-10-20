@@ -193,6 +193,8 @@ The primary analysis workflow is code execution, not GUI driving.
    **pi の Write/Edit ツールには書込ガードが無い**（PreToolUse hook `guard-write` が効くのは claude エンジンだけ）。
    同期マウント上のファイルを Write/Edit で直接書くと、書込に失敗したとき 0 バイトになりうるので、
    work_dir へファイルを置くときは必ず `save_text` / `save_code` / `save_fig` を使う。
+   **長いコード・テキストはシェルコマンドに埋め込まない**（heredoc や `python -c` の引数。約 7,900 文字以上のコマンドは途中で切れた実績があるので、1 回のコマンドは 7,000 文字未満を目安にする）。
+   Write ツールでこのチャットの stage（環境変数 `MYANALYSIS_AGENT_STAGE` の絶対パス。`python -c "import os; print(os.environ['MYANALYSIS_AGENT_STAGE'])"` で見る）に書き、`content` の代わりに `src="<ファイル名>"` を渡す（例: `save_code("<name>", "<label>", src="snippet.py")`。パスではなくファイル名だけ）。保存に成功すると stage のファイルは消える。この環境変数が無ければ stage は無いので `content` で渡す。
 10. **Promote**: `python -m newanalysis <name> --dataset <key>` (`--dataset` required)
    scaffolds `<dataset_dir>/analyses/<name>/analysis.py`. Do NOT edit that file
    directly — seed a draft with `python -m llm_bridge draft-analysis <name>

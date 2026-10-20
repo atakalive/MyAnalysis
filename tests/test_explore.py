@@ -302,6 +302,205 @@ def test_save_text_on_fragile_fs_never_renames(monkeypatch, tmp_path):
     assert path.read_text(encoding="utf-8") == "payload"
 
 
+# ---- save_text / save_code の src=（Issue #118） ----
+
+@pytest.fixture()
+def staged(monkeypatch, tmp_path):
+    """このチャットの stage を tmp_path/stage_root/chat（環境変数で渡す）、データセットを
+    tmp_path/ds に向ける（互いに重ならない）。"""
+    import common.paths as cp
+    root = tmp_path / "stage_root"
+    monkeypatch.setattr(cp, "agent_stage_dir", lambda: root)
+    stage = cp.prepare_agent_stage("chat")
+    monkeypatch.setenv(cp.AGENT_STAGE_ENV, str(stage))
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    monkeypatch.setattr("config.get_dataset_dir", lambda name: ds)
+    return stage, ds
+
+
+def test_save_text_src_moves_staged_file(staged):
+    stage, ds = staged
+    (stage / "notes.md").write_bytes(b"# hello\n")
+    path = explore.save_text("ds", "notes.md", src="notes.md")
+    assert path == ds / "_work" / "notes.md"
+    assert path.read_text(encoding="utf-8") == "# hello\n"
+    assert not (stage / "notes.md").exists()
+
+
+@pytest.mark.parametrize("src", [
+    "sub/notes.md", "sub\\notes.md", "../notes.md", "", ".hidden.md", "nul.txt",
+])
+def test_save_text_src_must_be_a_file_name(staged, src):
+    _stage, ds = staged
+    with pytest.raises(ValueError):
+        explore.save_text("ds", "notes.md", src=src)
+    assert list(ds.iterdir()) == []        # myanalysis.toml も work_dir も作らない
+
+
+def test_save_text_src_rejects_absolute_path(staged):
+    stage, ds = staged
+    (stage / "notes.md").write_bytes(b"x\n")
+    with pytest.raises(ValueError, match="not a path"):
+        explore.save_text("ds", "notes.md", src=str(stage / "notes.md"))
+    assert (stage / "notes.md").exists()
+
+
+def test_save_text_src_needs_a_stage(staged, monkeypatch):
+    import common.paths as cp
+    _stage, ds = staged
+    monkeypatch.delenv(cp.AGENT_STAGE_ENV)
+    with pytest.raises(ValueError, match="content="):
+        explore.save_text("ds", "notes.md", src="notes.md")
+    assert list(ds.iterdir()) == []
+
+
+def test_save_text_src_missing_file_raises(staged):
+    _stage, ds = staged
+    with pytest.raises(FileNotFoundError):
+        explore.save_text("ds", "notes.md", src="missing.md")
+    assert list(ds.iterdir()) == []
+
+
+def test_save_text_src_rejects_symlink(staged, tmp_path):
+    """stage の中のリンクは受けない（別チャットの stage や stage の外を指していても読まない）。"""
+    import os
+    import common.paths as cp
+    stage, ds = staged
+    secret = cp.prepare_agent_stage("other_chat") / "secret.py"
+    secret.write_bytes(b"secret = 1\n")
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside = 1\n")
+    for name, target in (("to_other.py", secret), ("to_outside.py", outside)):
+        try:
+            os.symlink(target, stage / name)
+        except (OSError, NotImplementedError) as e:
+            pytest.skip(f"symlink unavailable: {e}")
+        with pytest.raises(ValueError, match="link"):
+            explore.save_text("ds", "x.py", src=name)
+        assert os.path.lexists(stage / name)
+    assert secret.read_bytes() == b"secret = 1\n"
+    assert outside.read_bytes() == b"outside = 1\n"
+    assert list(ds.iterdir()) == []
+
+
+def test_save_text_src_rejects_hard_link(staged, tmp_path):
+    """stage の外の実体へのハードリンクも受けない。"""
+    import os
+    stage, ds = staged
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside = 1\n")
+    try:
+        os.link(outside, stage / "hard.py")
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"hard link unavailable: {e}")
+    with pytest.raises(ValueError, match="hard links"):
+        explore.save_text("ds", "x.py", src="hard.py")
+    assert (stage / "hard.py").exists() and outside.exists()
+    assert list(ds.iterdir()) == []
+
+
+def test_save_text_src_kept_when_destination_rejected(staged):
+    stage, _ds = staged
+    (stage / "session.json").write_bytes(b"{}")
+    with pytest.raises(ValueError, match="live GUI state"):
+        explore.save_text("ds", "session.json", src="session.json")
+    assert (stage / "session.json").exists()
+
+
+def test_save_text_src_kept_when_mount_write_fails(staged, monkeypatch):
+    from common.paths import MountWriteError
+    stage, _ds = staged
+    (stage / "notes.md").write_bytes(b"body\n")
+
+    def fail(path, text, **_kw):
+        raise MountWriteError(path, attempts=5, detail="simulated")
+    monkeypatch.setattr(explore, "atomic_write_text", fail)
+    with pytest.raises(MountWriteError):
+        explore.save_text("ds", "notes.md", src="notes.md")
+    assert (stage / "notes.md").exists()
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"content": "x", "src": "notes.md"},   # 両方
+    {},                                    # どちらも無い
+])
+def test_save_text_requires_exactly_one_of_content_and_src(staged, kwargs):
+    _stage, ds = staged
+    with pytest.raises(ValueError, match="exactly one"):
+        explore.save_text("ds", "notes.md", **kwargs)
+    assert list(ds.iterdir()) == []
+
+
+def test_save_text_empty_content_still_writes(staged):
+    """両方/どちらも無いの判定は `is None` で行う（空文字の content は従来どおり書ける）。"""
+    _stage, _ds = staged
+    path = explore.save_text("ds", "empty.txt", "")
+    assert path.read_bytes() == b""
+
+
+@pytest.mark.parametrize("raw, match", [
+    (b"", "empty"),                        # 0 バイト
+    ("あ".encode("cp932"), "UTF-8"),       # UTF-8 でない
+])
+def test_save_text_rejects_bad_src(staged, raw, match):
+    stage, ds = staged
+    (stage / "bad.txt").write_bytes(raw)
+    with pytest.raises(ValueError, match=match):
+        explore.save_text("ds", "bad.txt", src="bad.txt")
+    assert (stage / "bad.txt").exists()    # 直して再実行できるように残す
+    assert list(ds.iterdir()) == []        # データセット側には何も作らない
+
+
+def test_save_text_src_newlines_match_content(staged):
+    """CRLF / LF の src は content= と同じバイト列になる（'\\r\\r\\n' にしない）。"""
+    stage, _ds = staged
+    (stage / "lf.txt").write_bytes(b"a\nb\n")
+    (stage / "crlf.txt").write_bytes(b"a\r\nb\r\n")
+    want = explore.save_text("ds", "c.txt", "a\nb\n").read_bytes()
+    assert explore.save_text("ds", "lf.txt", src="lf.txt").read_bytes() == want
+    assert explore.save_text("ds", "crlf.txt", src="crlf.txt").read_bytes() == want
+    assert b"\r\r\n" not in want
+
+
+def test_save_code_src(staged):
+    stage, ds = staged
+    (stage / "snippet.py").write_bytes(b"print('hello')\n")
+    path = explore.save_code("ds", "snippet", src="snippet.py")
+    assert path == ds / "_work" / "code" / "snippet.py"
+    assert path.read_text(encoding="utf-8") == "print('hello')\n"
+    assert not (stage / "snippet.py").exists()
+
+
+def test_save_text_src_unlink_failure_is_swallowed(staged, monkeypatch):
+    """stage のファイルを消せなくても、書込は済んでいるので成功を返す。"""
+    from pathlib import Path
+    stage, _ds = staged
+    src = stage / "notes.md"
+    src.write_bytes(b"body\n")
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self == src:
+            raise PermissionError("locked")
+        return real_unlink(self, *a, **kw)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    path = explore.save_text("ds", "notes.md", src="notes.md")
+    assert path.read_text(encoding="utf-8") == "body\n"
+    assert src.exists()
+
+
+def test_save_text_src_same_file_as_destination_is_kept(staged):
+    """work_dir を stage に向けた構成では保存先＝src。保存したファイルを消さない。"""
+    stage, ds = staged
+    (ds / "myanalysis.toml").write_text(
+        f'work_dir = "{stage.as_posix()}"\nformat = "csv_per_subdir"\n', encoding="utf-8")
+    (stage / "x.py").write_bytes(b"x = 1\n")
+    path = explore.save_text("ds", "x.py", src="x.py")
+    assert path == stage / "x.py"
+    assert path.read_text(encoding="utf-8") == "x = 1\n"
+
+
 # ---- dataset_summary ----
 
 def _subdir_of(summary, name):

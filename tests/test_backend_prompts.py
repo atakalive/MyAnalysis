@@ -215,3 +215,20 @@ def test_gui_chat_prompt_has_no_chat_dataset_rule():
     from gui.chat import _SYSTEM_PROMPT
     from llm_backend.base import CHAT_DATASET_RULE
     assert CHAT_DATASET_RULE not in _SYSTEM_PROMPT
+
+
+def test_mount_safe_edits_routes_long_content_through_stage():
+    """長い本文はこのチャットの stage に Write して src= にファイル名を渡す（Issue #118）。
+
+    stage のパスはチャットごとに違うので、プロンプトにはパスを書かず環境変数の名前を書く。
+    7,000 は余裕を見た目安で、観測した切断位置（約 7,900）とは書き分ける。
+    """
+    from common.paths import AGENT_STAGE_ENV
+    assert "src='<file name>'" in MOUNT_SAFE_EDITS
+    assert "about 7,900 characters" in MOUNT_SAFE_EDITS
+    assert "under 7,000 characters (a safety margin, not the exact limit)" in MOUNT_SAFE_EDITS
+    assert "Persistence rule" in MOUNT_SAFE_EDITS
+    one_liner = f"import os; print(os.environ['{AGENT_STAGE_ENV}'])"
+    assert f'`python -c "{one_liner}"`' in MOUNT_SAFE_EDITS
+    compile(one_liner, "<prompt>", "exec")
+    assert "agent_stage" not in MOUNT_SAFE_EDITS     # パスは埋め込まない

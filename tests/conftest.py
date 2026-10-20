@@ -138,3 +138,17 @@ def _no_chat_dataset_env(monkeypatch):
 def _isolate_codex_home(monkeypatch, tmp_path):
     """実際の codex カタログ（`~/.codex/models_cache.json`）を読まない（Issue #117）。"""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex_home"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_stage(monkeypatch, tmp_path):
+    """エージェントの stage（`<repo>/data/agent_stage`）を tmp に向ける（Issue #118）。
+
+    バックエンドの `_build_env` が stage を作り、`save_text` / `save_code` の `src=` が
+    stage のファイルを消す。どちらも `common.paths.agent_stage_dir` を呼び出し時に引くので、
+    ここを差し替えれば実リポジトリの `data/` に触れない。GUI がエージェントに渡す
+    `MYANALYSIS_AGENT_STAGE` も継承させない（チャットのエージェント内で pytest を実行しても）。
+    """
+    import common.paths
+    monkeypatch.setattr(common.paths, "agent_stage_dir", lambda: tmp_path / "agent_stage")
+    monkeypatch.delenv(common.paths.AGENT_STAGE_ENV, raising=False)

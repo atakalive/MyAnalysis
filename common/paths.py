@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import tempfile
 import time
 from pathlib import Path, PureWindowsPath
@@ -230,6 +231,132 @@ def pycache_prefix() -> Path:
     利点を捨てずにマウントへの書込だけを止められる。
     """
     return repo_root() / "data" / "pycache"
+
+
+# 子プロセスに渡す「このチャットの stage」（Issue #118）。GUI が設定する内部用で .env には書かない。
+AGENT_STAGE_ENV = "MYANALYSIS_AGENT_STAGE"
+_STAGE_ALLOC_TRIES = 8   # 新しい stage の名前が既存と重なったときに引き直す回数
+
+
+def agent_stage_dir() -> Path:
+    """チャットエージェントが長いコード・テキストを置く一時置き場の root（Issue #118）。
+
+    本文をシェルコマンドに埋め込むと Claude Code（Windows）の Bash ツールが約 8K 文字で
+    コマンドを切る。エージェントは Write ツールで自分のチャットの stage（この下の
+    `<token>/`。`prepare_agent_stage` が作り、子プロセスの環境変数 `MYANALYSIS_AGENT_STAGE`
+    で渡す）に書き、`save_text` / `save_code` の `src=` にファイル名を渡す（成功すると消える）。
+    パスを返すだけで mkdir はしない。
+    """
+    return repo_root() / "data" / "agent_stage"
+
+
+def _resolve_or_none(path) -> Path | None:
+    """`Path.resolve()`。失敗したら None（Issue #118）。
+
+    リンクの有無の判定にだけ使う。`safe_resolve` は resolve() が OSError（WinFsp の
+    WinError 1005 等）のとき字句上の abspath に倒すので、リンク先で resolve が失敗すると
+    「リンクを経ていない」に見えてしまう。判定できないことを None で返し、呼び出し側は
+    stage を使わない側（fail-closed）に倒す。RuntimeError は Python 3.12 以前の
+    resolve() が symlink の循環で送出するもの（3.13 以降は送出せず、循環の手前の
+    パスを返す。こちらは `agent_stage_usable` の is_symlink で拒否する）。
+    """
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def agent_stage_usable() -> bool:
+    """stage の root がリンクを経ずにリポジトリの中にあり、ローカルの FS 上にあるか。never raise。
+
+    stage に置かれたファイルはエージェントの Write ツールが tmp+rename で書く（我々の検証付き
+    書込を通らない）。同期マウント上だと、その書込が 0 バイト以外の形で壊れても `src=` は
+    見抜けない。そこで root が fs_kind で fragile と判定されるとき（`MYANALYSIS_FORCE_FRAGILE`
+    などの上書きを含む）は使わない。`data/` と `data/agent_stage` が symlink のとき
+    （循環も含む）、解決した結果が字句上の絶対パスと違うとき（junction 等）、解決できない
+    ときも使わない。repo_root() は解決済みなので、確かめるのはこの 2 つだけでよい。
+    root が未作成でも True になりうる。
+    """
+    root = agent_stage_dir()
+    if root.is_symlink() or root.parent.is_symlink():
+        return False
+    resolved = _resolve_or_none(root)
+    if resolved is None or resolved != Path(os.path.abspath(root)):
+        return False
+    return not fs_kind.is_fragile(root)
+
+
+def _plain_stage(stage: Path) -> bool:
+    """stage が root の直下にある実ディレクトリ（リンクでない）か。判定できなければ False。"""
+    lexical = Path(os.path.abspath(stage))
+    return (lexical.parent == Path(os.path.abspath(agent_stage_dir()))
+            and _resolve_or_none(stage) == lexical
+            and stage.is_dir())
+
+
+def _allocate_agent_stage(root: Path) -> Path | None:
+    """root の下に新しい stage を排他的に作る。既にある名前は引き直す。OSError は送出する。"""
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(_STAGE_ALLOC_TRIES):
+        stage = root / secrets.token_hex(8)
+        try:
+            stage.mkdir()                    # 既にあれば FileExistsError → 引き直す
+        except FileExistsError:
+            continue
+        return stage
+    return None
+
+
+def prepare_agent_stage(token: str | None) -> Path | None:
+    """チャット 1 つ分の stage `agent_stage_dir()/<token>` を用意して返す。never raise。
+
+    token が None なら新しい stage を割り当てる: `secrets.token_hex(8)` の名前で mkdir を
+    排他的に（exist_ok=False で）行い、既にある名前（別のチャットの stage や前回の残り）なら
+    引き直す。返した stage の `.name` が token で、呼び出し側が持って次から渡す。
+    token を渡したら、その stage を（消されていれば）作り直して返す。
+    root が使えない（`agent_stage_usable()` が False）、作れない、または用意した stage が
+    root の直下の実ディレクトリでない（リンクに差し替わっている等）なら None（warning を残す）。
+    そのときエージェントには stage を渡さず、従来の `content=` に戻る。返す stage は
+    `current_agent_stage()` が受け入れるものと同じ条件を満たす。
+    stage は自動では消さない（使用中のチャットの stage を消さないため）。
+    """
+    root = agent_stage_dir()
+    if not agent_stage_usable():
+        _log.warning("agent stage root %s goes through a link or cannot be resolved; "
+                     "not using it", root)
+        return None
+    try:
+        if token is not None:
+            stage = root / token
+            stage.mkdir(parents=True, exist_ok=True)
+        else:
+            stage = _allocate_agent_stage(root)
+    except OSError as e:
+        _log.warning("could not create agent stage under %s: %s", root, e)
+        return None
+    if stage is None:
+        _log.warning("could not allocate a new agent stage under %s", root)
+        return None
+    if not _plain_stage(stage):
+        _log.warning("agent stage %s is not a plain directory; not using it", stage)
+        return None
+    return stage
+
+
+def current_agent_stage() -> Path | None:
+    """このプロセスに渡されたチャットの stage（環境変数 `MYANALYSIS_AGENT_STAGE`）。
+
+    値が `agent_stage_dir()` の直下にある実ディレクトリ（リンクでない）で、root も使える
+    ときだけ返す。そうでなければ None（判定できないときも None）。`save_text` /
+    `save_code` の `src=` と guard-write の案内がこれを使う。never raise。
+    """
+    raw = os.environ.get(AGENT_STAGE_ENV, "")
+    if not raw or not agent_stage_usable():
+        return None
+    stage = Path(raw)
+    if not stage.is_absolute() or not _plain_stage(stage):
+        return None
+    return stage
 
 
 def safe_resolve(path) -> Path:

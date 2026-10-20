@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from common.chat_dataset import chat_dataset_value
+from common.paths import AGENT_STAGE_ENV, prepare_agent_stage
 
 
 TOOL_CALL_MARKER = "🔧"
@@ -58,7 +59,11 @@ ANALYST_FRAMING = (
 # canonical analysis.py directly with Edit/Write on the synced mount can truncate
 # it to 0 bytes on a failed write, so route edits through the mount-safe
 # draft → apply → recover verbs (Issue #89). Names the three verbs so
-# tests/test_backend_prompts.py can guard their presence.
+# tests/test_backend_prompts.py can guard their presence. The last sentences route
+# long content through this chat's stage (Issue #118): Claude Code on Windows cuts a
+# Bash command at about 8K characters, so a script must never travel inside one.
+# The stage path differs per chat, so the prompt names the environment variable
+# that holds it (apply_agent_stage), not a path.
 MOUNT_SAFE_EDITS = (
     "Editing analysis code (mount-safe): NEVER edit the canonical "
     "analyses/<name>/analysis.py directly with the Edit/Write tools or a shell "
@@ -77,7 +82,22 @@ MOUNT_SAFE_EDITS = (
     "already mount-safe; to write any OTHER file under a dataset (notes, reports, "
     "derived CSV/JSON) use save_text(name, relpath, content) — apart from the "
     "analysis draft, never Write/Edit files under a dataset directly (a failed write "
-    "on the synced mount can truncate them to 0 bytes)."
+    "on the synced mount can truncate them to 0 bytes). "
+    "Long content: never put a script or long text inside a shell command "
+    "(heredoc, python -c, echo). Commands of about 7,900 characters or more have "
+    "been cut off silently, so keep every shell command under 7,000 characters (a "
+    "safety margin, not the exact limit). Instead write the content with your "
+    "file-writing tool (not the shell) into THIS chat's stage directory, whose "
+    "absolute path is in the environment variable "
+    f"{AGENT_STAGE_ENV} (print it once with `python -c \"import os; "
+    f"print(os.environ['{AGENT_STAGE_ENV}'])\"`), then pass just the file name instead "
+    "of content: save_code(name, label, src='<file name>') or save_text(name, "
+    "relpath, src='<file name>'). That moves the file into the dataset (the staged "
+    "copy is deleted on success); run code from the returned path. The stage is the "
+    "one local directory you may write to, even though it is inside the repository: "
+    "a transient hand-off, not storage, so it does not break the Persistence rule. "
+    f"If {AGENT_STAGE_ENV} is not set there is no stage: pass content= and keep each "
+    "command under 7,000 characters."
 )
 
 # Shared across ALL backend system prompts. The display verbs (figure / raw image
@@ -141,6 +161,25 @@ CHAT_DATASET_RULE = (
     "`show-image` reuse an open tab of that name, otherwise infer the dataset "
     "from the file path. Pass dataset= whenever it matters."
 )
+
+def apply_agent_stage(backend: object, env: dict) -> None:
+    """子プロセスの環境にそのチャット専用の stage を入れる（Issue #118）。
+
+    stage はバックエンドのインスタンス（ChatWidget._session_backends でチャット 1 つに 1 個）
+    ごとに `prepare_agent_stage(None)` が排他的に割り当てる `agent_stage_dir()/<token>`。
+    全チャット共通の 1 ディレクトリだと、2 つのチャットが同じファイル名で書いたときに互いの
+    本文を保存・削除してしまう。token はインスタンスに持たせ、次のターンからは同じ stage を
+    使う（getattr はホットリロード後の旧インスタンス対策）。stage が使えなければ継承した値も
+    消す（エージェントは content= に戻る）。
+    """
+    token = getattr(backend, "_stage_token", None)
+    stage = prepare_agent_stage(token)
+    if stage is None:
+        env.pop(AGENT_STAGE_ENV, None)
+        return
+    backend._stage_token = stage.name
+    env[AGENT_STAGE_ENV] = str(stage)
+
 
 CHAT_CONTEXT_OPEN = "<myanalysis_context>"
 CHAT_CONTEXT_CLOSE = "</myanalysis_context>"

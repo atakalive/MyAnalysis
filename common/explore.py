@@ -1,5 +1,7 @@
 """Exploratory analysis helpers: load, summarise, and save figures/code/text to a dataset's work_dir."""
 from __future__ import annotations
+import contextlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -145,7 +147,82 @@ def save_fig(name: str, fig: Figure, label: str) -> Path:
     return path
 
 
-def save_text(name: str, relpath: str, content: str) -> Path:
+def _staged_file(src: object) -> Path:
+    """`src=`（このチャットの stage の中のファイル名）を絶対パスにする（Issue #118）。
+
+    受けるのはファイル名だけ（パスは拒否）で、置き場所は環境変数 MYANALYSIS_AGENT_STAGE の
+    stage に限る。リンク（symlink）も拒否するので、src= で読むのは stage の直下に実体がある
+    ファイルだけになる（ハードリンクは _read_src が拒否する）。これは取り違えを防ぐための
+    仕組みで、悪意あるエージェントに対する境界ではない（エージェントは任意のコマンドを
+    実行でき、環境変数も変えられる）。src= がエージェントの読める範囲を広げないことだけを
+    保証する。
+    """
+    from common.paths import AGENT_STAGE_ENV, current_agent_stage, validate_relpath
+    if not isinstance(src, str) or "/" in src or "\\" in src or os.path.isabs(src):
+        raise ValueError(
+            f"src must be just the name of a file in your stage directory (e.g. "
+            f"'snippet.py'), not a path: {src!r}"
+        )
+    validate_relpath(src)   # 空・..・禁止文字・先頭ドット・予約デバイス名などを拒否
+    stage = current_agent_stage()
+    if stage is None:
+        raise ValueError(
+            f"src= needs this chat's stage directory, but {AGENT_STAGE_ENV} is not set "
+            f"or is not a usable stage (only chat agents get one). Pass content= instead."
+        )
+    path = stage / src
+    if path.is_symlink():
+        raise ValueError(
+            f"src {src!r} is a link; write the content itself into your stage directory"
+        )
+    return path
+
+
+def _read_src(path: Path) -> str:
+    """stage のファイルを本文として読む（Issue #118）。改行は '\\n' にそろえる。
+
+    テキストモード（newline=None）で読むので CRLF / CR は '\\n' になる。atomic_write_text は
+    書込時に '\\n' → os.linesep と変換するので、改行を保ったまま渡すと Windows で CRLF が
+    '\\r\\r\\n' になる。ここでそろえれば content= で渡したときと同じバイト列になる。
+    開いたファイルにほかのハードリンクがあれば拒否する（stage の外の実体を読まないため）。
+    """
+    try:
+        with open(path, encoding="utf-8", newline=None) as f:
+            if os.fstat(f.fileno()).st_nlink > 1:
+                raise ValueError(
+                    f"src {str(path)!r} has other hard links; write the content itself "
+                    f"into your stage directory"
+                )
+            text = f.read()
+    except UnicodeDecodeError as e:
+        raise ValueError(f"src {str(path)!r} is not valid UTF-8: {e}") from e
+    if not text:
+        raise ValueError(
+            f"src {str(path)!r} is empty (0 bytes); refusing to overwrite the "
+            f"destination with nothing. Write the file again, then retry."
+        )
+    return text
+
+
+def _discard_staged(staged: Path, dest: Path) -> None:
+    """保存し終えた stage のファイルを消す。never raise（書込は済んでいる）。
+
+    消すのは渡されたパスそのもの（resolve しない）。保存先と同じ実体なら消さない
+    （work_dir を stage に向けた構成で、保存したばかりのファイルを消さないため）。
+    """
+    with contextlib.suppress(OSError):
+        if os.path.samefile(staged, dest):
+            return
+        staged.unlink()
+
+
+def save_text(
+    name: str,
+    relpath: str,
+    content: str | None = None,
+    *,
+    src: str | None = None,
+) -> Path:
     """任意のテキストファイルを <dataset work_dir>/<relpath> に保存し、パスを返す。
 
     save_code が .py 専用なのに対し、こちらは拡張子を問わない汎用の書込口。メモ・
@@ -153,6 +230,14 @@ def save_text(name: str, relpath: str, content: str) -> Path:
     Write/Edit で直接書かせない（claude エンジンは PreToolUse hook（llm_bridge/guard_write.py）
     で機械的に拒否し、codex / pi はプロンプトの指示だけ）ので、これが
     work_dir へ任意のファイルを置く唯一の正規経路になる。
+
+    本文は content か src= のどちらか一方で渡す（Issue #118）。src= はこのチャットの stage
+    （環境変数 MYANALYSIS_AGENT_STAGE。common.paths.current_agent_stage）の中のファイル名で、
+    エージェントは長い本文を Write ツールで stage に書いてここへ渡す（本文をシェルコマンドに
+    埋め込むと約 8K 文字で切れるため）。stage のファイルは UTF-8 のテキストとして読み、改行は
+    content= と同じ扱いになる。0 バイトとリンク（symlink・ハードリンク）は拒否する。書込に
+    成功したら stage のファイルを消す（消せなくても成功のまま。保存先と同じ実体なら消さない）。
+    失敗したときは残す。
 
     relpath はサブディレクトリを含んでよい相対パス（例 "summary.md",
     "reports/2026-07.csv"）。検証規則は common.paths.validate_relpath を参照
@@ -172,11 +257,22 @@ def save_text(name: str, relpath: str, content: str) -> Path:
     Returns: 保存先の Path（絶対パス）。
 
     Raises:
-        ValueError: relpath が不正、work_dir 設定が不正、または宛先が予約済み。
+        ValueError: relpath が不正、work_dir 設定が不正、宛先が予約済み、content と src の
+            両方またはどちらも無い、src がファイル名でない、stage が無い、stage のファイルが
+            リンク・0 バイト・UTF-8 でない。
+        OSError: stage のファイルを開けない（存在しない等）。
         MountWriteError: リトライしても書込を検証できなかった。
     """
     from common.paths import resolve_under
     from dataset_config import get_work_dir
+    # 引数の検査と stage の読込は work_dir を解決する前に行う（初回は myanalysis.toml と
+    # work_dir が作られるので、駄目な呼び出しでデータセット側に何も残さない）。
+    if (content is None) == (src is None):
+        raise ValueError("pass exactly one of content or src=")
+    staged = None
+    if src is not None:
+        staged = _staged_file(src)
+        content = _read_src(staged)
     work_dir = get_work_dir(name)
     path = resolve_under(work_dir, relpath)     # 検証と封じ込め。mkdir はこの後。
     rel = path.relative_to(work_dir).parts
@@ -189,10 +285,18 @@ def save_text(name: str, relpath: str, content: str) -> Path:
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, content)   # マウント上の truncate-in-place（0byte 化）を避ける
+    if staged is not None:
+        _discard_staged(staged, path)
     return path
 
 
-def save_code(name: str, label: str, content: str) -> Path:
+def save_code(
+    name: str,
+    label: str,
+    content: str | None = None,
+    *,
+    src: str | None = None,
+) -> Path:
     """ad-hocコードスニペットを <dataset work_dir>/code/<label>.py に保存し、パスを返す。
 
     **.py 専用。** label にファイル拡張子は含めない（.py は自動付与。明示的な末尾 ".py"
@@ -202,6 +306,8 @@ def save_code(name: str, label: str, content: str) -> Path:
     work_dir は per-dataset 設定 myanalysis.toml で決まる（既定 _work）。
     label のバリデーション: common.paths.validate_name（区切りを含まない単一名）。
     content は UTF-8 で書き出す。既存ファイルは上書き。
+    content の代わりに src=（このチャットの stage の中のファイル名）も受ける。扱いは
+    save_text と同じ（save_text へそのまま渡す）。
 
     Returns: 保存先の Path（絶対パス）。
 
@@ -218,7 +324,7 @@ def save_code(name: str, label: str, content: str) -> Path:
             f"other file, use save_text({name!r}, 'reports/<file>.md', content) instead."
         )
     validate_name(stem)   # 単一名の契約を維持（save_text 経由でも "a/b" を通さない）
-    return save_text(name, f"code/{stem}.py", content)
+    return save_text(name, f"code/{stem}.py", content, src=src)
 
 
 def dataset_summary(

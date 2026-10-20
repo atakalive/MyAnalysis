@@ -194,6 +194,7 @@ README の [データセット](../README_ja.md#データセット)・[使い方
 | `data/llm_state/` のその他 | 表示設定・最近開いたデータセット・前回のワークスペース・エンジンの会話 ID・コマンド履歴（`command_log.jsonl`） |
 | `data/logs/` | クラッシュログ（`gui-crash-*.log`）と warning 以上のログ（`myanalysis.log`。1 MB で回転、3 世代） |
 | `data/locks/`, `data/pycache/` | ロックファイル・Python のキャッシュ（GUI と CLI を止めてから削除してよい） |
+| `data/agent_stage/` | エージェントが長いコード・テキストを置く一時置き場（チャットごとのフォルダ。保存に成功するとファイルは消える。フォルダと保存されなかったファイルは残るので、GUI を止めてから削除してよい） |
 
 **ホームディレクトリ**:
 

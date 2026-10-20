@@ -119,3 +119,4 @@ save_text("my_dataset", "reports/summary.md", md)  # → <work_dir>/reports/summ
 - `subdir_pattern`（データセット直下からの glob パターン）/ `csv_name` はキーワード引数。既定値は無いので、`dataset_summary` で見た実際の名前を渡す。Shift-JIS の CSV は `encoding="cp932"` を付ける。
 - `save_fig` は保存後に図を閉じる。`save_fig` / `save_code` のラベルに拡張子は付けない。その他の形式（`.md` / `.csv` / `.json` など）は `save_text` で書く。
 - `save_text` のパスは `work_dir` の中に限られる（`..`・絶対パス・予約名などは拒否。`session.json`・`chat_sessions/`・`*.bak` も書けない）。
+- `save_code` / `save_text` は本文の代わりに `src=<ファイル名>` も受ける（`content` とどちらか一方）。チャットのエージェント専用で、ファイル名はそのチャットの stage（`data/agent_stage/` の下のチャットごとのフォルダ。GUI が環境変数 `MYANALYSIS_AGENT_STAGE` で渡す）の中のもの。エージェントは長い本文を Write ツールで stage に書いてから `src=` で渡す（本文をシェルコマンドに埋め込むと途中で切れるため）。保存に成功すると stage のファイルは消える。0 バイトのファイル・UTF-8 でないファイル・リンクは拒否する。

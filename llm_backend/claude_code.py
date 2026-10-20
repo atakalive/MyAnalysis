@@ -43,6 +43,7 @@ from common.proc import no_window_kwargs, resolve_cmd_shim
 from llm_backend.base import (
     Message, TextDelta, ToolCallRequest, NO_LOCAL_PERSISTENCE, MOUNT_SAFE_EDITS,
     ANALYST_FRAMING, GUI_DISPLAY_VERBS, CHAT_DATASET_RULE, with_chat_context,
+    apply_agent_stage,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER, build_prompt_with_history, compose_system_prompt,
     format_thinking_line,
@@ -894,6 +895,8 @@ class ClaudeCodeBackend:
         # （実測: rename 失敗 546 件のうち 90 件 = 16% が *.cpython-312.pyc）。
         # 無効化ではなくローカルへの退避にするので、repo モジュールのキャッシュは効いたまま。
         child_env.setdefault("PYTHONPYCACHEPREFIX", str(pycache_prefix()))
+        # このチャット専用の stage（Issue #118）。長い本文はここへ Write して src= で渡させる。
+        apply_agent_stage(self, child_env)
         py_dir = os.path.dirname(sys.executable)
         child_env["PATH"] = os.pathsep.join(
             [py_dir] + ([child_env["PATH"]] if child_env.get("PATH") else [])

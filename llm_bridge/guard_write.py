@@ -21,6 +21,7 @@ stdin に Claude Code の hook JSON、stdout に決定 JSON、終了コードは
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -48,6 +49,21 @@ def _allow() -> int:
     return 0
 
 
+def _stage_name(name: str) -> str:
+    """案内に載せる stage のファイル名。
+
+    シェルの "..." と Python の '...' にそのまま入る文字（英数字と . _ -）だけにし、
+    save_text / save_code の src= が受ける名前（validate_relpath を通る単一名）にする。
+    """
+    from common.paths import validate_relpath
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip(".")
+    try:
+        validate_relpath(safe)
+    except ValueError:
+        return "staged.txt"
+    return safe
+
+
 def _guidance(target: Path) -> str:
     """拒否理由 — 代わりに何をすればよいかを具体的に書く。"""
     parts = [
@@ -67,16 +83,44 @@ def _guidance(target: Path) -> str:
             "     → 構文検証のうえ検証付きで analysis.py へ昇格",
         ]
     else:
+        # 本文はシェルコマンドに埋め込ませない（Issue #118）。Claude Code（Windows）の
+        # Bash ツールは約 8K 文字でコマンドを切るので、Write でこのチャットの stage に置き、
+        # save_text / save_code の src= にファイル名を渡させる。stage のパスは Write の宛先に
+        # だけ書き、コマンドには安全な文字だけのファイル名を入れる（引用の問題を作らない）。
+        from common.paths import current_agent_stage
+        stage = current_agent_stage()
+        if stage is not None:
+            fname = _stage_name(target.name)
+            parts += [
+                f"  1. Write ツールで本文を {(stage / fname).as_posix()} に書く",
+                "     （このチャット専用のローカルの一時置き場。ここへの Write/Edit は拒否しない。"
+                "本文をシェルコマンドに埋め込まないこと — 約 7,900 文字以上のコマンドは"
+                "途中で切れた実績がある）",
+                "  2. 保存する（src= には stage の中のファイル名だけを渡す。成功すると消える）:",
+                "  python -c \"from common.explore import save_text; "
+                f"print(save_text('<dataset>', '<relpath>', src='{fname}'))\"",
+                "     → work_dir へ任意の拡張子・サブディレクトリで検証付き書込",
+                "       （例: 'summary.md', 'reports/2026-07.csv'）",
+                "  python -c \"from common.explore import save_code; "
+                f"print(save_code('<dataset>', '<label>', src='{fname}'))\"",
+                "     → work_dir/code/<label>.py（.py 専用。label に拡張子は付けない）",
+            ]
+        else:
+            parts += [
+                "  （このプロセスにはチャットの stage が無い。本文は content で渡す。"
+                "約 7,900 文字以上のコマンドは途中で切れた実績があるので、1 回のコマンドは"
+                " 7,000 文字未満（余裕を見た目安）にすること）",
+                "  python -c \"from common.explore import save_text; "
+                "print(save_text('<dataset>', '<relpath>', content))\"",
+                "     → work_dir へ任意の拡張子・サブディレクトリで検証付き書込",
+                "       （例: 'summary.md', 'reports/2026-07.csv'）",
+                "  python -c \"from common.explore import save_code; "
+                "print(save_code('<dataset>', '<label>', content))\"",
+                "     → work_dir/code/<label>.py（.py 専用。label に拡張子は付けない）",
+            ]
         parts += [
-            "  python -c \"from common.explore import save_text; "
-            "save_text('<dataset>', '<relpath>', content)\"",
-            "     → work_dir へ任意の拡張子・サブディレクトリで検証付き書込",
-            "       （例: 'summary.md', 'reports/2026-07.csv'）",
-            "  python -c \"from common.explore import save_code; "
-            "save_code('<dataset>', '<label>', content)\"",
-            "     → work_dir/code/<label>.py（.py 専用。label に拡張子は付けない）",
             "  図は save_fig('<dataset>', fig, '<label>') を使う。",
-            "  いずれも保存先の絶対パスを返すので print() すること。",
+            "  いずれも保存先の絶対パスを返す。コードはそのパスから実行する。",
         ]
     parts += ["", "状態を確認するには: python -m llm_bridge doctor"]
     return "\n".join(parts)
