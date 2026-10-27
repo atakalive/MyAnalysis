@@ -179,7 +179,14 @@ class MultiRowTabBar(QTabBar):
                         QPalette.ColorRole.Text,
                     ):
                         opt.palette.setColor(cg, role, dim)
+            # 描画をタブの段（全幅）に限る。Fusion は選択タブの下端をタブの高さほども
+            # ある矩形で塗る。1 段ならウィジェット端で切れるが、多段では下の段を塗り潰す。
+            # 全幅にするのは、隣のタブへ重ねて描く分（PM_TabBarTabOverlap）を残すため。
+            r = self._rects[i]
+            painter.save()
+            painter.setClipRect(QRect(0, r.top(), self.width(), r.height()))
             painter.drawControl(QStyle.ControlElement.CE_TabBarTab, opt)
+            painter.restore()
 
     # --- 再レイアウトの起点（いずれも super() を先に呼ぶ）---------------
     def resizeEvent(self, event: QResizeEvent) -> None:

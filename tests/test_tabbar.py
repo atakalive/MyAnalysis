@@ -8,6 +8,36 @@ def qapp(monkeypatch):
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture()
+def dark_theme(qapp):
+    """Render under the real production theme (apply_dark_theme = Fusion + dark
+    palette); the global style+palette are saved and restored so nothing leaks
+    into other tests."""
+    from PySide6.QtWidgets import QStyleFactory
+
+    from gui import apply_dark_theme
+    orig_pal = qapp.palette()
+    orig_style = qapp.style().objectName()
+    apply_dark_theme(qapp)
+    try:
+        yield
+    finally:
+        restored = QStyleFactory.create(orig_style)
+        if restored is not None:
+            qapp.setStyle(restored)
+        qapp.setPalette(orig_pal)
+
+
+def _brightest(img, rect):
+    r = rect.intersected(img.rect())
+    best = 0.0
+    for y in range(r.top(), r.bottom() + 1):
+        for x in range(r.left(), r.right() + 1):
+            c = img.pixelColor(x, y)
+            best = max(best, 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
+    return best
+
+
 def _make_bar(qapp, n, labels=None, movable=True, width=360):
     from PySide6.QtWidgets import QTabWidget, QWidget
     from gui.tabbar import MultiRowTabBar
@@ -265,45 +295,50 @@ def test_compact_and_default_height_formula_match(qapp):
     assert bard.sizeHint().height() == max(1, bard._row_count) * bard._row_height
 
 
-def test_disabled_stub_tab_text_is_dimmed(qapp):
+def test_disabled_stub_tab_text_is_dimmed(qapp, dark_theme):
     """A disabled tab (the #56 float-position stub) renders its label clearly
     dimmer than a normal enabled tab (MultiRowTabBar.paintEvent). Guards the
     regression where setTabEnabled(False) alone did NOT dim the label, because
     the dark theme leaves the Disabled-group WindowText role bright.
 
-    Rendered under the real production theme (apply_dark_theme = Fusion + dark
-    palette), since the dimming is a Fusion/dark-palette effect; the global
-    style+palette are saved and restored so nothing leaks into other tests."""
-    from PySide6.QtWidgets import QStyleFactory
-    from gui import apply_dark_theme
-    orig_pal = qapp.palette()
-    orig_style = qapp.style().objectName()
-    try:
-        apply_dark_theme(qapp)                       # Fusion + dark, exactly as production
-        host, bar = _make_bar(qapp, 2, labels=["WWWWWW", "WWWWWW"], width=500)
-        host.show()
-        qapp.processEvents()
-        host.setTabEnabled(1, False)                 # index 1 = float-stub-like
-        bar.resize(host.width(), bar.height())
-        bar._relayout(bar.width())
+    Rendered under the real production theme, since the dimming is a
+    Fusion/dark-palette effect."""
+    host, bar = _make_bar(qapp, 2, labels=["WWWWWW", "WWWWWW"], width=500)
+    host.show()
+    qapp.processEvents()
+    host.setTabEnabled(1, False)                 # index 1 = float-stub-like
+    bar.resize(host.width(), bar.height())
+    bar._relayout(bar.width())
+    qapp.processEvents()
+    img = bar.grab().toImage()
+    enabled_lum = _brightest(img, bar.tabRect(0))
+    stub_lum = _brightest(img, bar.tabRect(1))
+    assert stub_lum < enabled_lum - 40           # stub label is clearly dimmed
+    host.deleteLater()
+
+
+def test_selected_tab_does_not_paint_over_lower_rows(qapp, dark_theme):
+    """Selecting a tab must not paint over the tabs in the rows below it.
+    Fusion fills the selected tab's bottom edge with a rect far taller than the
+    tab; a single-row bar clips it at the widget edge, but a multi-row bar drew
+    it over the lower rows and hid their labels (MultiRowTabBar.paintEvent)."""
+    n = 16
+    host, bar = _make_bar(qapp, n, labels=[f"WWWWW{i}" for i in range(n)], width=420)
+    host.show()
+    qapp.processEvents()
+    assert bar._row_count >= 3
+    rh = bar._row_height
+    first_of_row = {}
+    for i in range(n):
+        first_of_row.setdefault(bar.tabRect(i).y() // rh, i)
+    for row in range(bar._row_count - 1):
+        bar.setCurrentIndex(first_of_row[row])
         qapp.processEvents()
         img = bar.grab().toImage()
-
-        def brightest(rect):
-            r = rect.intersected(img.rect())
-            best = 0.0
-            for y in range(r.top(), r.bottom() + 1):
-                for x in range(r.left(), r.right() + 1):
-                    c = img.pixelColor(x, y)
-                    best = max(best, 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue())
-            return best
-
-        enabled_lum = brightest(bar.tabRect(0))
-        stub_lum = brightest(bar.tabRect(1))
-        assert stub_lum < enabled_lum - 40           # stub label is clearly dimmed
-        host.deleteLater()
-    finally:
-        restored = QStyleFactory.create(orig_style)
-        if restored is not None:
-            qapp.setStyle(restored)
-        qapp.setPalette(orig_pal)
+        # tab 0 sits in the top row, so nothing can paint over it
+        ref = _brightest(img, bar.tabRect(0))
+        for lower in range(row + 1, bar._row_count):
+            # every row starts at x=0, so its first tab overlaps the selected one
+            lum = _brightest(img, bar.tabRect(first_of_row[lower]))
+            assert lum > ref - 40, (row, lower, lum, ref)
+    host.deleteLater()
