@@ -96,7 +96,8 @@ def test_read_errors_and_token_state():
     assert ei.value.code == "too_large"
     assert claude_sub.token_state() == "bad"
 
-    path.write_bytes(b"sk-ant-api03-" + b"B" * 40)
+    # 復号はできるが形が違う。Windows は _unprotect が DPAPI なので、平文のままだと復号の段で undecryptable になる
+    path.write_bytes(claude_sub._protect(b"sk-ant-api03-" + b"B" * 40))
     with pytest.raises(claude_sub.AuthError) as ei:
         claude_sub.read_token()
     assert ei.value.code == "corrupt"
