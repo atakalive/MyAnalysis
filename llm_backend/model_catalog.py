@@ -26,7 +26,7 @@ from pathlib import Path
 from llm_backend import engines, preflight
 from llm_backend.codex import codex_home
 
-SUPPORTED: tuple[str, ...] = ("claude-vscode", "claude-cli", "pi", "codex")
+SUPPORTED: tuple[str, ...] = ("claude-vscode", "claude-cli", "claude-sub", "pi", "codex")
 
 
 @dataclass(frozen=True)
@@ -69,9 +69,15 @@ def fetch_models(engine_id: str) -> ModelList:
 
 
 def _fetch_claude(engine_id: str, settings: dict) -> ModelList:
+    from llm_backend import claude_sub, claude_sub_settings
     from llm_backend.claude_code import ClaudeCodeBackend
 
-    be = ClaudeCodeBackend(settings)
+    # build_backend は通さない（tests/test_model_catalog.py の「トークンを使わない」）。claude-sub は
+    # factory（llm_backend._make_claude_sub）と同じ組み立てで、サブのトークンで起動する（無ければ RuntimeError）。
+    if engine_id == "claude-sub":
+        be = ClaudeCodeBackend(claude_sub_settings(settings), auth_env=claude_sub.auth_env)
+    else:
+        be = ClaudeCodeBackend(settings)
     source = be._discover_binary()
     body = be.list_models()
     raw = body.get("models")

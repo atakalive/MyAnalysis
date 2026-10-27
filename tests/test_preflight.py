@@ -315,6 +315,9 @@ def test_note_keys_exist_in_every_catalog():
         "backend.status.note.openai_env_unset",
         "backend.status.note.vscode_ext",
         "backend.status.note.permission_mode_empty",
+        "backend.status.note.claude_sub",
+        "backend.status.note.claude_sub_token_bad",
+        "backend.status.note.claude_sub_settings_override",
     }
     for path in sorted(i18n_dir().glob("*.toml")):
         with open(path, "rb") as f:
@@ -434,6 +437,49 @@ def test_valid_or_unset_permission_mode_has_no_note(monkeypatch, engine_id, cfg)
     monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
     monkeypatch.setattr(preflight, "_claude_config", lambda: cfg)
     assert _PERM_NOTE not in _note_keys(preflight.check_engine(engine_id))
+
+
+def test_claude_sub_token_states(monkeypatch):
+    from llm_backend import claude_sub
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
+    monkeypatch.setattr(preflight, "_claude_sub_config", lambda: {})
+    st = preflight.check_engine("claude-sub")
+    assert st.auth_state == "missing" and st.login is None and st.install is None
+    assert "backend.status.note.claude_sub" in _note_keys(st)
+    assert "backend.status.note.claude_sub_token_bad" not in _note_keys(st)
+    claude_sub.save_token("sk-ant-oat01-" + "A" * 40)
+    assert preflight.check_engine("claude-sub").auth_state == "ok"
+    claude_sub.token_path().write_bytes(b"garbage")
+    st = preflight.check_engine("claude-sub")
+    assert st.auth_state == "missing"
+    assert "backend.status.note.claude_sub_token_bad" in _note_keys(st)
+
+
+def test_claude_sub_settings_override_blocks_auth(monkeypatch):
+    from llm_backend import claude_sub
+    monkeypatch.setattr(preflight, "_claude_binary", lambda bin_value: ("missing", None))
+    monkeypatch.setattr(preflight, "_claude_sub_config", lambda: {"cwd": "/x/agent"})
+    seen = []
+    monkeypatch.setattr(claude_sub, "settings_override",
+                        lambda cwd: seen.append(cwd) or "/x/settings.json (apiKeyHelper)")
+    claude_sub.save_token("sk-ant-oat01-" + "A" * 40)
+    st = preflight.check_engine("claude-sub")
+    assert st.auth_state == "missing"
+    assert ("backend.status.note.claude_sub_settings_override",
+            {"source": "/x/settings.json (apiKeyHelper)"}) in st.notes
+    assert seen == [preflight.Path("/x/agent")]
+
+
+def test_claude_sub_uses_its_own_bin_and_permission_mode(monkeypatch):
+    seen = []
+    monkeypatch.setattr(preflight, "_claude_binary",
+                        lambda bin_value: seen.append(bin_value) or ("missing", None))
+    monkeypatch.setattr(preflight, "_claude_sub_config",
+                        lambda: {"bin": "claude", "permission_mode": ""})
+    monkeypatch.setattr(preflight, "_claude_config", lambda: {"permission_mode": "plan"})
+    st = preflight.check_engine("claude-sub")
+    assert seen == ["claude"]
+    assert _PERM_NOTE in _note_keys(st)
 
 
 @pytest.mark.parametrize("engine_id", ["claude-vscode", "claude-cli"])

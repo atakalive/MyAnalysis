@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from common.i18n import tr
-from llm_backend import build_backend
+from llm_backend import build_backend, claude_sub, claude_sub_settings
 from llm_backend.engines import (
     ENGINES,
     apply_chat_search_selection,
@@ -61,6 +62,23 @@ class _PingWorker(QThread):
 
     def run(self) -> None:
         self.result.emit(ping_backend(self.backend))
+
+
+def _bin_is_auto(engine) -> bool:
+    """bin が空（VS Code 同梱の自動検出。env CLAUDE_CODE_BIN が勝つ）で動くエンジンか。
+
+    claude-sub は [claude_code] の bin を引き継ぐ（llm_backend.claude_sub_settings）。never raise。
+    """
+    if engine is None:
+        return False
+    if engine.id == "claude-vscode":
+        return True
+    if engine.id == "claude-sub":
+        try:
+            return not str(claude_sub_settings().get("bin") or "").strip()
+        except Exception:
+            return False
+    return False
 
 
 class BackendSelectorDialog(QDialog):
@@ -114,6 +132,28 @@ class BackendSelectorDialog(QDialog):
         self._form.addRow(tr("backend.dialog.effort"), self._effort_combo)
         self._effort_choices: tuple[str, ...] = ()  # 今の項目の effort_choices（モデル欄の変更で比べる）
 
+        # Claude サブのトークン（Issue #120）。出すのは _sync_token_row が決める。
+        # 保存は適用・キャンセルと関係なくその場で書く。欄で Enter を押すと既定のボタン（適用）になり、
+        # 適用は先に欄の値を保存する（_commit_pending_token）ので returnPressed はつながない。
+        self._token_state_label = QLabel(self)
+        self._token_edit = QLineEdit(self)
+        self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._token_edit.setPlaceholderText("sk-ant-oat01-…")
+        self._token_edit.setToolTip(tr("backend.claude_sub.tooltip"))
+        self._token_save_btn = QPushButton(tr("backend.claude_sub.save"), self)
+        self._token_delete_btn = QPushButton(tr("backend.claude_sub.delete"), self)
+        for btn in (self._token_save_btn, self._token_delete_btn):
+            btn.setAutoDefault(False)
+        self._token_row = QWidget(self)
+        token_layout = QHBoxLayout(self._token_row)
+        token_layout.setContentsMargins(0, 0, 0, 0)
+        token_layout.addWidget(self._token_state_label)
+        token_layout.addWidget(self._token_edit, 1)
+        token_layout.addWidget(self._token_save_btn)
+        token_layout.addWidget(self._token_delete_btn)
+        self._form.addRow(tr("backend.claude_sub.token"), self._token_row)
+        self._update_token_state()
+
         self._build_search_section(layout)
 
         self._env_warning = QLabel(tr("backend.dialog.env_warning"), self)
@@ -154,6 +194,8 @@ class BackendSelectorDialog(QDialog):
         self._engine_combo.currentIndexChanged.connect(self._on_engine_changed)
         self._model_combo.currentTextChanged.connect(self._on_model_text_changed)
         self._test_btn.clicked.connect(self._on_test)
+        self._token_save_btn.clicked.connect(self._on_token_save)
+        self._token_delete_btn.clicked.connect(self._on_token_delete)
         self._buttons.accepted.connect(self._on_apply)
         self._buttons.rejected.connect(self.reject)
 
@@ -237,6 +279,9 @@ class BackendSelectorDialog(QDialog):
         self._search_engine_combo.currentIndexChanged.connect(
             lambda _i=0: self._sync_search_widgets())
         self._search_follow.toggled.connect(lambda _c=False: self._refresh_enabled())
+        self._search_engine_combo.currentIndexChanged.connect(
+            lambda _i=0: self._sync_token_row())
+        self._search_follow.toggled.connect(lambda _c=False: self._sync_token_row())
 
     def _sync_search_widgets(self) -> None:
         e = engine_by_id(self._search_engine_combo.currentData())
@@ -355,6 +400,7 @@ class BackendSelectorDialog(QDialog):
         self._populate_choices(engine, field, keep_text=True)
 
     def _sync_engine_widgets(self) -> None:
+        self._sync_token_row()
         engine = self._selected_engine()
         if engine is None:
             # 「未選択」（Issue #115）: モデル・プロバイダの行は出さない。
@@ -454,11 +500,7 @@ class BackendSelectorDialog(QDialog):
         if engine is None:
             engine = self._selected_engine()
         self._env_warning.setVisible(bool(os.environ.get("LLM_BACKEND")))
-        show_bin = bool(
-            engine is not None
-            and engine.id == "claude-vscode"
-            and os.environ.get("CLAUDE_CODE_BIN")
-        )
+        show_bin = bool(_bin_is_auto(engine) and os.environ.get("CLAUDE_CODE_BIN"))
         self._env_bin_warning.setVisible(show_bin)
 
     def _on_engine_changed(self, _idx: int = 0) -> None:
@@ -501,6 +543,9 @@ class BackendSelectorDialog(QDialog):
         self._test_btn.setEnabled(
             self._ping_unlocked and self._selected_engine() is not None
         )
+        # トークンは全体で 1 つなので「全体設定に従う」とは関係なく、ping のロックだけに従う。
+        for w in (self._token_edit, self._token_save_btn, self._token_delete_btn):
+            w.setEnabled(self._ping_unlocked)
         if getattr(self, "_search_follow", None) is not None:
             self._search_follow.setEnabled(self._ping_unlocked)
             search_on = self._ping_unlocked and not self._search_follow.isChecked()
@@ -508,11 +553,82 @@ class BackendSelectorDialog(QDialog):
                       self._search_provider_combo):
                 c.setEnabled(search_on)
 
+    # ----- Claude サブのトークン（Issue #120） -----
+
+    def _token_row_wanted(self) -> bool:
+        """エンジン欄、または（全体設定に従わない）AI 検索のエンジン欄が claude-sub か。"""
+        if self._selected_engine_id() == "claude-sub":
+            return True
+        follow = getattr(self, "_search_follow", None)   # チャットごとのダイアログには無い
+        return (
+            follow is not None and not follow.isChecked()
+            and self._search_engine_combo.currentData() == "claude-sub"
+        )
+
+    def _sync_token_row(self) -> None:
+        self._form.setRowVisible(self._token_row, self._token_row_wanted())
+
+    def _update_token_state(self) -> None:
+        state = claude_sub.token_state()
+        if state == "ok":
+            text = tr("backend.claude_sub.state.ok")
+        elif state == "missing":
+            text = tr("backend.claude_sub.state.missing")
+        else:
+            text = tr("backend.claude_sub.state.bad")
+        self._token_state_label.setText(text)
+
+    @staticmethod
+    def _token_error_text(e: Exception) -> str:
+        """AuthError の code を i18n の文に（未知の code は str(e)。どちらもトークンの値を含まない）。"""
+        texts = {
+            "empty": tr("backend.claude_sub.error.empty"),
+            "prefix": tr("backend.claude_sub.error.prefix"),
+            "chars": tr("backend.claude_sub.error.chars"),
+            "inside_repo": tr("backend.claude_sub.error.inside_repo"),
+            "synced_location": tr("backend.claude_sub.error.synced_location"),
+            "write_failed": tr("backend.claude_sub.error.write_failed"),
+            "delete_failed": tr("backend.claude_sub.error.delete_failed"),
+        }
+        return texts.get(getattr(e, "code", ""), str(e))
+
+    def _save_token_from_field(self) -> bool:
+        """欄の値を保存する。成功したら欄を空にして True、失敗したら理由を出して False。"""
+        try:
+            claude_sub.save_token(self._token_edit.text())
+        except claude_sub.AuthError as e:
+            self._result_label.setText(self._token_error_text(e))
+            return False
+        self._token_edit.clear()
+        self._update_token_state()
+        self._result_label.setText(tr("backend.claude_sub.saved"))
+        return True
+
+    def _commit_pending_token(self) -> bool:
+        """疎通確認・適用の前に、欄に残っている値を保存する。行が隠れている・欄が空なら何もせず True。"""
+        if not self._token_row_wanted() or not self._token_edit.text().strip():
+            return True
+        return self._save_token_from_field()
+
+    def _on_token_save(self) -> None:
+        self._save_token_from_field()
+
+    def _on_token_delete(self) -> None:
+        try:
+            claude_sub.delete_token()
+        except claude_sub.AuthError as e:
+            self._result_label.setText(self._token_error_text(e))
+            return
+        self._update_token_state()
+        self._result_label.setText(tr("backend.claude_sub.deleted"))
+
     # ----- connectivity check -----
 
     def _on_test(self) -> None:
         engine = self._selected_engine()
         if engine is None:
+            return
+        if not self._commit_pending_token():
             return
         model = self._current_model_text()
         provider = self._current_provider_text(engine)
@@ -607,6 +723,8 @@ class BackendSelectorDialog(QDialog):
     def _on_apply(self) -> None:
         if not self._apply_allowed():
             return                     # 「未選択」のまま（Issue #115。ボタンも無効）
+        if not self._commit_pending_token():
+            return                     # 保存できない値（理由は _result_label）。閉じない
         engine = self._selected_engine()
         model = self._current_model_text()
         provider = self._current_provider_text(engine) if engine is not None else ""
@@ -723,8 +841,7 @@ class SessionEngineDialog(BackendSelectorDialog):
         # CLAUDE_CODE_BIN, conversely, matters MORE per-session: a session pinned to
         # claude-vscode gets bin="" and _discover_binary then honours that env var.
         self._env_bin_warning.setVisible(bool(
-            engine is not None and engine.id == "claude-vscode"
-            and os.environ.get("CLAUDE_CODE_BIN")
+            _bin_is_auto(engine) and os.environ.get("CLAUDE_CODE_BIN")
         ))
 
     # ----- follow-default gate -----

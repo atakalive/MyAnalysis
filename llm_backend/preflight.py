@@ -415,11 +415,22 @@ def _claude_config() -> dict:
     return merged_settings("claude_code", backend_config().get("claude_code", {}))
 
 
-def _claude_permission_notes() -> tuple[tuple[str, dict], ...]:
-    """permission_mode が空・不正なら注意を 1 件返す。never raise（失敗時は注意なし）。"""
+def _claude_sub_config() -> dict:
+    """Claude サブが使う設定（llm_backend.claude_sub_settings。[claude_code] の運用の値を引き継ぐ）。
+    テストで差し替える。"""
+    from llm_backend import claude_sub_settings
+    return claude_sub_settings()
+
+
+def _claude_permission_notes(get_config=None) -> tuple[tuple[str, dict], ...]:
+    """permission_mode が空・不正なら注意を 1 件返す。never raise（失敗時は注意なし）。
+
+    ``get_config`` は設定を返す関数（None なら ``_claude_config``。呼ぶ時点の global として引く）。
+    """
     try:
         from llm_backend.claude_code import permission_mode_is_invalid
-        if permission_mode_is_invalid(_claude_config().get("permission_mode")):
+        cfg = (get_config or _claude_config)()
+        if permission_mode_is_invalid(cfg.get("permission_mode")):
             return (("backend.status.note.permission_mode_empty", {}),)
     except Exception:
         pass
@@ -467,6 +478,36 @@ def _check_engine(engine_id: str) -> EngineStatus:
             install=(_NPM, "i", "-g", "@anthropic-ai/claude-code")
             if state in ("missing", "ok") and pre_state == "ok" else None,
             login=("claude",) if state == "ok" else None,
+        )
+
+    if engine_id == "claude-sub":
+        # 実行ファイルはメインと同じ（[claude_code].bin を引き継ぐ）。認証は置き場のトークンだけを見る
+        # （`claude auth status` はメインの判定になるので呼ばない）。ログイン・導入のボタンは出さない。
+        cfg = _claude_sub_config()
+        state, path = _claude_binary(str(cfg.get("bin") or ""))
+        ver = None
+        if state == "ok" and path:
+            r = _run([path, "--version"], _VERSION_TIMEOUT)
+            if r is None:
+                state = "unknown"
+            elif r[0] == 0:
+                ver = _parse_version(r[1])
+        from llm_backend import claude_sub
+        token = claude_sub.token_state()
+        # 送信と同じ判定（ClaudeCodeBackend._auth の check_settings）。cwd は ClaudeCodeBackend._agent_home と
+        # 同じ場所（ここでは作らない）。
+        override = claude_sub.settings_override(
+            Path(cfg.get("cwd") or Path.home() / ".myanalysis" / "agent_home"))
+        notes = (("backend.status.note.claude_sub", {}),)
+        if token == "bad":
+            notes = notes + (("backend.status.note.claude_sub_token_bad", {}),)
+        if override is not None:
+            notes = notes + (("backend.status.note.claude_sub_settings_override",
+                              {"source": override}),)
+        return EngineStatus(
+            engine_id=engine_id, binary_state=state, binary=path, version=ver,
+            auth_state="ok" if token == "ok" and override is None else "missing",
+            notes=notes + _claude_permission_notes(_claude_sub_config),
         )
 
     if engine_id == "pi":

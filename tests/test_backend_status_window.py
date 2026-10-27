@@ -303,7 +303,7 @@ def _buttons(w):
 
 def test_models_button_visibility(no_probe, parent_widget):
     w = _win(no_probe, parent_widget)
-    for eid in ("claude-vscode", "claude-cli", "pi", "codex"):
+    for eid in ("claude-vscode", "claude-cli", "claude-sub", "pi", "codex"):
         w._paint(_st(eid, binary_state="ok"))
         assert not w._rows[eid]["models"].isHidden(), eid
         for state in ("missing", "unknown"):

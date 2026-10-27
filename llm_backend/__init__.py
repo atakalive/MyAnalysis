@@ -25,6 +25,7 @@ __all__ = [
     "get_backend",
     "build_backend",
     "backend_config",
+    "claude_sub_settings",
     "default_backend_name",
     "resolve_backend_name",
     "NoEngineConfigured",
@@ -92,6 +93,43 @@ def _make_claude(settings: dict | None = None) -> LLMBackend:
     return ClaudeCodeBackend(settings)
 
 
+# Claude サブが [claude_code] から引き継がないキー（モデル系。models.toml の [claude_sub] に別に持つ）。
+_CLAUDE_SUB_MODEL_KEYS = frozenset({
+    "model", "effort", "thinking", "provider", "model_choices", "provider_choices",
+})
+
+
+def claude_sub_settings(settings: dict | None = None) -> dict:
+    """Claude サブの設定。config.toml の [claude_code] の運用の値（bin・cwd・permission_mode・
+    allowed_tools・guard_mount_writes・use_provider_system_prompt など。モデル系は除く）に、
+    ``settings``（None なら config.toml の [claude_sub] に models.toml の [claude_sub] を重ねたもの）を重ねる。
+
+    factory・preflight・疎通確認・モデル取得の全部がここを通るので、どの経路でも同じ設定に解決する。
+    """
+    base = backend_config().get("claude_code", {})
+    inherited = (
+        {k: v for k, v in base.items() if k not in _CLAUDE_SUB_MODEL_KEYS}
+        if isinstance(base, dict) else {}
+    )
+    if settings is None:
+        own = backend_config().get("claude_sub", {})
+        settings = merged_settings("claude_sub", own if isinstance(own, dict) else {})
+    return {**inherited, **settings}
+
+
+def _make_claude_sub(settings: dict | None = None) -> LLMBackend:
+    """Claude サブ（2 つ目のアカウントの setup-token）。トークンはここでは読まない。
+
+    構築に失敗すると _build_session_backend が全体の backend に倒すので、トークンが無いことで
+    構築を失敗させると、全体がメインの Claude のときにメインで答えてしまう。読むのは起動のたび
+    （ClaudeCodeBackend._auth）で、無ければそのターンがエラーになる。
+    """
+    from llm_backend import claude_sub
+    from llm_backend.claude_code import ClaudeCodeBackend
+
+    return ClaudeCodeBackend(claude_sub_settings(settings), auth_env=claude_sub.auth_env)
+
+
 def _make_codex(settings: dict | None = None) -> LLMBackend:
     from llm_backend.codex import CodexBackend
 
@@ -105,6 +143,7 @@ _BACKENDS: dict[str, Callable[[dict | None], LLMBackend]] = {
     "mock": _make_mock,
     "pi": _make_pi,
     "claude": _make_claude,
+    "claude-sub": _make_claude_sub,
     "codex": _make_codex,
 }
 

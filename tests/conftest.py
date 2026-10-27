@@ -135,6 +135,23 @@ def _no_chat_dataset_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_claude_sub_token(monkeypatch, tmp_path):
+    """Claude サブのトークンの置き場と claude の設定の検査を tmp に向ける（どのテストも実物に触れない。Issue #120）。"""
+    from llm_backend import claude_sub
+    monkeypatch.setattr(
+        claude_sub, "token_path", lambda: tmp_path / "secrets" / "claude_sub.bin"
+    )
+    # claude の設定の検査も実際の ~/.claude・管理者の設定・レジストリ・cwd の上のフォルダを読まない。
+    monkeypatch.setattr(claude_sub, "_claude_config_dirs", lambda cwd: [tmp_path / "claude_config"])
+    monkeypatch.setattr(claude_sub, "_managed_settings_files", lambda: [])
+    monkeypatch.setattr(claude_sub, "_policy_registry_present", lambda: False)
+    monkeypatch.setattr(claude_sub, "_ancestor_dirs", lambda cwd: [])
+    # マウントの判定は common.fs_kind（conftest の上の fixture が tmp_path を local に固定）に任せる。
+    # /proc/mounts の無い OS でもテストの保存が通るように、読める扱いにする。
+    monkeypatch.setattr(claude_sub, "_mounts_readable", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_codex_home(monkeypatch, tmp_path):
     """実際の codex カタログ（`~/.codex/models_cache.json`）を読まない（Issue #117）。"""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex_home"))

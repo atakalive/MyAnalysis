@@ -75,6 +75,7 @@
 設定は [QuickStart](#quickstart) の手順 3。
 
 - 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
+- Claude サブ（2 つ目の Claude のアカウント）も選べる。`claude setup-token` で作ったトークンを設定ダイアログに貼る（→ [docs/engines_ja.md](docs/engines_ja.md)）。
 - Claude Code / Codex CLI / pi は、それぞれのエンジンにログインして使う前提（各サービスのサブスクリプション、または pi のローカル llama.cpp）。API キーでの従量課金利用は想定しておらず、動作確認もしていない。アプリに API キーの設定欄は無い（OpenAI 互換 HTTP だけは `.env` の `OPENAI_API_KEY` を使う）。
 - 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
 - **モデル欄に入れるもの**

@@ -155,7 +155,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
     holds neutral facts (versions, provider names, tool output) and explanations are
     `(i18n key, params)` pairs in `notes`, translated by the caller.
   - **モデル取得 (fetch models)** — Qt-free `llm_backend/model_catalog.py` (`fetch_models`,
-    never raises; `SUPPORTED` = claude-vscode / claude-cli / pi / codex) reads the IDs the
+    never raises; `SUPPORTED` = claude-vscode / claude-cli / claude-sub / pi / codex) reads the IDs the
     installed tool itself knows and **only appends** the new ones to
     `[<section>].model_choices` (`append_new`). Nothing is removed (stale IDs are the user's
     to remove with 削除), and nothing is written when there is nothing new, so an
@@ -271,6 +271,33 @@ catalog until llama-server has them loaded, which is why the list is editable.
   default so only MyAnalysis's instructions remain (`--system-prompt` instead of
   `--append-system-prompt`; also toggleable per-launch via the 設定 menu).
   **External dependency**: the VS Code Claude Code extension installed + logged in.
+- **claude-sub backend (Issue #120)** — a second Claude account via a `claude setup-token`
+  long-lived token. It changes **only the auth**: `_make_claude_sub` builds
+  `ClaudeCodeBackend(claude_sub_settings(settings), auth_env=claude_sub.auth_env)`, whose
+  instance `name` is `"claude-sub"` (header / resume-token records stay apart from the main).
+  For the sub's child only, `_build_env` drops every `_AUTH_VARS` name (16, defined as
+  `AUTH_VARS` in [claude_sub.py](llm_backend/claude_sub.py), case-insensitive) and adds
+  `CLAUDE_CODE_OAUTH_TOKEN`. The token is read on every spawn (`_auth()`, before Popen in
+  `stream` / `list_models`); missing / undecryptable / malformed = RuntimeError without
+  spawning — **never falls back to the main login or another engine**. The factory does not
+  read the token: `_build_session_backend` falls back to the global backend on a build
+  failure, which could be the main Claude. `claude_sub_settings` inherits `[claude_code]`
+  from config.toml minus the 6 model keys (`model` / `effort` / `thinking` / `provider` /
+  `model_choices` / `provider_choices`), and `[claude_sub]` (config.toml + models.toml) wins;
+  so the binary is the main one's. The app never runs a browser, `claude auth login` or
+  `setup-token` — the user pastes the token into the dialog. Storage:
+  `~/.myanalysis/secrets/claude_sub.bin`, outside the repo (a path resolving inside the repo
+  is refused), not written on a synced/network mount (apparent dir and link-resolved dir both
+  checked; on POSIX without a readable `/proc/mounts` it cannot be judged, so not written);
+  `~` is assumed PC-local. Contents are a DPAPI (CurrentUser, no entropy) blob on Windows;
+  elsewhere plaintext 0600 in a 0700 dir, for tests/dev only (Windows is the supported
+  platform). The token is per PC (DPAPI only decrypts for this user on this PC). Claude's
+  settings (`apiKeyHelper`, `env` auth vars) take precedence over the token and survive
+  dropping env vars, so `check_settings` refuses to spawn when the policy registry, user
+  settings (`CLAUDE_CONFIG_DIR` / `~/.claude`), the child cwd and all its parents'
+  `.claude/settings*.json`, or managed settings define one (unreadable / non-JSON = refuse).
+  `_fetch_claude` (model catalog) does not go through `build_backend`; it builds the backend
+  the same way as the factory.
 - **Sending while a reply is running (Issue #119)**: while a chat is generating, Send
   becomes **Add** or **Queue** (`ChatWidget._send_kind`). Add (claude only, CLI 2.1.282 or
   newer) writes the text to the running process's stdin as a `user` line with a uuid
@@ -433,8 +460,8 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
   `{session id: {engine, backend, token, updated}}`。`ChatSession.backend_session_id` は
   `draft` と同じくフィールドだけ残した**非永続**値で、毎ターンここから再充填される。
 - **`engine`（エンジン ID）と `backend`（名前）の両方が一致したときだけ token を使う。**
-  `ClaudeCodeBackend.name` は claude-vscode と claude-cli で同じ `"claude-code"` なので、
-  名前だけでは別エンジンの token を素通ししてしまう。
+  `ClaudeCodeBackend.name` は claude-vscode と claude-cli で同じ `"claude-code"` なので（claude-sub は
+  `"claude-sub"`）、名前だけでは別エンジンの token を素通ししてしまう。
 - **失敗したターンでは token を捨てる**（`_forget_backend_session`）。バックエンドの
   `_session_id` は成功イベントでしか代入されないので、失敗後のインスタンスには死んだ token が
   残っている。これを書き戻すと「死んだ token で `--resume` → 失敗」を永久に繰り返し、しかも

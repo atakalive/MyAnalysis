@@ -77,6 +77,7 @@ The detailed documents under `docs/` are available in Japanese only.
 Set it up in step 3 of [QuickStart](#quickstart).
 
 - Claude is recommended (it is the most tested). "Claude (VS Code bundled engine)" uses the `claude` command on PATH when the VS Code extension is not found.
+- Claude sub (a second Claude account) can also be selected. Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
 - Claude Code, Codex CLI, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
 - Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
 - **What to put in the model field**

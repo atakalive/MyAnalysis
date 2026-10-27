@@ -189,6 +189,17 @@ def test_apply_writes_backend_bin_and_model(apply_env):
     assert apply_env.mc.cleared >= 1
 
 
+def test_apply_claude_sub_writes_its_own_sections(apply_env):
+    apply_env.cfg_p.write_text(_CONFIG_SEED, encoding="utf-8")
+    apply_selection(engine_by_id("claude-sub"), "claude-opus-5-5", "",
+                    engine_changed=True, effort="max")
+    cfgd = tomllib.loads(apply_env.cfg_p.read_text(encoding="utf-8"))
+    assert cfgd["backend"]["name"] == "claude-sub"
+    assert cfgd["claude_code"]["bin"] == ""          # メインの bin に触れない
+    mdld = tomllib.loads(apply_env.mdl_p.read_text(encoding="utf-8"))
+    assert mdld["claude_sub"] == {"model": "claude-opus-5-5", "effort": "max"}
+
+
 def test_apply_engine_unchanged_skips_config_patch(apply_env):
     apply_env.cfg_p.write_text(
         '[backend]\nname = "claude"\n\n[claude_code]\nbin = "/custom/claude"\n',
@@ -710,6 +721,7 @@ def test_update_choices_skips_engines_without_settings_and_unknown_fields(apply_
 def test_effort_levels_per_engine():
     assert engine_by_id("claude-vscode").effort_levels == engines.CLAUDE_EFFORTS
     assert engine_by_id("claude-cli").effort_levels == engines.CLAUDE_EFFORTS
+    assert engine_by_id("claude-sub").effort_levels == engines.CLAUDE_EFFORTS
     assert engine_by_id("pi").effort_levels == engines.PI_EFFORTS
     assert engine_by_id("codex").effort_levels == engines.CODEX_EFFORTS
     assert engine_by_id("openai-http").effort_levels == ()

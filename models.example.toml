@@ -32,6 +32,14 @@ effort   = ""              # --thinking: minimal | low | medium | high | xhigh |
 # model_choices    = ["gpt-6.1-sol", "gpt-6-sol"]
 # provider_choices = ["openai-codex", "llama.cpp"]
 
+[claude_sub]
+# Claude サブ（2 つ目の Claude のアカウント。setup-token）のモデル設定。
+# キーは [claude_code] と同じ model / thinking / effort（空なら CLI の既定）。
+# [claude_code] のモデル系の値は引き継がない（プランによって使えるモデルが違いうるため）。
+model    = ""
+thinking = ""
+effort   = ""
+
 [codex]
 model  = ""     # --model (empty = codex default; 候補は ChatGPT 側 Codex カタログ)
 effort = ""     # -c model_reasoning_effort: low | medium | high | xhigh | max | ultra (使える値はモデルによる)

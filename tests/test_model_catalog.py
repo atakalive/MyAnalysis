@@ -511,7 +511,7 @@ def test_fetch_models_never_raises(monkeypatch, tmp_path):
     def _boom(*a, **k):
         raise ValueError("boom")
     monkeypatch.setattr(model_catalog, "_engine_settings", _boom)
-    for eid in ("claude-vscode", "claude-cli", "pi"):
+    for eid in ("claude-vscode", "claude-cli", "claude-sub", "pi"):
         ml = model_catalog.fetch_models(eid)
         assert ml.state == "unknown" and "boom" in ml.detail
     monkeypatch.setattr(model_catalog, "_fetch_codex", _boom)

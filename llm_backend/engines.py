@@ -33,7 +33,7 @@ from llm_backend.settings_store import (
 class Engine:
     id: str
     label_key: str
-    backend_key: str      # "claude"|"pi"|"codex"|"openai"|"mock" (_BACKENDS key)
+    backend_key: str      # "claude"|"claude-sub"|"pi"|"codex"|"openai"|"mock" (_BACKENDS key)
     settings_key: str     # models.toml section; "" = no model settings
     config_patch: tuple[tuple[str, str | bool], ...]  # written to config.toml [settings_key] on switch
     fields: tuple[str, ...]                            # dialog knobs ("model", "provider")
@@ -99,6 +99,18 @@ ENGINES: tuple[Engine, ...] = (
         backend_key="claude",
         settings_key="claude_code",
         config_patch=(("bin", "claude"),),
+        fields=("model",),
+        model_suggestions=CLAUDE_MODELS,
+        effort_levels=CLAUDE_EFFORTS,
+    ),
+    Engine(
+        # 2 つ目の Claude のアカウント（setup-token）。認証だけが違い、実行ファイルなどの運用の設定は
+        # [claude_code] から引き継ぐ（llm_backend.claude_sub_settings）。モデル系は models.toml の [claude_sub]。
+        id="claude-sub",
+        label_key="backend.engine.claude_sub",
+        backend_key="claude-sub",
+        settings_key="claude_sub",
+        config_patch=(),
         fields=("model",),
         model_suggestions=CLAUDE_MODELS,
         effort_levels=CLAUDE_EFFORTS,
@@ -180,7 +192,8 @@ def current_engine_id() -> str | None:
     """Resolve the currently-configured engine id (matches get_backend selection).
 
     claude splits on ``[claude_code].bin`` truthiness (empty/unset = claude-vscode,
-    non-empty = claude-cli). None = no engine selected, or a backend key no Engine
+    non-empty = claude-cli); claude-sub has its own backend key and resolves through
+    the generic loop. None = no engine selected, or a backend key no Engine
     maps to (Issue #115: an unknown key is never mapped to a fallback engine).
     """
     name = _resolved_backend_name()

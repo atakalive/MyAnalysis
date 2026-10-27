@@ -5,7 +5,7 @@
 # models.toml) and applies without a restart.
 
 [backend]
-name = "claude"      # "claude" | "pi" | "codex" | "openai" | "mock"
+name = "claude"      # "claude" | "claude-sub" | "pi" | "codex" | "openai" | "mock"
 
 [pi]
 # ★ Windows パスは TOML basic 文字列だと \ がエスケープされる。
@@ -66,9 +66,16 @@ use_provider_system_prompt = true
 #   --add-dir + PYTHONPATH で参照可能。明示上書きしたい場合のみ↓を有効化:
 # cwd = 'C:/path/to/agent_home'
 
+[claude_sub]
+# Claude サブ（2 つ目の Claude のアカウント）の運用の設定。空なら [claude_code] の運用の値
+# （bin・cwd・permission_mode・allowed_tools など。model / effort などのモデル系は除く）を引き継ぐ。
+# ここに書いた値が [claude_code] より勝つ（例: permission_mode = "plan"）。
+# トークンはここに書かない。設定 → バックエンド/モデル設定… でエンジンに Claude サブを選んで入れる
+# （~/.myanalysis/secrets/claude_sub.bin に暗号化して置く）。
+
 [chat_search]
 # AI 検索（Ctrl+F → AI 検索）に使うエンジンとモデル。設定 → バックエンド/モデル設定… の
 # 「AI 検索用モデル」が書き換える。engine が空 = 全体設定（[backend]）と同じエンジン・モデル。
-engine = ""          # "" | "claude-vscode" | "claude-cli" | "pi" | "codex" | "openai-http" | "mock"
+engine = ""          # "" | "claude-vscode" | "claude-cli" | "claude-sub" | "pi" | "codex" | "openai-http" | "mock"
 model = ""           # 空 = そのエンジンの既定モデル
 provider = ""        # pi のみ。空 = pi の既定

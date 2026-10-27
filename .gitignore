@@ -27,6 +27,7 @@ node_modules/
 .env
 .env.local
 .env.pulled
+claude_sub.bin
 
 data/
 

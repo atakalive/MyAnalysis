@@ -900,3 +900,143 @@ def test_session_probe_codex_drops_inherited_effort_the_model_lacks(
         list(mod.build_backend("codex", settings).stream(
             [Message(role="user", content="hi")]))
     assert not any(str(a).startswith("model_reasoning_effort=") for a in seen[0])
+
+
+# ----- Claude サブのトークン（Issue #120） -----
+
+_SUB_TOKEN = "sk-ant-oat01-" + "A" * 40
+
+
+def _select(combo, data) -> None:
+    combo.setCurrentIndex(combo.findData(data))
+
+
+def test_token_row_only_for_claude_sub(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="claude-vscode")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._token_row.isHidden()
+    _select(dlg._engine_combo, "claude-sub")
+    assert not dlg._token_row.isHidden()
+    _select(dlg._engine_combo, "pi")
+    assert dlg._token_row.isHidden()
+
+
+def test_token_row_for_ai_search_unless_following(monkeypatch, parent_widget):
+    _patch_config(monkeypatch, engine_id="claude-vscode")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget, search_sel=("claude-sub", "", ""))
+    assert not dlg._token_row.isHidden()
+    dlg._search_follow.setChecked(True)
+    assert dlg._token_row.isHidden()
+    dlg._search_follow.setChecked(False)
+    _select(dlg._search_engine_combo, "pi")
+    assert dlg._token_row.isHidden()
+
+
+def test_token_row_in_session_dialog(monkeypatch, parent_widget):
+    dlg, *_ = _session_dlg(monkeypatch, parent_widget, engine="claude-sub")
+    assert not dlg._token_row.isHidden()
+
+
+def test_save_button_saves_and_clears(monkeypatch, parent_widget):
+    from llm_backend import claude_sub
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert dlg._token_state_label.text() == tr("backend.claude_sub.state.missing")
+    dlg._token_edit.setText(_SUB_TOKEN)
+    dlg._token_save_btn.click()
+    assert claude_sub.read_token() == _SUB_TOKEN
+    assert dlg._token_edit.text() == ""
+    assert dlg._token_state_label.text() == tr("backend.claude_sub.state.ok")
+    assert dlg._result_label.text() == tr("backend.claude_sub.saved")
+
+    dlg._token_edit.setText("sk-ant-api03-xyz")
+    dlg._token_save_btn.click()
+    assert dlg._result_label.text() == tr("backend.claude_sub.error.prefix")
+    assert dlg._token_edit.text() == "sk-ant-api03-xyz"
+    assert claude_sub.read_token() == _SUB_TOKEN
+
+    dlg._token_delete_btn.click()
+    assert claude_sub.token_state() == "missing"
+    assert dlg._token_state_label.text() == tr("backend.claude_sub.state.missing")
+
+
+def test_apply_saves_pending_token_first(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from llm_backend import claude_sub
+    from PySide6.QtWidgets import QDialog
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    seen = []
+    monkeypatch.setattr(mod, "apply_selection",
+                        lambda *a, **k: seen.append(claude_sub.token_state()))
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._token_edit.setText("bad")
+    dlg._on_apply()
+    assert seen == []
+    assert dlg.result() != QDialog.DialogCode.Accepted
+    assert dlg._result_label.text() == tr("backend.claude_sub.error.prefix")
+    dlg._token_edit.setText(_SUB_TOKEN)
+    dlg._on_apply()
+    assert seen == ["ok"]
+    assert dlg.result() == QDialog.DialogCode.Accepted
+
+
+def test_ping_saves_pending_token_first(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from llm_backend import claude_sub
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    built = []
+    monkeypatch.setattr(mod, "build_backend",
+                        lambda *a, **k: built.append(claude_sub.token_state()) or MagicMock())
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self: None)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._token_edit.setText("bad")
+    dlg._on_test()
+    assert built == []
+    dlg._token_edit.setText(_SUB_TOKEN)
+    dlg._on_test()
+    assert built == ["ok"]
+
+
+def test_hidden_row_is_not_saved(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+    from llm_backend import claude_sub
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    monkeypatch.setattr(mod, "apply_selection", lambda *a, **k: None)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._token_edit.setText(_SUB_TOKEN)
+    _select(dlg._engine_combo, "pi")
+    dlg._on_apply()
+    assert claude_sub.token_state() == "missing"
+
+
+def test_token_row_locked_during_ping(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    monkeypatch.setattr(mod, "build_backend", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(mod._PingWorker, "start", lambda self: None)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    dlg._on_test()
+    for w in (dlg._token_edit, dlg._token_save_btn, dlg._token_delete_btn):
+        assert not w.isEnabled()
+    from llm_backend.ping import PingResult
+    dlg._on_ping_result(PingResult(ok=True, elapsed=0.1, model="m", text="pong"))
+    for w in (dlg._token_edit, dlg._token_save_btn, dlg._token_delete_btn):
+        assert w.isEnabled()
+
+
+def test_bin_warning_for_claude_sub_with_auto_bin(monkeypatch, parent_widget):
+    import gui.backend_selector_dialog as mod
+
+    monkeypatch.setenv("CLAUDE_CODE_BIN", "/x/claude")
+    monkeypatch.setattr(mod, "claude_sub_settings", lambda: {"bin": ""})
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    assert not dlg._env_bin_warning.isHidden()
+    monkeypatch.setattr(mod, "claude_sub_settings", lambda: {"bin": "claude"})
+    dlg._update_warnings()
+    assert dlg._env_bin_warning.isHidden()

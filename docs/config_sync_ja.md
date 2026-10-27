@@ -5,7 +5,7 @@
 Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次の設定を同期する任意機能。設定しなければ何も起きない。
 
 - **同期するもの**: `datasets.local.json`（全 PC のパス）、`models.toml`、`llm_backend/config.toml`。`.env` は `--include-env` を付けたときだけ送り、受け取る側では `.env.pulled` に保存する（`.env` は上書きしない）。
-- **同期しないもの**: 計測データ・解析コード・`myanalysis.toml`（これらは同期ドライブで共有する）。ペルソナ定義。
+- **同期しないもの**: 計測データ・解析コード・`myanalysis.toml`（これらは同期ドライブで共有する）。ペルソナ定義。Claude サブのトークン（`~/.myanalysis/secrets/claude_sub.bin`。PC ごとに入れる）。
 
 ## 1 台目のセットアップ
 

@@ -37,7 +37,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
@@ -52,6 +52,9 @@ from llm_backend.base import (
     THINKING_MARKER, build_prompt_with_history, compose_system_prompt,
     format_thinking_line,
 )
+
+# Claude サブ（認証を渡すインスタンス）の子の環境から落とす、認証の先を決める変数（定義と理由は claude_sub）。
+from llm_backend.claude_sub import AUTH_VARS as _AUTH_VARS
 
 # Mandatory rules + minimal llm_bridge contract, injected on every turn via
 # --append-system-prompt. The engine auto-discovers CLAUDE.md and .claude/skills
@@ -336,8 +339,19 @@ class _Send:
 class ClaudeCodeBackend:
     name = "claude-code"
 
-    def __init__(self, config: dict | None = None):
+    def __init__(
+        self,
+        config: dict | None = None,
+        *,
+        auth_env: Callable[[], dict[str, str]] | None = None,
+    ):
         self._config = config or {}
+        # Claude サブ（llm_backend._make_claude_sub）: 起動のたびに呼んで子の環境に足す認証。
+        # None ならメイン（今までどおり）。名前を分けるので、resume token の記録
+        # （engine と backend の両方で突き合わせる）とヘッダの backend: がメインと混ざらない。
+        self._auth_env = auth_env
+        if auth_env is not None:
+            self.name = "claude-sub"
         self.model = self._config.get("model") or "claude-code"
         self._session_id: str | None = None
         self._proc: subprocess.Popen | None = None
@@ -390,6 +404,8 @@ class ClaudeCodeBackend:
             self._cur = send
         try:
             claude_bin = self._discover_binary()
+            # Claude サブの認証。取れなければここで RuntimeError（プロセスを起動しない）。
+            auth = self._auth()
             # 応答中の追加送信（Issue #119）は --replay-user-messages を受け付ける版だけ。
             # 非対応なら argv・stdin に書く行・interrupt の形は今までと同じ。
             replay = _replay_supported(claude_bin)
@@ -436,7 +452,7 @@ class ClaudeCodeBackend:
             # 等が全部消える）ため、シムは実体に解決して直接 spawn する。
             cmd = _wrap_shim(cmd)
 
-            child_env = self._build_env()
+            child_env = self._build_env(auth)
             cwd = config.get("cwd") or str(self._agent_home())
 
             with self._lock:
@@ -700,6 +716,7 @@ class ClaudeCodeBackend:
         stored in ``self._proc``, so ``cancel()`` / ``kill()`` never touch it.
         """
         claude_bin = self._discover_binary()
+        auth = self._auth()                 # Claude サブ: 取れなければ起動しない
         cmd = [
             claude_bin,
             "--output-format", "stream-json",
@@ -714,7 +731,7 @@ class ClaudeCodeBackend:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self._config.get("cwd") or str(self._agent_home()),
-            env=self._build_env(),
+            env=self._build_env(auth),
             start_new_session=(sys.platform != "win32"),
             **no_window_kwargs(),
         )
@@ -1322,7 +1339,28 @@ class ClaudeCodeBackend:
         home.mkdir(parents=True, exist_ok=True)
         return home
 
-    def _build_env(self) -> dict:
+    def _auth(self) -> dict[str, str] | None:
+        """Claude サブの認証の環境（メインなら None）。取れない・設定が認証を変えていれば RuntimeError（値は文に含めない）。
+
+        stream / list_models が Popen の前に呼ぶ。getattr: ホットリロード前のインスタンスには
+        _auth_env が無い（= メイン）。
+        """
+        fn = getattr(self, "_auth_env", None)
+        if fn is None:
+            return None
+        from llm_backend.claude_sub import AuthError, check_settings
+        try:
+            env = dict(fn())
+            # claude の設定ファイルの apiKeyHelper・env の認証の変数はトークンより先に効き、
+            # 子の環境から _AUTH_VARS を落としても残る。あれば起動しない。
+            check_settings(Path(self._config.get("cwd") or self._agent_home()))
+            return env
+        except AuthError as e:
+            raise RuntimeError(str(e)) from None
+        except Exception as e:
+            raise RuntimeError(f"claude-sub token unavailable ({type(e).__name__})") from None
+
+    def _build_env(self, auth: dict[str, str] | None = None) -> dict:
         child_env = os.environ.copy()
         rr = str(repo_root())
         child_env["PYTHONPATH"] = os.pathsep.join(
@@ -1352,6 +1390,12 @@ class ClaudeCodeBackend:
         effort = self._config.get("effort")
         if isinstance(effort, str) and effort.strip():
             child_env.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
+        # Claude サブ: 認証の先を決める変数を落としてから、サブのトークンを足す。
+        # auth が無い（メイン）ときは何も落とさない（今までと同じ環境）。
+        if auth is not None:
+            for k in [k for k in child_env if k.upper() in _AUTH_VARS]:
+                del child_env[k]
+            child_env.update(auth)
         return child_env
 
     def _drain_stderr(self, proc: subprocess.Popen, buf=None) -> None:
