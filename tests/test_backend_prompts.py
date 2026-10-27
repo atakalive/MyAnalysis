@@ -210,6 +210,13 @@ def test_mount_safe_edits_reload_names_dataset():
     assert "set-active-dataset" not in MOUNT_SAFE_EDITS
 
 
+def test_mount_safe_edits_asks_to_keep_analysis_code():
+    """図を作ったコードも、報告した数値・結論の元になった解析コードも save_code で残す。"""
+    assert "Keep your analysis reproducible" in MOUNT_SAFE_EDITS
+    assert "the code that produced each figure (same label as its save_fig)" in MOUNT_SAFE_EDITS
+    assert "the code behind any numbers or conclusions you report" in MOUNT_SAFE_EDITS
+
+
 def test_gui_chat_prompt_has_no_chat_dataset_rule():
     pytest.importorskip("PySide6")
     from gui.chat import _SYSTEM_PROMPT

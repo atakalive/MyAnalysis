@@ -59,7 +59,9 @@ ANALYST_FRAMING = (
 # canonical analysis.py directly with Edit/Write on the synced mount can truncate
 # it to 0 bytes on a failed write, so route edits through the mount-safe
 # draft → apply → recover verbs (Issue #89). Names the three verbs so
-# tests/test_backend_prompts.py can guard their presence. The last sentences route
+# tests/test_backend_prompts.py can guard their presence. It also asks the agent to
+# keep the code behind its figures and reported numbers (save_code), so a short
+# `python -c` analysis is not lost. The last sentences route
 # long content through this chat's stage (Issue #118): Claude Code on Windows cuts a
 # Bash command at about 8K characters, so a script must never travel inside one.
 # The stage path differs per chat, so the prompt names the environment variable
@@ -83,6 +85,9 @@ MOUNT_SAFE_EDITS = (
     "derived CSV/JSON) use save_text(name, relpath, content) — apart from the "
     "analysis draft, never Write/Edit files under a dataset directly (a failed write "
     "on the synced mount can truncate them to 0 bytes). "
+    "Keep your analysis reproducible: save with save_code the code that produced "
+    "each figure (same label as its save_fig) and the code behind any numbers or "
+    "conclusions you report, not just the plotting. "
     "Long content: never put a script or long text inside a shell command "
     "(heredoc, python -c, echo). Commands of about 7,900 characters or more have "
     "been cut off silently, so keep every shell command under 7,000 characters (a "
