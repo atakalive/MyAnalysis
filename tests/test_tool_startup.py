@@ -119,3 +119,20 @@ def test_tool_main_reports_failure_inside_main(monkeypatch, _recorded_crashlog):
     assert ei.value.code == 1
     assert len(_recorded_crashlog) == 1
     assert isinstance(_recorded_crashlog[0], RuntimeError)
+
+
+def test_startup_head_is_reread_in_main():
+    """起動時の HEAD（__main__ のガードで読む）は、main() で今の HEAD と同じときだけ使う。"""
+    from common.git import read_head
+    from common.paths import repo_root
+
+    ns = runpy.run_path(str(_TOOL), run_name="tool_head_probe")
+    startup_head = ns["_startup_head"]
+    assert startup_head() is None                  # import しただけ（__main__ でない）
+    head = read_head(repo_root())
+    if head is None:
+        pytest.skip("not a git checkout")
+    startup_head.__globals__["start_head"] = head
+    assert startup_head() == head
+    startup_head.__globals__["start_head"] = "0" * 40   # 読み込みの間にコミットが進んだ
+    assert startup_head() is None

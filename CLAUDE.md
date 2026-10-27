@@ -501,6 +501,16 @@ PC ローカルだからで、同期すると別 PC で存在しない ID を `-
 - 中核は Qt 非依存の [devtools/hotreload.py](devtools/hotreload.py)（superreload, AST 名抽出, purge）と Qt 配線の [devtools/qt_integration.py](devtools/qt_integration.py)（4 tier, manifest, verb, メニュー）。
 - 既知の限界: stale 名除去は dict 除去のみで Qt signal 接続・closure 捕捉等の外部参照は旧コードを保持し続ける（→ 警告で scope=app 推奨）。dataclass 既存インスタンスに新フィールドは生えない。`__main__`（= `python tool.py` の tool.py）と `devtools.*` は Tier 1 対象外。
 
+## 利用者向けの更新とバージョン — ヘルプ メニュー
+
+- **ヘルプ → MyAnalysis を更新**（本体は Qt 非依存の [common/self_update.py](common/self_update.py)、GUI は [gui/updater.py](gui/updater.py)）。**手動のみ**: 押したときだけ動く。起動時・定期の確認、裏での fetch、「更新があります」の通知は作らない（利用者の指示）。
+- 取得元は GitHub（`UPDATE_URL`）の `main` に固定し、origin は見ない（この開発 PC の origin は GitLab で、GitHub より先にあるので、押しても「最新です」になる）。`git fetch <URL> +refs/heads/main:refs/myanalysis/update` → `git merge --ff-only refs/myanalysis/update` → 一時 ref を消す。`FETCH_HEAD` は使わない（VS Code の自動 fetch などが間に origin で書き換えると、別の取得元へ進めてしまう）。`pull` は使わない（`pull.rebase` などの利用者設定に左右される）。今のブランチが `main` でなければ何もしない。
+- 認証は聞かない: `-c credential.helper= -c core.askPass=`、env は `common.git.git_env`（`GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never`、`GIT_ASKPASS` / `SSH_ASKPASS` とリポジトリの場所を変える `GIT_*` を外し、`GIT_CEILING_DIRECTORIES` を親フォルダに）。
+- pip は「起動時の HEAD → 更新後の HEAD」で `requirements.txt` が変わったときだけ（失敗や [あとで] の後に押し直すとやり直す）。pip が失敗したら再起動は勧めない。反映は既存の Tier 4（`HotReloadController.restart`）。チャットの応答中は始めない。
+- **バージョン**は pjdeck と同じく**プロセス起動時の HEAD**（日付は committer の日時。`2026.10.27 (abc1234)`）。`tool.py` が重い import の前に `common.git.read_head` で `.git` を読み（git は実行しない）、`main()` で読み直して違えば不明にし、`gui.about_dialog.set_startup_head` で QApplication の property に置く（Tier 3 でも変わらない）。
+- 既知の制約: 更新した後、再起動するまでは、後から import されるモジュールとエージェントが実行する `python -m llm_bridge` が新しいコードになり、動いている GUI（古いコード）と混ざる（[あとで] の知らせで早めの再起動を促す）。pip は GUI が動いたまま走るので、`requirements.txt` で既に入っているパッケージ（特に PySide6 など読み込み済みの DLL を持つもの）の最低版を上げると、使用中のファイルの置き換えになる。その変更をするときは手での更新を案内する。gitignore された利用者のファイル（`datasets.local.json`・`models.toml`・`llm_backend/config.toml`・`.env` など）と同じパスを追跡に加えるコミットも作らない（git は無視ファイルを捨ててよいものとして扱い、fast-forward で上書きする）。
+- Qt 非依存側（`common/git.py` / `common/self_update.py`）は文章を返さず、状態と git / pip の出力だけを返す。文は GUI が `tr()` で作る（`update.*` / `about.*`）。
+
 ## State
 
 No build system or package layout (no pyproject.toml; loose-directory layout); dependencies are listed in `requirements.txt` (runtime) and `requirements-dev.txt` (tests). Tests live under `tests/` as pytest modules — run `python -m pytest tests/` (GUI tests self-set `QT_QPA_PLATFORM=offscreen`). When introducing a build system / packaging, update this file with the resulting commands.

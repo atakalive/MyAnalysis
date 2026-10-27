@@ -2,7 +2,7 @@ import inspect
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import QPoint, Qt, QThread, Signal
+from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,11 +21,15 @@ from PySide6.QtWidgets import (
 )
 
 from common import i18n
+from common.git import read_commit_time
 from common.i18n import tr
+from common.paths import repo_root
+from gui.about_dialog import AboutDialog, startup_head
 from gui.floating_window import FloatingTabWindow
 from gui.qt_translation import install_qt_translator
 from gui.tab import AnalysisTab
 from gui.tabbar import MultiRowTabBar
+from gui.updater import SelfUpdater
 
 _log = logging.getLogger(__name__)
 
@@ -320,10 +324,24 @@ class ToolWindow(QMainWindow):
         self._backend_status_action.triggered.connect(self._open_backend_status)
 
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
+        # 手動のみ（押したときだけ GitHub から取る。起動時の確認・通知はしない）。gui/updater.py
+        self._update_action = self._help_menu.addAction(tr("menu.help.update"))
+        self._self_updater = SelfUpdater(self, self._update_action)
+        # メニューが閉じてから（応答中ならダイアログを出す）。lambda は呼出時に引くので Tier 1 の差し替えも効く
+        self._update_action.triggered.connect(
+            lambda: QTimer.singleShot(0, self._self_updater.start))
         self._about_action = self._help_menu.addAction(tr("menu.help.about"))
-        self._about_action.triggered.connect(
-            lambda: QMessageBox.about(self, "MyAnalysis Tool", "MyAnalysis Tool v0.1")
-        )
+        self._about_action.triggered.connect(self._show_about)
+
+    def _show_about(self) -> None:
+        """ヘルプ → バージョン情報…（gui/about_dialog.py）。版は起動時の HEAD。コミットの日時は開くたびに
+        .git のオブジェクトを読む（git は実行しない）。"""
+        head = startup_head()
+        dlg = AboutDialog(head, read_commit_time(repo_root(), head), parent=self)
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
 
     def retranslate(self) -> None:
         self._file_menu.setTitle(tr("menu.file"))
@@ -349,6 +367,7 @@ class ToolWindow(QMainWindow):
         self._backend_selector_action.setText(tr("menu.settings.backend_selector"))
         self._backend_status_action.setText(tr("menu.settings.backend_status"))
         self._help_menu.setTitle(tr("menu.help"))
+        self._update_action.setText(tr("menu.help.update"))
         self._about_action.setText(tr("menu.help.about"))
         self._chat_dock.setWindowTitle(tr("dock.chat"))
         cur = i18n.current_language()

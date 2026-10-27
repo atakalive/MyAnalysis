@@ -60,7 +60,8 @@
 
 - venv の名前は `.venv` にする。`run.bat` はこの名前だけを探し、自分で有効化する。
 - `python` で始まるコマンド（CLI など）は、コマンドプロンプトを開くたびに `MyAnalysis` フォルダで `.venv\Scripts\activate` を実行してから打つ。
-- 更新するときは、アプリを閉じて `git pull` → `.venv\Scripts\python -m pip install -r requirements.txt` → 起動。データセットには影響しない。
+- 更新するときは **ヘルプ → MyAnalysis を更新** を押す。GitHub の `main` を取得して進め（fast-forward のみ。手元に GitHub に無いコミットや、更新で上書きされる変更があれば何も変えない）、`requirements.txt` が変わっていれば `pip install -r requirements.txt` も実行してから、再起動するかを訊く。再起動すると開いていたデータセットを開き直す。押したときだけ動き、起動時の確認や「更新があります」の通知はしない。データセットには影響しない。
+- 手で更新するときは、アプリを閉じて `git pull` → `.venv\Scripts\python -m pip install -r requirements.txt` → 起動。
 
 - PowerShell で `activate` が失敗するときは、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を実行するか、コマンドプロンプトを使う。
 - TIFF 画像を開くときは `.venv\Scripts\python -m pip install tifffile` も入れる。

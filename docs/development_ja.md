@@ -71,7 +71,7 @@ GUI プロセス（python tool.py）
 CLI プロセス（python -m llm_bridge ...）: PySide6 なしで動く
 ```
 
-このほか、疎通確認・バックエンド状況の判定・状況ウィンドウからの npm によるインストール / 更新（`_CmdWorker`）・データセットピッカーの集計がそれぞれ短命の QThread で動く。サブプロセス型バックエンドは子プロセスの stderr を読み捨てる daemon スレッドを、トンネルは cloudflared の出力を読む daemon スレッドを持つ。
+このほか、疎通確認・バックエンド状況の判定・状況ウィンドウからの npm によるインストール / 更新（`_CmdWorker`）・データセットピッカーの集計がそれぞれ短命の QThread で動く。ヘルプ → MyAnalysis を更新 の git / pip は、押したときだけ短命の daemon スレッド（`gui/updater.py`）で動く。サブプロセス型バックエンドは子プロセスの stderr を読み捨てる daemon スレッドを、トンネルは cloudflared の出力を読む daemon スレッドを持つ。
 
 ### 3.2 GUI と CLI の連携
 
@@ -161,7 +161,9 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `mount_compat.py` | `os.path.realpath` を包む shim。WinFsp 上で PIL / matplotlib が落ちる問題への対策 |
 | `filelock.py` | プロセス間の排他ロック（POSIX は fcntl、Windows は msvcrt） |
 | `rclone_paths.py` | rclone のキャッシュ・ログの場所の解決（引数 > 環境変数。doctor と mount_probe で共有） |
-| `proc.py` | `no_window_kwargs()`（コンソール窓の抑止）、`resolve_cmd_shim()`（npm シムの実体解決） |
+| `proc.py` | `no_window_kwargs()`（コンソール窓の抑止）、`resolve_cmd_shim()`（npm シムの実体解決）、`run_capture()`（出力をまとめて取る実行。時間切れは `kill_tree()` でツリーごと止める） |
+| `git.py` | `.git` を読む `read_head` / `current_branch` / `read_commit_time`（git は実行しない。pjdeck から移植）と、認証を聞かない `run_git` |
+| `self_update.py` | ヘルプ → MyAnalysis を更新 の本体 `run_update`（GitHub の `main` を一時 ref に fetch → `merge --ff-only`、`requirements.txt` が変わっていれば pip）。文章は返さない |
 | `i18n.py` | 翻訳カタログと `tr()` |
 | `explore.py` | エージェント・対話用の解析 API（`load_dataset` / `dataset_summary` / `save_fig` / `save_code` / `save_text`） |
 | `loaders.py` | `load_csv_per_subdir` |
@@ -198,6 +200,8 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `persona_dialog.py` | AI ペルソナの設定ダイアログ |
 | `qt_translation.py` | Qt 標準ボタン等の翻訳（`qtbase_<lang>.qm`）の読込と言語切替時の張り直し |
 | `meeting_share.py` | 会議共有ウィンドウ |
+| `updater.py` | ヘルプ → MyAnalysis を更新 の `SelfUpdater`（`run_update` を daemon スレッドで動かし、結果を知らせ、再起動を訊いて Tier 4 で反映） |
+| `about_dialog.py` | ヘルプ → バージョン情報… の `AboutDialog` と、起動時の HEAD（QApplication の property）の読み書き |
 
 ### `llm_backend/`
 

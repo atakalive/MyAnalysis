@@ -62,7 +62,8 @@ The detailed documents under `docs/` are available in Japanese only.
 
 - Name the venv `.venv`. `run.bat` looks for this name only and activates it itself.
 - Commands that start with `python` (the CLI, etc.) are run in the `MyAnalysis` folder after `.venv\Scripts\activate`, every time you open a new Command Prompt.
-- To update, close the app, run `git pull` and then `.venv\Scripts\python -m pip install -r requirements.txt`, and launch again. Datasets are not affected.
+- To update, choose **Help → Update MyAnalysis**. It fetches `main` from GitHub and moves to it (fast-forward only; if there are commits that are not on GitHub, or local changes the update would overwrite, nothing is changed), runs `pip install -r requirements.txt` if `requirements.txt` changed, and then asks whether to restart. The restart reopens the datasets that were open. It runs only when you choose it; there is no check at startup and no "update available" notice. Datasets are not affected.
+- To update by hand, close the app, run `git pull` and then `.venv\Scripts\python -m pip install -r requirements.txt`, and launch again.
 
 - If `activate` fails in PowerShell, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use Command Prompt.
 - To open TIFF images, also run `.venv\Scripts\python -m pip install tifffile`.

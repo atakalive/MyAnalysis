@@ -9,6 +9,17 @@ if __name__ == "__main__":
     crashlog.install()
     crashlog.install_file_logging()
 
+    # 起動したコードの版（ヘルプ → バージョン情報）。重い import より前に .git から読む（git は実行
+    # しない）。読めなくても起動は止めない。main() で読み直し、読み込みの間に進んでいたら「不明」にする。
+    try:
+        from pathlib import Path
+
+        from common.git import read_head
+
+        start_head = read_head(Path(__file__).resolve().parent)
+    except Exception:  # noqa: BLE001 — 版が分からないだけ
+        start_head = None
+
 try:
     import argparse
     from collections.abc import Callable
@@ -20,6 +31,7 @@ try:
     from common.env import load_env
     from common.i18n import current_language, init_language, tr
     from gui import apply_dark_theme
+    from gui.about_dialog import set_startup_head
     from gui.chat import ChatWidget
     from gui.qt_translation import install_qt_translator
     from llm_backend import get_backend
@@ -191,6 +203,22 @@ def create_main_window(
     return win
 
 
+def _startup_head() -> str | None:
+    """起動時の HEAD（__main__ のガードで読んだもの）。今の HEAD と違えば（読み込みの間にコミットが
+    進んだ）None。モジュールとして import されたとき（テスト）は None。"""
+    head = globals().get("start_head")
+    if not head:
+        return None
+    try:
+        from pathlib import Path
+
+        from common.git import read_head
+
+        return head if read_head(Path(__file__).resolve().parent) == head else None
+    except Exception:  # noqa: BLE001 — 版が分からないだけ
+        return None
+
+
 def main() -> None:
     crashlog.install()
     load_env()
@@ -217,6 +245,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     apply_dark_theme(app)
+    set_startup_head(app, _startup_head())
     win = create_main_window(
         app, demo=args.demo, resume_session=args.resume_session
     )

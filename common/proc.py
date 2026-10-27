@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -66,3 +67,94 @@ def resolve_cmd_shim(bin_path: str) -> list[str]:
             ) or shutil.which("node")
             return [node, str(p)] if node else []
     return []
+
+
+_TASKKILL_TIMEOUT_S = 10
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """プロセスをツリーごと強制終了する。never raise。
+
+    Windows は ``taskkill /F /T``（返らなくても _TASKKILL_TIMEOUT_S で切る）。POSIX は
+    プロセスグループに SIGKILL を送るので、``start_new_session=True`` で起動したもの
+    （pid = PGID）にだけ使う。
+    """
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_TASKKILL_TIMEOUT_S,
+                **no_window_kwargs(),
+            )
+        else:
+            import signal
+
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:  # noqa: BLE001, S110 — 既に終了済み・taskkill の時間切れも含め、呼び出し側が終わりを待って確かめる
+        pass
+
+
+_REAP_SECONDS = 5   # 時間切れの後、kill_tree → 終わりを待つ（2 段目は kill() → 待つ）
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    ok: bool
+    output: str                     # stdout と stderr をまとめたもの（UTF-8、読めないバイトは置き換え）
+    returncode: int | None = None   # 終わらなかった・起動できなかったときは None
+    timed_out: bool = False
+    left_running: bool = False      # 時間切れで止めようとしたが、止まったか確かめられなかった
+
+
+def run_capture(argv: list[str], *, cwd, env: dict[str, str] | None,
+                timeout: float) -> CommandResult:
+    """argv を実行して出力をまとめて返す。never raise。
+
+    stdin は DEVNULL、コンソール窓は出さない（no_window_kwargs）。POSIX では新しいセッションで
+    起動し、時間切れはツリーごと止める（kill_tree → 待つ、まだなら kill() → 待つ）。
+    """
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=None if cwd is None else str(cwd), env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=(sys.platform != "win32"), **no_window_kwargs(),
+        )
+    except Exception as e:  # noqa: BLE001 — OSError のほか、引数の型違いも結果で返す
+        return CommandResult(False, f"could not start {argv[0] if argv else '?'}: {e}")
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _stop_timed_out(proc)
+    except Exception as e:  # noqa: BLE001
+        kill_tree(proc)
+        return CommandResult(False, f"{type(e).__name__}: {e}")
+    return CommandResult(proc.returncode == 0, _decode(out), proc.returncode)
+
+
+def _decode(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace")
+
+
+def _stop_timed_out(proc: subprocess.Popen) -> CommandResult:
+    """時間切れのプロセスを止める。communicate が返れば（本体も、出力のパイプを受け継いだ子も
+    終わった）止まったとする。"""
+    kill_tree(proc)
+    stopped, out = _reap(proc)
+    if not stopped:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        stopped, out = _reap(proc)
+    return CommandResult(False, _decode(out), None, timed_out=True, left_running=not stopped)
+
+
+def _reap(proc: subprocess.Popen) -> tuple[bool, bytes]:
+    try:
+        out, _ = proc.communicate(timeout=_REAP_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False, b""
+    return True, out or b""
