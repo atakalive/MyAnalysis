@@ -937,6 +937,17 @@ def _start_inflight(widget, *, mode_default):
     return sess, turn
 
 
+def _drop_glyph_line(widget):
+    """ライブ描画の末尾の印の行（作業中の印を置く空の行。完了後の文書には無い）を前のブロックに畳む。
+    本文が表で終わるときは表の後ろの空のブロックを使っていて畳めないので、段落などで終わる本文に使う。"""
+    from PySide6.QtGui import QTextCursor
+    last = widget._log.document().lastBlock()
+    assert last.text() == "" and not last.blockFormat().properties()
+    cursor = QTextCursor(widget._log.document())
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    cursor.deletePreviousChar()
+
+
 def test_live_hidden_suppresses_tool_lines(widget):
     """Streaming chunks containing 🔧/↳ lines never reach the document in
     hidden mode; surrounding prose does."""
@@ -1021,6 +1032,7 @@ def test_live_markdown_matches_completion_across_flushes(widget):
         for piece in pieces:
             turn.buffer += piece
             widget._flush_live_markdown()
+        _drop_glyph_line(widget)
         html = widget._log.toHtml()
         widget._turns.pop(sess.id)
         return html
@@ -2494,6 +2506,7 @@ def test_thinking_live_matches_completion(widget, mode):
     for piece in pieces:
         turn.buffer += piece
         widget._flush_live_markdown()
+    _drop_glyph_line(widget)
     staged = widget._log.toHtml()
     widget._turns.pop(sess.id)
 
@@ -3227,3 +3240,237 @@ def test_stream_worker_emits_inject_support(qapp):
     w.done.connect(lambda sid: got.append(("done", sid)))
     w.run()        # スレッドを起動せずに同じスレッドで回す（直接接続で届く）
     assert got == [("support", "sid1"), ("chunk", "sid1", "ok"), ("done", "sid1")]
+
+
+# ---- 作業中の印（応答待ちのアニメ。gui/busy_glyph.py、pjdeck から移したもの） ----
+
+
+@pytest.fixture()
+def shown(qapp, widget):
+    """表示した ChatWidget（印は見えている間だけ動くので、印のテストは表示して見る）。"""
+    widget.resize(420, 500)
+    widget.show()
+    qapp.processEvents()
+    yield widget
+    _cleanup(widget)
+    widget.close()
+
+
+def _glyph_line_rect(widget):
+    """文書の最後のブロック（印の行）の cursorRect の高さを 1 辺とする正方形の (左, 上, 幅, 高さ)。"""
+    from PySide6.QtGui import QTextCursor
+    rect = widget._log.cursorRect(QTextCursor(widget._log.document().lastBlock()))
+    return rect.left(), rect.top(), rect.height(), rect.height()
+
+
+def _glyph_on_line(widget):
+    """印が見えていて、最後のブロックが空の印の行で、印がその正方形に重なっている。"""
+    g = widget._busy_glyph
+    geo = g.geometry()
+    return (g.isVisible() and widget._log.document().lastBlock().text() == ""
+            and (geo.left(), geo.top(), geo.width(), geo.height()) == _glyph_line_rect(widget))
+
+
+def test_busy_glyph_under_the_header_at_turn_start(shown, monkeypatch):
+    from gui.busy_glyph import PATTERN_KEYS
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    g = w._busy_glyph
+    assert _glyph_on_line(w)
+    assert w._log.document().lastBlock().position() == turn.anchor   # 見出しの下の空の本文
+    assert g.pattern() == w._glyph_patterns[sess.id] and g.pattern() in PATTERN_KEYS
+    assert g.is_animating()
+    assert w._log.viewport().childAt(g.geometry().center()) is None   # マウスは下の履歴に通す
+
+
+def test_busy_glyph_moves_below_the_text(shown, monkeypatch):
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    top = w._busy_glyph.geometry().top()
+    w._on_chunk(sess.id, "おわり")
+    w._flush_live_markdown()
+    assert _glyph_on_line(w)
+    assert w._log.document().lastBlock().previous().text() == "おわり"   # 本文のすぐ下へ押される
+    assert w._busy_glyph.geometry().top() > top
+
+
+@pytest.mark.parametrize("body", [
+    "段落の終わり",
+    "- 一つ目\n- 二つ目",
+    "```\nx = 1\n```",
+    "| a | b |\n|---|---|\n| 1 | 2 |",
+    "\n💭 考え中",
+    "段落\n\n---",
+], ids=["paragraph", "list", "code", "table", "thinking", "rule"])
+def test_glyph_line_same_in_live_and_render(shown, monkeypatch, body):
+    """本文の終わり方によらず、ライブ（flush）でも描き直し（_render_session）でも、最後のブロックは既定の書式の
+    空の行で、印がその上にある。anchor から末尾までの形も同じ（文書全体は比べない: _render_session は
+    user の見出しに「編集」のリンクを付けるが、ライブの _start_turn は付けない）。"""
+    from PySide6.QtGui import QTextCursor
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    w._on_chunk(sess.id, body)
+    w._flush_live_markdown()
+    doc = w._log.document()
+
+    def tail():
+        blocks, b = [], doc.findBlock(turn.anchor)
+        while b.isValid():
+            blocks.append((b.text(), QTextCursor(b).currentTable() is not None))
+            b = b.next()
+        return blocks
+
+    def check():
+        last = doc.lastBlock()
+        assert last.text() == "" and last.textList() is None
+        assert not last.blockFormat().properties()   # 既定の書式（リスト・引用・コードでない）
+        assert _glyph_on_line(w)
+
+    live = tail()
+    check()
+    w._render_session(sess)
+    assert tail() == live
+    check()
+
+
+def test_busy_glyph_hides_on_stop(shown, qapp, monkeypatch):
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    assert _glyph_on_line(w)
+    w._on_stop()
+    assert w._busy_glyph.isHidden()
+    w._on_chunk(sess.id, "止めた後に届いた本文")   # 止めても終わるまでは本文が流れる
+    w._flush_live_markdown()
+    qapp.processEvents()
+    assert w._busy_glyph.isHidden()
+
+
+@pytest.mark.parametrize("end", ["done", "failed"])
+def test_glyph_line_removed_when_turn_ends(shown, qapp, monkeypatch, end):
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    w._on_chunk(sess.id, "答え")
+    w._flush_live_markdown()
+    assert _glyph_on_line(w)
+    if end == "done":
+        w._on_done(sess.id)
+    else:
+        w._on_failed(sess.id, "boom")
+    qapp.processEvents()
+    doc = w._log.document()
+    assert w._busy_glyph.isHidden()
+    assert doc.lastBlock().text() != ""   # 印の行が残らない
+    if end == "done":
+        text, count = doc.toPlainText(), doc.blockCount()
+        w._render_session(sess)
+        assert (doc.toPlainText(), doc.blockCount()) == (text, count)
+
+
+def test_busy_glyph_follows_the_visible_chat(shown, qapp, monkeypatch):
+    """応答中でないチャットへ切り替えると隠れて止まり、戻すとまた印の行に出る。"""
+    w = shown
+    b = _add_scratch(w, "B")
+    sess, turn, _ = _begin(w, monkeypatch)
+    g = w._busy_glyph
+    assert _glyph_on_line(w) and g.is_animating()
+    w._tab_bar.setCurrentIndex(_tab_index_for(w, b))   # → _on_switch_session
+    qapp.processEvents()
+    assert w._active is b
+    assert g.isHidden() and not g.is_animating()
+    w._tab_bar.setCurrentIndex(_tab_index_for(w, sess))
+    qapp.processEvents()
+    assert _glyph_on_line(w) and g.is_animating()
+    assert w._log.document().lastBlock().position() == turn.anchor   # 描き直しで張り直した anchor の下
+
+
+def test_busy_glyph_not_shown_for_background_turn(shown, qapp, monkeypatch):
+    """背景のチャットのターンでは、表示中のチャットに印も印の行も出さない。切り替えるとその形で出る。"""
+    w = shown
+    b = _add_scratch(w, "B")
+    _fake_workers(monkeypatch)
+    monkeypatch.setattr(w, "_load_backend_session", lambda *a, **k: None)
+    w._session_backends[b.id] = _FakeBackend()
+    before = w._log.toPlainText()
+    assert w._start_turn(b, "裏で")
+    assert b.id in w._glyph_patterns
+    assert w._busy_glyph.isHidden()
+    assert w._log.toPlainText() == before
+    w._tab_bar.setCurrentIndex(_tab_index_for(w, b))
+    qapp.processEvents()
+    assert _glyph_on_line(w)
+    assert w._busy_glyph.pattern() == w._glyph_patterns[b.id]
+
+
+def test_busy_glyph_follows_scroll(shown, qapp, monkeypatch):
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    w._on_chunk(sess.id, "\n\n".join(f"段落 {i}" for i in range(200)))
+    w._flush_live_markdown()
+    sb = w._log.verticalScrollBar()
+    assert sb.maximum() > 0 and _glyph_on_line(w)
+    sb.setValue(0)
+    qapp.processEvents()
+    assert _glyph_on_line(w)
+    assert w._busy_glyph.geometry().top() >= w._log.viewport().height()   # 見えている所より下
+    sb.setValue(sb.maximum())
+    qapp.processEvents()
+    assert _glyph_on_line(w)
+
+
+@pytest.mark.parametrize("how", ["shortcut", "wheel", "narrow"])
+def test_busy_glyph_follows_zoom_and_wrap(shown, qapp, monkeypatch, how):
+    """Ctrl++（_zoom_in。描き直す）、Ctrl+ホイール（QTextBrowser の既定のズーム。描き直さず、短い文書では
+    スクロールバーも変わらない）、幅を狭めて折り返しが変わる、のどれでも印が印の行に付いていく。"""
+    w = shown
+    sess, turn, _ = _begin(w, monkeypatch)
+    w._on_chunk(sess.id, "折り返す本文 " * 12 if how == "narrow" else "短い本文")
+    w._flush_live_markdown()
+    assert w._log.verticalScrollBar().maximum() == 0   # 文書が短い
+    before = w._busy_glyph.geometry()
+    if how == "shortcut":
+        # offscreen の既定の文字は下限（_MIN_PT）より小さく、そのままでは押しても下限に頭打ちになる
+        w._log_base_pt = 10.0
+        for _ in range(4):
+            w._zoom_in()
+    elif how == "wheel":
+        w._log.zoomIn(4)
+    else:
+        w.resize(200, 500)
+    qapp.processEvents()   # 0ms のタイマー（_glyph_timer）
+    assert _glyph_on_line(w)
+    if how == "narrow":
+        assert w._busy_glyph.geometry().top() > before.top()
+    else:
+        assert w._busy_glyph.height() > before.height()
+
+
+def test_busy_glyph_pattern_changes_every_turn(shown, monkeypatch):
+    import random
+    from gui.busy_glyph import PATTERN_KEYS
+    w = shown
+    w._glyph_rng = random.Random(7)
+    seen = []
+    for text in ("一回目", "二回目", "三回目"):
+        sess, turn, _ = _begin(w, monkeypatch, text=text)
+        assert w._busy_glyph.pattern() == w._glyph_patterns[sess.id]
+        seen.append(w._glyph_patterns[sess.id])
+        w._on_done(sess.id)
+        assert w._busy_glyph.isHidden()   # ターンが終わったら隠す
+    assert all(k in PATTERN_KEYS for k in seen)
+    assert seen[0] != seen[1] and seen[1] != seen[2]
+
+
+def test_busy_glyph_absent_on_old_instance(shown, qapp, monkeypatch):
+    """Tier 1 の hot reload は __init__ を再実行しないので、印の属性を持たない旧インスタンスでも
+    ターンが回る（印が出ないだけ）。"""
+    w = shown
+    w._busy_glyph.hide()
+    for name in ("_busy_glyph", "_glyph_timer", "_glyph_patterns", "_glyph_rng"):
+        delattr(w, name)
+    sess, turn, _ = _begin(w, monkeypatch)
+    w._on_chunk(sess.id, "本文")
+    w._flush_live_markdown()
+    w._log.verticalScrollBar().setValue(0)
+    qapp.processEvents()
+    w._on_done(sess.id)
+    assert sess.messages[-1].content == "本文"

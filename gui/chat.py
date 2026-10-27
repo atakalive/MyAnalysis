@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import random
 import sys
 import time
 import uuid
@@ -16,7 +17,7 @@ from common.chat_dataset import chat_dataset_value
 from common.i18n import tr
 
 from PySide6.QtCore import (
-    Qt, QByteArray, QSignalBlocker, QThread, QTimer, QUrl, Signal,
+    Qt, QByteArray, QRect, QSignalBlocker, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QActionGroup, QColor, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
@@ -39,6 +40,7 @@ from llm_backend.base import (
 from llm_backend.unconfigured import NoEngineConfigured, UnconfiguredBackend
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
+from gui.busy_glyph import BusyGlyph, pick_pattern
 from gui.tabbar import MultiRowTabBar
 from gui.tools import TOOLS
 
@@ -547,6 +549,26 @@ class ChatWidget(QWidget):
         self._log.setOpenExternalLinks(True)
         self._log.setOpenLinks(False)
         self._log.anchorClicked.connect(self._on_anchor_clicked)
+        # 作業中の印（応答待ちのアニメ。pjdeck から移したもの）。表示中のチャットの進行中ターンの、文書の
+        # 最後の空の行（印の行）の左端に出す（_place_glyph）。viewport の子なので履歴のスクロールで一緒に動き、
+        # マウスは下の履歴に通す。形はチャットごとに覚え、ターンごとに選び直す（_glyph_patterns）。
+        # 下の _render_session・_apply_zoom から置き直すので、それより前に作る。
+        self._busy_glyph = BusyGlyph(self._log.viewport())
+        self._busy_glyph.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._busy_glyph.hide()
+        self._glyph_rng = random.Random()
+        self._glyph_patterns: dict[str, str] = {}
+        # スクロール・大きさ・文字の大きさが変わったら、Qt が組み直した後に置き直す。Ctrl+ホイールのズーム
+        # （QTextBrowser の既定）や折り返しの変化は、短い文書だとスクロールバーに出ず documentSizeChanged
+        # だけが来る。_log の文書は差し替えない（clear() の後も同じ layout）ので 1 回つなげばよい。
+        self._glyph_timer = QTimer(self)
+        self._glyph_timer.setSingleShot(True)
+        self._glyph_timer.setInterval(0)
+        self._glyph_timer.timeout.connect(self._place_glyph)
+        for sb in (self._log.verticalScrollBar(), self._log.horizontalScrollBar()):
+            sb.valueChanged.connect(self._schedule_glyph)
+            sb.rangeChanged.connect(self._schedule_glyph)
+        self._log.document().documentLayout().documentSizeChanged.connect(self._schedule_glyph)
 
         self._input = QPlainTextEdit()
         self._input.setPlaceholderText(tr("chat.input.placeholder", send_key=send_key_label()))
@@ -1322,8 +1344,10 @@ class ChatWidget(QWidget):
                 cursor.setPosition(turn.anchor)
                 cursor.setCharFormat(QTextCharFormat())
                 self._insert_markdown(cursor, body)
-                self._scroll_to_bottom()
+            self._end_with_glyph_line()   # 印の行（スクロールは印の行まで）
+            self._scroll_to_bottom()
         self._apply_search_highlight(sess)
+        self._place_glyph()
 
     # ----- chat search (Issue #108) -----
 
@@ -1922,6 +1946,7 @@ class ChatWidget(QWidget):
         self._session_backends.pop(sess.id, None)
         self._turn_notes.pop(sess.id, None)
         self._pending_remote.pop(sess.id, None)
+        getattr(self, "_glyph_patterns", {}).pop(sess.id, None)   # 作業中の印の形
         # The resume-token store is a side record keyed by session id, so unlike
         # `draft` (which lives on the session) it is not dropped with the session.
         self._forget_backend_session(sess)
@@ -2216,6 +2241,12 @@ class ChatWidget(QWidget):
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは
         # _log を触らないので anchor=None（_flush_live_markdown がガード済み）。
         turn.anchor = (self._log.document().characterCount() - 1) if is_active else None
+        if is_active:
+            self._end_with_glyph_line()   # 見出しの下の空の本文がそのまま印の行になる（足さない）
+        # 作業中の印の形（同じチャットの直前のターンと違う形。背景のチャットでも選ぶ）
+        patterns = getattr(self, "_glyph_patterns", None)
+        if patterns is not None:
+            patterns[sess.id] = pick_pattern(self._glyph_rng, patterns.get(sess.id))
         self._turns[sess.id] = turn
         worker.chunk.connect(self._on_chunk)
         worker.done.connect(self._on_done)
@@ -2562,6 +2593,65 @@ class ChatWidget(QWidget):
             self._stop_btn.setEnabled(False)
             self._status.setText("")
         self._update_send_controls()
+        self._place_glyph()   # 開始・Stop・タブ切替・完了の後に、作業中の印を出す・隠す
+
+    def _schedule_glyph(self, *_: object) -> None:
+        timer = getattr(self, "_glyph_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _place_glyph(self) -> None:
+        """作業中の印を印の行（表示中のチャットの進行中ターンの、文書の最後の空の行）の左端に置く。
+        ターンが無い・止めた・印の行が無いなら隠す。
+
+        印の行は文書だけのもの（発言には入れない）で、_start_turn・_flush_live_markdown・_render_session が
+        in-flight ブロックの後ろに書き（_end_with_glyph_line）、ターンの終わりの描き直し（_render_session）で
+        無くなる。置き直すのは、描いた直後（_flush_live_markdown・_render_session の最後）と
+        _update_turn_ui（開始・Stop・タブ切替・完了）は直接、スクロール・大きさ・文字の大きさの変化は
+        0ms のタイマー（_glyph_timer）。Stop の後も本文は流れるが、_glyph_rect が None を返すので隠れたまま。
+        getattr: Tier 1 の hot reload では __init__ を再実行しないので、印の無い旧インスタンスでは何もしない。
+        """
+        glyph = getattr(self, "_busy_glyph", None)
+        if glyph is None:
+            return
+        try:
+            key = getattr(self, "_glyph_patterns", {}).get(self._active.id)
+            if key is not None and key != glyph.pattern():
+                glyph.set_pattern(key)
+            rect = self._glyph_rect()
+            if rect is None or rect.width() <= 0 or rect.height() <= 0:
+                glyph.hide()
+                return
+            glyph.setGeometry(rect)
+            glyph.raise_()
+            glyph.show()
+        except Exception:  # noqa: BLE001 — スロットで落とさない
+            _logger.exception("failed to place the busy glyph")
+            glyph.hide()
+
+    def _glyph_rect(self) -> QRect | None:
+        """印の矩形（viewport の座標）。文書の最後のブロック（印の行）の cursorRect の高さを 1 辺とする正方形で、
+        左端もその cursorRect。表示中のチャットにターンが無い・止めた・最後のブロックが空でない（印の行が
+        無い）なら None。"""
+        turn = self._turns.get(self._active.id)
+        if turn is None or turn.anchor is None or turn.stopped:
+            return None
+        block = self._log.document().lastBlock()
+        if block.text():
+            return None
+        rect = self._log.cursorRect(QTextCursor(block))
+        return QRect(rect.left(), rect.top(), rect.height(), rect.height())
+
+    def _end_with_glyph_line(self) -> None:
+        """文書の最後のブロックを印の行（block の書式が既定の空の行）にする。最後のブロックが空で block の書式に
+        何も無ければ、それを使う（本文が空のときの anchor のブロックと、本文が表で終わったときに Qt が表の後ろに
+        置く空のブロック）。ほかは End に既定の書式の空のブロックを足す（リスト・引用・コード・見出しを
+        引き継がない）。ターン中に印の行まで選んでコピーすると末尾に改行が 1 つ付く（pjdeck と同じく許す）。"""
+        cursor = QTextCursor(self._log.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        block = cursor.block()
+        if block.text() or block.blockFormat().properties():
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat())
 
     def _update_send_controls(self) -> None:
         """送信ボタン（有効・ラベル・ツールチップ）・入力欄の薄字・待ち表示を、表示中のチャットに合わせる
@@ -2743,7 +2833,8 @@ class ChatWidget(QWidget):
         保留タイマーは発火時点のアクティブ turn を描く（タブ切替は _render_session が
         再 anchor するため自己修復）。anchor 未設定 / turn 無しなら no-op。in-flight
         ブロックが _log 末尾である前提（スピナーは _log に書かない。_turn_notes は _render_session が
-        in-flight ブロックより前に描き、応答中の案内は _status_note に出す）に依存。"""
+        in-flight ブロックより前に描き、応答中の案内は _status_note に出す。末尾の印の行は
+        in-flight ブロックの一部で、この flush と _render_session が自分で書く）に依存。"""
         turn = self._turns.get(self._active.id)
         if turn is None or turn.anchor is None:
             return
@@ -2766,8 +2857,10 @@ class ChatWidget(QWidget):
         cursor.setCharFormat(QTextCharFormat())
         if body.strip():
             self._insert_markdown(cursor, body)   # 完了時 _append_block(markdown=True) と同一の描画関数
+        self._end_with_glyph_line()   # 本文の後ろに印の行（次の flush で一緒に消して置き直す）
         turn.rendered = body      # 直近描画済みの簡略本文（無変化スキップ判定の基準）
         self._scroll_to_bottom()
+        self._place_glyph()
 
     def _append_system_line(self, text: str) -> None:
         doc = self._log.document()
