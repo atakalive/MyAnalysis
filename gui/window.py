@@ -3,7 +3,7 @@ import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, Qt, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -59,6 +59,17 @@ class _FloatStub(QWidget):
 
 def _is_stub(w: QWidget | None) -> bool:
     return bool(getattr(w, "is_float_stub", False))
+
+
+def _step_current(w, step: int) -> None:
+    """w（QTabWidget / QTabBar）の選択を step 方向へ巡回する。無効なタブ（#56 の位置スタブ）は飛ばす。"""
+    n = w.count()
+    i = w.currentIndex()
+    for _ in range(n - 1):
+        i = (i + step) % n
+        if w.isTabEnabled(i):
+            w.setCurrentIndex(i)
+            return
 
 
 class _DatasetGroup(QWidget):
@@ -235,6 +246,17 @@ class ToolWindow(QMainWindow):
         self._chat_search_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Find))
         self._chat_search_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self._chat_search_action.triggered.connect(self._open_chat_search)
+        # タブの前後切替（Issue #121）。タブバー既定の ←/→ はバーにフォーカスがあるときしか
+        # 効かないので、チャット検索と同じくアプリショートカットにする。Ctrl+←/→ は解析タブ
+        # （編集中のテキスト欄では Qt が単語移動を優先し、ここは発火しない）、Alt+←/→ は
+        # データセット。lambda はメソッドを呼出時に引くので Tier 1 の差し替えも効く。
+        for seq, slot in (("Ctrl+Right", lambda: self._cycle_tab(1)),
+                          ("Ctrl+Left", lambda: self._cycle_tab(-1)),
+                          ("Alt+Right", lambda: self._cycle_dataset(1)),
+                          ("Alt+Left", lambda: self._cycle_dataset(-1))):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(slot)
         self._meeting_share_action = self._view_menu.addAction(tr("menu.view.meeting_share"))
         self._meeting_share_action.triggered.connect(self._open_meeting_share)
 
@@ -456,6 +478,22 @@ class ToolWindow(QMainWindow):
     def _current_group(self) -> _DatasetGroup | None:
         w = self._stack.currentWidget()
         return w if isinstance(w, _DatasetGroup) else None
+
+    def _cycle_tab(self, step: int) -> None:
+        """前面データセットの解析タブを step 方向へ巡回する（Ctrl+←/→、Issue #121）。"""
+        grp = self._current_group()
+        if grp is not None:
+            _step_current(grp.tabs, step)
+
+    def _cycle_dataset(self, step: int) -> None:
+        """データセットを step 方向へ巡回する（Alt+←/→、Issue #121）。
+
+        スイッチャーの選択を動かすだけで、クリックと同じ currentChanged →
+        _on_switcher_changed → _select_dataset_group の経路を通る。データセットの
+        無いグループはスイッチャーに載らないので対象外。それが前面のときは、
+        スイッチャーで選択表示されているデータセットから隣へ進む。
+        """
+        _step_current(self._switcher, step)
 
     def _update_switcher_visibility(self) -> None:
         # Hide the switcher when ≤1 dataset is open (single-dataset look).
