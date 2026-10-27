@@ -342,3 +342,111 @@ def test_selected_tab_does_not_paint_over_lower_rows(qapp, dark_theme):
             lum = _brightest(img, bar.tabRect(first_of_row[lower]))
             assert lum > ref - 40, (row, lower, lum, ref)
     host.deleteLater()
+
+
+def test_current_tab_frame(qapp, dark_theme):
+    """The selected tab gets a 1px frame in the text colour on its top, left and
+    right; the bottom stays open so the tab joins its page, and the other tabs
+    get none (MultiRowTabBar._draw_current_frame)."""
+    from PySide6.QtGui import QPalette
+
+    from gui.tabbar import MultiRowTabBar
+    bar = MultiRowTabBar()
+    bar.addTab("TabLabel0")
+    bar.addTab("TabLabel1")
+    bar.resize(400, 40)
+    bar.show()
+    fg = bar.palette().color(QPalette.ColorRole.WindowText).rgb()
+    for cur in (0, 1):
+        bar.setCurrentIndex(cur)
+        qapp.processEvents()
+        img = bar.grab().toImage()
+        r, other = bar.tabRect(cur), bar.tabRect(1 - cur)
+        mid = r.center()
+        assert img.pixelColor(mid.x(), r.top()).rgb() == fg
+        assert img.pixelColor(r.left(), mid.y()).rgb() == fg
+        assert img.pixelColor(r.right() - 1, mid.y()).rgb() == fg
+        assert img.pixelColor(mid.x(), r.bottom()).rgb() != fg      # bottom stays open
+        assert img.pixelColor(other.center().x(), other.top()).rgb() != fg
+    bar.deleteLater()
+
+
+def test_current_tab_frame_survives_fractional_scaling(qapp, dark_theme):
+    """At 125%/150%/175% with the bar starting mid-pixel, the edges that touch the
+    bar's own edge (the top row's top, the leftmost tab's left) still show. A pen
+    line would put half its width outside the widget's clip and lose them."""
+    import math
+
+    from PySide6.QtGui import QImage, QPalette
+    from PySide6.QtWidgets import QWidget
+
+    from gui.tabbar import MultiRowTabBar
+    host = QWidget()
+    host.resize(460, 120)
+    bar = MultiRowTabBar(host)
+    bar.addTab("TabLabel0")
+    bar.addTab("TabLabel1")
+    host.show()
+    # narrower than both tabs side by side, so the second one wraps to the left
+    # edge of the second row
+    narrow = bar.tabSizeHint(0).width() + bar.tabSizeHint(1).width() // 2
+    fg = bar.palette().color(QPalette.ColorRole.WindowText)
+
+    def sides(dpr, x, y, width, cur):
+        bar.setCurrentIndex(cur)
+        bar.setGeometry(x, y, width, 80)
+        qapp.processEvents()
+        img = QImage(math.ceil(460 * dpr), math.ceil(120 * dpr), QImage.Format.Format_RGB32)
+        img.setDevicePixelRatio(dpr)
+        host.render(img)
+        r = bar.tabRect(cur).translated(x, y)
+        cx, cy = int((r.center().x() + 0.5) * dpr), int((r.center().y() + 0.5) * dpr)
+
+        def band(lo):       # device pixels covered by logical pixel column/row lo
+            return range(math.floor(lo * dpr), math.ceil((lo + 1) * dpr))
+
+        return {
+            "top": any(img.pixelColor(cx, v) == fg for v in band(r.top())),
+            "left": any(img.pixelColor(u, cy) == fg for u in band(r.left())),
+            "right": any(img.pixelColor(u, cy) == fg for u in band(r.right() - 1)),
+            "bottom": any(img.pixelColor(cx, v) == fg for v in band(r.bottom())),
+        }
+
+    drawn = {"top": True, "left": True, "right": True, "bottom": False}
+    for dpr in (1.25, 1.5, 1.75):
+        for x in range(4):
+            for y in range(19, 24):
+                for width, cur in ((400, 0), (400, 1), (narrow, 1)):
+                    assert sides(dpr, x, y, width, cur) == drawn, (dpr, x, y, width, cur)
+                assert bar.tabRect(1).left() == 0 and bar.tabRect(1).top() > 0
+    host.deleteLater()
+
+
+def test_disabled_current_tab_has_no_frame(qapp, dark_theme):
+    """Floating a group's only tab leaves its disabled position stub (#56) as the
+    current tab. It cannot be clicked, so it must not look selected."""
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QWidget
+
+    host, bar = _make_bar(qapp, 1, labels=["WWWWWW"], width=400)
+    host.show()
+    qapp.processEvents()
+    host.removeTab(0)                            # same steps as ToolWindow.float_tab
+    si = host.insertTab(0, QWidget(), "WWWWWW")
+    host.setTabEnabled(si, False)
+    qapp.processEvents()
+    assert bar.currentIndex() == 0 and not bar.isTabEnabled(0)
+    fg = bar.palette().color(QPalette.ColorRole.WindowText).rgb()
+    r = bar.tabRect(0)
+
+    def top_left():
+        img = bar.grab().toImage()
+        mid = r.center()
+        return (img.pixelColor(mid.x(), r.top()).rgb() == fg,
+                img.pixelColor(r.left(), mid.y()).rgb() == fg)
+
+    assert top_left() == (False, False)
+    host.setTabEnabled(0, True)                  # the same tab, enabled, is framed
+    qapp.processEvents()
+    assert top_left() == (True, True)
+    host.deleteLater()

@@ -1,6 +1,7 @@
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QMouseEvent,
+    QPainter,
     QPaintEvent,
     QPalette,
     QResizeEvent,
@@ -187,6 +188,26 @@ class MultiRowTabBar(QTabBar):
             painter.setClipRect(QRect(0, r.top(), self.width(), r.height()))
             painter.drawControl(QStyle.ControlElement.CE_TabBarTab, opt)
             painter.restore()
+            # 無効タブ（位置スタブ #56）は押せないので、選択中のままでも枠を付けない
+            # （グループの唯一のタブをフロートすると、スタブが選択中のまま残る）。
+            if i == cur and self.isTabEnabled(i):
+                self._draw_current_frame(painter, r)
+
+    def _draw_current_frame(self, painter: QPainter, rect: QRect) -> None:
+        """選択中のタブの上と左右に、文字色の 1px の帯を塗る（下は開けて中身とつなげる）。
+
+        線ではなく矩形の内側の帯にする。ペンの線は太さの半分が矩形の外に出るので、表示倍率が
+        125%・150% などでバーの位置が画素の途中になると、バーの端に掛かる線（1 段目の上、
+        バーの左端のタブの左）がウィジェットの切り抜きの外に落ちて消える。"""
+        r = rect.adjusted(0, 0, -1, 0)
+        color = self.palette().color(QPalette.ColorRole.WindowText)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for strip in (QRect(r.left(), r.top(), r.width(), 1),
+                      QRect(r.left(), r.top(), 1, r.height()),
+                      QRect(r.right(), r.top(), 1, r.height())):
+            painter.fillRect(strip, color)
+        painter.restore()
 
     # --- 再レイアウトの起点（いずれも super() を先に呼ぶ）---------------
     def resizeEvent(self, event: QResizeEvent) -> None:
