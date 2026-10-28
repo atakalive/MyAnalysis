@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -77,6 +78,12 @@ _LIVE_MD_MAX_INTERVAL_MS = 600    # 長文時に適応的に伸ばす際の上�
 # top of each widget's base size; clamping happens on the effective size so the
 # user can immediately step back from a bound.
 _MIN_PT, _MAX_PT = 6.0, 48.0
+
+
+def send_key_label() -> str:
+    """送信のキーの表記（入力欄の薄字）。macOS では Qt が Ctrl を ⌘ に読み替える（eventFilter の
+    ControlModifier は ⌘ の押下）。"""
+    return "⌘Return" if sys.platform == "darwin" else "Ctrl+Enter"
 
 
 def _load_chat_zoom() -> int:
@@ -542,7 +549,7 @@ class ChatWidget(QWidget):
         self._log.anchorClicked.connect(self._on_anchor_clicked)
 
         self._input = QPlainTextEdit()
-        self._input.setPlaceholderText(tr("chat.input.placeholder"))
+        self._input.setPlaceholderText(tr("chat.input.placeholder", send_key=send_key_label()))
         self._input.setMinimumHeight(40)
         self._input.installEventFilter(self)
         self._log.installEventFilter(self)   # Esc で検索ハイライトを消す（_input 生成後に入れる）
@@ -2564,13 +2571,16 @@ class ChatWidget(QWidget):
         self._send_btn.setEnabled(not (turn is not None and turn.stopped))
         kind = self._send_kind(sess)
         if kind == "add":
-            label, hint, tip = (tr("chat.btn.add"), tr("chat.input.placeholder_add"),
+            label, hint, tip = (tr("chat.btn.add"),
+                                tr("chat.input.placeholder_add", send_key=send_key_label()),
                                 tr("chat.tip.add"))
         elif kind == "queue":
-            label, hint, tip = (tr("chat.btn.queue"), tr("chat.input.placeholder_queue"),
+            label, hint, tip = (tr("chat.btn.queue"),
+                                tr("chat.input.placeholder_queue", send_key=send_key_label()),
                                 tr("chat.tip.queue"))
         else:
-            label, hint, tip = tr("chat.btn.send"), tr("chat.input.placeholder"), ""
+            label, hint, tip = (tr("chat.btn.send"),
+                                tr("chat.input.placeholder", send_key=send_key_label()), "")
         self._send_btn.setText(label)
         self._input.setPlaceholderText(hint)
         self._send_btn.setToolTip(tip)

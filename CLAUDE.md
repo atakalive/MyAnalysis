@@ -56,7 +56,7 @@ Settings specific to one dataset live in `myanalysis.toml` at the top of that da
 - Exploratory analysis output (figures, code snippets, notes/reports, intermediates) goes to the dataset's `work_dir` (default `<dataset_dir>/_work`, configurable per dataset via `myanalysis.toml`). Created on first save by `common.explore.save_fig()` / `save_code()` / `save_text()`.
 - `.env` is gitignored. It holds secrets and env overrides, loaded into the GUI process at startup by `common/env.py` (existing env vars win) and inherited by agent subprocesses: LLM backend (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `LLM_BACKEND`, `CLAUDE_CODE_BIN`, `CODEX_BIN`), R2 config sync (`R2_*`), meeting share (`RELAY_ADMIN_KEY`, `CLOUDFLARE_TUNNEL_NAME` / `CLOUDFLARE_TUNNEL_HOSTNAME` / `CLOUDFLARE_TUNNEL_CRED`, `CLOUDFLARED_BIN`, `RELAY_LAN_HOST`, `RELAY_LAN_PORT`, `RELAY_VIEW_MAX_MP`) and the sync-mount write strategy (`MYANALYSIS_WRITE_STRATEGY`, `MYANALYSIS_FS_OVERRIDE`, `MYANALYSIS_FORCE_FRAGILE`). pi does not read `PI_API_KEY` (use provider-specific keys). Copy `.env.example` to get started. `MYANALYSIS_CHAT_DATASET` and `MYANALYSIS_AGENT_STAGE` are set by the GUI for agent subprocesses only — never put them in `.env`.
 - Dataset registration (per-host paths) lives in the git-ignored `datasets.local.json`, **not** in tracked source — don't commit real registration data (names, hostnames, paths). Other non-secret config may still be committed.
-- Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF.
+- Windows `.bat`/`.cmd` files **must use CRLF line endings** — LF-only batch files break `cmd.exe` parsing (especially `if (...)` blocks) and fail to launch. `.gitattributes` pins `*.bat`/`*.cmd` to `eol=crlf`; keep that and don't let an editor save them as LF. Conversely `*.sh` (`run.sh`, the macOS / Linux launcher) is pinned to `eol=lf` and must keep its executable bit (`git update-index --chmod=+x`).
 
 ## LLM backends — `llm_backend/`
 
@@ -288,7 +288,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
   `setup-token` — the user pastes the token into the dialog. Storage:
   `~/.myanalysis/secrets/claude_sub.bin`, outside the repo (a path resolving inside the repo
   is refused), not written on a synced/network mount (apparent dir and link-resolved dir both
-  checked; on POSIX without a readable `/proc/mounts` it cannot be judged, so not written);
+  checked; on POSIX without a readable `/proc/mounts` it cannot be judged, so not written — always the case on macOS, so claude-sub cannot be used there);
   `~` is assumed PC-local. Contents are a DPAPI (CurrentUser, no entropy) blob on Windows;
   elsewhere plaintext 0600 in a 0700 dir, for tests/dev only (Windows is the supported
   platform). The token is per PC (DPAPI only decrypts for this user on this PC). Claude's
@@ -379,7 +379,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   検出は `python -m llm_bridge doctor`（`check_local_state`。`--repair` は削除＝次回書込で再生成）。
 - ロックファイルはマウント外（`data/locks/`）へ自動マッピングされる（`common/filelock.py`）。
   マウント上では排他が効いている保証がなく、同期チャーンも生むため。PC 間排他は元々成立しない。
-- バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` と claude / codex / pi の各バックエンドが設定。`python -m export` は `sys.pycache_prefix` を自分で設定）。
+- バイトコードは `PYTHONPYCACHEPREFIX` でローカルへ退避する（`run.bat` / `run.sh` と claude / codex / pi の各バックエンドが設定。`python -m export` は `sys.pycache_prefix` を自分で設定）。
   マウント上の `.py` を import すると CPython が `__pycache__/*.pyc` を tmp+rename で書き、
   同じ失敗経路に乗る（実測で rename 失敗の 16%）。
 - **claude エンジンでは、チャットエージェントの `Write`/`Edit` がマウント上で機械的に拒否される**（PreToolUse hook →
@@ -388,6 +388,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   例外は `analysis.draft.py` — draft は Write/Edit を許可する（`apply-analysis` が strip /
   `ast.parse` / `build_tab` 束縛の 3 ゲートを通してからしか昇格させないので、draft が
   0 バイト化しても `analysis.py` に伝播しない）。hook は内部エラー時に必ず fail-open する。
+  既知の制約: Git Bash の無い Windows では Claude Code が hook を PowerShell で実行し、`"<python>" -m llm_bridge guard-write` を解釈できずに失敗するので（hook の失敗は書込を止めない）、拒否されない。macOS も fs_kind がいつも local を返すので拒否されない。
   stage（`data/agent_stage/` 配下）は、`data/` と `data/agent_stage` がリンクを経ずにローカルの FS（fs_kind で fragile でない）にあると確かめられたときだけ案内する。hook は stage を特別扱いしない（ローカルなので通常の FS 判定で許可される）。`MYANALYSIS_FORCE_FRAGILE` などで repo も fragile と判定される環境では stage を案内せず、従来の `content` の案内に戻る。
 
 診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`

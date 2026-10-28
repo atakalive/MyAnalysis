@@ -25,10 +25,12 @@ rclone などのマウントでは、「一時ファイルに書いて置き換�
 
 | 環境変数 | 意味 |
 |---|---|
-| `MYANALYSIS_FS_OVERRIDE` | 判定の上書き。例 `M:=fragile,C:\mnt\sync=fragile`（前方一致） |
+| `MYANALYSIS_FS_OVERRIDE` | 判定の上書き。例 `M:=fragile,C:\mnt\sync=fragile`（前方一致）。macOS / Linux では絶対パスで書く（例 `/Volumes/<名前>=fragile`。大文字・小文字を区別し、`~` は展開しない） |
 | `MYANALYSIS_WRITE_STRATEGY` | `auto`（既定）/ `inplace` / `replace`（旧方式。rclone では危険） |
 | `MYANALYSIS_FORCE_FRAGILE` | `1` で全パスを fragile として扱う |
-| `PYTHONPYCACHEPREFIX` | Python のキャッシュをローカルに置く。**`.env` では効かない**ので、起動前に OS / シェルで設定する（`run.bat` は自動で設定する）。`python tool.py` を手で実行するときは自分で設定するか、`PYTHONDONTWRITEBYTECODE=1`（または `python -B`）。`python -m export` は自分でローカルに置くので要らない |
+| `PYTHONPYCACHEPREFIX` | Python のキャッシュをローカルに置く。**`.env` では効かない**ので、起動前に OS / シェルで設定する（`run.bat`・`run.sh` は自動で設定する）。`python tool.py` を手で実行するときは自分で設定するか、`PYTHONDONTWRITEBYTECODE=1`（または `python -B`）。`python -m export` は自分でローカルに置くので要らない |
+
+macOS では `~/.zprofile`、Linux ではシェルの設定ファイル（bash なら `~/.bashrc`）に `export MYANALYSIS_FORCE_FRAGILE=1` のように書き、新しく開いたターミナルから `run.sh` で起動する（GUI と、そのターミナルで実行する CLI の両方に効く）。
 
 ## doctor（点検と修復）
 
@@ -49,7 +51,7 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 
 | 症状 | 主な原因 | 対処 |
 |---|---|---|
-| `run.bat` でウィンドウが出ない | 依存不足・Python が古い・登録簿の破損 | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`） |
+| `run.bat` でウィンドウが出ない | 依存不足・Python が古い・登録簿の破損 | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。macOS / Linux の `./run.sh` では、ダイアログの代わりにターミナルに出る |
 | チャットの先頭に「全体設定のバックエンドを作れませんでした」と出る | `[backend].name` / `LLM_BACKEND` の値が不正（エンジン未設定として扱われ、何も送らない） | 正しい値（`claude` / `codex` / `pi` / `openai` / `mock`）に直すか、設定 → バックエンド/モデル設定… で選び直す（`.env` の `LLM_BACKEND` は GUI の選択より優先されるので、そこが原因なら `.env` を直す） |
 | GUI の起動時に登録簿の破損を知らせるダイアログが出る / CLI が `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
 | チャットに「AI エンジンが選ばれていないため送信できません」と出る | エンジン未設定、または `llm_backend/config.toml` の構文が壊れていて、`.env` にも `LLM_BACKEND` / `OPENAI_BASE_URL` が無い（このとき何も送らない） | [エンジンを設定](../README_ja.md#ai-エンジン)（`config.toml` が壊れていれば **適用** で `.bak` に退避して作り直される） |

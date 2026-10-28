@@ -8,13 +8,15 @@
 
 | 利用方法（エンジン） | `[backend].name` | `models.toml` のセクション | 解析 | 必要なもの |
 |---|---|---|---|---|
-| Claude（VS Code 同梱エンジン）**推奨** | `claude`（`bin` 空） | `[claude_code]` | ○ | VS Code / Cursor / Windsurf の Claude Code 拡張にサインイン（見つからなければ PATH 上の `claude` を使う）。Windows では Git for Windows を推奨（MyAnalysis のエージェントへの指示は Bash ツールを前提にしている） |
-| Claude（PATH の CLI） | `claude`（`bin` 指定） | `[claude_code]` | ○ | `npm i -g @anthropic-ai/claude-code` → `claude` でログイン |
-| Claude（サブのアカウント） | `claude-sub` | `[claude_sub]` | ○ | 2 つ目の Claude のアカウントで `claude setup-token` を実行して作った長期トークン（ダイアログに貼る）。実行ファイルはメインと同じ |
+| Claude（VS Code 同梱エンジン）**推奨** | `claude`（`bin` 空） | `[claude_code]` | ○ | VS Code / Cursor / Windsurf の Claude Code 拡張にサインイン（見つからなければ PATH 上の `claude` を使う）。有料プラン（Pro / Max / Team / Enterprise）のアカウント。Windows では Git for Windows が要る（MyAnalysis のエージェントへの指示は Bash ツールを前提にしている。Git Bash が無いと Claude Code はフックを PowerShell で実行して失敗し、同期・ネットワークドライブ上への Write/Edit を止める仕組みが働かない） |
+| Claude（PATH の CLI） | `claude`（`bin` 指定） | `[claude_code]` | ○ | 公式インストーラー（Windows は PowerShell で `irm https://claude.ai/install.ps1 \| iex`、macOS / Linux は `curl -fsSL https://claude.ai/install.sh \| bash`。Node.js は要らない）か `npm i -g @anthropic-ai/claude-code` → `claude` でログイン。`bin` が空でも、拡張が見つからなければ PATH 上の `claude` を使う |
+| Claude（サブのアカウント） | `claude-sub` | `[claude_sub]` | ○ | 2 つ目の Claude のアカウントで `claude setup-token` を実行して作った長期トークン（ダイアログに貼る）。実行ファイルはメインと同じ。macOS では使えない（→ [エンジン別の補足](#エンジン別の補足)） |
 | Codex CLI（OpenAI） | `codex` | `[codex]` | ○ | `npm i -g @openai/codex` → `codex login` |
 | pi コーディングエージェント | `pi` | `[pi]` | ○ | Node.js 22.19+、pi 0.67.4 以上、`npm i -g @earendil-works/pi-coding-agent` → `pi` を起動して `/login`。Windows では Git Bash |
 | OpenAI 互換 HTTP | `openai` | `[openai-compat]` | ×（GUI 操作のみ） | `.env` の `OPENAI_BASE_URL` 等 |
 | モック（動作確認） | `mock` | — | × | 不要 |
+
+macOS で nodejs.org のインストーラーの Node.js を使うと、`npm i -g`（Codex・pi の導入、状況ウィンドウの **インストール / 更新**）が権限の不足（`EACCES`）で失敗することがある。Homebrew（`brew install node`）か、nvm などのバージョン管理ツールで入れた Node.js を使う。
 
 ## 設定のしかた
 
@@ -104,6 +106,7 @@
   - トークンは、サブのアカウントでログインした端末で `claude setup-token` を実行して作り、ダイアログに貼る。MyAnalysis はログインも `setup-token` も走らせない。
   - 置き場は `~/.myanalysis/secrets/claude_sub.bin`。DPAPI で暗号化し、リポジトリ・同期の外に置く。暗号はこの PC のこの Windows の利用者でしか戻せないので、トークンは PC ごとに入れる。
   - `~` は PC ローカルである前提。置き場が同期・ネットワークのマウントの上なら書かない（確かめられないときも書かない）。
+  - 対応は Windows。macOS では置き場がマウントの上でないかを確かめられない（`/proc/mounts` が無い）ので、トークンを保存せず、Claude サブは使えない。Linux では暗号化せずに置く（権限 0600）。
   - トークンが無い・読めないと、送信・疎通確認・モデル取得がエラーになる。メインのアカウントでは答えない。
   - 全体の既定を Claude サブにすると、R2 同期先の PC でもサブになるが、トークンはその PC で入れるまでエラーになる。
   - 運用の設定（`bin`・`cwd`・`permission_mode` など）は `[claude_code]` を引き継ぎ、`config.toml` の `[claude_sub]` で上書きできる。モデル・effort は `models.toml` の `[claude_sub]` で別に持つ。

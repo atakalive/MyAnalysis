@@ -17,7 +17,7 @@
 
 1. `.env` に `RELAY_ADMIN_KEY` を設定する（任意の長い秘密文字列。例: `python -c "import secrets; print(secrets.token_urlsafe(32))"` の出力）。空なら共有機能が無効になるだけ。
 2. 外部から参加してもらうには、Cloudflare の named tunnel が必要。Cloudflare の無料アカウントと、ネームサーバーを Cloudflare に向けた**自分のドメイン**が要る（trycloudflare の一時トンネルには対応していない）。
-   - cloudflared を入れる（Windows: `winget install cloudflare.cloudflared`）。
+   - cloudflared を入れる（Windows: `winget install cloudflare.cloudflared`、macOS: `brew install cloudflared`）。
    - `cloudflared tunnel login` → `cloudflared tunnel create <トンネル名>` → `cloudflared tunnel route dns <トンネル名> <ホスト名>`
    - `.env` に `CLOUDFLARE_TUNNEL_NAME=<トンネル名>` と `CLOUDFLARE_TUNNEL_HOSTNAME=<ホスト名>`（任意で `CLOUDFLARED_BIN`, `CLOUDFLARE_TUNNEL_CRED`）。
 3. `.env` は起動時に一度だけ読むので、編集したらアプリを再起動する。
@@ -40,7 +40,7 @@
 - 共有ウィンドウで、**開始する前に**「LAN リンクも出す（直結・http）」を ON にし、「ホスト IP」を確認する（自動検出値は必ず確かめる）。開始後に LAN を追加するには「停止」→「開始」（新しいリンクになる）。ホスト IP が空のまま開始すると、環境変数 `RELAY_LAN_HOST`（`.env` に書いた値を含む）があればその値を使い、それも空なら LAN リンクなしで開始し、ログ欄に知らせる。
 - **LAN 参加リンクコピー** でリンク全体を渡す（トークン単体では使えない）。
 - `.env` の `RELAY_LAN_HOST`（IP の初期値）、`RELAY_LAN_PORT`（固定ポート。使用中なら開始に失敗する）。
-- Windows ファイアウォールでの許可、参加者側ブラウザの「HTTPS のみ」モードの解除が必要な場合がある。
+- Windows ファイアウォールでの許可（macOS でファイアウォールを有効にしているなら、Python の受信接続の許可）、参加者側ブラウザの「HTTPS のみ」モードの解除が必要な場合がある。
 - 外部リンクが失敗しても、「外部リンク使用不可（LAN リンクのみ有効）」として LAN だけで続けられる。
 
 ## コマンドから操作する

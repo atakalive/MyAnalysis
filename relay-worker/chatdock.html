@@ -141,7 +141,7 @@
       <div id="chatlog"></div>
       <div id="status"></div>
       <div id="inputrow">
-        <textarea id="msg" rows="5" placeholder="Message… (Ctrl+Enter to send, Enter for newline)"></textarea>
+        <textarea id="msg" rows="5" placeholder="Message… (Ctrl+Enter, or ⌘+Enter on a Mac, to send; Enter for newline)"></textarea>
         <div id="inputbar">
           <span id="genIndicator" style="display:none"></span>
           <button id="sendBtn">Send</button>
@@ -179,7 +179,7 @@ const T = {
         newChatNullDs: "Pick a dataset first — chats here are not saved",
         newChatPending: "Creating a new chat…",
         newChatTimeout: "The new chat did not appear.",
-        msgPlaceholder: "Message… (Ctrl+Enter to send, Enter for newline)",
+        msgPlaceholder: "Message… (Ctrl+Enter, or ⌘+Enter on a Mac, to send; Enter for newline)",
         viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
@@ -199,7 +199,7 @@ const T = {
         newChatNullDs: "先にデータセットを選んでください（ここのチャットは保存されません）",
         newChatPending: "新規チャットを作成中…",
         newChatTimeout: "新規チャットが作成されませんでした。",
-        msgPlaceholder: "メッセージ…（Ctrl+Enter で送信、Enter で改行）",
+        msgPlaceholder: "メッセージ…（Ctrl+Enter（Mac は ⌘+Enter）で送信、Enter で改行）",
         viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 

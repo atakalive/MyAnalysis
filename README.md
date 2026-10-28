@@ -16,27 +16,46 @@ The detailed documents under `docs/` are available in Japanese only.
 
 ## QuickStart
 
-**Prerequisites**: Windows 11 / Python 3.11 or later (tested with 3.12; the python.org build) / Git for Windows (for clone and update, and for Claude Code's Bash tool) / the Claude Code extension installed in VS Code and signed in. To use another engine → [AI engines](#ai-engines)
+**Prerequisites**:
+- **OS**: Windows 11, or macOS (untested). For Linux, read [macOS / Linux](#macos--linux).
+- **Python 3.11 or later**: on Windows, the python.org build (tested with 3.12). On macOS, the python.org build or Homebrew (the `python3` that comes with macOS is 3.9 and cannot be used).
+- **Git**:
+  - Windows: Git for Windows. Besides clone and update, it provides Git Bash, which Claude Code runs commands with. Without Git Bash, the safeguard that stops the agent from writing files directly on sync or network drives does not work.
+  - macOS: run `xcode-select --install` in Terminal and wait for the installation to finish (it installs Git).
+- **Claude Code**: signed in with an account on a paid plan (Pro / Max / Team / Enterprise). The free plan cannot use it. Either the Claude Code extension for VS Code, or the `claude` command installed with the official installer (→ [AI engines](#ai-engines)). To use another engine, also see [AI engines](#ai-engines).
 
 > [!WARNING]
 > The agent runs commands with your user privileges, without asking for confirmation. Your requests and the data it reads are sent to the engine's provider. → [Security](#security)
 
-1. **Install**: run in Command Prompt (Win+R → `cmd`). Put it somewhere that is not a sync folder such as OneDrive.
+1. **Install**: put it somewhere that is not a sync folder such as OneDrive or iCloud.
+   - **Windows**: run in a Command Prompt (Win+R → `cmd`) opened after installing Python and Git (a window that was already open before cannot find `git` or `py`).
 
-   ```bat
-   cd /d %USERPROFILE%
-   git clone https://github.com/atakalive/MyAnalysis.git
-   cd MyAnalysis
-   py -3 -m venv .venv
-   .venv\Scripts\python -m pip install -r requirements.txt
-   ```
+     ```bat
+     cd /d %USERPROFILE%
+     git clone https://github.com/atakalive/MyAnalysis.git
+     cd MyAnalysis
+     py -3 -m venv .venv
+     .venv\Scripts\python -m pip install -r requirements.txt
+     ```
 
-   If `py` is missing (Microsoft Store Python), use `python -m venv .venv` instead.
+     If `py` is missing (Microsoft Store Python), use `python -m venv .venv` instead.
+   - **macOS**: run in Terminal (Applications → Utilities). First check with `python3 --version` that it is 3.11 or later (if it says 3.9, check that the Terminal was opened after installing Python, or call it with the version, such as `python3.12`).
 
-2. **Launch**: double-click `run.bat` in the `MyAnalysis` folder (no need to activate the venv). The UI starts in English (to switch to Japanese: **Settings → Language / 言語 → 日本語**). If no window appears → [Troubleshooting](#troubleshooting)
-3. **AI engine**: open **Settings → Backend / model settings…** and choose **Claude (VS Code bundled engine)** under "Engine (how to run)". The model field can be left empty. Press **Connectivity check**; when it shows `OK (…s / <model name>)`, press **Apply**. If it shows "Failed", check that you are signed in to the Claude Code extension in VS Code. On the second and later PCs that use [R2 config sync](docs/config_sync_ja.md), first read [the section for the second and later PCs](docs/config_sync_ja.md#2-台目以降).
+     ```sh
+     cd ~
+     git clone https://github.com/atakalive/MyAnalysis.git
+     cd MyAnalysis
+     python3 -m venv .venv
+     .venv/bin/python -m pip install -r requirements.txt
+     ```
+
+     - Do not put it under `~/Desktop` or `~/Documents` if iCloud syncs "Desktop & Documents", or under `~/Library/CloudStorage` (where cloud storage apps such as OneDrive and Dropbox keep their folders). Starting with `cd ~` as above puts it directly under your home folder (`~/MyAnalysis`).
+     - If `scutil --get HostName` says `not set`, fix the host name with `sudo scutil --set HostName <name>` (letters, digits, and `-`) before registering datasets. Datasets are registered per host name, and on a Mac without a fixed host name it can change with the network, so elsewhere a dataset shows "No path on this host".
+
+2. **Launch**: on Windows, double-click `run.bat` in the `MyAnalysis` folder (no need to activate the venv). On macOS, run `./run.sh` in the same Terminal (from then on, `~/MyAnalysis/run.sh` in Terminal). The app runs inside the Terminal, so keep the Terminal open while you use it. If it fails to start, the reason is shown in the Terminal. The UI starts in English (to switch to Japanese: **Settings → Language / 言語 → 日本語**). If no window appears → [Troubleshooting](#troubleshooting)
+3. **AI engine**: open **Settings → Backend / model settings…** and choose **Claude (VS Code bundled engine)** under "Engine (how to run)". The model field can be left empty. Press **Connectivity check**; when it shows `OK (…s / <model name>)`, press **Apply**. If it shows "Failed", check that you are signed in to the Claude Code extension in VS Code (or the `claude` command) with an account on a paid plan. On the second and later PCs that use [R2 config sync](docs/config_sync_ja.md), first read [the section for the second and later PCs](docs/config_sync_ja.md#2-台目以降).
 4. **Dataset**: choose the folder with your measurement data in **File → New dataset**. The folder name is filled in as the name; change it if it contains symbols or starts with `-` (→ [Datasets](#datasets)). When registration finishes, the dataset opens.
-5. **Ask**: type something like "describe what is in this dataset" or "plot the relationship between `<column A>` and `<column B>`" in the chat pane on the right and press **Ctrl+Enter**. A reply can take from tens of seconds to a few minutes, and figures open in tabs on the left. If you see `[error: …]` (`[エラー: …]` in the Japanese UI) → [Troubleshooting](#troubleshooting)
+5. **Ask**: type something like "describe what is in this dataset" or "plot the relationship between `<column A>` and `<column B>`" in the chat pane on the right and press **Ctrl+Enter** (**⌘+Return** on macOS). A reply can take from tens of seconds to a few minutes, and figures open in tabs on the left. If you see `[error: …]` (`[エラー: …]` in the Japanese UI) → [Troubleshooting](#troubleshooting)
 6. **Save**: the tab layout and chats are not saved automatically. Use **File → Save session** often, and **File → Save and quit** when you are done (→ [Saving and resuming](#saving-and-resuming)).
 
 ---
@@ -60,16 +79,30 @@ The detailed documents under `docs/` are available in Japanese only.
 
 ## Installation and launch
 
-- Name the venv `.venv`. `run.bat` looks for this name only and activates it itself.
-- Commands that start with `python` (the CLI, etc.) are run in the `MyAnalysis` folder after `.venv\Scripts\activate`, every time you open a new Command Prompt.
+- Name the venv `.venv`. `run.bat` (`run.sh` on macOS / Linux) looks for this name only and activates it itself.
+- Commands that start with `python` (the CLI, etc.) are run in the `MyAnalysis` folder after `.venv\Scripts\activate` (`source .venv/bin/activate` in Terminal on macOS / Linux), every time you open a new Command Prompt.
 - To update, choose **Help → Update MyAnalysis**. It fetches `main` from GitHub and moves to it (fast-forward only; if there are commits that are not on GitHub, or local changes the update would overwrite, nothing is changed), runs `pip install -r requirements.txt` if `requirements.txt` changed, and then asks whether to restart. The restart reopens the datasets that were open. It runs only when you choose it; there is no check at startup and no "update available" notice. Datasets are not affected.
-- To update by hand, close the app, run `git pull` and then `.venv\Scripts\python -m pip install -r requirements.txt`, and launch again.
+- A copy installed with GitHub's **Download ZIP** can be launched, but **Help → Update MyAnalysis** does not work because there is no `.git`. Install with `git clone`.
+- To update by hand, close the app, run `git pull` and then `.venv\Scripts\python -m pip install -r requirements.txt` (`.venv/bin/python` on macOS / Linux), and launch again.
 
 - If `activate` fails in PowerShell, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use Command Prompt.
-- To open TIFF images, also run `.venv\Scripts\python -m pip install tifffile`.
+- To open TIFF images, also run `.venv\Scripts\python -m pip install tifffile` (`.venv/bin/python` on macOS / Linux).
 - Package versions are not pinned. If something does not work, match the tested versions (Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2 / Pillow 10.3.0. These are the versions for Python 3.12).
 - To try the screens without data, run `python tool.py --demo`.
-- On macOS / Linux: `python3 -m venv .venv` → `.venv/bin/python -m pip install -r requirements.txt` → `.venv/bin/python tool.py` (untested).
+
+### macOS / Linux
+
+macOS / Linux are untested. To install, follow the macOS steps in step 1 of [QuickStart](#quickstart).
+
+- **Launch**: launch with `./run.sh`. `run.sh` uses `.venv/bin/python` and keeps the bytecode (`__pycache__`) in the repository's `data/pycache`. Running `.venv/bin/python tool.py` directly creates `__pycache__` inside a sync folder when you open an analysis stored there.
+- **Terminal**: the app runs inside the Terminal, so keep it open while you use the app (also after an update or a restart). If the app fails to start, the reason is shown in the Terminal, not in a dialog.
+- **Keys**: read Ctrl in this README and in the docs as ⌘, and Alt as ⌥ (send is ⌘+Return, chat search ⌘F, previous/next analysis tab ⌘←/→, previous/next dataset ⌥←/→). Inside a text input, ⌘←/→ (start/end of line) and ⌥←/→ (move by word) are taken by the input.
+- **Menus**: "Quit" (and "About MyAnalysis…" in the English UI) is in the app menu at the left end of the menu bar ("Python"). The other menus are as described in this README.
+- **File access**: the first time you open data in the Documents, Desktop, or Downloads folders, or on an external or network volume, macOS asks whether to allow Terminal to access it; allow it. If you denied it, allow "Terminal" in System Settings → Privacy & Security → Files and Folders.
+- **Certificates**: with the python.org build of Python, run **Install Certificates.command** in Applications → Python 3.x once. Without it, the OpenAI-compatible engine over HTTPS fails with `CERTIFICATE_VERIFY_FAILED` (Claude, Codex, and pi are not affected). Homebrew's Python does not need it.
+- **Sync drives**: sync drives (mounts such as rclone) are not detected and are always treated as ordinary disks (→ [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md#同期ドライブでの書き込み)).
+- **Claude sub**: cannot be used on macOS, because its token cannot be saved there.
+- **Linux**: on Debian / Ubuntu, install `sudo apt install git python3-venv libxcb-cursor0` first. The steps are the same as for macOS (`xcode-select`, `scutil`, certificates, and file access are macOS only).
 
 ---
 
@@ -78,7 +111,8 @@ The detailed documents under `docs/` are available in Japanese only.
 Set it up in step 3 of [QuickStart](#quickstart).
 
 - Claude is recommended (it is the most tested). "Claude (VS Code bundled engine)" uses the `claude` command on PATH when the VS Code extension is not found.
-- Claude sub (a second Claude account) can also be selected. Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
+- Without VS Code, install the `claude` command with Claude Code's official installer (no Node.js needed): on Windows, `irm https://claude.ai/install.ps1 | iex` in PowerShell; on macOS / Linux, `curl -fsSL https://claude.ai/install.sh | bash` in Terminal. Check that `claude --version` works in a newly opened terminal, then run `claude` and log in. Then launch MyAnalysis again (PATH is read at launch, so on macOS / Linux run `run.sh` from a new Terminal). Keep the engine as "Claude (VS Code bundled engine)".
+- Claude sub (a second Claude account) can also be selected (not on macOS). Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
 - Claude Code, Codex CLI, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
 - Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
 - **What to put in the model field**
@@ -155,8 +189,12 @@ To restrict the agent's permissions, read [docs/security_ja.md](docs/security_ja
 | No window appears with `run.bat` | A dialog shows the cause. If Python is too old, there is only the dialog (nothing is logged). Otherwise a traceback is left in `data/logs/gui-crash-*.log` (logs at warning level and above go to `data/logs/myanalysis.log`). If it says "A required package is missing", run `.venv\Scripts\python -m pip install -r requirements.txt` in the `MyAnalysis` folder (if `.venv` does not exist, redo step 1 of QuickStart). A Windows "pythonw not found" error also means `.venv` is missing. To see details, activate the venv and run `python tool.py` |
 | `'py' is not recognized as an internal or external command`, or `py -3` fails with `Unable to create process` | Python was installed from the Microsoft Store or without the launcher, or the launcher points to a Python that was removed (`py -0p` shows the paths). Install Python from python.org (the launcher is included by default) and redo step 1. If you keep the Microsoft Store build, `python -m venv .venv` works instead (the note under step 1) |
 | The chat says "No AI engine is selected, so nothing can be sent" | No AI engine is configured → step 3 of [QuickStart](#quickstart) |
-| `[error: RuntimeError('Claude Code engine not found…')]` | Install the Claude Code extension and sign in (or point to `claude` with `[claude_code].bin` in `llm_backend/config.toml` or the `CLAUDE_CODE_BIN` environment variable) |
+| `[error: RuntimeError('Claude Code engine not found…')]` | Install the Claude Code extension or the `claude` command and sign in (→ [AI engines](#ai-engines)). Or point to `claude` with `[claude_code].bin` in `llm_backend/config.toml` or the `CLAUDE_CODE_BIN` environment variable |
 | The chat shows `[error: …]` | Expired authentication, rate limits, etc. Send again, or log in to the engine again |
+| No window appears with `./run.sh` (macOS / Linux) | The reason is shown in the Terminal (and left in `data/logs/gui-crash-*.log`). If it says `MyAnalysis needs Python 3.11 or newer`, delete the venv with `rm -rf .venv` and create it again from step 1 with a `python3` that is 3.11 or later. If it says "A required package is missing", run `.venv/bin/python -m pip install -r requirements.txt` |
+| On Linux, `Could not load the Qt platform plugin "xcb"` | Install `libxcb-cursor0` (`sudo apt install libxcb-cursor0` on Debian / Ubuntu) |
+| On macOS, `CERTIFICATE_VERIFY_FAILED` | With the python.org build of Python, run Install Certificates.command (→ [macOS / Linux](#macos--linux)) |
+| On macOS, a dataset shows "No path on this host" after moving to another place | The host name changed with the network. Fix the host name with `scutil` from step 1, then register again with **Register path on this PC…** in **File → Open dataset…** |
 | "Save failed verification" | The sync drive is misbehaving. Common with mounts such as rclone → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) (includes the check-and-repair command `doctor`) |
 
 Other symptoms, problems with sync drives, and what to include when reporting a bug → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)
@@ -174,7 +212,7 @@ To also remove the engines' conversation records and the R2 / Cloudflare setting
 
 ## Limitations
 
-- Tested on Windows 11 only.
+- Tested on Windows 11 only (macOS / Linux are untested → [macOS / Linux](#macos--linux)).
 - An analysis tab keeps its data in memory while it is open. Opening many large datasets puts pressure on memory.
 - In the Japanese UI, some displays remain in English (→ [display language](docs/usage_ja.md#表示言語)).
 - Details → [docs/usage_ja.md](docs/usage_ja.md#制限事項の詳細)

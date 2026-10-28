@@ -57,7 +57,8 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"
 ### 1. cloudflared 導入
 
 ```
-winget install cloudflare.cloudflared
+winget install cloudflare.cloudflared   # Windows
+brew install cloudflared                # macOS
 ```
 
 PATH に通らない場合は新しいシェルで再試行、または `CLOUDFLARED_BIN` でフルパス指定。
@@ -135,7 +136,7 @@ https のページ（外部リンクのページや任意の静的配置）に�
 
 - **「トンネル起動に失敗しました」**（cloudflared）→ 共有ウィンドウのログ欄に原因が出る。
   さらに詳しくは `cloudflared tunnel run <name>` を手で実行するとエラーが確認できる。よくある原因:
-  - cloudflared が見つからない → `winget install cloudflare.cloudflared` 後、新しいシェルで再試行。別パスなら `CLOUDFLARED_BIN`。
+  - cloudflared が見つからない → `winget install cloudflare.cloudflared`（macOS は `brew install cloudflared`）後、新しいシェルで再試行。別パスなら `CLOUDFLARED_BIN`。
   - `CLOUDFLARE_TUNNEL_NAME/HOSTNAME` 未設定 → `.env` を確認。GUI を再起動したか（`.env` は起動時に一度だけ読まれる）。
   - 登録がタイムアウトする → 認証情報/ネットワーク不良。
 - **ゲストが Cloudflare エラー 1033** → 多くはホストが現在共有していない（停止・期限切れ・アプリ終了）。

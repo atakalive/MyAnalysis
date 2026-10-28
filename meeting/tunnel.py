@@ -112,8 +112,8 @@ class _CloudflaredNamed:
                 )
             except FileNotFoundError as e:
                 raise RuntimeError(
-                    "cloudflared not found (winget install cloudflare.cloudflared "
-                    f"or set CLOUDFLARED_BIN): {e!r}"
+                    "cloudflared not found (Windows: winget install cloudflare.cloudflared, "
+                    f"macOS: brew install cloudflared, or set CLOUDFLARED_BIN): {e!r}"
                 ) from e
             proc = self._proc
 

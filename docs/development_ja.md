@@ -46,10 +46,11 @@ MyAnalysis 本体（アプリのコード）を変更する開発者・コント
 | `python tool.py --demo` | 合成データの `_demo` タブ付きで起動。`SelectorPanel` / `TrajectoryPanel` / `ImagePanel` の 3 種を使う。データセット不要で、タブ verb（`tab _demo set-split ...` 等）を試せる。`_demo` はデータセットに属さないので snapshot / state は保存されない |
 | `python tool.py --resume-session` | `data/llm_state/reload_manifest.json` からウィンドウ・タブ・チャットを復元する。ホットリロードの `restart` が内部で使う。manifest は読んだ後に削除され、無ければ通常起動になる |
 | `run.bat` | 利用者向けランチャ。リポジトリ直下の `.venv` があれば activate し、`pythonw` でコンソール無しで起動する。起動失敗はダイアログで知らせる（Python の版不足以外は `data/logs/gui-crash-*.log` にも残る） |
+| `run.sh` | macOS / Linux 用ランチャ（未検証）。`.venv` があればその python を使い、`PATH` に `.venv/bin` を足して、ターミナルの前面で `exec` する。起動失敗はダイアログにならず stderr に出る |
 
 **クラッシュログ** — 未捕捉例外（メインスレッド・Python スレッド）は `data/logs/gui-crash-*.log` に traceback が残る。同じ箇所の例外は 1 回だけ、1 プロセス最大 200 件、Ctrl-C / `SystemExit` は記録しない。フックは `tool.py` の冒頭（`__main__` のときだけ）で入る。Python の版不足はダイアログだけ（フックより前に判定して終了するので、ログには残らない）。import 時の失敗と `main()` の中の起動失敗（`app.exec()` より前）は、原因を示すダイアログを出し、`data/logs/gui-crash-*.log` に traceback を残す（書き込みは best-effort）。warning 以上のログは `data/logs/myanalysis.log`（1 MB で回転、3 世代）。
 
-**`PYTHONPYCACHEPREFIX`** — `run.bat` とエージェントの子プロセスは `data/pycache` を設定するが、手元のシェルから起動した python には設定されない（`python -m export` は自分で `sys.pycache_prefix` を `data/pycache` にする）。同期ドライブ上の `.py` を import 機構で読むコードを手で実行するときは、`PYTHONPYCACHEPREFIX=<repo>/data/pycache` を設定しておく（理由は [§5.1](#51-同期ドライブへの書込)）。
+**`PYTHONPYCACHEPREFIX`** — `run.bat` / `run.sh` とエージェントの子プロセスは `data/pycache` を設定するが、手元のシェルから起動した python には設定されない（`python -m export` は自分で `sys.pycache_prefix` を `data/pycache` にする）。同期ドライブ上の `.py` を import 機構で読むコードを手で実行するときは、`PYTHONPYCACHEPREFIX=<repo>/data/pycache` を設定しておく（理由は [§5.1](#51-同期ドライブへの書込)）。
 
 ---
 
@@ -144,6 +145,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 |---|---|
 | `tool.py` | GUI のエントリポイント。`create_main_window()` はホットリロード `app` からも呼ばれる |
 | `run.bat` | Windows 用ランチャ（CRLF 必須） |
+| `run.sh` | macOS / Linux 用ランチャ（LF 必須・実行ビット付き） |
 | `config.py` | データセット登録簿のアクセス API（`DATASETS` / `get_dataset_dir` / `register_dataset` / `unregister_dataset` / `reload_datasets`） |
 | `dataset_registry.py` | 登録簿 `datasets.local.json` の読み書き（ロック付き、型検証、破損は `RegistryError`） |
 | `dataset_config.py` | データセットごとの `myanalysis.toml` と、解析・出力パスの解決（`analysis_file` / `state_dir` / `batch_dir` 等） |

@@ -19,6 +19,26 @@ import pytest
 from common.i18n import tr
 
 
+def input_hint(key: str) -> str:
+    """入力欄の薄字の期待値（送信のキーの表記を差し込んだもの）。gui は遅れて import する。"""
+    from gui.chat import send_key_label
+    return tr(key, send_key=send_key_label())
+
+
+@pytest.mark.parametrize(("platform", "label"), [("darwin", "⌘Return"), ("win32", "Ctrl+Enter"),
+                                                 ("linux", "Ctrl+Enter")])
+def test_input_hint_names_the_send_key_of_the_os(monkeypatch, platform, label):
+    import gui.chat as chat_mod
+
+    monkeypatch.setattr(chat_mod.sys, "platform", platform)
+    assert chat_mod.send_key_label() == label
+    for key in ("chat.input.placeholder", "chat.input.placeholder_add",
+                "chat.input.placeholder_queue"):
+        hint = tr(key, send_key=chat_mod.send_key_label())
+        assert label in hint and "{send_key}" not in hint
+        assert platform != "darwin" or "Ctrl" not in hint
+
+
 class _FakeBackend:
     name = "mock"
     model = "fake-model"
@@ -3030,7 +3050,7 @@ def test_retranslate_keeps_add_queue_label(widget):
         assert widget._send_btn.text() == tr("chat.btn.add")
         widget.retranslate()
         assert widget._send_btn.text() == tr("chat.btn.add")
-        assert widget._input.placeholderText() == tr("chat.input.placeholder_add")
+        assert widget._input.placeholderText() == input_hint("chat.input.placeholder_add")
     finally:
         _cleanup(widget)
 
@@ -3172,13 +3192,13 @@ def test_inject_support_known_updates_label(widget, monkeypatch):
     try:
         assert workers[-1].inject_support.slots == [widget._on_inject_support]
         assert widget._send_btn.text() == tr("chat.btn.add")          # 判定前は楽観的に「追加」
-        assert widget._input.placeholderText() == tr("chat.input.placeholder_add")
+        assert widget._input.placeholderText() == input_hint("chat.input.placeholder_add")
         backend.supported = False                                      # 判定の結果: 非対応
         widget._on_inject_support("other-session")                     # 表示中でないチャットの通知は無視
         assert widget._send_btn.text() == tr("chat.btn.add")
         widget._on_inject_support(sess.id)
         assert widget._send_btn.text() == tr("chat.btn.queue")
-        assert widget._input.placeholderText() == tr("chat.input.placeholder_queue")
+        assert widget._input.placeholderText() == input_hint("chat.input.placeholder_queue")
         assert widget._send_btn.toolTip() == tr("chat.tip.queue")
         _send(widget, "次")
         assert backend.injected == []
