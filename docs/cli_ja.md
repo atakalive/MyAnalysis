@@ -20,6 +20,8 @@ python -m llm_bridge <verb> ...
 |---|---|---|---|
 | `list-datasets` | `[--json]` | 不要 | 登録済みデータセットの一覧 |
 | `register-dataset` | `<名前> <絶対パス> [--host H] [--format csv_per_subdir\|custom] [--no-open]` | 不要 | データセットの登録（→ [登録](usage_ja.md#登録)） |
+| `host` | — | 不要 | この PC の登録簿のキー（`host`）と、照合に使う別名（`aliases`）を JSON で出す |
+| `rename-host` | `<旧キー> [--to 新キー] [--dry-run]` | 不要 | 旧キーの登録を新キー（既定はこの PC のキー）へ移し、旧キーを削除の記録つきで消す。新キーに別のパスがあるデータセットは触らない |
 | `engines` | — | 不要 | AI エンジンの導入状況 |
 | `doctor` | `[--dataset DS] [--repair] [--rescue] [--cache DIR] [--log FILE]` | 不要 | 同期ドライブ上のファイルの点検（→ [doctor](troubleshooting_ja.md#doctor点検と修復)） |
 | `recover-analysis` | `<解析名> [--dataset DS]` | 不要※ | 0 バイトになった `analysis.py` を `.bak` から戻す |

@@ -1599,7 +1599,6 @@ class ToolWindow(QMainWindow):
         chat.focus_input()
 
     def _register_dataset(self) -> None:
-        import socket
         from pathlib import Path
 
         import config
@@ -1627,14 +1626,13 @@ class ToolWindow(QMainWindow):
             break
 
         try:
-            config.register_dataset(name, path)
+            res = config.register_dataset(name, path)
         except Exception as e:
             QMessageBox.critical(self, tr("err.register.title"), str(e))
             return
 
         # 成功時のみメモリ poke: 直後に解析タブを追加しても get_dataset_dir が成功する。
-        host = socket.gethostname().upper()
-        config.DATASETS.setdefault(name, {})[host] = path
+        config.DATASETS.setdefault(name, {})[res["host"]] = path
 
         # 登録直後に remote へ送る（送信のみ・バックグラウンド・best-effort。登録の成否とは無関係）。
         self.request_config_push()

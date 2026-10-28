@@ -284,6 +284,144 @@ def test_figure_panel_half_scale(qapp, tmp_path):
     assert panel._user_zoomed is False
 
 
+def _figure_panel(qapp, tmp_path):
+    """800×600 の PNG を読み込んだ 400×400 の FigurePanel と、解析的な fit。"""
+    import pytest as _pytest
+    from PySide6.QtGui import QPixmap
+    from gui.panels import FigurePanel
+
+    png = tmp_path / "big.png"
+    if not png.exists():
+        QPixmap(800, 600).save(str(png))
+    panel = FigurePanel()
+    panel.resize(400, 400)
+    panel.show()
+    qapp.processEvents()
+    panel.set_path(png)
+    vp = panel.viewport().size()
+    br = panel._item.boundingRect()
+    if vp.width() < 2 or vp.height() < 2:
+        _pytest.skip("offscreen viewport not sized")
+    fit = min(vp.width() / br.width(), vp.height() / br.height())
+    return panel, fit
+
+
+def _wheel(panel, dy, phase=None) -> bool:
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    if phase is None:
+        phase = Qt.ScrollPhase.NoScrollPhase
+    vp = panel.viewport()
+    pos = QPointF(vp.width() / 2, vp.height() / 2)
+    global_pos = QPointF(vp.mapToGlobal(pos.toPoint()))
+    ev = QWheelEvent(pos, global_pos, QPoint(0, 0), QPoint(0, dy),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, phase, False)
+    QApplication.sendEvent(vp, ev)
+    return ev.isAccepted()
+
+
+def _pinch(panel, value: float) -> bool:
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QNativeGestureEvent, QPointingDevice
+    from PySide6.QtWidgets import QApplication
+
+    vp = panel.viewport()
+    pos = QPointF(vp.width() / 2, vp.height() / 2)
+    global_pos = QPointF(vp.mapToGlobal(pos.toPoint()))
+    ev = QNativeGestureEvent(Qt.NativeGestureType.ZoomNativeGesture,
+                             QPointingDevice.primaryPointingDevice(), 2,
+                             pos, pos, global_pos, value, QPointF(0, 0))
+    return QApplication.sendEvent(vp, ev)
+
+
+def _close(a: float, b: float) -> bool:
+    return abs(a - b) <= abs(b) * 1e-9
+
+
+def test_figure_panel_wheel_steps(qapp, tmp_path):
+    """±120 で 1 段（1.25 倍・0.8 倍）、240 でも 1 段、縮小はフィットで止まる。"""
+    panel, fit = _figure_panel(qapp, tmp_path)
+    before = panel.transform().m11()
+    _wheel(panel, 120)
+    assert _close(panel.transform().m11() / before, 1.25)
+    _wheel(panel, 120)
+    before = panel.transform().m11()
+    _wheel(panel, -120)
+    assert _close(panel.transform().m11() / before, 0.8)
+    for _ in range(30):
+        _wheel(panel, -120)
+    assert panel.transform().m11() >= fit * (1 - 1e-6)
+
+    before = panel.transform().m11()
+    _wheel(panel, 240)
+    assert _close(panel.transform().m11() / before, 1.25)
+
+
+def test_figure_panel_wheel_is_proportional(qapp, tmp_path):
+    """30 を 4 回 = 120 を 1 回（トラックパッドの細かいイベント）。"""
+    panel_a, _fit = _figure_panel(qapp, tmp_path)
+    before = panel_a.transform().m11()
+    _wheel(panel_a, 120)
+    ratio_a = panel_a.transform().m11() / before
+
+    panel_b, _fit = _figure_panel(qapp, tmp_path)
+    before = panel_b.transform().m11()
+    for _ in range(4):
+        _wheel(panel_b, 30)
+    ratio_b = panel_b.transform().m11() / before
+    assert _close(ratio_b, ratio_a)
+
+
+def test_figure_panel_ignores_momentum(qapp, tmp_path):
+    from PySide6.QtCore import Qt
+
+    panel, _fit = _figure_panel(qapp, tmp_path)
+    before = panel.transform().m11()
+    assert _wheel(panel, 120, Qt.ScrollPhase.ScrollMomentum) is True
+    assert panel.transform().m11() == before
+
+
+def test_figure_panel_half_scale_accumulates(qapp, tmp_path):
+    """50% 縮小から +30 は 4 回目でフィットに戻る。途中の −30 で積算は 0 に戻る。"""
+    panel, fit = _figure_panel(qapp, tmp_path)
+    panel._set_half_scale()
+    half = panel.transform().m11()
+    for _ in range(3):
+        _wheel(panel, 30)
+        assert panel._half is True
+        assert panel.transform().m11() == half
+    _wheel(panel, 30)
+    assert panel._half is False
+    assert abs(panel.transform().m11() - fit) <= fit * 1e-6
+
+    panel._set_half_scale()
+    half = panel.transform().m11()
+    _wheel(panel, 30)
+    _wheel(panel, 30)
+    _wheel(panel, -30)
+    for _ in range(3):
+        _wheel(panel, 30)
+    assert panel._half is True
+    assert panel.transform().m11() == half
+
+
+def test_figure_panel_pinch(qapp, tmp_path):
+    panel, _fit = _figure_panel(qapp, tmp_path)
+    before = panel.transform().m11()
+    assert _pinch(panel, 0.25) is True
+    assert _close(panel.transform().m11() / before, 1.25)
+
+    before = panel.transform().m11()
+    _pinch(panel, 1.0)
+    assert _close(panel.transform().m11() / before, 1.25)
+
+    before = panel.transform().m11()
+    _pinch(panel, -1.0)
+    assert panel.transform().m11() == before
+
+
 def test_show_collapse_then_restore_vertical(
     win, png_path, png_path2, png_path3, png_path4
 ):

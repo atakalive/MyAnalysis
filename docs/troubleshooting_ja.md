@@ -14,7 +14,10 @@ rclone などのマウントでは、「一時ファイルに書いて置き換�
 | OneDrive / Dropbox / Google ドライブのミラー（C: などの下のフォルダ） | local |
 | Google ドライブのストリーミング（仮想ドライブ文字） | ドライブが報告するファイルシステム名による（doctor で確認する） |
 | **rclone をフォルダにマウント**（例 `C:\mnt\sync`） | **local と誤判定される** → ドライブ文字でマウントするか、下の `MYANALYSIS_FS_OVERRIDE` で指定する |
-| macOS（すべて） | 自動では local。必要なら `MYANALYSIS_FORCE_FRAGILE=1` |
+| macOS の APFS・HFS+・exFAT・FAT（File Provider の Google ドライブ・Dropbox・OneDrive・iCloud を含む） | local |
+| macOS の macFUSE・FUSE-T・rclone（nfsmount を含む）・SMB・NFS・AFP・WebDAV | fragile |
+| macOS で、そのパスだけ statfs が答えない（切れたネットワーク・FUSE のマウントなど） | fragile |
+| macOS で、statfs の仕組みそのものが使えない（`/` でも読めない） | local。必要なら `MYANALYSIS_FORCE_FRAGILE=1` |
 
 - 判定は `python -m llm_bridge doctor --dataset <ds>` の最初の節で確認できる。判定はドライブごとにアプリ起動中は記憶されるので、マウントを変えたらアプリを再起動する。
 - 読み戻し確認はキャッシュを読むので、「クラウドへのアップロード完了」を意味しない。PC を終了する前に同期の完了を待つ。

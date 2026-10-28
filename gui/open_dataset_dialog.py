@@ -8,8 +8,8 @@ background thread.
 from __future__ import annotations
 
 import os
-import socket
 import time
+from collections.abc import Iterable
 from pathlib import Path, PureWindowsPath
 
 from PySide6.QtCore import (
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from common.host_key import host_key, host_keys
 from common.i18n import tr
 from llm_bridge import dataset_meta
 from llm_bridge.dataset_meta import HEAVY_FIELDS, DatasetMeta
@@ -101,15 +102,17 @@ def _norm_path(p: str) -> str:
     return os.path.normcase(os.path.normpath(p))
 
 
-def _path_doubts(name: str, path: str, registry: dict, host: str) -> list[tuple[str, dict]]:
-    """この PC での *name* のパスとして *path* を登録する前に確認すべき点（Qt 非依存）。
+def _path_doubts(name: str, path: str, registry: dict,
+                 host: str | Iterable[str]) -> list[tuple[str, dict]]:
+    """この PC のキー（正規のキーと別名）での *name* のパスとして *path* を登録する前に確認すべき点（Qt 非依存）。
 
     戻り値は (理由コード, tr の引数) の列。空なら確認なしで登録してよい。
       - "no_marker":    フォルダに _DATASET_MARKERS のどれも無い（stat 失敗も無い扱い）。
       - "name_differs": フォルダ名が、他ホストの登録パスのどのフォルダ名とも違う
                         （PureWindowsPath は `/` と `\\` の両方で区切るので POSIX パスにも効く）。
-      - "dup":          この PC で、別のデータセット名に同じフォルダが登録済み。
+      - "dup":          この PC のキー（正規のキーと別名）で、別のデータセット名に同じフォルダが登録済み。
     """
+    hosts = (host,) if isinstance(host, str) else tuple(host)
     doubts: list[tuple[str, dict]] = []
 
     def _exists(p: Path) -> bool:
@@ -122,7 +125,7 @@ def _path_doubts(name: str, path: str, registry: dict, host: str) -> list[tuple[
         doubts.append(("no_marker", {}))
 
     others = [p for h, p in (registry.get(name) or {}).items()
-              if h != host and isinstance(p, str)]
+              if h not in hosts and isinstance(p, str)]
     other_names = sorted({PureWindowsPath(p).name for p in others})
     if others and PureWindowsPath(path).name.casefold() not in {
             n.casefold() for n in other_names}:
@@ -132,8 +135,8 @@ def _path_doubts(name: str, path: str, registry: dict, host: str) -> list[tuple[
     for ds, per_host in sorted(registry.items()):
         if ds == name or not isinstance(per_host, dict):
             continue
-        p = per_host.get(host)
-        if isinstance(p, str) and _norm_path(p) == mine:
+        if any(isinstance(p, str) and _norm_path(p) == mine
+               for p in (per_host.get(h) for h in hosts)):
             doubts.append(("dup", {"other": ds}))
             break
     return doubts
@@ -841,14 +844,14 @@ class OpenDatasetDialog(QDialog):
         if m is None or not m.name or m.unavailable_reason != "no-host":
             return
         name = m.name
-        host = socket.gethostname().upper()
+        host = host_key()
         path = QFileDialog.getExistingDirectory(
             self, tr("picker.add_path.title", name=name, host=host))
         if not path:
             return
 
         import config
-        doubts = _path_doubts(name, path, config.DATASETS, host)
+        doubts = _path_doubts(name, path, config.DATASETS, host_keys())
         if doubts:
             lines = []
             for code, params in doubts:

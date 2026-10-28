@@ -23,13 +23,13 @@ boto3 はモジュール先頭では import せず _client() で遅延 import �
 """
 import json
 import os
-import socket
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 import config
 from common.env import load_env
+from common.host_key import host_key
 from common.filelock import exclusive_lock
 from common.paths import atomic_write_text, repo_root
 
@@ -305,7 +305,7 @@ def make_bundle(*, config_path: Path | None = None, include_env: bool = False,
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "updated_by": socket.gethostname().upper(),
+        "updated_by": host_key(),
         "updated_at": _now_iso(),
         "datasets": datasets,
         "entry_meta": entry_meta,
@@ -574,7 +574,7 @@ def sync(*, direction: str = "both", apply: bool = True,
     bucket = creds["bucket"]
     object_key = key or (creds["prefix"] + BUNDLE_NAME)
     client = _client(creds)
-    self_host = socket.gethostname().upper()
+    self_host = host_key()
     now = _now_iso()
 
     # sidecar entry_meta（datasets の LWW 用）を取得するために make_bundle を使う。

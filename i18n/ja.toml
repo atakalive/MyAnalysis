@@ -389,7 +389,7 @@
 "dev.reload.done" = "完了"
 "meeting.start_failed" = "開始に失敗: {error}"
 "backend.status.note.claude_sub" = "2 つ目の Claude のアカウントです。トークンは 設定 → バックエンド/モデル設定… でエンジンに「Claude（サブのアカウント）」を選ぶと入力できます（PC ごとに入れます）。"
-"backend.status.note.claude_sub_token_bad" = "保存されたトークンを読めません（別の PC・別の Windows の利用者で書いたか、壊れています）。貼り直してください。"
+"backend.status.note.claude_sub_token_bad" = "保存されたトークンを読めません（別の PC・別の利用者で書いたか、壊れているか、macOS のキーチェーンを使えません）。キーチェーンの問題でなければ、貼り直してください。"
 "backend.status.note.claude_sub_settings_override" = "Claude の設定に、トークンより先に使われる認証があります（{source}）。メインや別の認証で応答しないよう、Claude サブは起動しません。その設定から apiKeyHelper・認証の環境変数を外してください。"
 "backend.claude_sub.token" = "トークン"
 "backend.claude_sub.state.ok" = "設定済み"
@@ -397,7 +397,7 @@
 "backend.claude_sub.state.bad" = "読めません"
 "backend.claude_sub.save" = "保存"
 "backend.claude_sub.delete" = "削除"
-"backend.claude_sub.tooltip" = "Claude サブのアカウントでログインした端末で claude setup-token を実行し、表示された長期トークン（sk-ant-oat…）を貼ってください。暗号化して ~/.myanalysis/secrets に置きます（リポジトリ・同期の外）。PC ごとに入れてください。"
+"backend.claude_sub.tooltip" = "Claude サブのアカウントでログインした端末で claude setup-token を実行し、表示された長期トークン（sk-ant-oat…）を貼ってください。{place}に置きます（リポジトリ・同期の外）。PC ごとに入れてください。"
 "backend.claude_sub.saved" = "Claude サブのトークンを保存しました。"
 "backend.claude_sub.deleted" = "Claude サブのトークンを削除しました。"
 "backend.claude_sub.error.empty" = "トークンが空です。"
@@ -407,6 +407,10 @@
 "backend.claude_sub.error.synced_location" = "トークンの置き場が同期・ネットワークのマウントの上にある（か、それを確かめられない）ので、書きませんでした。"
 "backend.claude_sub.error.write_failed" = "トークンを書けませんでした。"
 "backend.claude_sub.error.delete_failed" = "トークンを削除できませんでした。"
+"backend.claude_sub.place.dpapi" = "暗号化して ~/.myanalysis/secrets "
+"backend.claude_sub.place.plain" = "暗号化せずに（権限 0600）~/.myanalysis/secrets "
+"backend.claude_sub.place.keychain" = "macOS のログインキーチェーン"
+"backend.claude_sub.error.keychain" = "macOS のキーチェーンに読み書きできませんでした（ロックされているか、許可されませんでした）。"
 "backend.status.note.permission_mode_empty" = "permission_mode が空（または不正）なので bypassPermissions（制限なし）で動きます。絞るには permission_mode を bypassPermissions 以外に明示してください（allowed_tools だけでは絞れません）。docs/security_ja.md を参照。"
 
 # --- chat search (Issue #108) ---

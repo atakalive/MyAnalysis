@@ -5,7 +5,7 @@
 Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次の設定を同期する任意機能。設定しなければ何も起きない。
 
 - **同期するもの**: `datasets.local.json`（全 PC のパス）、`models.toml`、`llm_backend/config.toml`。`.env` は `--include-env` を付けたときだけ送り、受け取る側では `.env.pulled` に保存する（`.env` は上書きしない）。
-- **同期しないもの**: 計測データ・解析コード・`myanalysis.toml`（これらは同期ドライブで共有する）。ペルソナ定義。Claude サブのトークン（`~/.myanalysis/secrets/claude_sub.bin`。PC ごとに入れる）。
+- **同期しないもの**: 計測データ・解析コード・`myanalysis.toml`（これらは同期ドライブで共有する）。ペルソナ定義。Claude サブのトークン（Windows は `~/.myanalysis/secrets/claude_sub.bin`、macOS はログインキーチェーン。PC ごとに入れる）。
 
 ## 1 台目のセットアップ
 
@@ -35,7 +35,7 @@ Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次�
 
 ## 自動同期と手動コマンド
 
-- GUI の起動時と、CLI の `register-dataset` の後に自動で双方向同期する。GUI でのデータセットの登録と**登録の削除**は、その場で R2 へ送る（送信のみ。バックグラウンドで行い、完了は待たない）。設定ファイル（`models.toml` / `llm_backend/config.toml`）の変更は、この PC の次回起動時か次の送信、または `config-sync` のときに一緒に送られる。他の PC には、その PC の次回起動時（か `config-sync`）に届く。
+- GUI の起動時と、CLI の `register-dataset`・`rename-host` の後に自動で双方向同期する。GUI でのデータセットの登録と**登録の削除**は、その場で R2 へ送る（送信のみ。バックグラウンドで行い、完了は待たない）。設定ファイル（`models.toml` / `llm_backend/config.toml`）の変更は、この PC の次回起動時か次の送信、または `config-sync` のときに一緒に送られる。他の PC には、その PC の次回起動時（か `config-sync`）に届く。
 - 失敗しても起動も登録・削除も止まらない（通常は数秒で打ち切り、何も表示しない。送れなかった変更は次回起動時の同期で送られる）。止めるには `.env` に `R2_AUTOSYNC=0`（起動時・登録・削除の後の自動同期をすべて止める）。
 - 手動: `config-sync`（双方向）/ `config-push`（R2 側だけ書く）/ `config-pull`（ローカル側だけ書く）。どれもマージした結果を書くもので、片側で強制的に上書きするものではない。`--dry-run` で予定だけ表示。`--include-env` は `config-sync` / `config-push` だけ。
 - 自動同期が効かないときは、まず `python -m llm_bridge config-sync --dry-run` でエラーと警告を確認する。自動同期（起動時・登録・削除の後）の例外を見るには `R2_DEBUG=1` を設定し、`python tool.py` をコンソールから起動する（`run.bat` では表示されない。起動時は `auto-sync skipped:`、GUI での登録・削除の後は `auto-push skipped:` を含む行）。
@@ -48,6 +48,7 @@ Cloudflare R2（オブジェクトストレージ）を使って、PC 間で次�
 - **登録の削除は「登録を削除」で行ったときだけ他の PC に伝播する。** `datasets.local.json` を手で編集して消したエントリは、次の同期で他の PC や R2 から復活する。削除の記録は `~/.myanalysis/config_share_state.json` にあるので、同期する前にこのファイルを消さない。
 - 設定ファイルはファイル単位で、更新時刻が新しい方が勝つ。両方の PC で編集すると、古い方の変更は失われる。PC の時計を合わせておく。
 - ホスト名が同じ PC を 2 台使わない（互いのパスを上書きし合う）。
+- Mac の名前は `python -m llm_bridge host` で確かめる（macOS は HostName かローカルホスト名を使う）。`aliases`（照合にも使う別名）も、他の PC の名前と重ねない。重なっていたら、Mac のローカルホスト名を変える（システム設定 → 一般 → 共有）。
 - `config.toml` の PC 固有の値も他の PC に配られる。Claude / Codex の実行ファイルのパスを PC ごとに変えるなら、`[claude_code].bin` / `[codex].bin` を空にし、各 PC の `.env` の `CLAUDE_CODE_BIN` / `CODEX_BIN` で指定する（`bin` が空でないと環境変数は無視される。GUI で「Claude（PATH の CLI）」を選ぶと `bin = "claude"` が書かれる）。各セクションの `cwd` と `[pi].bin` は PC ごとに変えられないので、絶対パスを書かない。
 - R2 同期を使う全 PC で、アプリを同じ版にそろえる（古い版は新しい形式の同期データを読めず、その PC では同期が止まる。起動時には何も表示されない）。
 - `config-sync` などが `warning: remote bundle が未知スキーマ/不正のため read-only フォールバック` を出すときは、どの PC も R2 の同期データを読みも書きもしない。まず全 PC のアプリを同じ版にそろえる。それでも出るなら同期データが壊れている（UTF-8 で表せない文字を含む等）ので、下の「R2 から .env を消すには」の 1〜3 と同じ手順で `config/bundle.json` を削除して作り直す。

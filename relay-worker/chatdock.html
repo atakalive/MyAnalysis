@@ -180,7 +180,7 @@ const T = {
         newChatPending: "Creating a new chat…",
         newChatTimeout: "The new chat did not appear.",
         msgPlaceholder: "Message… (Ctrl+Enter, or ⌘+Enter on a Mac, to send; Enter for newline)",
-        viewHint: "Full figure — scroll to zoom, drag to pan, double-click to reset" },
+        viewHint: "Full figure — scroll or pinch to zoom, drag to pan, double-click to reset" },
   ja: { generating: "応答生成中…", optedOut: "このセッションは非公開になりました。",
         sendFail: "送信失敗", resend: "再送", expired: "ミーティングが終了しました（チャネル失効）。",
         gap: "— 一部のメッセージがスキップされました —", connecting: "接続中…",
@@ -200,7 +200,7 @@ const T = {
         newChatPending: "新規チャットを作成中…",
         newChatTimeout: "新規チャットが作成されませんでした。",
         msgPlaceholder: "メッセージ…（Ctrl+Enter（Mac は ⌘+Enter）で送信、Enter で改行）",
-        viewHint: "全体図 — ホイールで拡大、ドラッグで移動、ダブルクリックで戻す" },
+        viewHint: "全体図 — ホイール・ピンチで拡大、ドラッグで移動、ダブルクリックで戻す" },
 }[LANG];
 
 // ---- constants ----
@@ -1292,6 +1292,30 @@ async function fetchView(targetVer) {
 }
 
 // ---- zoom / pan ----
+// One wheel event → zoom factor (1 = ignore). deltaMode must be read before deltaY by the caller
+// (Firefox then keeps line units). Pixel deltas are proportional: /40 keeps one Chrome/Edge notch
+// (100 × display scale, or 100 ÷ page zoom) at one 1.1× step; trackpads scroll in small steps.
+// ctrl+wheel without the physical Control key is a pinch (Chromium's conversion, exp(-dy/100));
+// inside a Safari gesture* sequence it is dropped (the gesture events already zoom).
+// Every path is capped at one step (1.1×) per event, so a huge delta cannot jump the view.
+const ZOOM_STEP = 1.1;
+const ZOOM_STEP_LN = Math.log(ZOOM_STEP);
+function wheelZoomFactor(deltaMode, deltaY, ctrlKey, physicalCtrl, inGesture) {
+  if (!deltaY) return 1;
+  if (ctrlKey && !physicalCtrl) {
+    if (inGesture) return 1;
+    return Math.exp(Math.max(-ZOOM_STEP_LN, Math.min(ZOOM_STEP_LN, -deltaY / 100)));
+  }
+  if (deltaMode !== 0) return deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+  return Math.pow(ZOOM_STEP, Math.max(-1, Math.min(1, -deltaY / 40)));
+}
+// Safari gesturechange: e.scale is relative to gesturestart. Move toward base × e.scale, at most
+// one step per event (a lagging view catches up on the next events, because the target is absolute).
+function gestureStepFactor(current, base, eScale) {
+  if (!(eScale > 0) || !(current > 0)) return 1;
+  return Math.max(1 / ZOOM_STEP, Math.min(ZOOM_STEP, (base * eScale) / current));
+}
+function clampScale(s) { return Math.min(20, Math.max(0.1, s)); }
 let scale = 1, panX = 0, panY = 0;
 function applyTransform() {
   const img = document.getElementById("view");
@@ -1304,10 +1328,19 @@ function resetView() { scale = 1; panX = 0; panY = 0; applyTransform(); }
 function setupViewer() {
   const wrap = document.getElementById("canvaswrap");
   wrap.title = T.viewHint;   // full figure is decoupled from the host's view
+  let ctrlHeld = false, inGesture = false, gestureBase = 1;
+  window.addEventListener("keydown", (e) => { if (e.key === "Control") ctrlHeld = true; });
+  window.addEventListener("keyup", (e) => { if (e.key === "Control") ctrlHeld = false; });
+  window.addEventListener("blur", () => { ctrlHeld = false; });
+  wrap.addEventListener("gesturestart", (e) => { e.preventDefault(); inGesture = true; gestureBase = scale; }, { passive: false });
+  wrap.addEventListener("gesturechange", (e) => { e.preventDefault(); scale = clampScale(scale * gestureStepFactor(scale, gestureBase, e.scale)); applyTransform(); }, { passive: false });
+  wrap.addEventListener("gestureend", (e) => { e.preventDefault(); inGesture = false; }, { passive: false });
   wrap.addEventListener("wheel", (e) => {
     e.preventDefault();
-    const f = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    scale = Math.min(20, Math.max(0.1, scale * f));
+    const mode = e.deltaMode;   // read before deltaY (Firefox)
+    const f = wheelZoomFactor(mode, e.deltaY, e.ctrlKey, ctrlHeld, inGesture);
+    if (f === 1) return;
+    scale = clampScale(scale * f);
     applyTransform();
   }, { passive: false });
   let dragging = false, sx = 0, sy = 0;
@@ -2018,6 +2051,29 @@ async function runSelfTest() {
       } finally {
         send = _send;
       }
+    }
+
+    // 12. Issue #122: 図の拡縮（wheel・ピンチ・Safari の gesturechange）は 1 イベント 1 段（1.1 倍）まで。
+    {
+      const near = (a, b) => Math.abs(a - b) < 1e-12;
+      const w = wheelZoomFactor;
+      check("wheel-line-down", near(w(1, 3, false, false, false), 1 / 1.1));
+      check("wheel-line-up", near(w(1, -3, false, false, false), 1.1));
+      check("wheel-px-notch", [-100, -150, -80, -40].every((d) => near(w(0, d, false, false, false), 1.1)));
+      check("wheel-px-small", near(w(0, -10, false, false, false), Math.pow(1.1, 0.25)));
+      check("wheel-pinch", near(w(0, -5, true, false, false), Math.exp(0.05)));
+      check("wheel-pinch-cap", near(w(0, -10, true, false, false), 1.1) &&
+        near(w(0, -1000, true, false, false), 1.1) && near(w(0, 1000, true, false, false), 1 / 1.1));
+      check("wheel-px-cap", near(w(0, -100000, false, false, false), 1.1) &&
+        near(w(0, 100000, false, false, false), 1 / 1.1));
+      check("wheel-physical-ctrl", near(w(0, -100, true, true, false), 1.1));
+      check("wheel-pinch-in-gesture", w(0, -10, true, false, true) === 1);
+      check("wheel-zero", w(0, 0, false, false, false) === 1);
+      const g = gestureStepFactor;
+      check("gesture-step", near(g(1, 1, 1.05), 1.05));
+      check("gesture-step-cap", near(g(1, 1, 50), 1.1) && near(g(1, 1, 0.01), 1 / 1.1));
+      check("gesture-step-catch-up", near(g(1.1, 1, 1.15), 1.15 / 1.1));
+      check("gesture-step-bad", g(1, 1, 0) === 1 && g(1, 1, NaN) === 1);
     }
   } finally {
     cfg = _cfgSave;

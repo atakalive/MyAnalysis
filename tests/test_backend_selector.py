@@ -1040,3 +1040,22 @@ def test_bin_warning_for_claude_sub_with_auto_bin(monkeypatch, parent_widget):
     monkeypatch.setattr(mod, "claude_sub_settings", lambda: {"bin": "claude"})
     dlg._update_warnings()
     assert dlg._env_bin_warning.isHidden()
+
+
+def test_token_error_text_keychain():
+    import gui.backend_selector_dialog as mod
+    from llm_backend import claude_sub
+
+    text = mod.BackendSelectorDialog._token_error_text(claude_sub.AuthError("keychain", "x"))
+    assert text == tr("backend.claude_sub.error.keychain")
+
+
+@pytest.mark.parametrize("kind", ["keychain", "dpapi", "plain"])
+def test_token_tooltip_names_the_storage(monkeypatch, parent_widget, kind):
+    from llm_backend import claude_sub
+
+    _patch_config(monkeypatch, engine_id="claude-sub")
+    monkeypatch.setattr(claude_sub, "storage_kind", lambda: kind)
+    dlg, _ = _make_dialog(monkeypatch, parent_widget)
+    expected = tr("backend.claude_sub.tooltip", place=tr(f"backend.claude_sub.place.{kind}"))
+    assert dlg._token_edit.toolTip() == expected

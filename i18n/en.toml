@@ -389,7 +389,7 @@
 "dev.reload.done" = "done"
 "meeting.start_failed" = "start failed: {error}"
 "backend.status.note.claude_sub" = "A second Claude account. Enter its token in Settings → Backend/model settings… by choosing the engine \"Claude (sub account)\" (once per PC)."
-"backend.status.note.claude_sub_token_bad" = "The saved token cannot be read (written on another PC or by another Windows user, or damaged). Paste it again."
+"backend.status.note.claude_sub_token_bad" = "The saved token cannot be read (written on another PC or by another user, damaged, or the macOS Keychain cannot be used). Unless it is a Keychain problem, paste it again."
 "backend.status.note.claude_sub_settings_override" = "Claude settings define authentication that takes precedence over the token ({source}). Claude sub will not start, so that it never answers with the main or another account. Remove apiKeyHelper / the authentication environment variables from those settings."
 "backend.claude_sub.token" = "Token"
 "backend.claude_sub.state.ok" = "Set"
@@ -397,7 +397,7 @@
 "backend.claude_sub.state.bad" = "Unreadable"
 "backend.claude_sub.save" = "Save"
 "backend.claude_sub.delete" = "Delete"
-"backend.claude_sub.tooltip" = "Run claude setup-token on a machine logged in to the sub Claude account and paste the long-lived token it prints (sk-ant-oat…). It is stored encrypted under ~/.myanalysis/secrets (outside the repository and sync). Enter it on each PC."
+"backend.claude_sub.tooltip" = "Run claude setup-token on a machine logged in to the sub Claude account and paste the long-lived token it prints (sk-ant-oat…). It is stored {place} (outside the repository and sync). Enter it on each PC."
 "backend.claude_sub.saved" = "Saved the Claude sub token."
 "backend.claude_sub.deleted" = "Deleted the Claude sub token."
 "backend.claude_sub.error.empty" = "The token is empty."
@@ -407,6 +407,10 @@
 "backend.claude_sub.error.synced_location" = "The token path is on a synced or network mount (or this could not be verified), so it was not written."
 "backend.claude_sub.error.write_failed" = "Could not write the token."
 "backend.claude_sub.error.delete_failed" = "Could not delete the token."
+"backend.claude_sub.place.dpapi" = "encrypted under ~/.myanalysis/secrets"
+"backend.claude_sub.place.plain" = "unencrypted (permission 0600) under ~/.myanalysis/secrets"
+"backend.claude_sub.place.keychain" = "in the macOS login Keychain"
+"backend.claude_sub.error.keychain" = "Could not read or write the macOS Keychain (it is locked, or access was denied)."
 "backend.status.note.permission_mode_empty" = "permission_mode is empty or invalid, so bypassPermissions (no restriction) is used. To restrict, set permission_mode to a mode other than bypassPermissions (allowed_tools alone does not restrict). See docs/security_ja.md."
 
 # --- chat search (Issue #108) ---

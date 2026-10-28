@@ -21,13 +21,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import socket
 import time
 import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import config
+from common.host_key import host_keys
 from common.paths import (bak_path, durable_read_json, durable_write_json,
                           read_json_classified, safe_resolve, strip_seq)
 import dataset_config
@@ -540,8 +540,7 @@ def load_one(name: str) -> DatasetMeta:
         base.unavailable_reason = "bad-config"
 
     try:
-        this_host = socket.gethostname().upper()
-        base.other_hosts = sorted(set(config.DATASETS.get(name, {})) - {this_host})
+        base.other_hosts = sorted(set(config.DATASETS.get(name, {})) - set(host_keys()))
     except Exception:
         base.other_hosts = []
 

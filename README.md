@@ -50,7 +50,7 @@ The detailed documents under `docs/` are available in Japanese only.
      ```
 
      - Do not put it under `~/Desktop` or `~/Documents` if iCloud syncs "Desktop & Documents", or under `~/Library/CloudStorage` (where cloud storage apps such as OneDrive and Dropbox keep their folders). Starting with `cd ~` as above puts it directly under your home folder (`~/MyAnalysis`).
-     - If `scutil --get HostName` says `not set`, fix the host name with `sudo scutil --set HostName <name>` (letters, digits, and `-`) before registering datasets. Datasets are registered per host name, and on a Mac without a fixed host name it can change with the network, so elsewhere a dataset shows "No path on this host".
+     - On macOS, MyAnalysis uses the HostName (if set) or the local host name (System Settings → General → Sharing) as this PC's name. It does not change with the network. If you renamed the Mac, its name got a "-2", or you want to fix the name, run `sudo scutil --set HostName <name>` (letters, digits, and `-`).
 
 2. **Launch**: on Windows, double-click `run.bat` in the `MyAnalysis` folder (no need to activate the venv). On macOS, run `./run.sh` in the same Terminal (from then on, `~/MyAnalysis/run.sh` in Terminal). The app runs inside the Terminal, so keep the Terminal open while you use it. If it fails to start, the reason is shown in the Terminal. The UI starts in English (to switch to Japanese: **Settings → Language / 言語 → 日本語**). If no window appears → [Troubleshooting](#troubleshooting)
 3. **AI engine**: open **Settings → Backend / model settings…** and choose **Claude (VS Code bundled engine)** under "Engine (how to run)". The model field can be left empty. Press **Connectivity check**; when it shows `OK (…s / <model name>)`, press **Apply**. If it shows "Failed", check that you are signed in to the Claude Code extension in VS Code (or the `claude` command) with an account on a paid plan. On the second and later PCs that use [R2 config sync](docs/config_sync_ja.md), first read [the section for the second and later PCs](docs/config_sync_ja.md#2-台目以降).
@@ -100,8 +100,8 @@ macOS / Linux are untested. To install, follow the macOS steps in step 1 of [Qui
 - **Menus**: "Quit" (and "About MyAnalysis…" in the English UI) is in the app menu at the left end of the menu bar ("Python"). The other menus are as described in this README.
 - **File access**: the first time you open data in the Documents, Desktop, or Downloads folders, or on an external or network volume, macOS asks whether to allow Terminal to access it; allow it. If you denied it, allow "Terminal" in System Settings → Privacy & Security → Files and Folders.
 - **Certificates**: with the python.org build of Python, run **Install Certificates.command** in Applications → Python 3.x once. Without it, the OpenAI-compatible engine over HTTPS fails with `CERTIFICATE_VERIFY_FAILED` (Claude, Codex, and pi are not affected). Homebrew's Python does not need it.
-- **Sync drives**: sync drives (mounts such as rclone) are not detected and are always treated as ordinary disks (→ [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md#同期ドライブでの書き込み)).
-- **Claude sub**: cannot be used on macOS, because its token cannot be saved there.
+- **Sync drives**: FUSE mounts (macFUSE, FUSE-T, rclone) and network mounts (SMB, NFS, AFP, WebDAV) are treated as sync drives (fragile); everything else (disks such as APFS, and the iCloud, Google Drive, Dropbox, and OneDrive folders) as ordinary disks (→ [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md#同期ドライブでの書き込み)).
+- **Claude sub**: the token is kept in the login Keychain (item `MyAnalysis-claude-sub`). macOS may ask for Keychain access when it is saved or read. In sessions that cannot use the Keychain, such as SSH, it shows as "Not set".
 - **Linux**: on Debian / Ubuntu, install `sudo apt install git python3-venv libxcb-cursor0` first. The steps are the same as for macOS (`xcode-select`, `scutil`, certificates, and file access are macOS only).
 
 ---
@@ -112,7 +112,7 @@ Set it up in step 3 of [QuickStart](#quickstart).
 
 - Claude is recommended (it is the most tested). "Claude (VS Code bundled engine)" uses the `claude` command on PATH when the VS Code extension is not found.
 - Without VS Code, install the `claude` command with Claude Code's official installer (no Node.js needed): on Windows, `irm https://claude.ai/install.ps1 | iex` in PowerShell; on macOS / Linux, `curl -fsSL https://claude.ai/install.sh | bash` in Terminal. Check that `claude --version` works in a newly opened terminal, then run `claude` and log in. Then launch MyAnalysis again (PATH is read at launch, so on macOS / Linux run `run.sh` from a new Terminal). Keep the engine as "Claude (VS Code bundled engine)".
-- Claude sub (a second Claude account) can also be selected (not on macOS). Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
+- Claude sub (a second Claude account) can also be selected. Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
 - Claude Code, Codex CLI, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
 - Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
 - **What to put in the model field**
@@ -194,7 +194,7 @@ To restrict the agent's permissions, read [docs/security_ja.md](docs/security_ja
 | No window appears with `./run.sh` (macOS / Linux) | The reason is shown in the Terminal (and left in `data/logs/gui-crash-*.log`). If it says `MyAnalysis needs Python 3.11 or newer`, delete the venv with `rm -rf .venv` and create it again from step 1 with a `python3` that is 3.11 or later. If it says "A required package is missing", run `.venv/bin/python -m pip install -r requirements.txt` |
 | On Linux, `Could not load the Qt platform plugin "xcb"` | Install `libxcb-cursor0` (`sudo apt install libxcb-cursor0` on Debian / Ubuntu) |
 | On macOS, `CERTIFICATE_VERIFY_FAILED` | With the python.org build of Python, run Install Certificates.command (→ [macOS / Linux](#macos--linux)) |
-| On macOS, a dataset shows "No path on this host" after moving to another place | The host name changed with the network. Fix the host name with `scutil` from step 1, then register again with **Register path on this PC…** in **File → Open dataset…** |
+| On macOS, a dataset shows "No path on this host" | Check the current name with `python -m llm_bridge host`, and move registrations under an old name with `python -m llm_bridge rename-host <old name>` (you can also add the path with **Register path on this PC…** in **File → Open dataset…**) |
 | "Save failed verification" | The sync drive is misbehaving. Common with mounts such as rclone → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) (includes the check-and-repair command `doctor`) |
 
 Other symptoms, problems with sync drives, and what to include when reporting a bug → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)

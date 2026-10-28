@@ -48,7 +48,7 @@
      ```
 
      - iCloud で「デスクトップと書類」を同期しているなら `~/Desktop`・`~/Documents` の下、`~/Library/CloudStorage`（OneDrive・Dropbox などのクラウドストレージのフォルダがある場所）の下には置かない。上のとおり `cd ~` から始めればホームの直下（`~/MyAnalysis`）に入る。
-     - `scutil --get HostName` が `not set` と出たら、データセットを登録する前に `sudo scutil --set HostName <名前>`（英数字と `-`）でホスト名を固定する。データセットの登録はホスト名ごとで、固定していない macOS はつなぐネットワークでホスト名が変わることがあり、別の場所では「このホストにパス無し」になる。
+     - MyAnalysis は、macOS では HostName（設定されていれば）か、ローカルホスト名（システム設定 → 一般 → 共有）を、この PC の名前に使う。ネットワークでは変わらない。Mac の名前を変えた・名前に「-2」が付いた・名前を固定したいときは、`sudo scutil --set HostName <名前>`（英数字と `-`）。
 
 2. **起動**: Windows は `MyAnalysis` フォルダの `run.bat` をダブルクリックする（venv の有効化は不要）。macOS は同じターミナルで `./run.sh`（次からはターミナルで `~/MyAnalysis/run.sh`）。アプリはターミナルの中で動くので、使っている間はターミナルを閉じない。起動に失敗した理由はターミナルに出る。UI は英語で起動するので、先に **Settings → Language / 言語 → 日本語** に切り替える。以降の手順は日本語表示のメニュー名で書く。ウィンドウが出なければ → [トラブルシューティング](#トラブルシューティング)
 3. **AI エンジン**: **設定 → バックエンド/モデル設定…** を開き、「利用方法（エンジン）」で **Claude（VS Code 同梱エンジン）** を選ぶ。モデル欄は空のままでよい。**疎通確認** を押して `OK（…秒 / <モデル名>）` と出たら **適用**。失敗と出たら、VS Code の Claude Code 拡張（または `claude` コマンド）に、有料プランのアカウントでサインインしているか確かめる。[R2 設定同期](docs/config_sync_ja.md) を使う 2 台目以降の PC では、先に [2 台目以降](docs/config_sync_ja.md#2-台目以降) を読む。
@@ -98,8 +98,8 @@ macOS / Linux での動作は未検証。インストールは [QuickStart](#qui
 - **メニュー**: 「終了」（英語表示では「About MyAnalysis…」も）は、メニューバー左端のアプリのメニュー（「Python」）に入る。ほかのメニューはこの README のとおり。
 - **ファイルのアクセス**: 書類・デスクトップ・ダウンロードのフォルダや、外付け・ネットワークのボリュームのデータを初めて開くとき、macOS がターミナルにアクセスを許可するかを訊くので、許可する。拒否したときは、システム設定 → プライバシーとセキュリティ → ファイルとフォルダ で「ターミナル」に許可する。
 - **証明書**: python.org 版の Python では、アプリケーション → Python 3.x の **Install Certificates.command** を一度実行する。実行しないと、HTTPS の OpenAI 互換エンジンが `CERTIFICATE_VERIFY_FAILED` で失敗する（Claude・Codex・pi には関係しない）。Homebrew 版では要らない。
-- **同期ドライブ**: 同期ドライブ（rclone などのマウント）の自動判定が効かず、いつも通常のディスクとして扱う（→ [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md#同期ドライブでの書き込み)）。
-- **Claude サブ**: macOS ではトークンを保存できないので使えない。
+- **同期ドライブ**: FUSE（macFUSE・FUSE-T・rclone）とネットワーク（SMB・NFS・AFP・WebDAV）のマウントは同期ドライブ（fragile）として扱い、ほか（APFS などのディスク、iCloud・Google ドライブ・Dropbox・OneDrive のフォルダ）は通常のディスクとして扱う（→ [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md#同期ドライブでの書き込み)）。
+- **Claude サブ**: トークンはログインキーチェーン（項目名 `MyAnalysis-claude-sub`）に置く。保存するとき・読むときに、キーチェーンの確認が出ることがある。SSH などキーチェーンを使えないセッションでは「未設定」に見える。
 - **Linux**: Debian / Ubuntu では、先に `sudo apt install git python3-venv libxcb-cursor0` を入れておく。手順は macOS と同じ（`xcode-select`・`scutil`・証明書・ファイルのアクセスは macOS だけのもの）。
 
 ---
@@ -110,7 +110,7 @@ macOS / Linux での動作は未検証。インストールは [QuickStart](#qui
 
 - 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
 - VS Code を使わないときは、Claude Code の公式インストーラーで `claude` コマンドを入れる（Node.js は要らない）。Windows は PowerShell で `irm https://claude.ai/install.ps1 | iex`、macOS / Linux はターミナルで `curl -fsSL https://claude.ai/install.sh | bash`。新しく開いた端末で `claude --version` が動くことを確かめてから、`claude` を実行してログインする。そのあと MyAnalysis を起動し直す（PATH は起動したときに読むので、macOS / Linux は新しいターミナルから `run.sh`）。エンジンは「Claude（VS Code 同梱エンジン）」のままでよい。
-- Claude サブ（2 つ目の Claude のアカウント）も選べる（macOS では使えない）。`claude setup-token` で作ったトークンを設定ダイアログに貼る（→ [docs/engines_ja.md](docs/engines_ja.md)）。
+- Claude サブ（2 つ目の Claude のアカウント）も選べる。`claude setup-token` で作ったトークンを設定ダイアログに貼る（→ [docs/engines_ja.md](docs/engines_ja.md)）。
 - Claude Code / Codex CLI / pi は、それぞれのエンジンにログインして使う前提（各サービスのサブスクリプション、または pi のローカル llama.cpp）。API キーでの従量課金利用は想定しておらず、動作確認もしていない。アプリに API キーの設定欄は無い（OpenAI 互換 HTTP だけは `.env` の `OPENAI_API_KEY` を使う）。
 - 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
 - **モデル欄に入れるもの**
@@ -192,7 +192,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 | `./run.sh` でウィンドウが出ない（macOS / Linux） | 理由はターミナルに出る（`data/logs/gui-crash-*.log` にも残る）。`MyAnalysis needs Python 3.11 or newer` と出たら、`rm -rf .venv` で消してから、3.11 以上の `python3` で手順 1 の venv を作り直す。「必要なパッケージがありません」と出たら `.venv/bin/python -m pip install -r requirements.txt` |
 | Linux で `Could not load the Qt platform plugin "xcb"` と出る | `libxcb-cursor0` を入れる（Debian / Ubuntu は `sudo apt install libxcb-cursor0`） |
 | macOS で `CERTIFICATE_VERIFY_FAILED` と出る | python.org 版の Python なら Install Certificates.command を実行する（→ [macOS / Linux](#macos--linux)） |
-| macOS で、別の場所に移るとデータセットが「このホストにパス無し」になる | ネットワークでホスト名が変わっている。手順 1 の `scutil` でホスト名を固定してから、**ファイル → データセットを開く…** の **この PC のパスを登録…** で登録し直す |
+| macOS で、データセットが「このホストにパス無し」になる | `python -m llm_bridge host` で今の名前を確かめ、古い名前の登録は `python -m llm_bridge rename-host <古い名前>` で移す（**ファイル → データセットを開く…** の **この PC のパスを登録…** でも足せる） |
 | 「保存に失敗しました（検証NG）」 | 同期ドライブの不調。rclone などのマウントで起きやすい → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)（点検・修復コマンド `doctor` を含む） |
 
 その他の症状、同期ドライブで起きる問題、不具合を報告するときに添えるもの → [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md)

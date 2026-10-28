@@ -4,12 +4,12 @@ import json
 import math
 import os
 import re
-import socket
 import sys
 from pathlib import Path
 
 import dataset_config
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
+from common.host_key import host_key, host_keys
 from common.paths import safe_resolve
 from llm_bridge import state, annotations, commands
 from llm_bridge.paths import active_state_path
@@ -176,6 +176,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Don't auto-open the dataset in a running GUI (skip the 10s wait)",
     )
 
+    sub.add_parser("host", help="Print this PC's registry host key and aliases")
+    p_rh = sub.add_parser("rename-host", help="Move registry paths from an old host key to this PC's key")
+    p_rh.add_argument("old", help="Old host key")
+    p_rh.add_argument("--to", default=None, help="New host key (default: this PC's key)")
+    p_rh.add_argument("--dry-run", action="store_true", default=False,
+                      help="Only report what would change")
+
     # description / completed はユーザーが決める値。help= を省いて --help から隠し、
     # エージェントが verb を発見して勝手に meta.json を書きに行くのを防ぐ（verb 自体は
     # 人手/スクリプト用に残す。GUI の「概要を編集」は patch_description を直接呼ぶ）。
@@ -334,12 +341,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(name)
             return 0
         from dataset_config import load_config
-        host = socket.gethostname().upper()
+        import config
         result = []
         for name in sorted(DATASETS):
             entry = {"name": name}
             per_host = DATASETS[name]
-            entry["path"] = per_host.get(host)
+            hit = config.host_path(per_host)
+            entry["path"] = hit[1] if hit else None
             try:
                 entry["format"] = load_config(name).get("format", "csv_per_subdir")
             except Exception as e:
@@ -411,6 +419,29 @@ def main(argv: list[str] | None = None) -> int:
         return doctor.run(args.dataset, repair=args.repair, rescue=args.rescue,
                           cache=args.cache, log=args.log)
 
+    if args.cmd == "host":
+        keys = host_keys()
+        print(json.dumps({"host": host_key(), "aliases": keys[1:]}, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "rename-host":
+        import config
+        try:
+            res = config.rename_host(args.old, args.to, dry_run=args.dry_run)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        for c in res["conflicts"]:
+            print(f"warning: {c['dataset']}: {res['new']} already has a different path; "
+                  f"{res['old']} kept", file=sys.stderr)
+        sync = None
+        if not args.dry_run:
+            import config_share
+            sync = config_share.try_sync()
+        res["sync"] = sync
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+
     if args.cmd == "register-dataset":
         from config import register_dataset
 
@@ -422,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
 
         is_current_host = (
             args.host is None
-            or args.host.upper() == socket.gethostname().upper()
+            or args.host.upper() == host_key()
         )
         if is_current_host and not Path(args.path).exists():
             print(

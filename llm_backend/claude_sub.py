@@ -4,16 +4,23 @@
 （``auth_env``。起動のたびに呼ぶ）。トークンが無い・戻せない・形が違うときは ``AuthError`` で、
 呼び出し側（``ClaudeCodeBackend._auth``）はプロセスを起動しない。メインの認証・別のエンジンには倒さない。
 
-置き場は ``~/.myanalysis/secrets/claude_sub.bin``（リポジトリ・同期ドライブ・R2 同期・agent_home の外）。
-中身は、空白を除いたトークンの UTF-8 を DPAPI（CurrentUser・エントロピー無し）で暗号化した blob そのもの。
-DPAPI の blob は、この PC の同じ Windows の利用者でしか戻せない（トークンは PC ごとに入れる）。
-Windows 以外（テストの経路）は暗号化せず、0700 のフォルダの 0600 のファイルに書く。
+置き場（リポジトリ・同期ドライブ・R2 同期・agent_home の外）:
 
-``~``（Windows は %USERPROFILE%）は PC ローカルである前提（MyAnalysis は agent_home・config_share_state.json などの
-PC ローカルの状態も ``~/.myanalysis`` に置いている）。置き場が同期・ネットワークのマウントの上か判定できないときも含めて、
-そうなら書かない（``synced_location``。``_on_synced_mount``。見かけのフォルダとリンクを辿った実体の両方を見る）。それ以外の同期（検出できないもの）で写されても、DPAPI の blob は
-他の PC・利用者では戻せない。対応するのは Windows（MyAnalysis の前提）。Windows 以外の平文の経路はテストと開発（Linux・WSL）用で、
-``/proc/mounts`` の無い OS（macOS 等）では判定できないので書かない。
+- Windows は ``~/.myanalysis/secrets/claude_sub.bin`` に DPAPI の blob。中身は、空白を除いたトークンの UTF-8 を
+  DPAPI（CurrentUser・エントロピー無し）で暗号化した blob そのもの。DPAPI の blob は、この PC の同じ Windows の利用者
+  でしか戻せない（トークンは PC ごとに入れる）。
+- macOS はログインキーチェーン（generic password、service ``MyAnalysis-claude-sub``・account ``claude_sub``）で、
+  ファイルは作らない。``/usr/bin/security`` の ``-i`` に stdin で渡し、argv に載せない。書いた後に読み直して確かめる。
+  ``security`` の終了コード 44（項目が無い）は未設定、ほかの失敗は ``AuthError("keychain")``。
+  既知の制約: SSH などでログインキーチェーンが検索リストに無いと、``find-generic-password`` は 44 を返し「未設定」と表示される。
+- Linux 等（テストと開発用）は暗号化せず、0700 のフォルダの 0600 のファイルに書く。``/proc/mounts`` の無い
+  macOS 以外の POSIX では判定できないので書かない。
+
+ファイルに置く OS では、``~``（Windows は %USERPROFILE%）は PC ローカルである前提（MyAnalysis は agent_home・
+config_share_state.json などの PC ローカルの状態も ``~/.myanalysis`` に置いている）。置き場が同期・ネットワークのマウントの
+上か判定できないときも含めて、そうなら書かない（``synced_location``。``_on_synced_mount``。見かけのフォルダとリンクを辿った
+実体の両方を見る）。それ以外の同期（検出できないもの）で写されても、DPAPI の blob は他の PC・利用者では戻せない。
+対応するのは Windows と macOS。
 
 claude は、設定ファイルの ``apiKeyHelper`` と ``env`` の認証の変数を ``CLAUDE_CODE_OAUTH_TOKEN`` より先に使う（2.1.301 の同梱コードの
 認証の先の順: apiKeyHelper → ANTHROPIC_AUTH_TOKEN → CLAUDE_CODE_OAUTH_TOKEN → …。設定の env は起動時に環境変数として入る）。
@@ -31,6 +38,7 @@ import ctypes
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,6 +54,13 @@ _TOKEN_RE = re.compile(r"[\x21-\x7e]+")     # 空白の無い ASCII の印字で
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 _SETTINGS_MAX = 1024 * 1024     # claude の設定ファイルを読む上限
 _PROC_MOUNTS = "/proc/mounts"   # POSIX のマウントの一覧（common.fs_kind が読む）
+_SECURITY = "/usr/bin/security"
+_KC_SERVICE = "MyAnalysis-claude-sub"
+_KC_ACCOUNT = "claude_sub"
+_KC_NOT_FOUND = 44            # errSecItemNotFound (-25300) の下位 8 ビット
+_KC_LINE_MAX = 4094           # security -i の 1 行（改行を除く）の上限バイト数
+_KC_TIMEOUT = 60.0            # 読み・保存・削除（ロック解除の確認に答える時間を見込む）
+_KC_STATE_TIMEOUT = 5.0       # 状態（GUI スレッドから呼ぶ）
 
 # 認証の先を決める変数。claude_code._build_env がサブの子の環境から落とし、claude の設定ファイルの env に
 # あれば check_settings が起動を止める。ANTHROPIC_AUTH_TOKEN などは CLAUDE_CODE_OAUTH_TOKEN より先に効くので、
@@ -106,8 +121,72 @@ def check_token(token: str) -> str | None:
     return None
 
 
+# ----- macOS のキーチェーン（テストが _use_keychain / _security を差し替える） -----
+
+def _use_keychain() -> bool:
+    return sys.platform == "darwin"
+
+
+def storage_kind() -> str:
+    """置き場の種類。"keychain"（macOS）/ "dpapi"（Windows）/ "plain"（それ以外。平文 0600）。GUI が文を選ぶのに使う。"""
+    if _use_keychain():
+        return "keychain"
+    if sys.platform == "win32":
+        return "dpapi"
+    return "plain"
+
+
+def _security(args: list[str], *, stdin: str | None = None, timeout: float) -> tuple[int, str]:
+    """``/usr/bin/security`` を実行して (終了コード, 標準出力)。投げない（起動できない・時間切れは (-1, "")）。
+
+    標準エラーは返さない（地域化されるので判定に使わない）。
+    """
+    try:
+        r = subprocess.run([_SECURITY, *args], input=stdin, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return -1, ""
+    return r.returncode, r.stdout or ""
+
+
+def _keychain_add_line(token: str) -> str:
+    """``security -i`` に送る 1 行（末尾の改行を含む）。
+
+    ``security`` の split_line は ``"`` か ``'`` で引用を始めて同じ字でだけ閉じ、``\\`` は次の 1 字をそのまま写すので、
+    ``\\`` と ``"`` だけをエスケープして ``"`` で囲む。1 行が上限を超えると残りが別のコマンドとして実行されるので拒否する。
+    """
+    if any(c in token for c in "\r\n\0"):
+        raise AuthError("chars", _CHECK_MESSAGES["chars"])
+    escaped = token.replace("\\", "\\\\").replace('"', '\\"')
+    body = f'add-generic-password -U -a "{_KC_ACCOUNT}" -s "{_KC_SERVICE}" -w "{escaped}"'
+    if len(body.encode("utf-8")) > _KC_LINE_MAX:
+        raise AuthError("chars", _CHECK_MESSAGES["chars"])
+    return body + "\n"
+
+
+def _keychain_error(rc: int) -> AuthError:
+    return AuthError("keychain", f"cannot access the macOS Keychain (security exit {rc})")
+
+
+def _kc_find_args(*, secret: bool) -> list[str]:
+    args = ["find-generic-password", "-s", _KC_SERVICE, "-a", _KC_ACCOUNT]
+    if secret:
+        args.append("-w")
+    return args
+
+
 def read_token() -> str:
     """置き場のトークン。無い・読めない・形が違えば AuthError。ワーカースレッドからも呼ぶ。"""
+    if _use_keychain():
+        rc, out = _security(_kc_find_args(secret=True), timeout=_KC_TIMEOUT)
+        if rc == 0:
+            token = clean_token(out)
+            if check_token(token) is not None:
+                raise AuthError("corrupt", "claude-sub keychain item is corrupt")
+            return token
+        if rc == _KC_NOT_FOUND:
+            raise AuthError("not_set", "claude-sub token is not set")
+        raise _keychain_error(rc)
     path = token_path()
     try:
         with open(path, "rb") as f:
@@ -129,7 +208,19 @@ def read_token() -> str:
 
 
 def token_state() -> str:
-    """"ok" / "missing"（ファイルが無い）/ "bad"（在るが使えない）。投げない。"""
+    """"ok" / "missing"（ファイルが無い）/ "bad"（在るが使えない）。投げない。
+
+    キーチェーンでは値を読まない（``-w`` を付けない。属性はロックされていても確認なしで引けるので、GUI スレッドから
+    呼んでも止まらない）。その "ok" は「項目がある」だけで、中身の形は確かめない（壊れていれば送信時の
+    ``read_token`` が ``corrupt``）。
+    """
+    if _use_keychain():
+        rc, _ = _security(_kc_find_args(secret=False), timeout=_KC_STATE_TIMEOUT)
+        if rc == 0:
+            return "ok"
+        if rc == _KC_NOT_FOUND:
+            return "missing"
+        return "bad"
     try:
         read_token()
     except AuthError as e:
@@ -150,6 +241,16 @@ def save_token(text: str) -> None:
     reason = check_token(token)
     if reason is not None:
         raise AuthError(reason, _CHECK_MESSAGES[reason])
+    if _use_keychain():
+        # トークンは argv に載せない（ps・EDR から見える）。-T も付けない（作った security 自身が信頼される）。
+        line = _keychain_add_line(token)
+        _security(["-i"], stdin=line, timeout=_KC_TIMEOUT)      # 成否は読み直しで判断する
+        rc, out = _security(_kc_find_args(secret=True), timeout=_KC_TIMEOUT)
+        if rc != 0:
+            raise _keychain_error(rc)
+        if clean_token(out) != token:
+            raise AuthError("keychain", "macOS Keychain read-back did not match the saved token")
+        return
     path = token_path()
     try:
         inside = path.resolve().is_relative_to(repo_root().resolve())
@@ -196,7 +297,7 @@ def _on_synced_mount(directory: Path) -> bool:
 
     Windows は common.fs_kind（ボリュームの FS 名。UNC・ネットワークドライブ・NTFS などでない FS・判定の失敗は fragile）。
     POSIX は /proc/mounts を読めるときだけ fs_kind（FUSE・CIFS・NFS などは fragile）を使う。読めないとき fs_kind は
-    local を返すので、ここで判定できないとして True にする（macOS 等）。
+    local を返すので、ここで判定できないとして True にする（macOS 以外の POSIX。macOS はキーチェーンを使うのでここを通らない）。
     """
     if sys.platform != "win32" and not _mounts_readable():
         return True
@@ -205,6 +306,10 @@ def _on_synced_mount(directory: Path) -> bool:
 
 def delete_token() -> None:
     """置き場のトークンを消す（無ければ何もしない）。消せなければ AuthError。"""
+    if _use_keychain():
+        rc, _ = _security(["delete-generic-password", "-s", _KC_SERVICE, "-a", _KC_ACCOUNT], timeout=_KC_TIMEOUT)
+        if rc not in (0, _KC_NOT_FOUND):
+            raise _keychain_error(rc)
     try:
         token_path().unlink(missing_ok=True)
     except OSError as e:

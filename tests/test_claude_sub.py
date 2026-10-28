@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -244,6 +245,189 @@ def test_real_dpapi_roundtrip():
     claude_sub.save_token(_TOKEN)
     assert _TOKEN.encode() not in claude_sub.token_path().read_bytes()
     assert claude_sub.read_token() == _TOKEN
+
+
+# ---- macOS のキーチェーン（Issue #122。/usr/bin/security の偽物で試す） ----
+
+
+class _FakeKeychain:
+    """``claude_sub._security`` の偽物。(service, account) → 値の dict と、呼び出しの記録を持つ。"""
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str], str] = {}
+        self.calls: list[tuple[list[str], str | None, float]] = []
+        self.force: dict[str, int] = {}          # コマンド名 → 強制する rc
+        self.readback: str | None = None         # 値つきの find で返す別の値
+
+    @staticmethod
+    def _key(args: list[str]) -> tuple[str, str]:
+        return args[args.index("-s") + 1], args[args.index("-a") + 1]
+
+    def __call__(self, args, *, stdin=None, timeout):
+        self.calls.append((list(args), stdin, timeout))
+        if args == ["-i"]:
+            words = shlex.split(stdin.rstrip("\n"))
+            if words[0] in self.force:
+                return self.force[words[0]], ""
+            if words[0] == "add-generic-password":
+                self.items[self._key(words)] = words[words.index("-w") + 1]
+                return 0, ""
+            return 1, ""
+        cmd = args[0]
+        if cmd in self.force:
+            return self.force[cmd], ""
+        key = self._key(args)
+        if cmd == "find-generic-password":
+            if key not in self.items:
+                return 44, ""
+            if "-w" in args:
+                value = self.readback if self.readback is not None else self.items[key]
+                return 0, value + "\n"
+            return 0, "keychain: ...\n"
+        if cmd == "delete-generic-password":
+            if key not in self.items:
+                return 44, ""
+            del self.items[key]
+            return 0, ""
+        return 1, ""
+
+
+@pytest.fixture
+def keychain(monkeypatch):
+    fake = _FakeKeychain()
+    monkeypatch.setattr(claude_sub, "_use_keychain", lambda: True)
+    monkeypatch.setattr(claude_sub, "_security", fake)
+    return fake
+
+
+def test_keychain_save_and_read(keychain):
+    claude_sub.save_token(_TOKEN)
+    assert claude_sub.read_token() == _TOKEN
+    assert claude_sub.token_state() == "ok"
+    assert claude_sub.auth_env() == {claude_sub.TOKEN_ENV: _TOKEN}
+    assert not claude_sub.token_path().exists()
+    assert claude_sub.storage_kind() == "keychain"
+
+
+def test_keychain_token_only_on_stdin(keychain):
+    claude_sub.save_token(_TOKEN)
+    claude_sub.read_token()
+    claude_sub.token_state()
+    claude_sub.delete_token()
+    for args, _stdin, _timeout in keychain.calls:
+        assert all(_TOKEN not in a for a in args)
+        assert "-T" not in args
+    saves = [c for c in keychain.calls if c[1] is not None]
+    assert len(saves) == 1
+    assert saves[0][0] == ["-i"]
+    assert _TOKEN in saves[0][1]
+
+
+def test_keychain_add_line_escapes():
+    value = 'sk-ant-oat01-a"b\\c'
+    line = claude_sub._keychain_add_line(value)
+    assert line.endswith("\n")
+    assert shlex.split(line)[-1] == value
+
+
+def test_keychain_add_line_limit(keychain):
+    ok = "sk-ant-oat01-" + "A" * 4009
+    assert len(ok) == 4022
+    line = claude_sub._keychain_add_line(ok)
+    assert len(line[:-1].encode("utf-8")) == 4094
+    too_long = ok + "A"
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.save_token(too_long)
+    assert ei.value.code == "chars"
+    assert keychain.calls == []
+
+
+def test_keychain_not_found(keychain):
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.read_token()
+    assert ei.value.code == "not_set"
+    assert claude_sub.token_state() == "missing"
+
+
+@pytest.mark.parametrize("rc", [51, -1])
+def test_keychain_other_rc_is_keychain_error(keychain, rc):
+    claude_sub.save_token(_TOKEN)
+    keychain.force["find-generic-password"] = rc
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.read_token()
+    assert ei.value.code == "keychain"
+    assert _TOKEN not in str(ei.value)
+    assert claude_sub.token_state() == "bad"
+
+
+def test_keychain_corrupt_item(keychain):
+    keychain.items[(claude_sub._KC_SERVICE, claude_sub._KC_ACCOUNT)] = "sk-ant-api03-" + "B" * 40
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.read_token()
+    assert ei.value.code == "corrupt"
+    assert "sk-ant-api03" not in str(ei.value)
+
+
+def test_keychain_save_skips_mount_check(keychain, monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("must not be called on the keychain path")
+
+    monkeypatch.setattr(claude_sub, "_on_synced_mount", _boom)
+    monkeypatch.setattr(claude_sub, "_real_dir", _boom)
+    monkeypatch.setattr(claude_sub, "atomic_write_bytes", _boom)
+    claude_sub.save_token(_TOKEN)
+    assert claude_sub.read_token() == _TOKEN
+
+
+def test_keychain_readback_mismatch(keychain):
+    keychain.readback = "sk-ant-oat01-" + "Z" * 80
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.save_token(_TOKEN)
+    assert ei.value.code == "keychain"
+    assert _TOKEN not in str(ei.value)
+    assert "exit 0" not in str(ei.value)
+
+
+def test_keychain_readback_failure(keychain):
+    keychain.force["find-generic-password"] = 51
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.save_token(_TOKEN)
+    assert ei.value.code == "keychain"
+    assert _TOKEN not in str(ei.value)
+
+
+def test_keychain_state_does_not_read_secret(keychain):
+    claude_sub.save_token(_TOKEN)
+    claude_sub.read_token()
+    claude_sub.delete_token()
+    keychain.calls.clear()
+    claude_sub.token_state()
+    assert len(keychain.calls) == 1
+    args, _stdin, timeout = keychain.calls[0]
+    assert "-w" not in args
+    assert timeout == 5.0
+    keychain.calls.clear()
+    claude_sub.save_token(_TOKEN)
+    claude_sub.read_token()
+    claude_sub.delete_token()
+    assert keychain.calls
+    assert all(c[2] == 60.0 for c in keychain.calls)
+
+
+def test_keychain_delete(keychain):
+    claude_sub.save_token(_TOKEN)
+    claude_sub.delete_token()
+    assert claude_sub.token_state() == "missing"
+    claude_sub.delete_token()               # 44 は成功扱い
+    old = claude_sub.token_path()
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"old")
+    claude_sub.delete_token()
+    assert not old.exists()
+    keychain.force["delete-generic-password"] = 51
+    with pytest.raises(claude_sub.AuthError) as ei:
+        claude_sub.delete_token()
+    assert ei.value.code == "keychain"
 
 
 # ---- claude の設定の検査 ----

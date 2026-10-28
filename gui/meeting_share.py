@@ -8,6 +8,8 @@ Opened from View → ミーティング共有…. All user-facing strings go thr
 from __future__ import annotations
 
 import os
+import socket
+import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer
@@ -21,6 +23,59 @@ from common.i18n import tr
 # Duration options (label suffix, seconds). Max 24h, server-clamped to [1h, 24h].
 _TTL_OPTIONS = [("1h", 3600), ("3h", 10800), ("6h", 21600),
                 ("12h", 43200), ("24h", 86400)]
+
+
+def _is_darwin() -> bool:
+    return sys.platform == "darwin"
+
+
+def _resolver_ipv4s() -> list[str]:
+    """自分のホスト名を名前解決した IPv4（重複除去）。失敗は空。DNS を引くので遅いことがある。"""
+    candidates: list[str] = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and ip not in candidates:
+                candidates.append(ip)
+    except Exception:
+        return []
+    return candidates
+
+
+def _interface_ipv4s() -> list[str]:
+    """動いているインターフェース（loopback・point-to-point を除く）の IPv4（重複除去）。DNS を引かない。失敗は空。"""
+    try:
+        from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
+        flag = QNetworkInterface.InterfaceFlag
+        ipv4 = QAbstractSocket.NetworkLayerProtocol.IPv4Protocol
+        out: list[str] = []
+        for iface in QNetworkInterface.allInterfaces():
+            flags = iface.flags()
+            if not (flags & flag.IsUp) or not (flags & flag.IsRunning):
+                continue
+            if (flags & flag.IsLoopBack) or (flags & flag.IsPointToPoint):
+                continue
+            for entry in iface.addressEntries():
+                ip = entry.ip()
+                if ip.protocol() == ipv4:
+                    text = ip.toString()
+                    if text and text not in out:
+                        out.append(text)
+        return out
+    except Exception:
+        return []
+
+
+def _pick_ip(candidates: list[str]) -> str:
+    def _rank(ip: str) -> tuple:
+        # loopback を最後、link-local を次、VPN 帯(25./100.64.)を後ろ、私設 LAN を前。
+        return (ip.startswith("127."), ip.startswith("169.254."),
+                ip.startswith("25.") or ip.startswith("100.64."), ip)
+
+    for ip in sorted(candidates, key=_rank):
+        if not ip.startswith("127.") and not ip.startswith("169.254."):
+            return ip
+    return ""
 
 
 class MeetingShareWindow(QWidget):
@@ -325,26 +380,13 @@ class MeetingShareWindow(QWidget):
 
     def _primary_ip(self) -> str:
         """LAN 配布に使うホストの IPv4 候補（推定）。失敗しても空文字で返し、
-        meeting_start を落とさない。VPN/loopback/link-local は後回し。"""
-        import socket
-        candidates: list[str] = []
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                ip = info[4][0]
-                if ip and ip not in candidates:
-                    candidates.append(ip)
-        except Exception:
-            candidates = []
+        meeting_start を落とさない。VPN/loopback/link-local は後回し。
 
-        def _rank(ip: str) -> tuple:
-            # loopback を最後、link-local を次、VPN 帯(25./100.64.)を後ろ、私設 LAN を前。
-            return (ip.startswith("127."), ip.startswith("169.254."),
-                    ip.startswith("25.") or ip.startswith("100.64."), ip)
-
-        for ip in sorted(candidates, key=_rank):
-            if not ip.startswith("127.") and not ip.startswith("169.254."):
-                return ip
-        return ""
+        macOS はホスト名の名前解決（DHCP の名前を DNS で引く）が GUI スレッドを止め得るので、
+        インターフェースの一覧を先に見る。ほかは名前解決を先に見て、見つからなければインターフェース。"""
+        if _is_darwin():
+            return _pick_ip(_interface_ipv4s()) or _pick_ip(_resolver_ipv4s())
+        return _pick_ip(_resolver_ipv4s()) or _pick_ip(_interface_ipv4s())
 
     def _on_name_changed(self, text: str) -> None:
         self._relay.set_host_name(text)

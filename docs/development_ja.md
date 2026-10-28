@@ -160,6 +160,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 |---|---|
 | `paths.py` | 書込の chokepoint（`atomic_write_*` / `durable_*_json`）、`repo_root`、`safe_resolve`、相対パス検証 `validate_relpath` / `resolve_under` |
 | `fs_kind.py` | 書込先が rename を信頼できる FS（local）か同期マウント等（fragile）かの判定 |
+| `host_key.py` | この PC の登録簿のキー `host_key()` と、照合に使う別名 `host_keys()`（macOS は scutil の HostName / LocalHostName） |
 | `mount_compat.py` | `os.path.realpath` を包む shim。WinFsp 上で PIL / matplotlib が落ちる問題への対策 |
 | `filelock.py` | プロセス間の排他ロック（POSIX は fcntl、Windows は msvcrt） |
 | `rclone_paths.py` | rclone のキャッシュ・ログの場所の解決（引数 > 環境変数。doctor と mount_probe で共有） |
@@ -518,7 +519,7 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `MYANALYSIS_RCLONE_CACHE` / `MYANALYSIS_RCLONE_LOG` | `doctor` と `devtools.mount_probe` で `--cache` / `--log` を省略したときの rclone の VFS キャッシュ / ログの場所（OS の環境変数。`.env` からは読まない） |
 | `LLM_BACKEND` | バックエンドの全体既定の選択を上書きする（`config.toml` より優先。チャット単位のエンジン上書きには効かない） |
 | `CLAUDE_CODE_BIN` / `CODEX_BIN` | claude / codex の実行ファイル（`config.toml` の `bin` が空のときに使われる） |
-| `R2_AUTOSYNC` | `0` で R2 の自動同期（起動時と CLI の `register-dataset` の後の双方向同期、GUI での登録・登録削除の後の送信）を止める。手動の `config-*` は残る |
+| `R2_AUTOSYNC` | `0` で R2 の自動同期（起動時と CLI の `register-dataset`・`rename-host` の後の双方向同期、GUI での登録・登録削除の後の送信）を止める。手動の `config-*` は残る |
 
 ### 9.5 旧形式の登録簿からの移行
 

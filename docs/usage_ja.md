@@ -19,7 +19,8 @@ README の [データセット](../README_ja.md#データセット)・[使い方
 }
 ```
 
-- ホスト名のキーは **大文字**。確認は `python -c "import socket; print(socket.gethostname().upper())"`。手で書いた小文字のキーは一致しない。
+- ホスト名のキーは **大文字**。この PC のキーの確認は `python -m llm_bridge host`（`aliases` は照合にも使う別名。macOS だけ）。手で書いた小文字のキーは一致しない。
+- PC の名前（ホスト名）を変えたときは、`python -m llm_bridge rename-host <古い名前>` で登録を今の名前へ移せる（`--dry-run` で先に確かめられる。R2 同期を使っていれば、古い名前の登録の削除も伝わる）。
 - パスは絶対パス。JSON では `\` を `\\` と書くか `/` を使う。
 - 新しく clone した直後は登録簿が無く、最初の登録でファイルが作られる。
 - 手で編集するときは GUI を終了してから行う。**登録簿が壊れていると（空のファイルも含む）GUI も全 CLI も起動しない**（→ [トラブルシューティング](troubleshooting_ja.md#トラブルシューティング)）。
@@ -254,7 +255,7 @@ npm uninstall -g @anthropic-ai/claude-code @openai/codex @earendil-works/pi-codi
 
 ### 対応プラットフォーム
 
-開発と動作確認は Windows 11 のみ。ランチャーは `run.bat`（Windows）と `run.sh`（macOS / Linux。未検証）。macOS / Linux で気をつけること（キーの読み替え、メニュー、ファイルのアクセス、証明書など）は README の [macOS / Linux](../README_ja.md#macos--linux)。macOS では同期ドライブの自動判定が効かず（常に local 扱い。`MYANALYSIS_FORCE_FRAGILE=1` で強制できる）、Claude サブはトークンを保存できないので使えない。インストーラは無い。更新は **ヘルプ → MyAnalysis を更新** を押したときだけで、起動時の確認や自動の更新は無い。`requirements.txt` は版を固定していない。
+開発と動作確認は Windows 11 のみ。ランチャーは `run.bat`（Windows）と `run.sh`（macOS / Linux。未検証）。macOS / Linux で気をつけること（キーの読み替え、メニュー、ファイルのアクセス、証明書など）は README の [macOS / Linux](../README_ja.md#macos--linux)。macOS では、同期ドライブは FUSE（macFUSE・FUSE-T・rclone）とネットワーク（SMB・NFS・AFP・WebDAV）のマウントだけを fragile と判定し、ほかは local として扱う（→ [同期ドライブでの書き込み](troubleshooting_ja.md#同期ドライブでの書き込み)）。Claude サブのトークンはログインキーチェーン（項目名 `MyAnalysis-claude-sub`）に置く。インストーラは無い。更新は **ヘルプ → MyAnalysis を更新** を押したときだけで、起動時の確認や自動の更新は無い。`requirements.txt` は版を固定していない。
 
 ### メモリと規模
 

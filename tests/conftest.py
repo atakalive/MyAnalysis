@@ -149,6 +149,32 @@ def _isolate_claude_sub_token(monkeypatch, tmp_path):
     # マウントの判定は common.fs_kind（conftest の上の fixture が tmp_path を local に固定）に任せる。
     # /proc/mounts の無い OS でもテストの保存が通るように、読める扱いにする。
     monkeypatch.setattr(claude_sub, "_mounts_readable", lambda: True)
+    # macOS でも本物のキーチェーン（/usr/bin/security）に触れない。keychain の経路を試すテストは
+    # _use_keychain と _security の両方を自分で差し替える。
+    monkeypatch.setattr(claude_sub, "_use_keychain", lambda: False)
+    monkeypatch.setattr(claude_sub, "_security", _forbid_security)
+
+
+def _forbid_security(*a, **k):
+    raise AssertionError("real /usr/bin/security must not run in tests")
+
+
+def _forbid_scutil(*a, **k):
+    raise AssertionError("real /usr/sbin/scutil must not run in tests")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_key(monkeypatch):
+    """この PC の登録簿のキーを非 macOS の経路に固定し、本物の scutil に触れない（Issue #122）。
+
+    macOS の経路を試すテストだけが、自分で _is_darwin を True・_scutil を偽物に差し替える。
+    """
+    from common import host_key
+    monkeypatch.setattr(host_key, "_is_darwin", lambda: False)
+    monkeypatch.setattr(host_key, "_scutil", _forbid_scutil)
+    host_key.cache_clear()
+    yield
+    host_key.cache_clear()
 
 
 @pytest.fixture(autouse=True)

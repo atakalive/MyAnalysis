@@ -1797,12 +1797,16 @@ def test_flag_strict_bool(qapp):
 
 def test_primary_ip_prefers_lan(qapp, monkeypatch):
     import socket
+    from gui import meeting_share
     from gui.meeting_share import MeetingShareWindow
     chat = FakeChat()
     win = FakeWindow(chat, tabs=[])
     mr, r = _make_relay(monkeypatch, win)
     sw = MeetingShareWindow(win, r)
     sw._timer.stop()
+
+    monkeypatch.setattr(meeting_share, "_is_darwin", lambda: False)
+    monkeypatch.setattr(meeting_share, "_interface_ipv4s", lambda: [])
 
     def gai(ips):
         return lambda host, *a, **kw: [
@@ -1813,6 +1817,58 @@ def test_primary_ip_prefers_lan(qapp, monkeypatch):
     assert sw._primary_ip() == "192.168.1.50"
     monkeypatch.setattr(socket, "getaddrinfo", gai(["127.0.0.1", "169.254.1.1"]))
     assert sw._primary_ip() == ""
+    r.stop()
+
+
+def _ip_share_window(monkeypatch):
+    from gui.meeting_share import MeetingShareWindow
+    chat = FakeChat()
+    win = FakeWindow(chat, tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    sw = MeetingShareWindow(win, r)
+    sw._timer.stop()
+    return sw, r
+
+
+def _gai(ips):
+    import socket
+    return lambda host, *a, **kw: [
+        (socket.AF_INET, None, None, "", (ip, 0)) for ip in ips]
+
+
+def _gai_forbidden(*a, **kw):
+    raise AssertionError("getaddrinfo must not be called")
+
+
+def test_primary_ip_darwin_prefers_interfaces(qapp, monkeypatch):
+    import socket
+    from gui import meeting_share
+    sw, r = _ip_share_window(monkeypatch)
+    monkeypatch.setattr(meeting_share, "_is_darwin", lambda: True)
+    monkeypatch.setattr(meeting_share, "_interface_ipv4s", lambda: ["10.0.0.7"])
+    monkeypatch.setattr(socket, "getaddrinfo", _gai_forbidden)
+    assert sw._primary_ip() == "10.0.0.7"
+    monkeypatch.setattr(meeting_share, "_interface_ipv4s", lambda: [])
+    monkeypatch.setattr(socket, "getaddrinfo", _gai(["192.168.1.50"]))
+    assert sw._primary_ip() == "192.168.1.50"
+    r.stop()
+
+
+def test_primary_ip_non_darwin_falls_back_to_interfaces(qapp, monkeypatch):
+    import socket
+    from gui import meeting_share
+    sw, r = _ip_share_window(monkeypatch)
+    monkeypatch.setattr(meeting_share, "_is_darwin", lambda: False)
+
+    def _no_interfaces():
+        raise AssertionError("_interface_ipv4s must not be called")
+
+    monkeypatch.setattr(meeting_share, "_interface_ipv4s", _no_interfaces)
+    monkeypatch.setattr(socket, "getaddrinfo", _gai(["192.168.1.50"]))
+    assert sw._primary_ip() == "192.168.1.50"
+    monkeypatch.setattr(meeting_share, "_interface_ipv4s", lambda: ["10.0.0.7"])
+    monkeypatch.setattr(socket, "getaddrinfo", _gai(["127.0.0.1"]))
+    assert sw._primary_ip() == "10.0.0.7"
     r.stop()
 
 

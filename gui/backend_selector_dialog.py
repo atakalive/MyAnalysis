@@ -139,7 +139,14 @@ class BackendSelectorDialog(QDialog):
         self._token_edit = QLineEdit(self)
         self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._token_edit.setPlaceholderText("sk-ant-oat01-…")
-        self._token_edit.setToolTip(tr("backend.claude_sub.tooltip"))
+        kind = claude_sub.storage_kind()
+        if kind == "keychain":
+            place = tr("backend.claude_sub.place.keychain")
+        elif kind == "dpapi":
+            place = tr("backend.claude_sub.place.dpapi")
+        else:
+            place = tr("backend.claude_sub.place.plain")
+        self._token_edit.setToolTip(tr("backend.claude_sub.tooltip", place=place))
         self._token_save_btn = QPushButton(tr("backend.claude_sub.save"), self)
         self._token_delete_btn = QPushButton(tr("backend.claude_sub.delete"), self)
         for btn in (self._token_save_btn, self._token_delete_btn):
@@ -589,6 +596,7 @@ class BackendSelectorDialog(QDialog):
             "synced_location": tr("backend.claude_sub.error.synced_location"),
             "write_failed": tr("backend.claude_sub.error.write_failed"),
             "delete_failed": tr("backend.claude_sub.error.delete_failed"),
+            "keychain": tr("backend.claude_sub.error.keychain"),
         }
         return texts.get(getattr(e, "code", ""), str(e))
 

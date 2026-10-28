@@ -8,7 +8,7 @@ Experimental measurement data analysis project (Python). Data lives **outside th
 
 ## Data access — always go through `config.py`
 
-Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. The registry maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Lookup uppercases this PC's hostname (`socket.gethostname().upper()`) and matches it exactly against the host keys; the keys themselves are not normalised, so they must be uppercase. `register_dataset` (CLI `register-dataset` and the GUI) uppercases the host before writing; a lowercase key hand-written into `datasets.local.json` never matches.
+Raw measurement data is not in the repo. It lives on a synced drive whose mount point varies by PC. The registry maps each dataset name to a `{hostname: full_path}` dictionary, resolving the per-PC mount point difference. Lookup matches the host keys exactly against `common.host_key.host_keys()` in order (Windows / Linux: `[socket.gethostname().upper()]`; macOS: the canonical key — HostName → LocalHostName, uppercased — followed by aliases including the old `gethostname().upper()` key); writes use `host_key()`; old keys are cleaned up with `python -m llm_bridge rename-host` (with tombstones); the keys themselves are not normalised, so they must be uppercase. `register_dataset` (CLI `register-dataset` and the GUI) uppercases the host before writing; a lowercase key hand-written into `datasets.local.json` never matches.
 
 The registration data itself is **not in code**: it lives in `datasets.local.json` at the repo root (Git-ignored; storage implemented by [dataset_registry.py](dataset_registry.py)), and [config.py](config.py) is the access API (`DATASETS`, `get_dataset_dir`, `register_dataset`, `reload_datasets`). A fresh checkout has no registry file and starts empty.
 
@@ -19,7 +19,7 @@ from config import get_dataset_dir
 path = get_dataset_dir("my_dataset")
 ```
 
-When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods write `datasets.local.json` under a lock (verified `atomic_write_text`). **Never edit `config.py` to register a dataset.** CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録も登録後に `open-dataset` verb でそのデータセットを開く（File → データセットを開く… と同じ経路。保存済みのタブ構成・チャットがあれば復元する。open-dataset が未登録の素の ToolWindow では開かない）。登録の削除は File → データセットを開く… の「登録を削除」（`config.unregister_dataset`。登録簿からのみ外し DS フォルダには触れない。開いていれば先に閉じる）。同じ一覧の「この PC のパスを登録…」は可用性 `no-host` の行（他 PC の登録は届いているがこのホストのパスが無い）でだけ有効で、`config.register_dataset`（このホスト）→ `try_push` を行う（Issue #112。`missing` の行は同期ドライブ未マウントのことが多いので対象外。疑わしいフォルダは `_path_doubts` で確認を出す。GUI の新規登録と違い自動では開かない）。R2 同期（[config_share.py](config_share.py)）の登録簿マージは union・非破壊なので、削除は明示的な tombstone（ローカル状態と bundle の `deleted`、bundle schema 2）でだけ伝播する — tombstone を経ずに登録簿から消しても次回 sync で remote から復活する。自動同期は、GUI 起動時と CLI `register-dataset` の後が `config_share.try_sync`（双方向）、GUI での登録・登録削除の直後が `config_share.try_push`（送信のみ。`gui/config_push.py` の `ConfigPusher` がデーモンスレッドで実行し GUI スレッドを塞がない。push ロックで直列化。GUI からのバックグラウンド pull はしない）。 Hand-editing `datasets.local.json` is also supported (plain UTF-8 JSON, `{dataset: {HOST: path}}`); JSON has no comments, and key order is not a contract. A corrupt registry raises `RegistryError` instead of degrading to an empty config. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at the register CLI / `datasets.local.json`.
+When adding work for a new measurement, register the dataset via CLI (`python -m llm_bridge register-dataset <name> <path> [--host H]`) or GUI (File → データセットを新規登録). Both methods write `datasets.local.json` under a lock (verified `atomic_write_text`). **Never edit `config.py` to register a dataset.** CLI 登録は GUI 起動中なら自動でデータセットを開く（`--no-open` でスキップ可）。GUI 登録も登録後に `open-dataset` verb でそのデータセットを開く（File → データセットを開く… と同じ経路。保存済みのタブ構成・チャットがあれば復元する。open-dataset が未登録の素の ToolWindow では開かない）。登録の削除は File → データセットを開く… の「登録を削除」（`config.unregister_dataset`。登録簿からのみ外し DS フォルダには触れない。開いていれば先に閉じる）。同じ一覧の「この PC のパスを登録…」は可用性 `no-host` の行（他 PC の登録は届いているがこのホストのパスが無い）でだけ有効で、`config.register_dataset`（このホスト）→ `try_push` を行う（Issue #112。`missing` の行は同期ドライブ未マウントのことが多いので対象外。疑わしいフォルダは `_path_doubts` で確認を出す。GUI の新規登録と違い自動では開かない）。R2 同期（[config_share.py](config_share.py)）の登録簿マージは union・非破壊なので、削除は明示的な tombstone（ローカル状態と bundle の `deleted`、bundle schema 2）でだけ伝播する — tombstone を経ずに登録簿から消しても次回 sync で remote から復活する。自動同期は、GUI 起動時と CLI `register-dataset`・`rename-host` の後が `config_share.try_sync`（双方向）、GUI での登録・登録削除の直後が `config_share.try_push`（送信のみ。`gui/config_push.py` の `ConfigPusher` がデーモンスレッドで実行し GUI スレッドを塞がない。push ロックで直列化。GUI からのバックグラウンド pull はしない）。 Hand-editing `datasets.local.json` is also supported (plain UTF-8 JSON, `{dataset: {HOST: path}}`); JSON has no comments, and key order is not a contract. A corrupt registry raises `RegistryError` instead of degrading to an empty config. When running on a new PC, add that hostname (uppercase) to each dataset you'll use. Unknown host or dataset raises a descriptive error pointing at the register CLI / `datasets.local.json`.
 
 旧構成（`config.py` 内の `DATASETS` リテラル）からの移行は `python -m devtools.migrate_dataset_registry --source <旧 config.py> [--output <registry.json>] [--dry-run]`（旧ファイルを実行せず `ast.literal_eval` で読む。既存の異なる登録簿は上書きしない）。
 
@@ -285,13 +285,18 @@ catalog until llama-server has them loaded, which is why the list is editable.
   from config.toml minus the 6 model keys (`model` / `effort` / `thinking` / `provider` /
   `model_choices` / `provider_choices`), and `[claude_sub]` (config.toml + models.toml) wins;
   so the binary is the main one's. The app never runs a browser, `claude auth login` or
-  `setup-token` — the user pastes the token into the dialog. Storage:
+  `setup-token` — the user pastes the token into the dialog. Storage: on macOS
+  (`_use_keychain()`) the token goes into the login Keychain via `/usr/bin/security`
+  (generic password `MyAnalysis-claude-sub` / `claude_sub`; written through `security -i`
+  stdin so it never appears in argv, then read back), so no file and no mount check; exit 44
+  (item not found) is "not set", other failures are AuthError `keychain`; `token_state()` only
+  checks that the item exists (no `-w`). Elsewhere
   `~/.myanalysis/secrets/claude_sub.bin`, outside the repo (a path resolving inside the repo
   is refused), not written on a synced/network mount (apparent dir and link-resolved dir both
-  checked; on POSIX without a readable `/proc/mounts` it cannot be judged, so not written — always the case on macOS, so claude-sub cannot be used there);
+  checked; on POSIX other than macOS without a readable `/proc/mounts` it cannot be judged, so not written);
   `~` is assumed PC-local. Contents are a DPAPI (CurrentUser, no entropy) blob on Windows;
-  elsewhere plaintext 0600 in a 0700 dir, for tests/dev only (Windows is the supported
-  platform). The token is per PC (DPAPI only decrypts for this user on this PC). Claude's
+  on Linux etc. plaintext 0600 in a 0700 dir, for tests/dev only (Windows and macOS are the
+  supported platforms). The token is per PC (DPAPI only decrypts for this user on this PC). Claude's
   settings (`apiKeyHelper`, `env` auth vars) take precedence over the token and survive
   dropping env vars, so `check_settings` refuses to spawn when the policy registry, user
   settings (`CLAUDE_CONFIG_DIR` / `~/.claude`), the child cwd and all its parents'
@@ -356,6 +361,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   FS 種別（`common/fs_kind.py`）で戦略を切り替え、fragile では in-place write、
   local では従来の tmp+replace。どちらでも **read-back 検証 + 最大 5 回リトライ**を行い、
   最後まで検証できなければ `MountWriteError` を送出する（黙って成功にしない）。
+- macOS の FS 判定は `statfs` の `f_fstypename` と `MNT_LOCAL`（`common/fs_kind._darwin_statfs` / `_parse_statfs`）。apfs・hfs・msdos・exfat かつ MNT_LOCAL だけ local、ほかは fragile。そのパスだけ statfs・statvfs が失敗する・自己検査に外れるときは fragile、statfs の仕組みそのものが使えない（`/` でも通らない。`_darwin_mechanism_ok`）ときだけ local（今までと同じ）。firmlink のため `f_mntonname` をパスの接頭辞と照合しない。
 - 生の `open(path,"w")` / `Path.write_text` / `QPixmap.save(path)` / `fig.savefig(path)` を
   データセットディレクトリに向けてはならない。バイナリは BytesIO/QBuffer でバイト列にしてから
   `atomic_write_bytes` へ渡す。
@@ -388,7 +394,7 @@ POSIX, `msvcrt` on Windows. `python -m llm_bridge <verb>` runs without PySide6.
   例外は `analysis.draft.py` — draft は Write/Edit を許可する（`apply-analysis` が strip /
   `ast.parse` / `build_tab` 束縛の 3 ゲートを通してからしか昇格させないので、draft が
   0 バイト化しても `analysis.py` に伝播しない）。hook は内部エラー時に必ず fail-open する。
-  既知の制約: Git Bash の無い Windows では Claude Code が hook を PowerShell で実行し、`"<python>" -m llm_bridge guard-write` を解釈できずに失敗するので（hook の失敗は書込を止めない）、拒否されない。macOS も fs_kind がいつも local を返すので拒否されない。
+  既知の制約: Git Bash の無い Windows では Claude Code が hook を PowerShell で実行し、`"<python>" -m llm_bridge guard-write` を解釈できずに失敗するので（hook の失敗は書込を止めない）、拒否されない。macOS では APFS 等のローカル FS は local なので拒否されない（FUSE・ネットワークのマウントは拒否される）。
   stage（`data/agent_stage/` 配下）は、`data/` と `data/agent_stage` がリンクを経ずにローカルの FS（fs_kind で fragile でない）にあると確かめられたときだけ案内する。hook は stage を特別扱いしない（ローカルなので通常の FS 判定で許可される）。`MYANALYSIS_FORCE_FRAGILE` などで repo も fragile と判定される環境では stage を案内せず、従来の `content` の案内に戻る。
 
 診断と復旧: `python -m llm_bridge doctor [--repair] [--rescue]`

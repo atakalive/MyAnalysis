@@ -71,7 +71,7 @@ use_provider_system_prompt = true
 # （bin・cwd・permission_mode・allowed_tools など。model / effort などのモデル系は除く）を引き継ぐ。
 # ここに書いた値が [claude_code] より勝つ（例: permission_mode = "plan"）。
 # トークンはここに書かない。設定 → バックエンド/モデル設定… でエンジンに Claude サブを選んで入れる
-# （~/.myanalysis/secrets/claude_sub.bin に暗号化して置く）。
+# （Windows は ~/.myanalysis/secrets/claude_sub.bin に暗号化して、macOS はログインキーチェーンに置く）。
 
 [chat_search]
 # AI 検索（Ctrl+F → AI 検索）に使うエンジンとモデル。設定 → バックエンド/モデル設定… の

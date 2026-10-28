@@ -1,9 +1,10 @@
 import io
+import math
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QContextMenuEvent,
+    QNativeGestureEvent,
     QPainter,
     QPixmap,
     QResizeEvent,
@@ -192,6 +194,15 @@ class FigurePanel(QGraphicsView):
     ホイール=カーソル中心に拡縮、左ドラッグ=パン。縮小はフィットで止まる
     （右クリック『50% に縮小』で 50% 表示、その状態から拡大ホイールで 100% 復帰）。
     Pillow/pyqtgraph/numpy 不要 — 依存は PySide6 のみ。
+
+    ホイールの換算: angleDelta の 1 ノッチ = 120 で 1 段（1.25 倍）、細かい delta はそれに比例し、
+    1 イベントで 1 段を超えない。macOS のトラックパッド・Magic Mouse の精密スクロールは細かいイベントを
+    大量に出すので、比例させないと拡大が飛ぶ。指を離した後の慣性（ScrollMomentum）では拡縮しない。
+    pixelDelta は Qt 6.8 以降マウスホイールでも埋まるので、トラックパッドの判定には使わない。
+    ピンチ（ZoomNativeGesture）も同じ換算で 1 イベント 1 段まで。換算がデバイスで外れても、
+    1 イベント 1 段の頭打ちがあるので今より速くはならない（遅くなるだけ）。
+    inverted()（ナチュラルスクロール）は見ない — OS が渡す向きに従い、ImageViewerPanel やブラウザと
+    向きを揃える。2 本指のスクロールは拡縮のまま（パンには変えない）。
     """
 
     MAX_ABS_SCALE = 40.0
@@ -205,6 +216,7 @@ class FigurePanel(QGraphicsView):
         self._pixmap: QPixmap | None = None
         self._user_zoomed = False
         self._half = False  # 右クリックメニューでの 50% 縮小状態か
+        self._half_acc = 0.0  # 50% 縮小中の拡大方向の積算（ノッチ単位）
         self._text_item: QGraphicsTextItem | None = None
         self._path: Path | None = None
 
@@ -279,6 +291,7 @@ class FigurePanel(QGraphicsView):
         self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
         self._user_zoomed = False
         self._half = False
+        self._half_acc = 0.0
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -293,15 +306,37 @@ class FigurePanel(QGraphicsView):
     def wheelEvent(self, event: QWheelEvent) -> None:
         if self._pixmap is None:
             return
+        if event.phase() == Qt.ScrollPhase.ScrollMomentum:
+            event.accept()  # 指を離した後の慣性では拡縮し続けない
+            return
         dy = event.angleDelta().y()
         if dy == 0:
             return
-        self._zoom_step(dy > 0)
+        self._zoom_by_units(max(-1.0, min(1.0, dy / 120)))
         event.accept()
 
+    def viewportEvent(self, event: QEvent) -> bool:
+        # トラックパッドのピンチ（ネイティブのジェスチャーは viewport に届く）。1 イベント 1 段まで。
+        if (event.type() == QEvent.Type.NativeGesture
+                and isinstance(event, QNativeGestureEvent)
+                and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            value = event.value()
+            if value > -1:
+                units = math.log1p(value) / math.log(self.ZOOM_IN)
+                self._zoom_by_units(max(-1.0, min(1.0, units)))
+            event.accept()
+            return True
+        return super().viewportEvent(event)
+
     def _zoom_step(self, zoom_in: bool) -> None:
-        """ホイール 1 ノッチ分の拡縮。通常領域の下限=フィット（100% 未満へは縮まない）。
-        50% 縮小状態（self._half）では拡大でフィットへ復帰・縮小で 50% を維持する。"""
+        """ホイール 1 ノッチ分の拡縮（_zoom_by_units の ±1）。"""
+        self._zoom_by_units(1.0 if zoom_in else -1.0)
+
+    def _zoom_by_units(self, units: float) -> None:
+        """ノッチ単位（±1 = 1 段 = 1.25 倍 / 0.8 倍）の拡縮。通常領域の下限=フィット（100% 未満へは縮まない）。
+        50% 縮小状態（self._half）では、拡大方向の積算が 1 ノッチに達したらフィットへ復帰し、縮小方向は
+        50% を維持して積算を捨てる。フィットに戻ったイベントの余り（積算の 1 を超えた分）は捨て、そのイベントでは
+        フィットで止める（次のイベントからは通常の拡大）。"""
         if self._pixmap is None:
             return
         # 縮小下限 fit はその場で解析計算（手動ズーム中のリサイズでも陳腐化しない）。
@@ -317,17 +352,22 @@ class FigurePanel(QGraphicsView):
         # （本パネルは scale と平行移動のみ）。将来 回転/反転を足すとこの前提は崩れる。
         current = self.transform().m11()
         if self._half:
-            # 50% 縮小状態: 拡大方向で 100%(フィット) へ復帰、縮小方向は 50% 維持。
-            if zoom_in:
-                target = fit
-                self._half = False
+            # 50% 縮小状態: 拡大方向の積算が 1 ノッチで 100%(フィット) へ復帰、縮小方向は 50% 維持。
+            if units > 0:
+                self._half_acc += units
+                if self._half_acc >= 1:
+                    target = fit
+                    self._half = False
+                    self._half_acc = 0.0
+                else:
+                    target = current
             else:
+                self._half_acc = 0.0
                 target = current
         else:
             # 通常: 下限=フィット（既存仕様どおり 100% 未満へは縮まない）。
-            factor = self.ZOOM_IN if zoom_in else self.ZOOM_OUT
             hi = max(fit, self.MAX_ABS_SCALE)
-            target = min(max(current * factor, fit), hi)
+            target = min(max(current * self.ZOOM_IN ** units, fit), hi)
         applied = target / current
         if abs(applied - 1) >= 1e-9:
             self.scale(applied, applied)
@@ -352,6 +392,7 @@ class FigurePanel(QGraphicsView):
             self.scale(applied, applied)
         self.centerOn(self._item)  # 小さくなった画像をパネル中央へ
         self._half = True
+        self._half_acc = 0.0
         self._user_zoomed = True  # リサイズで倍率保持（自動再フィットさせない）
 
     def full_pixmap(self) -> QPixmap | None:
