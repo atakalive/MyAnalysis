@@ -180,26 +180,31 @@ def _fake_libc(monkeypatch, table: dict, default=None):
     return seen
 
 
-_ROOT = os.path.abspath("/")
+# _darwin_mechanism_ok が statfs に渡すのは macOS のルートの文字列 "/" そのもの（abspath しない）。
+# 偽物の表のキーも "/" にする（os.path.abspath("/") は Windows で "C:\\" になり、一致しない）。
+_MECH_ROOT = "/"
 
 
 def test_darwin_statfs_existing_path(monkeypatch):
     path = os.path.abspath("/Users/u/data")
-    seen = _fake_libc(monkeypatch, {path: _APFS, _ROOT: _APFS})
+    seen = _fake_libc(monkeypatch, {path: _APFS, _MECH_ROOT: _APFS})
     assert fs_kind._darwin_statfs(path) == ("apfs", _LOCAL_FLAG, "/System/Volumes/Data")
     assert seen[0] == os.fsencode(os.path.abspath(path))
 
 
 def test_darwin_statfs_missing_path_climbs(monkeypatch):
     base = os.path.abspath("/Users/u")
-    _fake_libc(monkeypatch, {base: _APFS, _ROOT: _APFS})
+    _fake_libc(monkeypatch, {base: _APFS, _MECH_ROOT: _APFS})
     assert fs_kind._darwin_statfs(os.path.join(base, "data", "x.json"))[0] == "apfs"
 
 
 def test_darwin_statfs_failed_paths(monkeypatch):
     eio = os.path.abspath("/Volumes/gone")
     bad = os.path.abspath("/Volumes/odd")
-    _fake_libc(monkeypatch, {eio: errno.EIO, bad: _BAD, _ROOT: _APFS})
+    seen = _fake_libc(monkeypatch, {eio: errno.EIO, bad: _BAD, _MECH_ROOT: _APFS})
+    assert fs_kind._darwin_mechanism_ok() is True      # 前提: 仕組みは正しい（ここが崩れると下は unavailable になる）
+    assert os.fsencode(_MECH_ROOT) in seen
+    fs_kind.cache_clear()
     assert fs_kind._darwin_statfs(eio) == fs_kind._STATFS_FAILED
     fs_kind.cache_clear()
     assert fs_kind._darwin_statfs(bad) == fs_kind._STATFS_FAILED
