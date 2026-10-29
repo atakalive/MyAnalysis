@@ -296,16 +296,20 @@ def test_uninstall_removes(net):
     assert (_root() / "generation").read_text().strip()
 
 
-def test_uninstall_reports_io_when_removal_fails(net, monkeypatch):
+def test_uninstall_reports_io_when_removal_fails(net, monkeypatch, tmp_path):
     assert _ok().ok
-    # 占有・アクセス拒否で消せない（ignore_errors=True の rmtree は失敗を握って何もしない）
-    monkeypatch.setattr(mi.shutil, "rmtree", lambda p, ignore_errors=False: None)
-    r = mi.uninstall()
+    # 占有・アクセス拒否で消せない（ignore_errors=True の rmtree は失敗を握って何もしない）。
+    # 局所パッチは context() で解除する。monkeypatch.undo() は conftest の autouse 隔離
+    # （install_root を tmp_path へ向ける差し替え）まで巻き戻し、後の uninstall が実際の
+    # ~/.myanalysis/mathjax を消してしまうため使わない。
+    with monkeypatch.context() as m:
+        m.setattr(mi.shutil, "rmtree", lambda p, ignore_errors=False: None)
+        r = mi.uninstall()
     assert not r.ok and r.error == "io"
     assert V in r.message
     assert (_root() / V / "installed.json").exists()
     assert mi.status().state == "installed"
-    monkeypatch.undo()
+    assert mi.install_root() == tmp_path / "mathjax"     # 2 回目の削除先も tmp_path のまま
     assert mi.uninstall().ok and not (_root() / V).exists()
 
 
