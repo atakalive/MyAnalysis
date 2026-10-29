@@ -11,7 +11,7 @@ backend_sessions.json（ネイティブ resume token の PC ローカルスト�
 _capture_backend_session がターン毎に書くので、隔離しないと開発者の実チャットの
 token をテストが上書きするうえ、残留エントリで後続テストが順序依存になる。
 
-ui_prefs.json（言語・tool_display・全体ペルソナ等の UI 設定）と personas.json
+ui_prefs.json（言語・tool_display・全体ペルソナ・数式の描画等の UI 設定）と personas.json
 （ペルソナ定義ストア）も同じ層: update_ui_pref / personas の save 経路を素通し
 すると、スイートを走らせるたびに開発者の実設定・実定義が書き換わる。
 global_state_dir 経由で ui_prefs を解決するテストは、同一属性 ui_prefs_path を
@@ -63,6 +63,33 @@ def _isolate_pc_local_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         lb_paths, "personas_path", lambda: tmp_path / "personas.json"
     )
+    # 数式描画モジュール（MathJax）の導入先も PC ローカルの状態（Issue #123）。呼び出し側は
+    # mathjax_install.install_root() と属性で引くので、ここでの差し替えが効く。
+    from common import mathjax_install
+    monkeypatch.setattr(mathjax_install, "install_root", lambda: tmp_path / "mathjax")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_math_engine():
+    """数式の変換エンジンの単一インスタンス（QApplication の属性）をテストごとに捨てる（Issue #123）。
+
+    エンジンは作られた時点の ui_prefs を持つので、持ち越すと結果が順序依存になる。"""
+    yield
+    import sys
+    me = sys.modules.get("gui.math_engine")
+    if me is None:
+        return
+    qtw = sys.modules.get("PySide6.QtWidgets")     # conftest は PySide6 を import しない（Qt 非依存）
+    app = qtw.QApplication.instance() if qtw is not None else None
+    eng = getattr(app, me._APP_ATTR, None) if app is not None else None
+    if eng is not None:
+        try:
+            eng.stop()
+        finally:
+            delattr(app, me._APP_ATTR)
+    mr = sys.modules.get("gui.math_render")
+    if mr is not None:
+        mr.clear_raster_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -239,3 +239,26 @@ def test_mount_safe_edits_routes_long_content_through_stage():
     assert f'`python -c "{one_liner}"`' in MOUNT_SAFE_EDITS
     compile(one_liner, "<prompt>", "exec")
     assert "agent_stage" not in MOUNT_SAFE_EDITS     # パスは埋め込まない
+
+
+# ----- チャットの数式（Issue #123） -----
+
+def test_math_format_rule_names_the_delimiters():
+    from llm_backend.base import MATH_FORMAT_RULE
+    for needle in ("$...$", "$$...$$", "Unicode", "aligned", "cases", "\\$", "code"):
+        assert needle in MATH_FORMAT_RULE, needle
+
+
+def test_all_four_prompts_include_math_format_rule():
+    pytest.importorskip("PySide6")
+    from gui.chat import _SYSTEM_PROMPT
+    from llm_backend.base import MATH_FORMAT_RULE
+    from llm_backend.claude_code import _SYSTEM_PROMPT as CLAUDE_PROMPT
+    from llm_backend.codex import _SYSTEM_PROMPT_CODEX
+    from llm_backend.pi import _SYSTEM_PROMPT_PI
+
+    for where, text in (("claude", CLAUDE_PROMPT), ("codex", _SYSTEM_PROMPT_CODEX),
+                        ("pi", _SYSTEM_PROMPT_PI), ("gui.chat", _SYSTEM_PROMPT)):
+        assert MATH_FORMAT_RULE in text, where
+    for where, text in _all_backend_prompts().items():
+        assert MATH_FORMAT_RULE in text, where

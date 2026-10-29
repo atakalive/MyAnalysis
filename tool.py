@@ -243,6 +243,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # QtWebEngine（チャットの数式の描画。gui/math_engine.py）の前提。QApplication を作る前に設定する。
+    from PySide6.QtCore import QCoreApplication, Qt
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     apply_dark_theme(app)
     set_startup_head(app, _startup_head())

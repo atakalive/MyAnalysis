@@ -323,6 +323,9 @@ class ToolWindow(QMainWindow):
         )
         self._backend_status_action.triggered.connect(self._open_backend_status)
 
+        self._math_settings_action = self._settings_menu.addAction(tr("menu.settings.math"))
+        self._math_settings_action.triggered.connect(self._open_math_settings)
+
         self._help_menu = self.menuBar().addMenu(tr("menu.help"))
         # 手動のみ（押したときだけ GitHub から取る。起動時の確認・通知はしない）。gui/updater.py
         self._update_action = self._help_menu.addAction(tr("menu.help.update"))
@@ -366,6 +369,7 @@ class ToolWindow(QMainWindow):
         self._persona_settings_action.setText(tr("menu.settings.persona"))
         self._backend_selector_action.setText(tr("menu.settings.backend_selector"))
         self._backend_status_action.setText(tr("menu.settings.backend_status"))
+        self._math_settings_action.setText(tr("menu.settings.math"))
         self._help_menu.setTitle(tr("menu.help"))
         self._update_action.setText(tr("menu.help.update"))
         self._about_action.setText(tr("menu.help.about"))
@@ -427,6 +431,20 @@ class ToolWindow(QMainWindow):
         win.show()
         win.raise_()
         win.activateWindow()
+
+    def _open_math_settings(self) -> None:
+        """設定 → 数式の描画…（Issue #123。gui/math_settings_dialog.py）。モーダル。"""
+        from gui.math_settings_dialog import MathSettingsDialog
+        dlg = MathSettingsDialog(self, on_changed=self._refresh_chat_math)
+        try:
+            dlg.exec()
+        finally:
+            dlg.deleteLater()
+
+    def _refresh_chat_math(self) -> None:
+        cw = self.chat_widget()
+        if cw is not None and hasattr(cw, "refresh_math"):
+            cw.refresh_math()
 
     def _set_tool_display_default(self, mode: str) -> None:
         if self._chat_widget is not None \

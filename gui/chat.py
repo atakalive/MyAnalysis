@@ -17,10 +17,10 @@ from common.chat_dataset import chat_dataset_value
 from common.i18n import tr
 
 from PySide6.QtCore import (
-    Qt, QByteArray, QRect, QSignalBlocker, QThread, QTimer, QUrl, Signal,
+    Qt, QByteArray, QMimeData, QRect, QSignalBlocker, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QActionGroup, QColor, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QShortcut,
+    QActionGroup, QColor, QDesktopServices, QFontInfo, QKeyEvent, QKeySequence, QPalette, QShortcut,
     QTextBlock, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
     QTextDocumentFragment, QTextFormat,
 )
@@ -33,14 +33,17 @@ from PySide6.QtWidgets import (
 
 from llm_backend.base import (
     LLMBackend, Message, TextDelta, ToolCallRequest, UserAbsorbed, UserUnknown, InjectSupport,
-    NO_LOCAL_PERSISTENCE,
+    MATH_FORMAT_RULE, NO_LOCAL_PERSISTENCE,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER,
 )
 from llm_backend.unconfigured import NoEngineConfigured, UnconfiguredBackend
 from llm_bridge import chat_store
 from llm_bridge.chat_store import ChatSession
+from gui import math_engine
 from gui.busy_glyph import BusyGlyph, pick_pattern
+from gui.math_engine import MathKey
+from gui.math_render import DISPLAY_PROP, TEX_PROP, build_markdown_doc, math_at
 from gui.tabbar import MultiRowTabBar
 from gui.tools import TOOLS
 
@@ -60,7 +63,7 @@ _SYSTEM_PROMPT = (
     "run, an analysis created or changed, or any other file written, tell them "
     "to switch this chat to the Claude, Codex or pi engine (right-click the "
     "chat tab → Model for this chat…, or Settings → Backend / model settings…)."
-) + "\n" + NO_LOCAL_PERSISTENCE
+) + "\n" + NO_LOCAL_PERSISTENCE + "\n" + MATH_FORMAT_RULE
 
 
 _MAX_TOOL_TURNS = 8
@@ -75,6 +78,10 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _LIVE_MD_INTERVAL_MS = 120        # ライブ Markdown 再描画のコアレッシング基準間隔（ms）
 _SPLIT_SAVE_DEBOUNCE_MS = 400     # 履歴/入力 splitter 比率の保存 debounce（ms）
 _LIVE_MD_MAX_INTERVAL_MS = 600    # 長文時に適応的に伸ばす際の上限（ms）
+_MATH_COALESCE_MS = 50            # 数式の変換結果（MathEngine.rendered）をまとめて描き直す間隔（ms）
+
+# 描画モジュールが無効なのにチャットに数式が出たときの案内（アプリを起動している間に 1 回だけ）
+_math_hint_shown = False
 
 # Chat font zoom bounds (effective point size). _zoom is an integer pt delta on
 # top of each widget's base size; clamping happens on the effective size so the
@@ -391,7 +398,7 @@ class _Turn:
     """Per-session in-flight turn state. Not a QObject — timers/worker are
     owned by ChatWidget so they live on the GUI thread."""
     __slots__ = ("session", "backend", "worker", "kill_timer", "buffer", "stopped",
-                 "anchor", "rendered", "stream_id", "extra")
+                 "anchor", "rendered", "stream_id", "extra", "math_pending")
 
     def __init__(self, session: ChatSession, backend: LLMBackend,
                  worker: _StreamWorker, kill_timer: QTimer):
@@ -410,6 +417,8 @@ class _Turn:
         # 配信と完了時の最終配信を同一 in-flight メッセージへ紐付けるためにリレーへ送る。
         self.stream_id = ""
         self.extra: list[_Extra] = []   # 応答中に送った発言（Issue #119。送った順）
+        # 直近のライブ描画で変換中だった数式の鍵（Issue #123）。描けたら _on_math_timer が描き直す。
+        self.math_pending: set[MathKey] = set()
 
 
 def _role_label(role: str) -> str:
@@ -471,6 +480,77 @@ class _ArchivedChatsDialog(QDialog):
         if not (0 <= r < len(self._rows)):
             return None
         return self._rows[r][2]
+
+
+class _ChatLog(QTextBrowser):
+    """チャットの履歴。数式の画像をコピー・ドラッグで LaTeX に戻し、右クリックに「LaTeX をコピー」を足す
+    （Issue #123）。リンクは使わない（_on_anchor_clicked は未知のスキームを外部で開いてしまう）。"""
+
+    def createMimeDataFromSelection(self):  # noqa: N802 — Qt の名前
+        cur = self.textCursor()
+        if not cur.hasSelection():
+            return super().createMimeDataFromSelection()
+        tmp = QTextDocument()
+        tmp.setDefaultFont(self.document().defaultFont())
+        QTextCursor(tmp).insertFragment(QTextDocumentFragment(cur))
+        found: list[tuple[int, str, bool, QTextCharFormat]] = []
+        block = tmp.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fmt = frag.charFormat()
+                m = math_at(fmt) if fmt.isImageFormat() else None
+                if m is not None:
+                    for off, ch in enumerate(frag.text()):
+                        if ch == "\ufffc":
+                            found.append((frag.position() + off, m[0], m[1], fmt))
+                it += 1
+            block = block.next()
+        if not found:
+            return super().createMimeDataFromSelection()
+        for pos, tex, display, fmt in reversed(found):
+            f = QTextCharFormat(fmt)
+            for prop in (QTextFormat.Property.ImageName, QTextFormat.Property.ImageWidth,
+                         QTextFormat.Property.ImageHeight, QTextFormat.Property.ObjectType,
+                         QTextFormat.Property.TextToolTip):
+                f.clearProperty(prop)
+            f.clearProperty(TEX_PROP)
+            f.clearProperty(DISPLAY_PROP)
+            f.setObjectType(QTextFormat.ObjectTypes.NoObject)
+            f.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignNormal)
+            c = QTextCursor(tmp)
+            c.setPosition(pos)
+            c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
+            c.insertText(f"$${tex}$$" if display else f"${tex}$", f)
+        mime = QMimeData()
+        mime.setHtml(tmp.toHtml())
+        mime.setText(tmp.toPlainText())
+        return mime
+
+    def math_tex_at(self, pos) -> str | None:
+        """ビューポートの座標 pos の下（前後の文字）が数式なら、その TeX。"""
+        doc = self.document()
+        p = self.cursorForPosition(pos).position()
+        for q in (p, p - 1):
+            if q < 0 or q >= doc.characterCount() - 1:
+                continue
+            c = QTextCursor(doc)
+            c.setPosition(q)
+            c.setPosition(q + 1, QTextCursor.MoveMode.KeepAnchor)
+            m = math_at(c.charFormat())
+            if m is not None:
+                return m[0]
+        return None
+
+    def contextMenuEvent(self, ev) -> None:  # noqa: N802 — Qt の名前
+        menu = self.createStandardContextMenu(ev.pos())
+        tex = self.math_tex_at(ev.pos())
+        if tex is not None:
+            act = menu.addAction(tr("chat.copy_latex"))
+            act.triggered.connect(lambda _=False, t=tex: QApplication.clipboard().setText(t))
+        menu.exec(ev.globalPos())
+        menu.deleteLater()
 
 
 class ChatWidget(QWidget):
@@ -545,7 +625,7 @@ class ChatWidget(QWidget):
         header.addWidget(self._new_btn, alignment=Qt.AlignmentFlag.AlignTop)
         layout.insertLayout(0, header)
 
-        self._log = QTextBrowser()
+        self._log = _ChatLog()
         self._log.setOpenExternalLinks(True)
         self._log.setOpenLinks(False)
         self._log.anchorClicked.connect(self._on_anchor_clicked)
@@ -634,6 +714,15 @@ class ChatWidget(QWidget):
         self._live_timer.setSingleShot(True)
         self._live_timer.setInterval(_LIVE_MD_INTERVAL_MS)
         self._live_timer.timeout.connect(self._flush_live_markdown)
+
+        # 数式（Issue #123）: 完了したメッセージの描画で変換中だった式の鍵。MathEngine.rendered を受けたら
+        # _math_timer で 50 ms まとめてから描き直す（_on_math_timer）。
+        self._math_pending: set[MathKey] = set()
+        self._math_timer = QTimer(self)
+        self._math_timer.setSingleShot(True)
+        self._math_timer.setInterval(_MATH_COALESCE_MS)
+        self._math_timer.timeout.connect(self._on_math_timer)
+        math_engine.engine().rendered.connect(self._on_math_rendered)
 
         self._rebuild_tab_bar()
         self._render_session(self._active)
@@ -1312,6 +1401,7 @@ class ChatWidget(QWidget):
         if persona_line is not None:
             self._append_system_line(persona_line)
         mode = self._effective_tool_display(sess)
+        math_pending: set[MathKey] = set()
         for i, m in enumerate(sess.messages):
             if m.role == "user":
                 self._append_block("user", m.content or "", msg_index=i,
@@ -1321,8 +1411,8 @@ class ChatWidget(QWidget):
                 # ブロックを描かないよう、簡略結果が中身を持つ時だけ描画する。
                 body = _simplify_tool_text(m.content, mode)
                 if body.strip():
-                    self._append_block("assistant", body, markdown=True,
-                                       msg_index=i, actions=("fork",))
+                    math_pending |= self._append_block("assistant", body, markdown=True,
+                                                       msg_index=i, actions=("fork",))
         # Show stashed completion note from a background-finished turn. In-flight
         # ブロックより前に描く（背景で自動送信したセッションは note を持ったまま進行中に
         # なり、後に描くと _flush_live_markdown の全置換で消える。Issue #119）。
@@ -1339,13 +1429,15 @@ class ChatWidget(QWidget):
             self._append_block("assistant", "")                       # ヘッダ + 空本文
             turn.anchor = self._log.document().characterCount() - 1   # 本文開始の文書位置
             turn.rendered = body                                      # 無変化スキップの基準を再設定
+            turn.math_pending = set()
             if body:
                 cursor = QTextCursor(self._log.document())
                 cursor.setPosition(turn.anchor)
                 cursor.setCharFormat(QTextCharFormat())
-                self._insert_markdown(cursor, body)
+                turn.math_pending = self._insert_markdown(cursor, body)
             self._end_with_glyph_line()   # 印の行（スクロールは印の行まで）
             self._scroll_to_bottom()
+        self._math_pending = math_pending   # 前の描画の分は捨てる（置き換え）
         self._apply_search_highlight(sess)
         self._place_glyph()
 
@@ -2855,8 +2947,10 @@ class ChatWidget(QWidget):
         # 見出し/リスト/コードブロック書式の残留を断つ（「ライブ==完了」保証）。
         cursor.setBlockFormat(QTextBlockFormat())
         cursor.setCharFormat(QTextCharFormat())
+        turn.math_pending = set()
         if body.strip():
-            self._insert_markdown(cursor, body)   # 完了時 _append_block(markdown=True) と同一の描画関数
+            # 完了時 _append_block(markdown=True) と同一の描画関数
+            turn.math_pending = self._insert_markdown(cursor, body)
         self._end_with_glyph_line()   # 本文の後ろに印の行（次の flush で一緒に消して置き直す）
         turn.rendered = body      # 直近描画済みの簡略本文（無変化スキップ判定の基準）
         self._scroll_to_bottom()
@@ -2874,19 +2968,29 @@ class ChatWidget(QWidget):
         )
         self._scroll_to_bottom()
 
-    def _insert_markdown(self, cursor: QTextCursor, text: str) -> None:
+    def _insert_markdown(self, cursor: QTextCursor, text: str) -> set[MathKey]:
         """text を Markdown として一時ドキュメントに流し込み、フラグメントとして
         本体ドキュメントの cursor 位置に挿入する。外部ライブラリ不要。
+
+        数式は gui/math_render.build_markdown_doc が画像（描画モジュールが有効で変換済み）か等幅の
+        LaTeX ソースにする（Issue #123）。戻り値は変換中だった式の鍵。
 
         思考の引用ブロック（💭）は文字色を _THINKING_COLOR にする。断片の先頭ブロックは
         挿入先のブロックに合流して引用書式を失うので、先頭が思考の引用なら挿入後に
         その書式を付け直す。"""
-        doc = QTextDocument()
-        doc.setDefaultFont(self._log.font())   # 見出しサイズを現在のズーム基準に揃える
-        doc.setMarkdown(
+        thinking = QColor(_THINKING_COLOR)
+        doc, resources, pending = build_markdown_doc(
             text.rstrip(),                     # 末尾空白由来の余分な末尾段落を抑制
-            QTextDocument.MarkdownFeature.MarkdownDialectGitHub,  # 既定値だが明示
+            font=self._log.font(),             # 見出しサイズを現在のズーム基準に揃える
+            color=self._log.palette().color(QPalette.ColorRole.Text),
+            max_width=self._math_max_width(),
+            block_color=lambda b: thinking if _is_thinking_block(b) else None,
+            skip_line=_is_tool_line,
         )
+        target = self._log.document()
+        for url, img in resources.items():   # insertFragment より先に登録する（逆だと壊れた画像がキャッシュされる）
+            target.addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), img)
+        self._maybe_math_hint(text)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(_THINKING_COLOR))
         block = doc.begin()
@@ -2904,11 +3008,74 @@ class ChatWidget(QWidget):
             c = QTextCursor(self._log.document())
             c.setPosition(start)
             c.setBlockFormat(first_fmt)
+        return pending
+
+    def _math_max_width(self) -> float:
+        """display の数式を縮める基準の幅（履歴の本文の幅）。"""
+        margin = self._log.document().documentMargin()
+        return max(80.0, self._log.viewport().width() - 2 * margin - 8)
+
+    def _maybe_math_hint(self, text: str) -> None:
+        """描画モジュールが無効なのに数式が出たら、起動中に 1 回だけ案内する。"""
+        global _math_hint_shown
+        if _math_hint_shown or self._window is None:
+            return
+        if math_engine.engine().prefs.enabled:
+            return
+        from common.mathmd import split_math
+        if not split_math(text, skip_line=_is_tool_line)[1]:
+            return
+        _math_hint_shown = True
+        self._status_note(tr("math.hint"))
+
+    # ----- 数式の描き直し（Issue #123） -----
+
+    def _on_math_rendered(self) -> None:
+        self._math_timer.start()
+
+    def _on_math_timer(self) -> None:
+        """変換が届いた式を描き直す。(A) 履歴と (B) ライブを独立に判定する。"""
+        eng = math_engine.engine()
+        hist = getattr(self, "_math_pending", set())
+        if hist:
+            remaining = {k for k in hist if eng.is_pending(k)}
+            self._math_pending = remaining
+            if not remaining:
+                if self._log.textCursor().hasSelection():
+                    self._math_pending = hist     # 選択が外れるまで待つ
+                    self._math_timer.start()
+                    return
+                self.refresh_math()
+                return
+        turn = self._turns.get(self._active.id)
+        if turn is None:
+            return
+        live = getattr(turn, "math_pending", set())
+        remaining = {k for k in live if eng.is_pending(k)}
+        if remaining != live:
+            turn.math_pending = remaining
+            turn.rendered = None
+            self._live_timer.start()
+
+    def refresh_math(self) -> None:
+        """表示中のチャットを描き直す（スクロール位置を保つ。設定の切替からも呼ぶ）。"""
+        sb = self._log.verticalScrollBar()
+        old = sb.value()
+        at_bottom = old >= sb.maximum()
+        self._log.setUpdatesEnabled(False)
+        try:
+            self._render_active_preserving_status()
+            if not at_bottom:
+                sb.setValue(min(old, sb.maximum()))
+            else:
+                sb.setValue(sb.maximum())
+        finally:
+            self._log.setUpdatesEnabled(True)
 
     def _append_block(
         self, role: str, text: str, *, markdown: bool = False,
         msg_index: int | None = None, actions: tuple[str, ...] = (),
-    ) -> None:
+    ) -> set[MathKey]:
         """role ヘッダ + 本文を末尾に追加する。markdown=True の場合のみ本文を
         Markdown 描画する（完了済み assistant メッセージのリプレイ専用）。
 
@@ -2941,9 +3108,11 @@ class ChatWidget(QWidget):
         cursor.insertHtml(header)
         cursor.insertBlock()
         cursor.setCharFormat(QTextCharFormat())
+        pending: set[MathKey] = set()
         if text:
             if markdown:
-                self._insert_markdown(cursor, text)
+                pending = self._insert_markdown(cursor, text)
             else:
                 cursor.insertText(text)
         self._scroll_to_bottom()
+        return pending

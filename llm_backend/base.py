@@ -167,6 +167,20 @@ CHAT_DATASET_RULE = (
     "from the file path. Pass dataset= whenever it matters."
 )
 
+# チャットの数式の書き方（Issue #123）。4 つのプロンプト（claude / codex / pi / gui.chat）すべてに入れる。
+# tests/test_backend_prompts.py が含まれていることを検査する。
+MATH_FORMAT_RULE = (
+    "Math in chat replies: the chat renders LaTeX inside Markdown — $...$ for "
+    "inline math and $$...$$ for display math on its own lines (when rendering "
+    "is turned off, the LaTeX source is shown instead, so it stays readable). "
+    "Write formulas in LaTeX; do not imitate them with Unicode superscript or "
+    "subscript characters (no μₖ, β̂₀, x²). Matrices (pmatrix, bmatrix), "
+    "aligned and cases are available. Break long equations across lines with "
+    "\\begin{aligned}...\\end{aligned} inside $$...$$. Write a literal dollar "
+    "sign (currency, shell variables in prose) as \\$. Math inside code spans "
+    "and code blocks is not rendered."
+)
+
 def apply_agent_stage(backend: object, env: dict) -> None:
     """子プロセスの環境にそのチャット専用の stage を入れる（Issue #118）。
 

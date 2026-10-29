@@ -177,6 +177,7 @@ Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 H
 | CLI | GUI の操作・データセットの登録・点検をコマンドで行う | [docs/cli_ja.md](docs/cli_ja.md) |
 | 複数 PC での設定同期 | 登録簿とエンジンの設定を、Cloudflare R2 で PC 間で同期する | [docs/config_sync_ja.md](docs/config_sync_ja.md) |
 | ミーティング共有 | 解析画面とチャットを、離れた相手のブラウザへ共有する（外部の相手とつなぐには Cloudflare の設定が必要）。**参加リンクを持つ人は、承認なしにエージェントを動かせる** | [docs/meeting_share_ja.md](docs/meeting_share_ja.md) |
+| チャットの数式描画 | チャットの返答の LaTeX の数式（`$…$` / `$$…$$`）を描く。**設定 → 数式の描画…** から導入する: MathJax（Apache-2.0）と数式フォント 1 つを npm レジストリから取得し（アプリに固定した sha512 と照合）、`~/.myanalysis/mathjax` に置き、QtWebEngine（PySide6 に含まれる）で描く。数式を描いている間は Chromium のプロセスが 1 つ動く。入れていなければ数式は LaTeX のソースで出る | — |
 
 ---
 

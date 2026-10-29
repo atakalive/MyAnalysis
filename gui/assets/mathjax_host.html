@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<!--
+  MyAnalysis: チャットの数式を TeX → SVG に変換する、画面を持たないページ（Issue #123。gui/math_engine.py）。
+  自前の設定だけを持つ。MathJax 本体とフォントは導入先（クエリ root=、PC ローカル）から読む。
+  クエリ: root=<導入先の版のディレクトリの file: URL>、font=<フォント名>、minScale=<添字の最小倍率>。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var root = (q.get("root") || "").replace(/\/+$/, "");
+  var font = q.get("font") || "mathjax-dejavu";
+  var minScale = parseFloat(q.get("minScale") || "0.7");
+  window.mjReady = false;
+  window.mjFailed = null;
+  window.__mjResults = {};
+  window.MathJax = {
+    loader: {
+      paths: { mathjax: root },
+      // 読み上げ・点字・補助 MathML・メニューは読まない（sre/ は導入しない）
+      load: []
+    },
+    tex: {
+      // 未定義のコマンドはエラーにする。拡張は既定の autoload（require を含む）で使われたときに読む。
+      packages: { "[-]": ["noundefined"] },
+      formatError: function (jax, err) { throw err; }
+    },
+    output: {
+      font: font,
+      fontPath: root + "/fonts/%%FONT%%",
+      minScale: minScale
+    },
+    svg: { fontCache: "local" },
+    options: {
+      enableMenu: false,
+      enableEnrichment: false,
+      enableComplexity: false,
+      enableExplorer: false,
+      enableSpeech: false,
+      enableBraille: false,
+      menuOptions: { settings: { enrich: false, speech: false, braille: false, assistiveMml: false, collapsible: false } }
+    },
+    startup: {
+      typeset: false,
+      pageReady: function () {
+        return MathJax.startup.defaultPageReady().then(function () { window.mjReady = true; });
+      }
+    }
+  };
+  window.startBatch = function (id, items) {
+    var res = { done: false, items: [] };
+    window.__mjResults[id] = res;
+    var p = MathJax.startup.promise;
+    items.forEach(function (it) {
+      p = p.then(function () {
+        return MathJax.tex2svgPromise(it.tex, { display: !!it.display }).then(function (node) {
+          var svg = node.querySelector("svg");
+          if (!svg) { res.items.push({ error: "no svg" }); return; }
+          var err = svg.querySelector("[data-mjx-error]");
+          if (err) { res.items.push({ error: err.getAttribute("data-mjx-error") || "error" }); return; }
+          res.items.push({ svg: svg.outerHTML });
+        }, function (e) {
+          res.items.push({ error: String((e && e.message) || e) });
+        });
+      });
+    });
+    p.then(function () { res.done = true; }, function () { res.done = true; });
+    return true;
+  };
+  // JSON の文字列で返す（Python 側で json.loads する）
+  window.takeBatch = function (id) {
+    var r = window.__mjResults[id];
+    if (!r) { return JSON.stringify({ done: true, items: [], missing: true }); }
+    var items = r.items.splice(0, r.items.length);
+    if (r.done) { delete window.__mjResults[id]; }
+    return JSON.stringify({ done: r.done, items: items });
+  };
+  var s = document.createElement("script");
+  s.src = root + "/tex-svg.js";
+  s.async = true;
+  s.onerror = function () { window.mjFailed = "load tex-svg.js"; };
+  document.head.appendChild(s);
+})();
+</script>
+</head>
+<body></body>
+</html>
