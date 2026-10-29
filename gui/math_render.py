@@ -30,6 +30,7 @@ DISPLAY_PROP = int(QTextFormat.Property.UserProperty) + 1   # display か
 IMG_SCHEME = "mathimg:"
 SOURCE_COLOR = "#9a9a9a"
 MAX_RASTER_PX = 4096
+LINE_SEP = "\u2028"          # display のソース表示で TeX の改行に使う行区切り
 DISPLAY_MIN_SHRINK = 0.6
 RASTER_CACHE_BYTES = 64 * 1024 * 1024
 
@@ -102,6 +103,11 @@ def _cache_put(key: tuple, r: _Raster) -> None:
         _raster_bytes -= old.nbytes
 
 
+def raster_caps(dpr: float) -> tuple[float, int]:
+    """論理 px での幅の上限と、整数の高さの上限。どちらも ``round(x * dpr) <= MAX_RASTER_PX`` になる。"""
+    return MAX_RASTER_PX / dpr, max(1, math.floor(MAX_RASTER_PX / dpr + 1e-9))
+
+
 def rasterize(svg: str, *, em_px: float, color: str, bold: bool, dpr: float,
               x_height: float, max_width: float | None = None) -> _Raster | None:
     """SVG を、ベースラインの余白付きの QImage（devicePixelRatio 付き）にする。読めなければ None。"""
@@ -116,7 +122,10 @@ def rasterize(svg: str, *, em_px: float, color: str, bold: bool, dpr: float,
     w, above, depth = vw * scale, -miny * scale, (vh + miny) * scale
     top, bottom = baseline_pads(above, depth, x_height)
     h = top + above + depth + bottom
-    fit = min(1.0, MAX_RASTER_PX / max(w * dpr, h * dpr, 1e-9))   # 一辺 4096 px（dpr 込み）に収める
+    # 一辺 4096 px（dpr 込み）に収める。高さは下で整数に切り上げるので、上限は「物理で 4096 px を
+    # 超えない最大の整数の論理の高さ」で掛ける（切り上げた後の round(h * dpr) も 4096 以下になる）
+    w_cap, h_cap = raster_caps(dpr)
+    fit = min(1.0, w_cap / max(w, 1e-9), h_cap / max(h, 1e-9))
     w, h, top, above, depth = w * fit, h * fit, top * fit, above * fit, depth * fit
     # Qt は行の中の画像の高さを整数に丸めてから ascent を出すので、高さを整数にする（上下に同じだけ
     # 足すので top − bottom は変わらない）
@@ -251,7 +260,8 @@ def _insert_source(cur: QTextCursor, tex: str, display: bool, font: QFont) -> No
     if not display:
         cur.insertText(f"${tex}$", fmt)
         return
-    body = "$$" + tex.replace("\n", " ") + "$$"    # 段落の中の改行で TeX の改行を保つ
+    # TeX の改行は行区切り（U+2028）に置き換える。段落を割らずに改行して見せる（toPlainText では "\n" に戻る）
+    body = "$$" + tex.replace("\n", LINE_SEP) + "$$"
     cur.insertText(body, fmt)
     bf = cur.blockFormat()
     bf.setAlignment(Qt.AlignmentFlag.AlignLeft)

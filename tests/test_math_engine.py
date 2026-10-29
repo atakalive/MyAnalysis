@@ -23,6 +23,14 @@ from test_mathmd import SAMPLE_MD
 REPO = Path(__file__).resolve().parent.parent
 
 
+def _child_env(**extra: str) -> dict[str, str]:
+    """子プロセスの env。親の PYTHONPATH は消さず、その前にリポジトリを足す（依存を PYTHONPATH で
+    読んでいる環境でも、子が依存を見失わない）。"""
+    pp = os.environ.get("PYTHONPATH", "")
+    return {**os.environ, **extra,
+            "PYTHONPATH": os.pathsep.join(x for x in (str(REPO), pp) if x)}
+
+
 # ---------------------------------------------------------------- is_allowed_url（導入先が無くても走る）
 
 def test_is_allowed_url(tmp_path):
@@ -48,6 +56,34 @@ def test_is_allowed_url(tmp_path):
         assert not is_allowed_url(bad, host=host, root=root)
 
 
+def test_child_env_keeps_parent_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/deps/a", "/deps/b"]))
+    env = _child_env(QT_QPA_PLATFORM="offscreen")
+    assert env["PYTHONPATH"] == os.pathsep.join([str(REPO), "/deps/a", "/deps/b"])
+    assert env["QT_QPA_PLATFORM"] == "offscreen"
+    monkeypatch.delenv("PYTHONPATH")
+    assert _child_env()["PYTHONPATH"] == str(REPO)
+
+
+def test_svg_cache_counts_utf8_bytes(monkeypatch, qapp_fixture):
+    from gui import math_engine
+    from gui.math_engine import MathEngine
+    eng = MathEngine()
+    key = ("mathjax-dejavu", "\u03b1", False)
+    eng._put(key, "svg", "\u3042" * 10)                 # 10 文字・30 バイト
+    assert eng._cache_bytes == 30 + 2
+    eng._put(key, "svg", "x")                           # 置き換えで前の分を引く
+    assert eng._cache_bytes == 1 + 2
+    monkeypatch.setattr(math_engine, "SVG_CACHE_BYTES", 100)
+    eng._put(("mathjax-dejavu", "a", False), "svg", "\u3042" * 20)   # 20 文字・60 バイト
+    eng._put(("mathjax-dejavu", "b", False), "svg", "\u3042" * 20)
+    # 文字数なら 40+…で上限の内だが、バイト数（60+1 を 2 件）では超えるので古いものから捨てる
+    assert ("mathjax-dejavu", "a", False) not in eng._cache
+    assert ("mathjax-dejavu", "b", False) in eng._cache
+    assert eng._cache_bytes == 61
+    eng.stop()
+
+
 # ---------------------------------------------------------------- 遅延 import
 
 def test_webengine_not_imported_by_gui_modules():
@@ -55,7 +91,7 @@ def test_webengine_not_imported_by_gui_modules():
             "import gui.chat, gui.math_settings_dialog, gui.math_engine, gui.math_render;"
             "print('PySide6.QtWebEngineCore' in sys.modules)")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True,
-                         env={**os.environ, "PYTHONPATH": str(REPO)}, timeout=120)
+                         env=_child_env(), timeout=120)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip().splitlines()[-1] == "False"
 
@@ -197,7 +233,7 @@ def real_run(tmp_path_factory):
     prefs = tmp_path_factory.mktemp("prefs") / "ui_prefs.json"
     p = subprocess.run([sys.executable, "-c", _CHILD, str(prefs), json.dumps(spans)],
                        cwd=REPO, capture_output=True, text=True, timeout=300,
-                       env={**os.environ, "PYTHONPATH": str(REPO), "QT_QPA_PLATFORM": "offscreen"})
+                       env=_child_env(QT_QPA_PLATFORM="offscreen"))
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")]
     if not lines:
         pytest.skip(f"QtWebEngine could not start: rc={p.returncode} {p.stderr[-2000:]}")

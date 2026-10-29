@@ -296,6 +296,19 @@ def test_uninstall_removes(net):
     assert (_root() / "generation").read_text().strip()
 
 
+def test_uninstall_reports_io_when_removal_fails(net, monkeypatch):
+    assert _ok().ok
+    # 占有・アクセス拒否で消せない（ignore_errors=True の rmtree は失敗を握って何もしない）
+    monkeypatch.setattr(mi.shutil, "rmtree", lambda p, ignore_errors=False: None)
+    r = mi.uninstall()
+    assert not r.ok and r.error == "io"
+    assert V in r.message
+    assert (_root() / V / "installed.json").exists()
+    assert mi.status().state == "installed"
+    monkeypatch.undo()
+    assert mi.uninstall().ok and not (_root() / V).exists()
+
+
 # ---------------------------------------------------------------- 使用中の印
 
 def test_in_use_marks(net):

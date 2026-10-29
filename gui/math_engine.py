@@ -42,6 +42,12 @@ HOST_HTML = Path(__file__).resolve().parent / "assets" / "mathjax_host.html"
 _APP_ATTR = "_myanalysis_math_engine"
 
 
+def _entry_bytes(key: MathKey, value: str) -> int:
+    """キャッシュの 1 件の大きさ。SVG と TeX の UTF-8 のバイト数（文字数ではない）。"""
+    return (len(value.encode("utf-8", "surrogatepass"))
+            + len(key[1].encode("utf-8", "surrogatepass")))
+
+
 @dataclass(frozen=True)
 class MathResult:
     status: Literal["ready", "pending", "error"]
@@ -246,12 +252,12 @@ class MathEngine(QObject):
     def _put(self, key: MathKey, kind: str, value: str) -> None:
         old = self._cache.pop(key, None)
         if old is not None:
-            self._cache_bytes -= len(old[1]) + len(key[1])
+            self._cache_bytes -= _entry_bytes(key, old[1])
         self._cache[key] = (kind, value)
-        self._cache_bytes += len(value) + len(key[1])
+        self._cache_bytes += _entry_bytes(key, value)
         while self._cache_bytes > SVG_CACHE_BYTES and len(self._cache) > 1:
             k, (_, v) = self._cache.popitem(last=False)
-            self._cache_bytes -= len(v) + len(k[1])
+            self._cache_bytes -= _entry_bytes(k, v)
 
     # ---------------------------------------------------------------- page
 

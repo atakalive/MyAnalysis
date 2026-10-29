@@ -125,7 +125,8 @@ def test_display_centered_and_source_left_with_newlines():
     eng2 = FakeEngine(MathPrefs(enabled=False))
     doc, _, _ = _build(md, eng2)
     (_, fmt, text, block), = _objects(doc)
-    assert text == "$$a \\\\ b$$"
+    assert text == "$$a \\\\\u2028b$$"                  # 段落は割らず、行区切りで改行する
+    assert "$$a \\\\\nb$$" in doc.toPlainText()          # プレーンテキストでは改行に戻る
     assert block.blockFormat().alignment() & Qt.AlignmentFlag.AlignLeft
     assert not block.blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter
 
@@ -183,6 +184,23 @@ def test_bold_grows_by_stroke():
     src = prepare_svg(SVG, "#123456", True)
     assert 'stroke-width="15" stroke-linejoin="round" stroke-linecap="round"' in src
     assert "currentColor" not in src and "#123456" in src
+
+
+@pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5, 2.0, 2.5, 3.0])
+def test_raster_physical_size_within_cap_after_rounding(dpr):
+    tall = SVG.replace('viewBox="0 -750 1000 1000"', 'viewBox="0 -75000 1000 100000"')
+    r = rasterize(tall, em_px=100.0, color="#ffffff", bold=True, dpr=dpr, x_height=10.0)
+    assert r.image.width() <= 4096 and r.image.height() <= 4096
+    assert r.height == int(r.height)                     # 行の中の画像の高さは整数
+    assert r.image.height() == round(r.height * dpr)
+
+
+def test_raster_cap_when_rounding_up_crosses_limit():
+    # 余白込みの高さが 1500·1.2 − 323.2/2 = 1638.4 px。dpr 2.5 で 4096 px ちょうど（縮めない）だが、
+    # 整数へ切り上げると 1639 px → 4098 px になって上限を超える。上限は切り上げた後の大きさで守る
+    r = rasterize(SVG, em_px=1200.0, color="#ffffff", bold=False, dpr=2.5, x_height=323.2)
+    assert r.image.height() <= 4096 and r.image.width() <= 4096
+    assert r.height == 1638
 
 
 def test_raster_limits():

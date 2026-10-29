@@ -451,6 +451,7 @@ def _extract(tgz: Path, out: Path, pick, cancelled: Callable[[], bool]) -> None:
 # ---------------------------------------------------------------- 掃除
 
 def _rmtree(p: Path) -> None:
+    """消せるだけ消す（失敗は握る）。消えたかは呼び出し側が ``exists()`` で確かめる。"""
     shutil.rmtree(p, ignore_errors=True)
 
 
@@ -587,6 +588,9 @@ def uninstall() -> InstallResult:
             for p in versions:
                 _rmtree(p)
             _clean_workdirs(root, None)
+            left = [p.name for p in versions if p.exists()]
+        if left:        # 占有・アクセス拒否などで消し切れなかった（rmtree は失敗を握る）
+            return InstallResult(False, "io", "cannot remove: " + ", ".join(left))
         return InstallResult(True)
     except OSError as e:
         return InstallResult(False, "io", f"{type(e).__name__}: {e}")
