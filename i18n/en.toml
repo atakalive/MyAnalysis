@@ -506,6 +506,7 @@
 "math.status.outdated"        = "Status: an update is available (installed: {version})"
 "math.status.broken"          = "Status: broken (reinstall it)"
 "math.status.no_webengine"    = "Status: QtWebEngine is not available"
+"math.status.restart_required" = "Status: restart required (quit MyAnalysis and start it again)"
 "math.status.last_failure"    = "Status: the last start failed ({error})"
 "math.enable"                 = "Render math in the chat"
 "math.font.label"             = "Font"

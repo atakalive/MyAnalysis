@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import QObject, QTimer, QUrl, QUrlQuery, Signal
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QTimer, QUrl, QUrlQuery, Signal
 from PySide6.QtWidgets import QApplication
 
 from common import mathjax_install
@@ -82,8 +82,18 @@ def load_prefs() -> MathPrefs:
     return MathPrefs(enabled, font, float(scale), bold)
 
 
+class RestartRequired(ImportError):
+    """QtWebEngine の前提を満たすには GUI の再起動が必要。"""
+
+
 def _load_webengine():
-    """QtWebEngine を読む（page を作る直前だけ）。テストが ImportError を投げる関数に差し替える。"""
+    """前提属性を確認してから QtWebEngine を読む。
+
+    AA_ShareOpenGLContexts は QApplication の作成前に設定する必要がある。
+    tool.main() の変更を Tier 3 で読み込んだ GUI では、その設定が実行されていない。
+    """
+    if not QCoreApplication.testAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts):
+        raise RestartRequired("AA_ShareOpenGLContexts was not set before QApplication; restart MyAnalysis")
     return importlib.import_module("PySide6.QtWebEngineCore")
 
 
@@ -157,6 +167,7 @@ class MathEngine(QObject):
         self._batch_seq = 0
         self._state = "idle"          # idle / starting / ready / failed / unavailable
         self.last_error: str | None = None
+        self.unavailable_reason: str | None = None
         self._page = None
         self._profile = None
         self._interceptor = None
@@ -198,6 +209,7 @@ class MathEngine(QObject):
         if self._page is None:
             self._state = "idle"
             self.last_error = None
+            self.unavailable_reason = None
             self.stateChanged.emit()
 
     def webengine_ok(self) -> bool:
@@ -207,7 +219,8 @@ class MathEngine(QObject):
         try:
             _load_webengine()
         except (ImportError, OSError) as e:
-            self._fail(f"QtWebEngine: {type(e).__name__}: {e}", state="unavailable")
+            self._fail(f"QtWebEngine: {type(e).__name__}: {e}", state="unavailable",
+                       reason="restart" if isinstance(e, RestartRequired) else None)
             return False
         return True
 
@@ -267,7 +280,8 @@ class MathEngine(QObject):
         try:
             mod = _load_webengine()
         except (ImportError, OSError) as e:
-            self._fail(f"QtWebEngine: {type(e).__name__}: {e}", state="unavailable")
+            self._fail(f"QtWebEngine: {type(e).__name__}: {e}", state="unavailable",
+                       reason="restart" if isinstance(e, RestartRequired) else None)
             return
         font = self.prefs.font
         use = mathjax_install.acquire_use(mathjax_install.VERSION, font)
@@ -340,11 +354,12 @@ class MathEngine(QObject):
             self.stateChanged.emit()
             self._dispatch()
 
-    def _fail(self, message: str, *, state: str = "failed") -> None:
+    def _fail(self, message: str, *, state: str = "failed", reason: str | None = None) -> None:
         """起動の失敗を確定する。pending だった式はすべて unavailable の扱い（rendered を 1 回出す）。"""
         _logger.warning("math engine unavailable: %s", message)
         self._state = state
         self.last_error = message
+        self.unavailable_reason = reason
         had = bool(self._queue) or self._batch is not None
         self._queue.clear()
         self._queued.clear()

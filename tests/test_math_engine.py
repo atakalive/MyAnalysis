@@ -96,6 +96,72 @@ def test_webengine_not_imported_by_gui_modules():
     assert out.stdout.strip().splitlines()[-1] == "False"
 
 
+@pytest.mark.parametrize("share_contexts", [False, True])
+def test_webengine_startup_attribute_in_child(tmp_path, share_contexts):
+    code = textwrap.dedent(r'''
+        import sys
+        from pathlib import Path
+        from PySide6.QtCore import QCoreApplication, Qt
+        share_contexts = sys.argv[2] == "True"
+        if share_contexts:
+            QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+        from PySide6.QtWidgets import QApplication
+        app = QApplication([])
+        from common import mathjax_install
+        from llm_bridge import paths as lb_paths
+        root = Path(sys.argv[1])
+        lb_paths.ui_prefs_path = lambda: root / "ui_prefs.json"
+        mathjax_install.install_root = lambda: root / "mathjax"
+        from gui import math_engine as me
+        assert "PySide6.QtWebEngineCore" not in sys.modules
+        if share_contexts:
+            mod = me._load_webengine()
+            assert mod is sys.modules["PySide6.QtWebEngineCore"]
+        else:
+            try:
+                me._load_webengine()
+            except me.RestartRequired:
+                pass
+            else:
+                raise AssertionError("missing RestartRequired")
+
+            def no_acquire(*args):
+                raise AssertionError("must not acquire a use lock")
+            mathjax_install.acquire_use = no_acquire
+            for via in ("request", "probe"):
+                eng = me.MathEngine()
+                eng.prefs = me.MathPrefs(enabled=True)
+                try:
+                    if via == "probe":
+                        assert eng.webengine_ok() is False
+                        assert eng.unavailable_reason == "restart"
+                    for font in ("mathjax-dejavu", "mathjax-newcm"):
+                        eng.reset()
+                        assert eng.unavailable_reason is None
+                        eng.prefs = me.MathPrefs(enabled=False, font=font)
+                        assert eng.request("disabled", False).error == "unavailable"
+                        eng.prefs = me.MathPrefs(enabled=True, font=font)
+                        for force in (False, True):
+                            assert eng.request("x", False, force=force) == me.MathResult("error", error="unavailable")
+                            assert eng.state == "unavailable"
+                            assert eng.unavailable_reason == "restart"
+                            assert not eng.running
+                            assert eng._profile is None and eng._use is None
+                            assert not eng.is_pending((font, "x", False))
+                    assert not eng.webengine_ok()
+                finally:
+                    eng.stop()
+            assert "PySide6.QtWebEngineCore" not in sys.modules
+            assert not (root / "mathjax").exists()
+        print("OK")
+    ''')
+    out = subprocess.run([sys.executable, "-c", code, str(tmp_path), str(share_contexts)],
+                         cwd=REPO, capture_output=True, text=True,
+                         env=_child_env(QT_QPA_PLATFORM="offscreen"), timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert out.stdout.strip().splitlines()[-1] == "OK"
+
+
 def _enable_prefs(**kw):
     from llm_bridge.paths import update_ui_pref
     update_ui_pref("math_render", True)
@@ -103,17 +169,19 @@ def _enable_prefs(**kw):
         update_ui_pref(k, v)
 
 
-def test_webengine_import_failure_is_unavailable(monkeypatch, qapp_fixture):
+@pytest.mark.parametrize("error_type", [ImportError, OSError])
+def test_webengine_import_failure_is_unavailable(monkeypatch, qapp_fixture, error_type):
     from gui import math_engine
     from gui.math_engine import MathEngine, MathResult
 
     def boom():
-        raise ImportError("no QtWebEngineCore")
+        raise error_type("no QtWebEngineCore")
     monkeypatch.setattr(math_engine, "_load_webengine", boom)
     _enable_prefs()
     eng = MathEngine()
     assert eng.request("x", False) == MathResult("error", None, "unavailable")
     assert eng.state == "unavailable"
+    assert eng.unavailable_reason is None
     assert eng.request("y", True) == MathResult("error", None, "unavailable")
     eng.stop()
 
@@ -132,6 +200,43 @@ def test_import_failure_shows_in_settings_dialog(monkeypatch, qapp_fixture):
         assert dlg.status_text() == tr("math.status.no_webengine")
     finally:
         dlg.deleteLater()
+        eng.stop()
+
+
+def test_restart_required_shows_in_settings_dialog(monkeypatch, qapp_fixture):
+    from common.i18n import tr
+    from gui import math_engine
+    from gui.math_settings_dialog import MathSettingsDialog
+
+    def boom():
+        raise math_engine.RestartRequired("restart MyAnalysis")
+    monkeypatch.setattr(math_engine, "_load_webengine", boom)
+    eng = math_engine.MathEngine()
+    dlg = MathSettingsDialog(engine=eng)
+    try:
+        assert eng.state == "unavailable"
+        assert eng.unavailable_reason == "restart"
+        assert dlg.status_text() == tr("math.status.restart_required")
+    finally:
+        dlg.deleteLater()
+        eng.stop()
+
+
+def test_unavailable_reason_cleared_before_state_notification(qapp_fixture):
+    from gui.math_engine import MathEngine
+    eng = MathEngine()
+    seen = []
+    eng.stateChanged.connect(lambda: seen.append((eng.state, eng.last_error, eng.unavailable_reason)))
+    try:
+        assert eng.unavailable_reason is None
+        eng._fail("restart", state="unavailable", reason="restart")
+        assert seen[-1] == ("unavailable", "restart", "restart")
+        eng.reset()
+        assert seen[-1] == ("idle", None, None)
+        eng._fail("restart", state="unavailable", reason="restart")
+        eng._fail("other failure")
+        assert seen[-1] == ("failed", "other failure", None)
+    finally:
         eng.stop()
 
 
@@ -201,6 +306,14 @@ _CHILD = textwrap.dedent(r'''
         out["fonts"][font] = {"ok": ok, "results": res, "state": eng.state, "error": eng.last_error}
         if eng.state in ("failed", "unavailable"):
             break
+    if eng.state == "ready":
+        prefs.write_text(json.dumps({"math_render": False, "math_font": font}))
+        eng.reload_prefs()
+        stopped = not eng.running and eng._profile is None and eng._use is None and not eng._cache
+        prefs.write_text(json.dumps({"math_render": True, "math_font": font}))
+        eng.reload_prefs()
+        out["disable_enable"] = {"stopped": stopped, "ok": wait(done, 60),
+                                 "state": eng.state, "reason": eng.unavailable_reason}
     # stop の順序
     order = []
     page, profile = eng._page, eng._profile
@@ -268,6 +381,10 @@ def test_real_font_choice_is_effective(real_run):
     tex, disp = real_run["spans"][2]
     key = f"{tex}|{disp}"
     assert a[key][1] != b[key][1]
+
+
+def test_real_disable_enable_restarts_rendering(real_run):
+    assert real_run["disable_enable"] == {"stopped": True, "ok": True, "state": "ready", "reason": None}
 
 
 def test_real_no_rejected_urls_or_console_errors(real_run):

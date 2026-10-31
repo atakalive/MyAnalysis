@@ -192,7 +192,8 @@ class MathSettingsDialog(QDialog):
         eng = self._engine
         font = self.selected_font()
         if eng.state == "unavailable":
-            text = tr("math.status.no_webengine")
+            text = (tr("math.status.restart_required") if eng.unavailable_reason == "restart"
+                    else tr("math.status.no_webengine"))
         elif st.state == "missing":
             text = tr("math.status.missing")
         elif st.state == "outdated":

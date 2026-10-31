@@ -506,6 +506,7 @@
 "math.status.outdated"        = "状態: 更新があります（入っている版: {version}）"
 "math.status.broken"          = "状態: 壊れています（入れ直してください）"
 "math.status.no_webengine"    = "状態: QtWebEngine が使えません"
+"math.status.restart_required" = "状態: 再起動が必要です（MyAnalysis を終了して起動し直すと使えます）"
 "math.status.last_failure"    = "状態: 前回の起動に失敗しました（{error}）"
 "math.enable"                 = "チャットで数式を描画する"
 "math.font.label"             = "フォント"
