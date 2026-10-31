@@ -2,7 +2,7 @@
 
 本物の QtWebEngine と導入済みの MathJax を使うテストは、pytest のプロセスに Chromium を入れないよう
 ``AA_ShareOpenGLContexts`` を設定した子プロセスで動かす。導入先は環境変数
-``MYANALYSIS_MATHJAX_TEST_ROOT``（無ければ skip）。QtWebEngine が起動できない環境でも skip する。
+``MYANALYSIS_MATHJAX_TEST_ROOT``（無ければ skip）。指定時の起動失敗はテスト失敗にする。
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import pytest
 from test_mathmd import SAMPLE_MD
 
 REPO = Path(__file__).resolve().parent.parent
+REAL_FONTS = ("mathjax-dejavu", "mathjax-newcm")
 
 
 def _child_env(**extra: str) -> dict[str, str]:
@@ -265,10 +266,11 @@ _CHILD = textwrap.dedent(r'''
     import json, os, sys, time
     from pathlib import Path
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    from PySide6.QtCore import QCoreApplication, Qt, QEventLoop, QTimer
+    from PySide6.QtCore import QCoreApplication, Qt, QEventLoop, QTimer, qVersion
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     from PySide6.QtWidgets import QApplication
     app = QApplication([])
+    from PySide6.QtWebEngineCore import qWebEngineChromiumVersion
     import shiboken6
     from common import mathjax_install
     from llm_bridge import paths as lb_paths
@@ -279,7 +281,8 @@ _CHILD = textwrap.dedent(r'''
     from gui import math_engine
     from common.mathmd import split_math
     spans = json.loads(sys.argv[2])
-    out = {"fonts": {}}
+    out = {"fonts": {}, "versions": {"python": sys.version, "qt": qVersion(),
+                                    "chromium": qWebEngineChromiumVersion()}}
 
     def wait(cond, secs):
         t = time.monotonic()
@@ -337,26 +340,39 @@ def real_run(tmp_path_factory):
     root = os.environ.get("MYANALYSIS_MATHJAX_TEST_ROOT")
     if not root:
         pytest.skip("MYANALYSIS_MATHJAX_TEST_ROOT is not set")
-    try:
-        import PySide6.QtWebEngineCore  # noqa: F401
-    except ImportError:
-        pytest.skip("QtWebEngine is not available")
     from common.mathmd import split_math
     spans = [[s.tex, s.display] for s in split_math(SAMPLE_MD)[1]]
     prefs = tmp_path_factory.mktemp("prefs") / "ui_prefs.json"
     p = subprocess.run([sys.executable, "-c", _CHILD, str(prefs), json.dumps(spans)],
                        cwd=REPO, capture_output=True, text=True, timeout=300,
                        env=_child_env(QT_QPA_PLATFORM="offscreen"))
+    assert p.returncode == 0, (
+        f"QtWebEngine child exited with {p.returncode}\n"
+        f"stdout: {p.stdout[-2000:]}\nstderr: {p.stderr[-4000:]}"
+    )
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")]
-    if not lines:
-        pytest.skip(f"QtWebEngine could not start: rc={p.returncode} {p.stderr[-2000:]}")
+    assert lines, f"QtWebEngine returned no RESULT\nstdout: {p.stdout}\nstderr: {p.stderr}"
     data = json.loads(lines[-1][len("RESULT "):])
     first = data["fonts"].get("mathjax-dejavu", {})
-    if first.get("state") == "unavailable":
-        pytest.skip(f"QtWebEngine is not usable: {first.get('error')}")
+    assert first.get("state") == "ready", (first, data.get("versions"), p.stderr)
     data["stderr"] = p.stderr
     data["spans"] = spans
     return data
+
+
+@pytest.mark.parametrize("returncode,stdout,expected", [
+    (1, 'RESULT {"fonts": {}}', "exited with 1"),
+    (0, "", "no RESULT"),
+    (0, 'RESULT {"fonts": {"mathjax-dejavu": {"state": "unavailable"}}}', "unavailable"),
+])
+def test_real_run_reports_startup_failures(monkeypatch, tmp_path_factory, returncode, stdout, expected):
+    monkeypatch.setenv("MYANALYSIS_MATHJAX_TEST_ROOT", str(tmp_path_factory.getbasetemp() / "mathjax"))
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, stdout, "startup detail"),
+    )
+    with pytest.raises(AssertionError, match=expected):
+        real_run.__wrapped__(tmp_path_factory)
 
 
 def _svgs(data, font):
@@ -414,45 +430,70 @@ def _walk(e, chain):
         yield from _walk(c, chain)
 
 
-def test_real_bold_assumption_holds(real_run):
+def _svg_xml(src, context):
+    try:
+        return ET.fromstring(src)
+    except ET.ParseError as e:
+        pytest.fail(f"invalid SVG XML {context!r}: {e}")
+
+
+@pytest.mark.parametrize("font", REAL_FONTS)
+def test_real_svg_xml_preserves_tex(real_run, font):
+    res = _svgs(real_run, font)
+    for tex, disp in real_run["spans"]:
+        context = (font, tex, disp)
+        root = _svg_xml(res[f"{tex}|{disp}"][1], context)
+        math = root.find(".//*[@data-mml-node='math']")
+        assert math is not None, context
+        assert math.get("data-latex") == tex, context
+
+
+@pytest.mark.parametrize("font", REAL_FONTS)
+def test_real_bold_assumption_holds(real_run, font):
     from gui.math_render import prepare_svg
-    res = _svgs(real_run, "mathjax-dejavu")
+    res = _svgs(real_run, font)
     for tex, disp in real_run["spans"]:
         svg = res[f"{tex}|{disp}"][1]
         for src, want in ((prepare_svg(svg, "#ffffff", False), "0"), (prepare_svg(svg, "#ffffff", True), "15")):
-            root = ET.fromstring(src)
+            context = (font, tex, disp, want)
+            root = _svg_xml(src, context)
             n = 0
             for e, chain in _walk(root, []):
                 tag = e.tag.rsplit("}", 1)[-1]
                 if tag not in ("path", "rect") or any(c.tag.endswith("defs") for c in chain):
                     continue
                 n += 1
-                assert _effective(chain, "stroke-width") == want
-                assert _effective(chain, "stroke") not in (None, "none")
+                assert _effective(chain, "stroke-width") == want, context
+                assert _effective(chain, "stroke") not in (None, "none"), context
                 if want == "15":
-                    assert _effective(chain, "stroke-linejoin") == "round"
-                    assert _effective(chain, "stroke-linecap") == "round"
+                    assert _effective(chain, "stroke-linejoin") == "round", context
+                    assert _effective(chain, "stroke-linecap") == "round", context
             # path は defs の中で use から参照されるので、defs の中も確かめる
             for e, chain in _walk(root, []):
                 if e.tag.rsplit("}", 1)[-1] == "use":
-                    assert _effective(chain, "stroke-width") == want
+                    assert _effective(chain, "stroke-width") == want, context
 
 
-def test_real_svg_renders_to_pixels(real_run, qapp_fixture):
+@pytest.mark.parametrize("font", REAL_FONTS)
+@pytest.mark.parametrize("bold", [False, True])
+def test_real_svg_renders_to_pixels(real_run, qapp_fixture, font, bold):
     from PySide6.QtCore import QByteArray, QRectF, Qt
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtSvg import QSvgRenderer
     from gui.math_render import prepare_svg, svg_viewbox
-    res = _svgs(real_run, "mathjax-dejavu")
+    res = _svgs(real_run, font)
     for tex, disp in real_run["spans"]:
-        svg = prepare_svg(res[f"{tex}|{disp}"][1], "#ffffff", False)
+        context = (font, tex, disp, bold)
+        svg = prepare_svg(res[f"{tex}|{disp}"][1], "#ffffff", bold)
         r = QSvgRenderer(QByteArray(svg.encode()))
-        assert r.isValid()
-        _, _, w, h = svg_viewbox(svg)
+        assert r.isValid(), context
+        vb = svg_viewbox(svg)
+        assert vb is not None, context
+        _, _, w, h = vb
         img = QImage(max(1, round(w / 50)), max(1, round(h / 50)), QImage.Format.Format_ARGB32)
         img.fill(Qt.GlobalColor.transparent)
         p = QPainter(img)
         r.render(p, QRectF(0, 0, img.width(), img.height()))
         p.end()
         assert any(img.pixelColor(x, y).alpha() > 0
-                   for x in range(img.width()) for y in range(img.height()))
+                   for x in range(img.width()) for y in range(img.height())), context

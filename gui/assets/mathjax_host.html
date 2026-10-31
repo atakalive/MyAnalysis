@@ -60,7 +60,7 @@
           if (!svg) { res.items.push({ error: "no svg" }); return; }
           var err = svg.querySelector("[data-mjx-error]");
           if (err) { res.items.push({ error: err.getAttribute("data-mjx-error") || "error" }); return; }
-          res.items.push({ svg: svg.outerHTML });
+          res.items.push({ svg: new XMLSerializer().serializeToString(svg) });
         }, function (e) {
           res.items.push({ error: String((e && e.message) || e) });
         });

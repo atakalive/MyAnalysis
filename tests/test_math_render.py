@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCursor, QTextDocument, QTextFormat
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QTextCursor, QTextDocument, QTextFormat
 from PySide6.QtWidgets import QApplication
 
 from common import mathjax_install
@@ -27,7 +28,23 @@ WIDE = SVG.replace('viewBox="0 -750 1000 1000"', 'viewBox="0 -750 40000 1000"')
 
 @pytest.fixture(autouse=True)
 def _app():
-    return QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])
+    font_ids = []
+    try:
+        # Windows の offscreen は OS のフォントを列挙せず、Qt 自体もフォントを同梱しない。
+        if not QFontDatabase.families():
+            from matplotlib import get_data_path
+            font_dir = Path(get_data_path()) / "fonts" / "ttf"
+            for name in ("DejaVuSans.ttf", "DejaVuSansMono.ttf"):
+                font_id = QFontDatabase.addApplicationFont(str(font_dir / name))
+                assert font_id >= 0, f"could not load test font: {font_dir / name}"
+                font_ids.append(font_id)
+                assert QFontDatabase.applicationFontFamilies(font_id), name
+        assert QFontInfo(_font()).pixelSize() == 20, "test font must resolve to 20 px"
+        yield app
+    finally:
+        for font_id in reversed(font_ids):
+            assert QFontDatabase.removeApplicationFont(font_id), font_id
 
 
 class FakeEngine(QObject):
