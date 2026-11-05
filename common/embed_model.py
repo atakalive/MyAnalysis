@@ -152,6 +152,11 @@ CATALOG: dict[str, EmbedModel] = {
 }
 DEFAULT_MODEL = "ruri-v3-30m"
 REQUIRED_PACKAGES = (("onnxruntime", "onnxruntime"), ("tokenizers", "tokenizers"))   # (import 名, pip 名)
+# 設定のウインドウが出所として見せる、pip 名ごとの配布元のページ（Issue #126）。
+PACKAGE_PAGES = {
+    "onnxruntime": "https://pypi.org/project/onnxruntime/",
+    "tokenizers": "https://pypi.org/project/tokenizers/",
+}
 
 ERRORS = ("network", "integrity", "cancelled", "io", "in_use", "pip")
 

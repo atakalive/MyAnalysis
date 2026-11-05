@@ -955,6 +955,22 @@ def test_clear(tmp_path, idx):
     assert ci.clear() == 0
 
 
+def test_clear_nonblocking_keeps_locked_slug_and_raises(tmp_path, idx):
+    a = _register(tmp_path, "dsA")
+    _chat(a, [("user", "x")], sid=SID_A)
+    idx.update()
+    other = lb_paths.chat_index_dir() / "other-1"
+    (other / ci.dskey("dsA")).mkdir(parents=True)
+    with filelock.exclusive_lock(lb_paths.chat_index_dir() / "fake-8.lock"):
+        with pytest.raises(ci.IndexLocked, match="fake-8"):
+            ci.clear(blocking=False)
+        assert _shard("dsA").exists() and not other.exists()      # 取れた slug だけ消す
+        with pytest.raises(ci.IndexLocked):
+            ci.clear(["dsA"], model_id="fake-8", blocking=False)
+        assert _shard("dsA").exists()
+    assert ci.clear(blocking=False) == 1 and not _shard("dsA").exists()
+
+
 def test_recall_combines(tmp_path, emb, idx):
     d = _register(tmp_path, "dsA")
     _chat(d, [("user", "needle")], sid=SID_A)

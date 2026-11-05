@@ -21,11 +21,13 @@ _SCAN_DIRS = (
 
 # tr(変数) を許すファイルと、その呼び出し数（増減したらテストが落ちる）。
 # キーの出どころ: ENGINES.label_key → test_engines、preflight の note → test_preflight、
-# model_catalog の note → test_model_catalog、
+# model_catalog の note → test_model_catalog、embed_model.CATALOG の label_key →
+# test_embedding_settings_dialog、
 # それ以外は同じファイル内のリテラル（下のキー形リテラル検査で存在を確認する）。
 DYNAMIC_TR_CALLS = {
     "gui/backend_selector_dialog.py": 3,
     "gui/backend_status_window.py": 3,
+    "gui/embedding_settings_dialog.py": 1,
     "gui/meeting_share.py": 2,
     "llm_backend/engines.py": 1,
     "llm_bridge/__main__.py": 2,

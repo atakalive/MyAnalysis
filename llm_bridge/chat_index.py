@@ -64,7 +64,8 @@ _monotonic = time.monotonic   # テストが差し替える時計
 
 
 class IndexLocked(RuntimeError):
-    """待つ側のロック（更新・再構築・削除）が上限まで待っても取れなかった。"""
+    """待つ側のロック（更新・再構築・削除）が上限まで待っても取れなかった。待たない削除
+    （``clear(blocking=False)``）で取れなかった slug があったときも。"""
 
 
 # ---------------------------------------------------------------- 設定・準備状態・埋め込み器
@@ -1313,26 +1314,49 @@ def read_message(dataset: str, sid: str, idx: int) -> str | None:
         return None
 
 
-def clear(datasets=None, *, model_id: str | None = None) -> int:
-    """索引を消す。None なら全 slug、指定があれば今の slug の該当データセットだけ。→ 消した shard の数。"""
+@contextlib.contextmanager
+def _clear_lock(path: Path, blocking: bool):
+    """削除のロック。blocking なら待つ（上限で IndexLocked）、そうでなければ取れたかを yield する。"""
+    if blocking:
+        with _blocking_lock(path):
+            yield True
+        return
+    with filelock.try_exclusive_lock(path) as got:
+        yield got
+
+
+def clear(datasets=None, *, model_id: str | None = None, blocking: bool = True) -> int:
+    """索引を消す。None なら全 slug、指定があれば今の slug の該当データセットだけ。→ 消した shard の数。
+
+    ``blocking=False`` はロックを待たない（GUI の設定のウインドウ。Issue #126）: ほかが使っている
+    slug は残してほかを消し、最後に IndexLocked を送出する。"""
     root = lb_paths.chat_index_dir()
     if not root.is_dir():
         return 0
     n = 0
+    busy: list[str] = []
     if datasets is None:
         for d in sorted(root.iterdir()):
             if not d.is_dir() or _SLUG.fullmatch(d.name) is None:
                 continue
-            with _blocking_lock(root / f"{d.name}.lock"):
+            with _clear_lock(root / f"{d.name}.lock", blocking) as got:
+                if not got:
+                    busy.append(d.name)
+                    continue
                 with contextlib.suppress(OSError):
                     n += sum(1 for p in d.iterdir() if p.is_dir() and _DSKEY.fullmatch(p.name))
                 _rmtree(d)
     else:
         slug = model_id or load_prefs().model_id
-        with _blocking_lock(_lock_file(slug)):
-            for name in dict.fromkeys(datasets):
-                sd = _shard_dir(slug, name)
-                if sd.exists():
-                    _rmtree(sd)
-                    n += 1
+        with _clear_lock(_lock_file(slug), blocking) as got:
+            if not got:
+                busy.append(slug)
+            else:
+                for name in dict.fromkeys(datasets):
+                    sd = _shard_dir(slug, name)
+                    if sd.exists():
+                        _rmtree(sd)
+                        n += 1
+    if busy:
+        raise IndexLocked("locked: " + ", ".join(busy))
     return n
