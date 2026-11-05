@@ -37,6 +37,9 @@ class UnconfiguredBackend:
     def set_chat_dataset(self, value: object) -> None:
         """不活性。duck-typed 注入の対称性のため。"""
 
+    def set_chat_recall(self, value: bool) -> None:
+        """不活性。duck-typed 注入の対称性のため（Issue #127）。"""
+
     def stream(
         self, messages: list[Message], tools: list | None = None
     ) -> Iterator[TextDelta | ToolCallRequest]:

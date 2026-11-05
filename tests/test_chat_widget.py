@@ -45,9 +45,13 @@ class _FakeBackend:
 
     def __init__(self):
         self.persona_calls: list[str] = []   # set_persona で渡された実効テキスト
+        self.recall_calls: list[bool] = []   # set_chat_recall で渡された値（Issue #127）
 
     def set_persona(self, value: str) -> None:
         self.persona_calls.append(str(value or ""))
+
+    def set_chat_recall(self, value: bool) -> None:
+        self.recall_calls.append(value)
 
 
 @pytest.fixture()
@@ -3474,3 +3478,76 @@ def test_busy_glyph_absent_on_old_instance(shown, qapp, monkeypatch):
     qapp.processEvents()
     w._on_done(sess.id)
     assert sess.messages[-1].content == "本文"
+
+
+# ---- Issue #127: 過去チャットの関連検索の判定の受け渡し ----
+
+
+def _recall_ready(monkeypatch, value):
+    """関連検索を「使える／使えない」にする。value は bool か、呼ぶたびに値を返す関数。
+
+    _chat_recall_ready はオフの ui_prefs なら索引のモジュールを読まないので、pref も立てる
+    （ui_prefs は conftest が tmp に隔離している）。"""
+    from llm_bridge import chat_index
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_recall_enabled", True)
+    fn = value if callable(value) else (lambda: value)
+    monkeypatch.setattr(chat_index, "is_ready", fn)
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_build_session_backend_passes_chat_recall(widget, monkeypatch, ready):
+    _recall_ready(monkeypatch, ready)
+    backend = widget._build_session_backend(_make_session(widget))
+    assert backend.recall_calls == [ready]
+
+
+def test_chat_recall_off_pref_does_not_ask_the_index(widget, monkeypatch):
+    """オフ（既定）なら is_ready を呼ばない（索引のモジュールを読まない）。"""
+    import gui.chat as gc
+    from llm_bridge import chat_index
+
+    def boom():
+        raise AssertionError("is_ready must not be called while the feature is off")
+
+    monkeypatch.setattr(chat_index, "is_ready", boom)
+    assert gc._chat_recall_ready() is False
+    backend = widget._build_session_backend(_make_session(widget))
+    assert backend.recall_calls == [False]
+
+
+def test_start_turn_passes_chat_recall_every_turn(widget, monkeypatch):
+    """毎ターン判定し直す: 設定のウインドウで切り替えた次の送信から効く。"""
+    _fake_workers(monkeypatch)
+    monkeypatch.setattr(widget, "_load_backend_session", lambda *a, **k: None)
+    sess = widget._active
+    backend = _FakeBackend()
+    widget._session_backends[sess.id] = backend
+    state = {"ready": True}
+    _recall_ready(monkeypatch, lambda: state["ready"])
+    try:
+        assert widget._start_turn(sess, "one")
+        widget._turns.clear()
+        state["ready"] = False
+        assert widget._start_turn(sess, "two")
+        widget._turns.clear()
+        assert widget._start_turn(sess, "three", chat_recall=True)   # 呼び出し側の判定が勝つ
+        assert backend.recall_calls == [True, False, True]
+    finally:
+        _cleanup(widget)
+
+
+def test_start_turn_survives_failing_readiness(widget, monkeypatch):
+    from llm_bridge import chat_index
+
+    def boom():
+        raise RuntimeError("broken")
+
+    _recall_ready(monkeypatch, True)
+    monkeypatch.setattr(chat_index, "is_ready", boom)
+    b = _FakeBackend()
+    _begin(widget, monkeypatch, backend=b)
+    try:
+        assert b.recall_calls == [False]
+    finally:
+        _cleanup(widget)

@@ -9,7 +9,13 @@ from collections.abc import Iterator
 from urllib.error import HTTPError
 
 from common.chat_dataset import chat_dataset_value
-from llm_backend.base import Message, TextDelta, ToolCallRequest, compose_system_prompt
+from llm_backend.base import (
+    Message,
+    TextDelta,
+    ToolCallRequest,
+    compose_system_prompt,
+    with_chat_recall_rule,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -41,6 +47,7 @@ class OpenAICompatBackend:
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
         self._chat_dataset: str | None = None
+        self._chat_recall = False   # 過去チャットの関連検索の規則を足すか（Issue #127）
 
     def set_persona(self, value: str) -> None:
         self._persona = str(value or "")
@@ -48,6 +55,10 @@ class OpenAICompatBackend:
     def set_chat_dataset(self, value: object) -> None:
         """チャットの DS（Issue #111）。ChatWidget._start_turn が毎ターン duck-typed に呼ぶ。"""
         self._chat_dataset = chat_dataset_value(value)
+
+    def set_chat_recall(self, value: bool) -> None:
+        """関連検索が使えるか（Issue #127）。ChatWidget が毎ターン duck-typed に呼ぶ。"""
+        self._chat_recall = bool(value)
 
     def _payload_messages(self, messages: list[Message]) -> list[dict]:
         """送信用 payload の messages を組み立てる（ペルソナは送信時合成）。
@@ -58,25 +69,28 @@ class OpenAICompatBackend:
         persona ありで system 不在なら合成 system を先頭挿入する。persona 空なら
         従来どおり素の to_payload 列（バイト同一）。getattr はホットリロード後の
         旧インスタンス対策。チャットの DS の節は base の後・ペルソナの前に送信時合成する
-        （DS が無ければ何も足さない。Issue #111）。
+        （DS が無ければ何も足さない。Issue #111）。関連検索の規則（Issue #127）は DS の節の
+        後・ペルソナの前（使えない状態なら何も足さない）。
         """
         payload = [m.to_payload() for m in messages]
         persona = (getattr(self, "_persona", "") or "").strip()
         note = _chat_dataset_note(getattr(self, "_chat_dataset", None))
-        if not persona and not note:
+        recall = bool(getattr(self, "_chat_recall", False))
+        if not persona and not note and not recall:
             return payload
         for d in payload:
             if d.get("role") == "system":
                 base = d.get("content") or ""
                 if note:
                     base = f"{base}\n\n{note}" if base else note
-                d["content"] = compose_system_prompt(base, persona)
+                d["content"] = compose_system_prompt(with_chat_recall_rule(base, recall), persona)
                 return payload
-        # system 不在: DS の節・ペルソナ節だけの system を先頭に。
+        # system 不在: DS の節・規則・ペルソナ節だけの system を先頭に。
         payload.insert(
             0,
             {"role": "system",
-             "content": compose_system_prompt(note, persona).lstrip("\n")},
+             "content": compose_system_prompt(with_chat_recall_rule(note, recall),
+                                              persona).lstrip("\n")},
         )
         return payload
 

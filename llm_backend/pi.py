@@ -28,6 +28,7 @@ from llm_backend.base import (
     ANALYST_FRAMING, GUI_DISPLAY_VERBS, CHAT_DATASET_RULE, MATH_FORMAT_RULE, with_chat_context,
     apply_agent_stage,
     build_prompt_with_history, compose_system_prompt, format_thinking_line,
+    with_chat_recall_rule,
 )
 
 # Mandatory rules + minimal llm_bridge contract injected on every turn via
@@ -68,6 +69,7 @@ class PiCodingAgentBackend:
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
         self._chat_dataset: str | None = None
+        self._chat_recall = False   # 過去チャットの関連検索の規則を足すか（Issue #127）
 
     def set_persona(self, value: str) -> None:
         self._persona = str(value or "")
@@ -75,6 +77,10 @@ class PiCodingAgentBackend:
     def set_chat_dataset(self, value: object) -> None:
         """チャットの DS（Issue #111）。ChatWidget._start_turn が毎ターン duck-typed に呼ぶ。"""
         self._chat_dataset = chat_dataset_value(value)
+
+    def set_chat_recall(self, value: bool) -> None:
+        """関連検索が使えるか（Issue #127）。ChatWidget が毎ターン duck-typed に呼ぶ。"""
+        self._chat_recall = bool(value)
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -100,10 +106,12 @@ class PiCodingAgentBackend:
         # AGENTS.md は --no-context-files で読ませない（グローバルの
         # ~/.pi/agent/AGENTS.md も読まない。pi 0.67.4 以上が必要）。
         cmd = [pi_bin, "--mode", "json", "--no-context-files"]
-        # persona 空なら compose は _SYSTEM_PROMPT_PI を同一オブジェクトで返す（既定は
-        # 従来とバイト同一）。getattr はホットリロード後の旧インスタンス対策。
+        # persona 空・関連検索なしなら _SYSTEM_PROMPT_PI を同一オブジェクトで渡す（既定は
+        # 従来とバイト同一。Issue #127）。getattr はホットリロード後の旧インスタンス対策。
         cmd += ["--append-system-prompt",
-                compose_system_prompt(_SYSTEM_PROMPT_PI, getattr(self, "_persona", ""))]
+                compose_system_prompt(
+                    with_chat_recall_rule(_SYSTEM_PROMPT_PI, getattr(self, "_chat_recall", False)),
+                    getattr(self, "_persona", ""))]
         if self._session_id:
             cmd += ["--session", self._session_id]
         skill_path = repo_root() / ".pi" / "skills" / "myanalysis-bridge"

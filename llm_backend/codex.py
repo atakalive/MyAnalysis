@@ -45,6 +45,7 @@ from llm_backend.base import (
     apply_agent_stage,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     build_prompt_with_history, compose_system_prompt, format_thinking_line,
+    with_chat_recall_rule,
 )
 
 # Injected via AGENTS.md in the agent's cwd (codex auto-discovers it there).
@@ -202,6 +203,7 @@ class CodexBackend:
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
         self._chat_dataset: str | None = None
+        self._chat_recall = False   # 過去チャットの関連検索の規則を足すか（Issue #127）
 
     def set_persona(self, value: str) -> None:
         self._persona = str(value or "")
@@ -209,6 +211,10 @@ class CodexBackend:
     def set_chat_dataset(self, value: object) -> None:
         """チャットの DS（Issue #111）。ChatWidget._start_turn が毎ターン duck-typed に呼ぶ。"""
         self._chat_dataset = chat_dataset_value(value)
+
+    def set_chat_recall(self, value: bool) -> None:
+        """関連検索が使えるか（Issue #127）。ChatWidget が毎ターン duck-typed に呼ぶ。"""
+        self._chat_recall = bool(value)
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -455,7 +461,10 @@ class CodexBackend:
         Known limitation (v1): AGENTS.md is ONE shared file across all codex
         sessions (single codex_home), so concurrent codex turns with different
         personas are last-writer-wins in the rewrite→spawn→read window — the
-        impact is tone only, never operational rules.
+        impact is tone only, never operational rules. The chat-recall rule
+        (Issue #127) is last-writer-wins the same way when the feature is turned
+        on or off while two codex turns start: a stale rule only makes the agent
+        try chat-recall, which then refuses with exit 2; a missing one only hides it.
         """
         cwd = self._config.get("cwd")
         home = Path(cwd) if cwd else Path.home() / ".myanalysis" / "codex_home"
@@ -465,9 +474,11 @@ class CodexBackend:
             current = agents.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError):
             current = None
-        # desired が内容と比較キーを兼ねる: ペルソナを外せば素の定数に戻り書き換わる。
+        # desired が内容と比較キーを兼ねる: ペルソナ・関連検索の規則（Issue #127）を外せば
+        # 素の定数に戻り書き換わる。
         desired = compose_system_prompt(
-            _SYSTEM_PROMPT_CODEX, getattr(self, "_persona", "")
+            with_chat_recall_rule(_SYSTEM_PROMPT_CODEX, getattr(self, "_chat_recall", False)),
+            getattr(self, "_persona", ""),
         )
         if current != desired:
             agents.write_text(desired, encoding="utf-8")

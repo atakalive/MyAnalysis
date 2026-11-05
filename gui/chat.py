@@ -110,6 +110,23 @@ def _save_chat_zoom(n: int) -> None:
     update_ui_pref("chat_zoom", n)
 
 
+def _chat_recall_ready() -> bool:
+    """過去チャットの関連検索が使える状態か（Issue #127。chat_index.is_ready）。never raise。
+
+    ターンごとに 1 回だけ読み、system の規則・関数ツール・AI 検索の wire で同じ値を使う。
+    機能がオフ（既定）なら ui_prefs を 1 回読むだけで、索引のモジュールを import しない
+    （ToolWindow.request_chat_index_update と同じ流儀）。"""
+    try:
+        from llm_bridge.paths import read_ui_pref
+        if read_ui_pref("chat_recall_enabled", False) is not True:   # chat_index.PREF_ENABLED
+            return False
+        from llm_bridge import chat_index
+        return bool(chat_index.is_ready())
+    except Exception:
+        _logger.debug("chat recall readiness check failed", exc_info=True)
+        return False
+
+
 _HEXDIGITS = frozenset("0123456789abcdefABCDEF")
 
 
@@ -966,6 +983,8 @@ class ChatWidget(QWidget):
             backend.set_use_provider_system_prompt(self.use_provider_system_prompt())
         if hasattr(backend, "set_persona"):   # 応答口調（全バックエンド duck-typed）
             backend.set_persona(self._effective_persona_text(sess))
+        if hasattr(backend, "set_chat_recall"):   # 関連検索の規則（Issue #127。_start_turn が毎ターン上書き）
+            backend.set_chat_recall(_chat_recall_ready())
         return backend
 
     def _load_backend_session(self, backend: LLMBackend, sess: ChatSession) -> None:
@@ -2263,7 +2282,8 @@ class ChatWidget(QWidget):
             self._pending_remote.pop(sess.id, None)
 
     def _start_turn(self, sess: ChatSession, text: str, origin: str = "local", *,
-                    wire_text: str | None = None, adopt_dataset: bool = True) -> bool:
+                    wire_text: str | None = None, adopt_dataset: bool = True,
+                    chat_recall: bool | None = None) -> bool:
         """Begin a streaming turn for `sess` with user message `text`.
 
         Extracted from `_on_send` so remote (guest) injections share the exact
@@ -2281,6 +2301,10 @@ class ChatWidget(QWidget):
         `adopt_dataset=False` なら、未束縛のセッションに `_current_dataset` を採用しない
         （応答中に溜まった発言の自動送信。Issue #119）。
 
+        `chat_recall` は過去チャットの関連検索が使えるか（Issue #127）。None ならここで 1 回だけ
+        判定する。AI 検索の初回（run_search）は wire を作るときに判定した値を渡す。この値を
+        system の規則・関数ツールの一覧・続きの質問の指示で共有する。
+
         戻り値: ターンを始めたら True。バックエンドが UnconfiguredBackend に解決されたら
         （エンジン未設定。Issue #115）何もせず False — セッションのメッセージ・タイトル・
         dataset・messageAdded・worker のどれにも触れない。
@@ -2293,6 +2317,7 @@ class ChatWidget(QWidget):
                 self._refuse_unconfigured(sess, origin)
                 return False
             self._session_backends[sess.id] = backend
+        recall = _chat_recall_ready() if chat_recall is None else bool(chat_recall)
         if wire_text is None:
             wire_text = self._search_followup_wire(sess, text)
         sess.messages.append(Message(role="user", content=text))
@@ -2319,6 +2344,8 @@ class ChatWidget(QWidget):
         self._load_backend_session(backend, sess)
         if hasattr(backend, "set_chat_dataset"):   # チャットの DS（Issue #111。全バックエンド duck-typed）
             backend.set_chat_dataset(sess.dataset)
+        if hasattr(backend, "set_chat_recall"):    # 関連検索の規則（Issue #127。全バックエンド duck-typed）
+            backend.set_chat_recall(recall)
         kill_timer = QTimer(self)
         kill_timer.setSingleShot(True)
         kill_timer.timeout.connect(partial(self._force_kill, sess.id))

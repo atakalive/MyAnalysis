@@ -50,7 +50,7 @@ from llm_backend.base import (
     apply_agent_stage,
     TOOL_CALL_MARKER, TOOL_ERROR_MARKER, TOOL_RESULT_INDENT, TOOL_RESULT_MARKER,
     THINKING_MARKER, build_prompt_with_history, compose_system_prompt,
-    format_thinking_line,
+    format_thinking_line, with_chat_recall_rule,
 )
 
 # Claude サブ（認証を渡すインスタンス）の子の環境から落とす、認証の先を決める変数（定義と理由は claude_sub）。
@@ -263,15 +263,18 @@ def _settings_payload(config: dict) -> dict:
     return payload
 
 
-def _system_prompt_args(use_provider_default: bool, persona: str = "") -> list[str]:
+def _system_prompt_args(use_provider_default: bool, persona: str = "",
+                        chat_recall: bool = False) -> list[str]:
     """True=CC 既定に追記（現状）／False=CC 既定を置換し MyAnalysis のみ残す。
 
-    persona 空なら compose は _SYSTEM_PROMPT を同一オブジェクトで返す（既定は
+    persona 空・chat_recall 偽なら _SYSTEM_PROMPT を同一オブジェクトで返す（既定は
     従来プロンプトとバイト同一）。system プロンプトは --resume ターンでも毎回
-    argv で供給されるので、ペルソナ変更は次ターンから token 破棄なしで効く。
+    argv で供給されるので、ペルソナ・関連検索の規則（Issue #127）の変更は次ターンから
+    token 破棄なしで効く。
     """
     flag = "--append-system-prompt" if use_provider_default else "--system-prompt"
-    return [flag, compose_system_prompt(_SYSTEM_PROMPT, persona)]
+    return [flag, compose_system_prompt(with_chat_recall_rule(_SYSTEM_PROMPT, chat_recall),
+                                        persona)]
 
 
 _OutEvent = TextDelta | UserAbsorbed | UserUnknown   # _out を通る出力（Issue #119）
@@ -364,6 +367,7 @@ class ClaudeCodeBackend:
         # ユーザー選択ペルソナ本文（"" = なし）。ChatWidget が duck-typed に注入する。
         self._persona = ""
         self._chat_dataset: str | None = None
+        self._chat_recall = False   # 過去チャットの関連検索の規則を足すか（Issue #127）
         # 応答中の追加送信（Issue #119）。_cur は今の（最後の）stream の状態。
         self._lock = threading.Lock()
         self._cur: _Send | None = None
@@ -378,6 +382,10 @@ class ClaudeCodeBackend:
     def set_chat_dataset(self, value: object) -> None:
         """チャットの DS（Issue #111）。ChatWidget._start_turn が毎ターン duck-typed に呼ぶ。"""
         self._chat_dataset = chat_dataset_value(value)
+
+    def set_chat_recall(self, value: bool) -> None:
+        """関連検索が使えるか（Issue #127）。ChatWidget が毎ターン duck-typed に呼ぶ。"""
+        self._chat_recall = bool(value)
 
     def stream(
         self, messages: list[Message], tools: list | None = None
@@ -429,9 +437,10 @@ class ClaudeCodeBackend:
                 # is not framed as a developer of it (see _agent_home).
                 "--add-dir", str(repo_root()),
             ]
-            # getattr: ホットリロードで旧インスタンスに _persona が無いケースのガード。
+            # getattr: ホットリロードで旧インスタンスに _persona / _chat_recall が無いケースのガード。
             cmd += _system_prompt_args(
-                self._use_provider_system_prompt, getattr(self, "_persona", "")
+                self._use_provider_system_prompt, getattr(self, "_persona", ""),
+                chat_recall=getattr(self, "_chat_recall", False),
             )
             cmd += ["--permission-mode", _resolve_permission_mode(config)]
             cmd += _generation_flags(config)

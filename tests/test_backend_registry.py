@@ -127,6 +127,7 @@ def test_unconfigured_backend_never_streams():
     assert b.name == "unconfigured"
     assert b.set_persona("x") is None
     assert b.set_chat_dataset("ds") is None
+    assert b.set_chat_recall(True) is None
     with pytest.raises(NoEngineConfigured):
         list(UnconfiguredBackend().stream([Message(role="user", content="hi")]))
 
