@@ -1,7 +1,8 @@
 """Chat search dialog (Ctrl+F) and result helpers — Issue #108.
 
-検索ウィンドウ（語・対象・アーカイブ・AI 検索・検索履歴）と、標準検索の結果
-Markdown、検索履歴の記録。検索そのものは Qt 非依存の llm_bridge.chat_search。
+検索ウィンドウ（語・対象・アーカイブ・検索方法・検索履歴）と、一致検索・埋め込み検索の結果
+Markdown、埋め込み検索のジョブ、検索履歴の記録。検索そのものは Qt 非依存の
+llm_bridge.chat_search と llm_bridge.chat_index（埋め込み検索。Issue #128）。
 
 このモジュールは gui.chat を import しない（gui.chat が関数内でこちらを import する）。
 テストが差し替えるので ai_search_engine / current_engine_id / current_model は
@@ -11,9 +12,10 @@ Markdown、検索履歴の記録。検索そのものは Qt 非依存の llm_bri
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -37,9 +39,10 @@ from common.i18n import tr
 from llm_backend.engines import current_engine_id, current_model, engine_by_id, engine_label
 from llm_bridge import chat_search as core
 from llm_bridge import chat_search_history as history
-from llm_bridge.chat_search import SearchRequest
+from llm_bridge.chat_search import EMBEDDING_MODES, SearchRequest
 
 _MAX_MD_HITS = 100
+_RELATED_SNIPPET = 160   # 埋め込み検索の 1 行の抜粋の長さ（一致検索の抜粋と同じくらい）
 _HISTORY_COLS = 6
 _COL_DATASET = 5
 _RELATED_K = 30          # AI 検索の初回に同梱する関連箇所の候補数（Issue #127）
@@ -116,7 +119,7 @@ def search_datasets(req, ctx) -> list[str]:
                 ctx, scope="all", include_archived=req.include_archived)
                 if isinstance(s.dataset, str)})
         return list(ctx.open_datasets)
-    return []
+    return []           # "unbound" と "registered"（登録済みの全データセット。名前を並べない）
 
 
 def target_text(req, datasets: list[str]) -> str | None:
@@ -127,6 +130,8 @@ def target_text(req, datasets: list[str]) -> str | None:
         return req.dataset
     if req.scope == "all":
         return ", ".join(datasets) if datasets else tr("chat.search.scope.all_short")
+    if req.scope == "registered":
+        return tr("chat.search.scope.registered_short")
     return None
 
 
@@ -151,20 +156,177 @@ def hits_to_markdown(hits, req, *, datasets: list[str], when: float) -> str:
         head += tr("chat.search.result.archived_included")
     if not hits:
         return head
-    lines = [head, ""]
+    return "\n".join([head, "", *_hit_lines(hits, req)])
+
+
+def _role_text(role) -> str:
+    return tr("chat.role.user") if role == "user" else tr("chat.role.assistant")
+
+
+def _hit_lines(hits, req) -> list[str]:
+    """一致検索のヒットの行（最大 _MAX_MD_HITS 行と「ほか n 件」）。"""
+    lines = []
     for i, h in enumerate(hits[:_MAX_MD_HITS], 1):
         name = _md_escape(core._collapse(h.title))
-        if req.scope == "all" and h.dataset is not None:
+        if req.scope in ("all", "registered") and h.dataset is not None:
             name = f"{_md_escape(h.dataset)} / {name}"
         if h.archived:
             name += _md_escape(tr("chat.search.result.archived_mark"))
-        role = tr("chat.role.user") if h.role == "user" else tr("chat.role.assistant")
         when = core.format_ts(h.updated)
         link = core.make_search_link(h.session_id, h.msg_index, req.query)
-        lines.append(f"{i}. [{name}]({link}) · {role} · {when} — {_md_escape(h.snippet)}")
+        lines.append(f"{i}. [{name}]({link}) · {_role_text(h.role)} · {when} — "
+                     f"{_md_escape(h.snippet)}")
     if len(hits) > _MAX_MD_HITS:
         lines += ["", tr("chat.search.result.more", n=len(hits) - _MAX_MD_HITS)]
+    return lines
+
+
+# ----- embedding search (Issue #128) -----
+
+
+def embedding_ready() -> bool:
+    """埋め込み検索・無料検索を出すか（llm_bridge.chat_index.is_ready）。never raise。
+
+    機能がオフ（既定）なら ui_prefs を 1 回読むだけで、索引のモジュールを import しない
+    （gui.chat._chat_recall_ready と同じ流儀。このモジュールは gui.chat を import しない）。"""
+    try:
+        if _read_pref("chat_recall_enabled", False) is not True:   # chat_index.PREF_ENABLED
+            return False
+        from llm_bridge import chat_index
+        return bool(chat_index.is_ready())
+    except Exception:  # noqa: BLE001 — never raise（使えない扱い）
+        _log.debug("chat recall readiness check failed", exc_info=True)
+        return False
+
+
+def _embed_model():
+    """選択中の埋め込みモデル（catalog の EmbedModel）。読めなければ None。never raise。"""
+    try:
+        from llm_bridge import chat_index
+        return chat_index.readiness().model
+    except Exception:  # noqa: BLE001
+        _log.debug("chat recall model lookup failed", exc_info=True)
+        return None
+
+
+def embed_model_text() -> str | None:
+    """ダイアログに出す埋め込みモデルの行（表示名と次元）。None なら出さない。"""
+    m = _embed_model()
+    if m is None:
+        return None
+    return tr("chat.search.dialog.embed_model", model=tr(m.label_key), dims=m.dims)
+
+
+def embed_model_id() -> str:
+    """結果の見出しに出すモデル（catalog の id。同期されるタブの本文に残すので訳さない）。"""
+    m = _embed_model()
+    return m.id if m is not None else "-"
+
+
+def _embedding_header(text_hits, req, *, datasets, when, model) -> str:
+    target = target_text(req, datasets)
+    t = core.format_ts(when)
+    if text_hits is not None:
+        if target is None:
+            head = tr("chat.search.result.header_unbound", time=t, n=len(text_hits))
+        else:
+            head = tr("chat.search.result.header", target=_md_escape(target), time=t,
+                      n=len(text_hits))
+    else:
+        if target is None:
+            target = tr("chat.search.scope.registered_short")
+        head = tr("chat.search.result.header_semantic", target=_md_escape(target), time=t,
+                  model=_md_escape(model))
+    if req.include_archived:
+        head += tr("chat.search.result.archived_included")
+    return head
+
+
+def embedding_markdown(text_hits, req, *, datasets: list[str], when: float, model: str,
+                       related: str | None = None) -> str:
+    """埋め込み検索（text_hits=None）・無料検索の結果タブの本文。
+
+    無料検索は一致検索の節（hits_to_markdown と同じ行。0 件なら節ごと省く）と関連の節、
+    埋め込み検索は関連の行だけ（節見出しなし）。related が None なら「検索中…」。
+    完了時もこの関数で全体を組み直す（一致の節は同じ入力から同じ文字列になる）。"""
+    lines = [_embedding_header(text_hits, req, datasets=datasets, when=when, model=model), ""]
+    if text_hits is not None:
+        if text_hits:
+            lines += ["### " + tr("chat.search.section.exact"), "", *_hit_lines(text_hits, req),
+                      ""]
+        lines += ["### " + tr("chat.search.section.related", model=_md_escape(model)), ""]
+    lines.append(related if related is not None else tr("chat.search.related.running"))
     return "\n".join(lines)
+
+
+def related_section_markdown(hits, req, *, exclude=frozenset(), open_datasets=None) -> str:
+    """埋め込み検索のヒット（chat_index.RecallHit）の行。exclude（(完全な sid, idx)）は除く。
+
+    リンクにはヒットのデータセットを ?ds= で載せる（閉じているデータセットのヒットを案内する
+    ため）。open_datasets（開いているデータセットの list）に無いデータセットのヒットには
+    「開く」の opendataset: リンクを付ける。None（分からない）なら付けない。"""
+    lines: list[str] = []
+    for h in hits:
+        if (h.sid, h.idx) in exclude:
+            continue
+        if len(lines) >= _MAX_MD_HITS:
+            break
+        ds = h.dataset if isinstance(h.dataset, str) and h.dataset else None
+        name = _md_escape(core._collapse(h.title))
+        if ds is not None:
+            name = f"{_md_escape(ds)} / {name}"
+        if h.archived:
+            name += _md_escape(tr("chat.search.result.archived_mark"))
+        link = core.make_search_link(h.sid, h.idx, req.query, dataset=ds)
+        line = (f"{len(lines) + 1}. [{name}]({link}) · {_role_text(h.role)} · "
+                f"{core.format_ts(h.updated)} · {h.score:.4f} — "
+                f"{_md_escape(core._clip(h.snippet, _RELATED_SNIPPET))}")
+        if ds is not None and isinstance(open_datasets, (list, tuple)) \
+                and ds not in open_datasets:
+            line += (f" · [{_md_escape(tr('chat.search.result.open_dataset'))}]"
+                     f"({core.make_open_dataset_link(ds)})")
+        lines.append(line)
+    if not lines:
+        return tr("chat.search.related.none")
+    return "\n".join(lines)
+
+
+class RecallJob(QObject):
+    """埋め込み検索を 1 回、デーモンスレッドで走らせる（Issue #128）。
+
+    結果は GUI スレッドで ``finished``（("ok", RecallResult) か ("error", 文字列)）に出す。
+    worker スレッドは自分の ``_result`` を emit するだけで、受け手は GUI スレッドに属する
+    この QObject の Slot なので、配送は queued になる（``gui/math_settings_dialog.py`` の
+    Signal → bound method と同じ形）。親（ChatWidget）ごと消えていれば emit の RuntimeError を
+    握り、配送待ちの分は Qt が捨てる。ChatWidget に Signal を足さない（scope=app を要さない）。
+    テストは ``_spawn`` を差し替えて同期にする。"""
+
+    finished = Signal(object)
+    _result = Signal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._result.connect(self._deliver)
+
+    def run(self) -> None:
+        try:
+            payload = ("ok", self._fn())
+        except Exception as e:  # noqa: BLE001 — 結果のタブに「検索できませんでした」を出す
+            _log.warning("chat recall failed", exc_info=True)
+            payload = ("error", f"{type(e).__name__}: {e}")
+        try:
+            self._result.emit(payload)
+        except RuntimeError:       # 先に親（ChatWidget）ごと消えた
+            pass
+
+    @Slot(object)
+    def _deliver(self, payload) -> None:
+        self.finished.emit(payload)
+
+
+def _spawn(job: RecallJob) -> None:
+    threading.Thread(target=job.run, name="myanalysis-chat-recall", daemon=True).start()
 
 
 # ----- history -----
@@ -180,15 +342,17 @@ def history_work_dir(ds, *, create: bool) -> Path | None:
         return None
 
 
-def record_search(req, ctx, *, dataset, n_hits, session_id, ts=None) -> bool:
+def record_search(req, ctx, *, dataset, n_hits, session_id, ts=None, datasets=None) -> bool:
+    """datasets を渡せばそれを記録する（埋め込み検索の完了時に、開始時の範囲で。ctx は None 可）。"""
     if req.scope == "unbound" or dataset is None:
         return False
     wd = history_work_dir(dataset, create=True)
     if wd is None:
         return False
     try:
-        entry = history.new_entry(req, datasets=search_datasets(req, ctx), n_hits=n_hits,
-                                  session_id=session_id, ts=ts)
+        entry = history.new_entry(
+            req, datasets=search_datasets(req, ctx) if datasets is None else datasets,
+            n_hits=n_hits, session_id=session_id, ts=ts)
     except ValueError:
         return False
     return history.append_history(wd, entry)
@@ -220,7 +384,7 @@ def _load_bool(key) -> bool:
 
 def load_scope_pref() -> str:
     v = _read_pref("chat_search_scope", "dataset")
-    return v if v in ("dataset", "all") else "dataset"
+    return v if v in ("dataset", "all", "registered") else "dataset"
 
 
 def load_archived_pref() -> bool:
@@ -229,6 +393,19 @@ def load_archived_pref() -> bool:
 
 def load_ai_pref() -> bool:
     return _load_bool("chat_search_ai")
+
+
+def load_mode_pref(items) -> str:
+    """前回の検索方法（items のどれか）。
+
+    chat_search_mode（使える状態のときだけ書く。Issue #128）が items にあり、新旧両方の
+    ビルドが書く chat_search_ai と食い違わなければそれ。それ以外は chat_search_ai から
+    （旧ビルドと同じ読み方。機能がオフなら埋め込み検索・無料検索は一致検索に倒れる）。"""
+    ai = load_ai_pref()
+    m = _read_pref("chat_search_mode", None)
+    if isinstance(m, str) and m in items and (m == "ai") == ai:
+        return m
+    return "ai" if ai else "text"
 
 
 def load_history_open_pref() -> bool:
@@ -240,6 +417,37 @@ def load_history_open_pref() -> bool:
 
 def _first_line(text: str) -> str:
     return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+
+
+def _mode_label(mode: str) -> str:
+    if mode == "semantic":
+        return tr("chat.search.mode.semantic")
+    if mode == "hybrid":
+        return tr("chat.search.mode.hybrid")
+    if mode == "ai":
+        return tr("chat.search.mode.ai")
+    return tr("chat.search.mode.text")
+
+
+def _mode_hint(mode: str) -> str:
+    if mode == "semantic":
+        return tr("chat.search.dialog.semantic_hint")
+    if mode == "hybrid":
+        return tr("chat.search.dialog.hybrid_hint")
+    if mode == "ai":
+        return tr("chat.search.dialog.ai_hint")
+    return ""
+
+
+def _history_mode_label(mode: str) -> str:
+    """検索履歴の「種別」列（埋め込み・無料は短い名前）。"""
+    if mode == "semantic":
+        return tr("chat.search.history.mode_semantic")
+    if mode == "hybrid":
+        return tr("chat.search.history.mode_hybrid")
+    if mode == "ai":
+        return tr("chat.search.mode.ai")
+    return tr("chat.search.mode.text")
 
 
 class ChatSearchDialog(QDialog):
@@ -299,38 +507,51 @@ class ChatSearchDialog(QDialog):
         layout.addWidget(self._mode_stack)
 
         # ----- options -----
-        form = QFormLayout()
+        # 検索方法（Issue #128）。埋め込み検索・無料検索は関連検索が使える状態のときだけ出す
+        # （開いた時点で 1 回だけ判定する。使えなければ一致検索と AI 検索の 2 択）。
+        self._embed_ready = embedding_ready()
+        self._mode_items: list[str] = (["text", "semantic", "hybrid", "ai"] if self._embed_ready
+                                       else ["text", "ai"])
+        self._mode_combo = QComboBox()
+        for i, m in enumerate(self._mode_items):
+            self._mode_combo.addItem(_mode_label(m))
+            hint = _mode_hint(m)
+            if hint:
+                self._mode_combo.setItemData(i, hint, Qt.ItemDataRole.ToolTipRole)
+        self._mode_combo.setCurrentIndex(self._mode_items.index(load_mode_pref(self._mode_items)))
+        self._prev_mode = self._mode()
+
+        self._form = form = QFormLayout()
         self._scope_combo = QComboBox()
         # 選択肢はコンボの index と対応するリストで持つ（itemData に tuple を入れると
-        # PySide6 6.10.1 は list で返し、比較・isinstance が外れる）。項目はここでだけ作る。
+        # PySide6 6.10.1 は list で返し、比較・isinstance が外れる）。項目は
+        # _fill_scope_combo でだけ作る（検索方法で「登録済みの全データセット」が出入りする）。
         self._scope_items: list[tuple[str, str | None]] = []
-        for ds in open_ds:
-            self._scope_items.append(("dataset", ds))
-            self._scope_combo.addItem(tr("chat.search.scope.dataset", dataset=ds))
-        if open_ds:
-            self._scope_items.append(("all", None))
-            self._scope_combo.addItem(
-                tr("chat.search.scope.all_named", datasets=", ".join(open_ds)))
-            if load_scope_pref() == "all":
-                self._scope_combo.setCurrentIndex(self._scope_combo.count() - 1)
-            else:
-                front = self._current if self._current is not None else open_ds[0]
-                self._scope_combo.setCurrentIndex(open_ds.index(front))
+        self._scope_row_visible = True
         form.addRow(tr("chat.search.dialog.scope"), self._scope_combo)
         self._switch_note = QLabel("")
         self._switch_note.setWordWrap(True)
         form.addRow("", self._switch_note)
+        self._fill_scope_combo(None)
         self._archived_check = QCheckBox(tr("chat.search.dialog.archived"))
         self._archived_check.setChecked(load_archived_pref())
         form.addRow("", self._archived_check)
-        self._ai_check = QCheckBox(tr("chat.search.dialog.ai"))
-        self._ai_check.setToolTip(tr("chat.search.dialog.ai_hint"))
-        self._ai_check.setChecked(load_ai_pref())
-        form.addRow("", self._ai_check)
+        form.addRow(tr("chat.search.dialog.mode"), self._mode_combo)
         self._engine_label = QLabel(ai_engine_label_text())
         form.addRow("", self._engine_label)
+        self._embed_label = QLabel("")
+        self._embed_in_ai = False
+        if self._embed_ready:          # オフなら索引のモジュールに触れない
+            self._embed_label.setText(embed_model_text() or "")
+            try:
+                from llm_bridge import chat_index
+                self._embed_in_ai = bool(chat_index.load_prefs().in_ai_search)
+            except Exception:  # noqa: BLE001
+                self._embed_in_ai = False
+        form.addRow("", self._embed_label)
         layout.addLayout(form)
-        self._mode_stack.setCurrentIndex(1 if self._ai_check.isChecked() else 0)
+        self._mode_stack.setCurrentIndex(1 if self._mode() == "ai" else 0)
+        self._update_mode_labels()
 
         # ----- history (collapsed by default) -----
         self._history_toggle = QToolButton()
@@ -366,10 +587,10 @@ class ChatSearchDialog(QDialog):
         self._history_panel.setVisible(opened)
         self._history_toggle.setArrowType(
             Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        self._update_scope_row()
         if not open_ds:
-            # 対象を選べず、検索履歴も常に空なので出さない（no_dataset の注記だけ残す）
-            form.setRowVisible(self._scope_combo, False)
-            form.setRowVisible(self._switch_note, False)
+            # 検索履歴は常に空なので出さない（no_dataset の注記だけ残す）。対象の行は、
+            # 開いているデータセットが無くても埋め込み検索なら「登録済みの全データセット」を出す。
             self._history_toggle.hide()
             self._history_panel.hide()
 
@@ -386,7 +607,7 @@ class ChatSearchDialog(QDialog):
         # ----- signals -----
         self._query_edit.textChanged.connect(self._update_search_enabled)
         self._ai_query_edit.textChanged.connect(self._update_search_enabled)
-        self._ai_check.toggled.connect(self._on_ai_toggled)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
         self._history_toggle.toggled.connect(self._on_history_toggled)
         self._history_tree.currentItemChanged.connect(self._on_history_current)
@@ -400,12 +621,20 @@ class ChatSearchDialog(QDialog):
 
     # ----- helpers -----
 
+    def _mode(self) -> str:
+        i = self._mode_combo.currentIndex()
+        return self._mode_items[i] if 0 <= i < len(self._mode_items) else "text"
+
+    def _set_mode(self, mode: str) -> None:
+        if mode in self._mode_items:
+            self._mode_combo.setCurrentIndex(self._mode_items.index(mode))
+
     def _focus_main_input(self) -> None:
-        w = self._ai_query_edit if self._ai_check.isChecked() else self._query_edit
+        w = self._ai_query_edit if self._mode() == "ai" else self._query_edit
         w.setFocus()
 
     def _main_text(self) -> str:
-        if self._ai_check.isChecked():
+        if self._mode() == "ai":
             return self._ai_query_edit.toPlainText().strip()
         return self._query_edit.text().strip()
 
@@ -422,6 +651,69 @@ class ChatSearchDialog(QDialog):
         except ValueError:
             return -1
 
+    def _wanted_scope_items(self) -> list[tuple[str, str | None]]:
+        items: list[tuple[str, str | None]] = [("dataset", ds) for ds in self._open]
+        if self._open:
+            items.append(("all", None))
+        if self._mode() in EMBEDDING_MODES:
+            items.append(("registered", None))
+        return items
+
+    def _scope_label(self, kind: str, ds) -> str:
+        if kind == "dataset":
+            return tr("chat.search.scope.dataset", dataset=ds)
+        if kind == "all":
+            return tr("chat.search.scope.all_named", datasets=", ".join(self._open))
+        return tr("chat.search.scope.registered")
+
+    def _choose_scope(self, keep) -> int:
+        """作り直した範囲のどれを選ぶか。keep（直前の選択）→ pref → 前面のデータセット。"""
+        if keep is not None:
+            i = self._scope_index(keep)
+            if i >= 0:
+                return i
+            if keep[0] == "registered":           # 一致検索・AI 検索に戻した
+                i = self._scope_index(("all", None))
+                if i >= 0:
+                    return i
+        pref = load_scope_pref()
+        if pref in ("all", "registered"):
+            i = self._scope_index((pref, None))
+            if i >= 0:
+                return i
+        if self._open:
+            # 項目に無い "registered"（機能がオフ）も前面のデータセット（旧ビルドと同じ読み方）
+            front = self._current if self._current is not None else self._open[0]
+            return self._open.index(front)
+        return 0 if self._scope_items else -1
+
+    def _fill_scope_combo(self, keep) -> None:
+        with QSignalBlocker(self._scope_combo):
+            self._scope_combo.clear()
+            self._scope_items = self._wanted_scope_items()
+            for kind, ds in self._scope_items:
+                self._scope_combo.addItem(self._scope_label(kind, ds))
+            self._scope_combo.setCurrentIndex(self._choose_scope(keep))
+
+    def _update_scope_row(self) -> None:
+        """対象の行は選べる項目があるときだけ出す。"""
+        visible = bool(self._scope_items)
+        if visible != self._scope_row_visible:
+            self._scope_row_visible = visible
+            self._form.setRowVisible(self._scope_combo, visible)
+            self._form.setRowVisible(self._switch_note, visible)
+        self._update_switch_note()
+
+    def _rebuild_scope_items(self) -> None:
+        """検索方法が変わったときに範囲を作り直す（項目が同じなら何もしない）。"""
+        if self._wanted_scope_items() == self._scope_items:
+            return
+        before = self._scope_data()
+        self._fill_scope_combo(before)
+        self._update_scope_row()
+        if self._scope_data() != before and not self._applying_entry:
+            self._reload_history()
+
     def _update_switch_note(self) -> None:
         kind, ds = self._scope_data()
         target = None
@@ -429,27 +721,42 @@ class ChatSearchDialog(QDialog):
             target = ds
         elif kind == "all" and self._current is None and self._open:
             target = self._open[0]
+        text = ""
         if target is not None:
-            self._switch_note.setText(tr("chat.search.dialog.will_switch", dataset=target))
-            self._switch_note.show()
-        else:
-            self._switch_note.setText("")
-            self._switch_note.hide()
+            text = tr("chat.search.dialog.will_switch", dataset=target)
+        elif kind == "registered" and self._mode() == "hybrid":
+            text = tr("chat.search.scope.registered_note")
+        self._switch_note.setText(text)
+        self._switch_note.setVisible(bool(text))
+
+    def _update_mode_labels(self) -> None:
+        mode = self._mode()
+        self._form.setRowVisible(self._engine_label, mode == "ai")
+        show_embed = self._embed_ready and bool(self._embed_label.text()) and (
+            mode in EMBEDDING_MODES or (mode == "ai" and self._embed_in_ai))
+        self._form.setRowVisible(self._embed_label, show_embed)
+        self._mode_combo.setToolTip(_mode_hint(mode))
 
     def _set_note(self, text: str) -> None:
         self._history_note.setText(text)
         self._history_note.setVisible(bool(text))
 
-    def _on_ai_toggled(self, on: bool) -> None:
-        self._mode_stack.setCurrentIndex(1 if on else 0)
-        if on:
+    def _on_mode_changed(self, *_) -> None:
+        mode, prev = self._mode(), self._prev_mode
+        self._prev_mode = mode
+        self._mode_stack.setCurrentIndex(1 if mode == "ai" else 0)
+        # 語の欄は一致・埋め込み・無料で共用（1 行）、AI は複数行。跨ぐときだけ写す。
+        if mode == "ai" and prev != "ai":
             t = self._query_edit.text().strip()
             if t:
                 self._ai_query_edit.setPlainText(t)
-        else:
+        elif prev == "ai" and mode != "ai":
             body = self._ai_query_edit.toPlainText()
             if body.strip():
                 self._query_edit.setText(" ".join(body.split()))
+        self._update_mode_labels()
+        self._rebuild_scope_items()
+        self._update_switch_note()       # 範囲が同じでも注記は検索方法で変わる（無料検索）
         self._update_search_enabled()
 
     def _on_scope_changed(self, *_) -> None:
@@ -463,7 +770,7 @@ class ChatSearchDialog(QDialog):
         kind, ds = self._scope_data()
         if kind == "dataset":
             return [ds]
-        if kind == "all":
+        if kind in ("all", "registered"):
             return list(self._open)
         return []
 
@@ -484,11 +791,17 @@ class ChatSearchDialog(QDialog):
         self._history_rows = rows
         self._history_tree.clear()
         for i, (ds, e) in enumerate(rows):
+            if history.entry_registered(e):
+                scope_text = tr("chat.search.scope.registered_short")
+            elif e["scope"] == "all":
+                scope_text = tr("chat.search.scope.all_short")
+            else:
+                scope_text = e["datasets"][0]
             item = QTreeWidgetItem([
                 core.format_ts(e["ts"]),
-                tr("chat.search.mode.ai") if e["mode"] == "ai" else tr("chat.search.mode.text"),
+                _history_mode_label(history.entry_mode(e)),
                 _first_line(e["query"]),
-                tr("chat.search.scope.all_short") if e["scope"] == "all" else e["datasets"][0],
+                scope_text,
                 str(e["n_hits"]) if isinstance(e["n_hits"], int) else "—",
                 ds,
             ])
@@ -498,7 +811,7 @@ class ChatSearchDialog(QDialog):
             item.setToolTip(2, tip)
             item.setData(0, Qt.ItemDataRole.UserRole, i)
             self._history_tree.addTopLevelItem(item)
-        self._history_tree.setColumnHidden(_COL_DATASET, kind != "all")
+        self._history_tree.setColumnHidden(_COL_DATASET, kind not in ("all", "registered"))
         self._history_toggle.setText(tr("chat.search.history.title_n", n=len(rows)))
         self._history_delete_btn.setEnabled(False)
         self._set_note(tr("chat.search.history.unreadable") if bad else "")
@@ -527,13 +840,20 @@ class ChatSearchDialog(QDialog):
     def _apply_entry(self, ds: str, entry: dict) -> None:
         self._applying_entry = True
         try:
-            self._ai_check.setChecked(entry["mode"] == "ai")
-            if entry["mode"] == "ai":
+            mode = history.entry_mode(entry)
+            if mode not in self._mode_items:      # 埋め込み検索が使えないときは一致検索に倒す
+                mode = "text"
+            self._set_mode(mode)
+            if mode == "ai":
                 self._ai_query_edit.setPlainText(entry["query"])
                 self._hint_edit.setText(entry["hint"])
             else:
                 self._query_edit.setText(entry["query"])
-            if entry["scope"] == "all":
+            reg = self._scope_index(("registered", None)) if history.entry_registered(entry) \
+                else -1
+            if reg >= 0:
+                self._scope_combo.setCurrentIndex(reg)
+            elif entry["scope"] == "all":
                 i = self._scope_index(("all", None))
                 if i >= 0:
                     self._scope_combo.setCurrentIndex(i)
@@ -586,16 +906,19 @@ class ChatSearchDialog(QDialog):
             if not self._main_text():
                 return
             kind, _ = self._scope_data()
-            _write_pref("chat_search_scope", "all" if kind == "all" else "dataset")
+            _write_pref("chat_search_scope", kind if kind in ("all", "registered") else "dataset")
             _write_pref("chat_search_archived", self._archived_check.isChecked())
-            _write_pref("chat_search_ai", self._ai_check.isChecked())
+            mode = self._mode()
+            _write_pref("chat_search_ai", mode == "ai")
+            if self._embed_ready:    # オフのときは書かない（ui_prefs を旧ビルドと同じに保つ）
+                _write_pref("chat_search_mode", mode)
         super().accept()
 
     def request(self) -> SearchRequest | None:
         if self._jump_sid is not None:
             return None
-        ai = self._ai_check.isChecked()
-        if ai:
+        mode = self._mode()
+        if mode == "ai":
             query = self._ai_query_edit.toPlainText().strip()
             hint = self._hint_edit.text().strip()
         else:
@@ -604,13 +927,13 @@ class ChatSearchDialog(QDialog):
         kind, ds = self._scope_data()
         if kind == "dataset":
             scope, dataset = "dataset", ds
-        elif kind == "all":
-            scope, dataset = "all", None
+        elif kind in ("all", "registered"):
+            scope, dataset = kind, None
         else:
             scope, dataset = "unbound", None
         return SearchRequest(query=query, scope=scope, dataset=dataset,
                              include_archived=self._archived_check.isChecked(),
-                             ai=ai, hint=hint)
+                             ai=(mode == "ai"), hint=hint, mode=mode)
 
     def jump_session_id(self) -> str | None:
         return self._jump_sid

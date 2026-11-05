@@ -94,6 +94,14 @@ def _combo_texts(c):
     return [c.itemText(i) for i in range(c.count())]
 
 
+def _set_mode(d, mode):
+    d._mode_combo.setCurrentIndex(d._mode_items.index(mode))
+
+
+def _is_ai(d):
+    return d._mode() == "ai"
+
+
 # ---- dialog ----
 
 
@@ -136,11 +144,11 @@ def test_dialog_no_dataset(qapp, monkeypatch, dirs):
 def test_dialog_search_button_and_ai_toggle(env):
     w, _ = env
     d = _dialog(w)
-    d._ai_check.setChecked(False)
+    _set_mode(d, "text")
     assert not d._search_btn.isEnabled()
     d._query_edit.setText("peak offset")
     assert d._search_btn.isEnabled()
-    d._ai_check.setChecked(True)
+    _set_mode(d, "ai")
     assert d._mode_stack.currentIndex() == 1
     assert d._ai_query_edit.toPlainText() == "peak offset"
     d._ai_query_edit.setPlainText("")
@@ -149,7 +157,7 @@ def test_dialog_search_button_and_ai_toggle(env):
     d._hint_edit.setText("h1 h2")
     assert d._search_btn.isEnabled()
     assert d.request().hint == "h1 h2" and d.request().ai
-    d._ai_check.setChecked(False)
+    _set_mode(d, "text")
     assert d._mode_stack.currentIndex() == 0
     assert d._query_edit.text() == "line one line two"
     assert d.request().hint == ""
@@ -161,7 +169,7 @@ def test_dialog_ctrl_enter_accepts(env):
     from PySide6.QtWidgets import QDialog
     w, _ = env
     d = _dialog(w)
-    d._ai_check.setChecked(True)
+    _set_mode(d, "ai")
     d._ai_query_edit.setPlainText("abc")
     d._ai_query_edit.moveCursor(d._ai_query_edit.textCursor().MoveOperation.End)
     QTest.keyClick(d._ai_query_edit, Qt.Key.Key_Return)
@@ -188,7 +196,7 @@ def test_dialog_prefs_persist(env):
     d = _dialog(w)
     d._scope_combo.setCurrentIndex(2)
     d._archived_check.setChecked(True)
-    d._ai_check.setChecked(True)
+    _set_mode(d, "ai")
     d._ai_query_edit.setPlainText("q")
     d.accept()
     assert read_ui_pref("chat_search_scope", None) == "all"
@@ -196,7 +204,7 @@ def test_dialog_prefs_persist(env):
     assert read_ui_pref("chat_search_ai", None) is True
     d2 = _dialog(w)
     assert d2._scope_combo.currentIndex() == 2
-    assert d2._archived_check.isChecked() and d2._ai_check.isChecked()
+    assert d2._archived_check.isChecked() and _is_ai(d2)
     assert d2._mode_stack.currentIndex() == 1
     # dataset 選択は DS 名を保存しない → 次は前面 DS
     d2._scope_combo.setCurrentIndex(1)
@@ -374,16 +382,16 @@ def test_history_select_reads_back(env):
     w.run_search(_req(query="ai question", ai=True, hint="hw"))
     w.set_current_dataset("dsA")
     d = _dialog(w)
-    d._ai_check.setChecked(False)
+    _set_mode(d, "text")
     d._archived_check.setChecked(False)
     tree = d._history_tree
     tree.setCurrentItem(tree.topLevelItem(1))    # 標準
-    assert not d._ai_check.isChecked()
+    assert not _is_ai(d)
     assert d._query_edit.text() == "peak"
     assert d._archived_check.isChecked()
     assert tree.topLevelItemCount() == 2
     tree.setCurrentItem(tree.topLevelItem(0))    # AI
-    assert d._ai_check.isChecked()
+    assert _is_ai(d)
     assert d._ai_query_edit.toPlainText() == "ai question" and d._hint_edit.text() == "hw"
     assert tree.topLevelItemCount() == 2
     assert d._history_delete_btn.isEnabled()
@@ -1180,3 +1188,303 @@ def test_related_hits_for_ai_conditions(monkeypatch):
     assert gcs.related_hits_for_ai("q", ["dsA"], False) == []       # 使えない
     _recall_env(monkeypatch, index=_FakeIndex(error=RuntimeError("x")))
     assert gcs.related_hits_for_ai("q", ["dsA"], False) is None     # 失敗（送出しない）
+
+
+# ---- Ctrl+F の 4 モード（Issue #128）: ダイアログ・Markdown ----
+
+
+def _items(d):
+    return list(d._scope_items)
+
+
+def test_dialog_off_is_two_choices_like_before(env, monkeypatch):
+    from llm_bridge import chat_index
+    from llm_bridge.paths import read_ui_pref, update_ui_pref
+
+    def boom(*a, **k):
+        raise AssertionError("the index module must not be consulted while the feature is off")
+
+    monkeypatch.setattr(chat_index, "readiness", boom)
+    monkeypatch.setattr(chat_index, "is_ready", boom)
+    update_ui_pref("chat_search_mode", "semantic")   # 使える状態のときに保存された値
+    update_ui_pref("chat_search_scope", "registered")
+    w, _ = env
+    d = _dialog(w)
+    assert d._mode_items == ["text", "ai"]
+    assert _combo_texts(d._mode_combo) == [tr("chat.search.mode.text"), tr("chat.search.mode.ai")]
+    assert d._mode() == "text"                       # 一致検索に倒す
+    assert _items(d) == [("dataset", "dsA"), ("dataset", "dsB"), ("all", None)]
+    assert d._scope_combo.currentIndex() == 0        # "registered" は前面の DS（旧ビルドと同じ）
+    assert d._form.isRowVisible(d._engine_label) is False
+    assert d._engine_label.text()                    # 文言は常にある
+    assert d._form.isRowVisible(d._embed_label) is False
+    _set_mode(d, "ai")
+    assert d._form.isRowVisible(d._engine_label) and not d._form.isRowVisible(d._embed_label)
+    d._ai_query_edit.setPlainText("q")
+    d.accept()
+    assert read_ui_pref("chat_search_ai", None) is True
+    assert read_ui_pref("chat_search_mode", None) == "semantic"   # オフでは書かない
+    assert read_ui_pref("chat_search_scope", None) == "dataset"
+
+
+def test_dialog_ready_has_four_modes_and_registered_scope(env, monkeypatch):
+    _recall_env(monkeypatch)
+    w, _ = env
+    d = _dialog(w)
+    assert d._mode_items == ["text", "semantic", "hybrid", "ai"]
+    assert d._mode() == "text"
+    base = [("dataset", "dsA"), ("dataset", "dsB"), ("all", None)]
+    assert _items(d) == base
+    d._scope_combo.setCurrentIndex(2)                       # 開いている全データセット
+    _set_mode(d, "semantic")
+    assert _items(d) == [*base, ("registered", None)]
+    assert d._scope_data() == ("all", None)                 # 選択は保つ
+    assert _combo_texts(d._scope_combo)[-1] == tr("chat.search.scope.registered")
+    assert d._form.isRowVisible(d._embed_label) and not d._form.isRowVisible(d._engine_label)
+    assert "ruri" in d._embed_label.text().casefold()
+    d._scope_combo.setCurrentIndex(3)
+    assert d._switch_note.isHidden()                        # 埋め込み検索は切替も注記もなし
+    _set_mode(d, "hybrid")
+    assert d._scope_data() == ("registered", None)
+    assert d._switch_note.text() == tr("chat.search.scope.registered_note")
+    d._query_edit.setText("peak")
+    r = d.request()
+    assert (r.mode, r.scope, r.dataset, r.ai) == ("hybrid", "registered", None, False)
+    _set_mode(d, "text")                                    # 一致検索に戻すと全データセット
+    assert _items(d) == base and d._scope_data() == ("all", None)
+    _set_mode(d, "ai")
+    assert d._form.isRowVisible(d._engine_label) and d._form.isRowVisible(d._embed_label)
+    assert d._ai_query_edit.toPlainText() == "peak"
+
+
+def test_dialog_ready_ai_hides_embed_label_when_not_passed(env, monkeypatch):
+    _recall_env(monkeypatch, in_ai=False)
+    w, _ = env
+    d = _dialog(w)
+    _set_mode(d, "ai")
+    assert not d._form.isRowVisible(d._embed_label)
+    _set_mode(d, "semantic")
+    assert d._form.isRowVisible(d._embed_label)
+
+
+def test_dialog_ready_without_dataset_offers_registered(qapp, monkeypatch, dirs):
+    _recall_env(monkeypatch)
+    w, _ = _make_widget(monkeypatch, open_ds=(), current=None)
+    d = _dialog(w)
+    assert _items(d) == [] and not d._form.isRowVisible(d._scope_combo)
+    _set_mode(d, "semantic")
+    assert _items(d) == [("registered", None)]
+    assert d._form.isRowVisible(d._scope_combo) and not d._scope_combo.isHidden()
+    assert d._switch_note.isHidden()
+    assert d._history_toggle.isHidden() and d._history_panel.isHidden()
+    d._query_edit.setText("x")
+    assert d.request().scope == "registered"
+    _set_mode(d, "text")
+    assert _items(d) == [] and not d._form.isRowVisible(d._scope_combo)
+    assert d.request().scope == "unbound"
+
+
+def test_dialog_mode_prefs_persist(env, monkeypatch):
+    from llm_bridge.paths import read_ui_pref, update_ui_pref
+    _recall_env(monkeypatch)
+    w, _ = env
+    d = _dialog(w)
+    _set_mode(d, "hybrid")
+    d._scope_combo.setCurrentIndex(3)
+    d._query_edit.setText("q")
+    d.accept()
+    assert read_ui_pref("chat_search_mode", None) == "hybrid"
+    assert read_ui_pref("chat_search_ai", None) is False
+    assert read_ui_pref("chat_search_scope", None) == "registered"
+    d2 = _dialog(w)
+    assert d2._mode() == "hybrid" and d2._scope_data() == ("registered", None)
+    # 旧ビルドが AI 検索に変えた（chat_search_ai だけ書いた）→ AI 検索
+    update_ui_pref("chat_search_ai", True)
+    assert _dialog(w)._mode() == "ai"
+    # mode は "ai" なのに ai が偽（旧ビルドが一致検索に戻した）→ 一致検索
+    update_ui_pref("chat_search_mode", "ai")
+    update_ui_pref("chat_search_ai", False)
+    assert _dialog(w)._mode() == "text"
+    update_ui_pref("chat_search_mode", 3)
+    assert _dialog(w)._mode() == "text"
+
+
+def test_dialog_mode_tooltips(env, monkeypatch):
+    from PySide6.QtCore import Qt
+    _recall_env(monkeypatch)
+    w, _ = env
+    d = _dialog(w)
+    tips = [d._mode_combo.itemData(i, Qt.ItemDataRole.ToolTipRole)
+            for i in range(d._mode_combo.count())]
+    assert tips == [None, tr("chat.search.dialog.semantic_hint"),
+                    tr("chat.search.dialog.hybrid_hint"), tr("chat.search.dialog.ai_hint")]
+    _set_mode(d, "ai")
+    assert d._mode_combo.toolTip() == tr("chat.search.dialog.ai_hint")
+
+
+def test_dialog_every_mode_and_scope_item(env, monkeypatch, list_item_data):
+    _recall_env(monkeypatch)
+    w, _ = env
+    d = _dialog(w)
+    got = []
+    for m in d._mode_items:
+        _set_mode(d, m)
+        d._query_edit.setText("x")
+        d._ai_query_edit.setPlainText("x")
+        for i in range(d._scope_combo.count()):
+            d._scope_combo.setCurrentIndex(i)
+            r = d.request()
+            got.append((r.mode, r.scope, r.dataset))
+    assert ("semantic", "registered", None) in got and ("hybrid", "registered", None) in got
+    assert not any(s == "registered" for m, s, _ in got if m in ("text", "ai"))
+    assert all(d._mode_combo.itemData(i) is None for i in range(d._mode_combo.count()))
+
+
+def _history_entry(ds, req, *, n_hits=3, datasets=None):
+    import dataset_config
+    from llm_bridge import chat_search_history as h
+    wd = dataset_config.get_work_dir(ds, create=True)
+    e = h.new_entry(req, datasets=[ds] if datasets is None else datasets, n_hits=n_hits,
+                    session_id="0123456789abcdef0123456789abcdef")
+    assert h.append_history(wd, e)
+    return e
+
+
+def test_history_embedding_rows_listed_and_read_back(env, monkeypatch):
+    from llm_bridge.chat_search import SearchRequest
+    _recall_env(monkeypatch)
+    w, _ = env
+    _history_entry("dsA", SearchRequest(query="sem q", scope="dataset", dataset="dsA",
+                                        include_archived=False, ai=False, mode="semantic"))
+    _history_entry("dsA", SearchRequest(query="hyb q", scope="registered", dataset=None,
+                                        include_archived=True, ai=False, mode="hybrid"),
+                   datasets=[])
+    d = _dialog(w)
+    tree = d._history_tree
+    assert tree.topLevelItemCount() == 2
+    rows = {tree.topLevelItem(i).text(2): tree.topLevelItem(i) for i in range(2)}
+    assert rows["sem q"].text(1) == tr("chat.search.history.mode_semantic")
+    assert rows["hyb q"].text(1) == tr("chat.search.history.mode_hybrid")
+    assert rows["hyb q"].text(3) == tr("chat.search.scope.registered_short")
+    tree.setCurrentItem(rows["hyb q"])
+    assert d._mode() == "hybrid" and d._scope_data() == ("registered", None)
+    assert d._query_edit.text() == "hyb q" and d._archived_check.isChecked()
+    assert tree.topLevelItemCount() == 2               # 読み戻しで一覧を作り直さない
+    tree.setCurrentItem(rows["sem q"])
+    assert d._mode() == "semantic" and d._scope_data() == ("dataset", "dsA")
+
+
+def test_history_embedding_rows_when_off(env):
+    from llm_bridge.chat_search import SearchRequest
+    w, _ = env
+    _history_entry("dsA", SearchRequest(query="hyb q", scope="registered", dataset=None,
+                                        include_archived=False, ai=False, mode="hybrid"),
+                   datasets=[])
+    d = _dialog(w)
+    item = d._history_tree.topLevelItem(0)
+    assert item.text(1) == tr("chat.search.history.mode_hybrid")
+    d._history_tree.setCurrentItem(item)
+    assert d._mode() == "text" and d._scope_data() == ("all", None)
+    assert d._query_edit.text() == "hyb q"
+
+
+def test_hits_markdown_full_text():
+    """括り出した行の生成が、一致検索の結果の全文を変えないこと。"""
+    from gui import chat_search as gcs
+    from llm_bridge.chat_search import SearchHit, format_ts
+    hits = [SearchHit(session_id="abcdef12" + "0" * 24, dataset="dsB", title="t_1",
+                      archived=True, msg_index=3, role="user", snippet="a*b", updated=0.0),
+            SearchHit(session_id="12345678" + "0" * 24, dataset=None, title="T",
+                      archived=False, msg_index=1, role="assistant", snippet="s", updated=0.0)]
+    md = gcs.hits_to_markdown(hits, _req(query="pk", scope="all", dataset=None),
+                              datasets=["dsA", "dsB"], when=0.0)
+    t = format_ts(0.0)
+    mark = tr("chat.search.result.archived_mark")
+    assert md.splitlines() == [
+        tr("chat.search.result.header", target="dsA, dsB", time=t, n=2), "",
+        (f"1. [dsB / t\\_1{mark}](chatsearch:abcdef12:3?q=pk) · {tr('chat.role.user')} · {t}"
+         " — a\\*b"),
+        f"2. [T](chatsearch:12345678:1?q=pk) · {tr('chat.role.assistant')} · {t} — s",
+    ]
+
+
+def _rhit(sid, idx=1, dataset="dsC", title="Peak chat", archived=False, score=0.0312,
+          snippet="offset was 0.12", role="assistant"):
+    from llm_bridge.chat_index import RecallHit
+    return RecallHit(sid=sid, sid8=sid[:8], idx=idx, dataset=dataset, title=title,
+                     archived=archived, role=role, score=score, cosine=0.8, lexical=0.0,
+                     snippet=snippet, updated=0.0)
+
+
+_SID1 = "1a2b3c4d" + "0" * 24
+_SID2 = "5e6f7a8b" + "0" * 24
+
+
+def _sem_req(mode="semantic", scope="registered", dataset=None, query="ベースライン ずれ",
+             archived=False):
+    from llm_bridge.chat_search import SearchRequest
+    return SearchRequest(query=query, scope=scope, dataset=dataset, include_archived=archived,
+                         ai=False, mode=mode)
+
+
+def test_related_section_markdown_lines():
+    from gui import chat_search as gcs
+    from llm_bridge import chat_search as core
+    req = _sem_req()
+    hits = [_rhit(_SID1, 12, dataset="dsA", title="ベース_補正"),
+            _rhit(_SID2, 3, dataset="dsC", archived=True, snippet="x" * 400, role="user")]
+    md = gcs.related_section_markdown(hits, req, open_datasets=["dsA", "dsB"])
+    lines = md.splitlines()
+    assert len(lines) == 2
+    link1 = core.make_search_link(_SID1, 12, req.query, dataset="dsA")
+    assert lines[0] == (f"1. [dsA / ベース\\_補正]({link1}) · {tr('chat.role.assistant')} · "
+                        f"{core.format_ts(0.0)} · 0.0312 — offset was 0.12")
+    assert "&ds=dsA" in link1
+    mark = tr("chat.search.result.archived_mark")
+    assert lines[1].startswith(f"2. [dsC / Peak chat{mark}](")
+    assert lines[1].endswith(f" · [{tr('chat.search.result.open_dataset')}]"
+                             f"({core.make_open_dataset_link('dsC')})")
+    assert "x" * 159 + "…" in lines[1] and "x" * 161 not in lines[1]
+    # 開いている DS が分からなければ「開く」を付けない・除外・0 件
+    assert "opendataset:" not in gcs.related_section_markdown(hits, req, open_datasets=None)
+    only2 = gcs.related_section_markdown(hits, req, exclude={(_SID1, 12)}, open_datasets=[])
+    assert only2.startswith("1. [dsC / ") and len(only2.splitlines()) == 1
+    assert gcs.related_section_markdown([], req) == tr("chat.search.related.none")
+    assert gcs.related_section_markdown(hits, req, exclude={(_SID1, 12), (_SID2, 3)}) == \
+        tr("chat.search.related.none")
+
+
+def test_related_section_markdown_caps_lines():
+    from gui import chat_search as gcs
+    hits = [_rhit(f"{i:08x}" + "0" * 24, i) for i in range(150)]
+    md = gcs.related_section_markdown(hits, _sem_req(), open_datasets=None)
+    assert len(md.splitlines()) == gcs._MAX_MD_HITS
+
+
+def test_embedding_markdown_semantic_and_hybrid():
+    from gui import chat_search as gcs
+    from llm_bridge.chat_search import SearchHit, format_ts
+    t = format_ts(0.0)
+    req = _sem_req()
+    md = gcs.embedding_markdown(None, req, datasets=[], when=0.0, model="ruri-v3-30m")
+    assert md.splitlines() == [
+        tr("chat.search.result.header_semantic",
+           target=tr("chat.search.scope.registered_short"), time=t, model="ruri-v3-30m"),
+        "", tr("chat.search.related.running")]
+    md = gcs.embedding_markdown(None, req, datasets=[], when=0.0, model="m", related="BODY")
+    assert md.endswith("\n\nBODY") and "###" not in md
+    hreq = _sem_req(mode="hybrid", scope="dataset", dataset="dsA", query="peak", archived=True)
+    hit = SearchHit(session_id=_SID1, dataset="dsA", title="T", archived=False, msg_index=2,
+                    role="user", snippet="peak", updated=0.0)
+    md = gcs.embedding_markdown([hit], hreq, datasets=["dsA"], when=0.0, model="m")
+    assert md.splitlines() == [
+        tr("chat.search.result.header", target="dsA", time=t, n=1)
+        + tr("chat.search.result.archived_included"),
+        "", "### " + tr("chat.search.section.exact"), "",
+        f"1. [T](chatsearch:1a2b3c4d:2?q=peak) · {tr('chat.role.user')} · {t} — peak",
+        "", "### " + tr("chat.search.section.related", model="m"), "",
+        tr("chat.search.related.running")]
+    md0 = gcs.embedding_markdown([], hreq, datasets=["dsA"], when=0.0, model="m", related="R")
+    assert tr("chat.search.section.exact") not in md0
+    assert md0.splitlines()[-3:] == ["### " + tr("chat.search.section.related", model="m"),
+                                     "", "R"]
