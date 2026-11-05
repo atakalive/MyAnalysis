@@ -120,12 +120,14 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `data/llm_state/reload_manifest.json` | ホットリロード `app` / `restart` の一時ファイル（読んだら削除） |
 | `data/llm_state/backend_sessions.json` | ネイティブ resume token（90 日で自動削除） |
 | `data/llm_state/personas.json`（+ `.bak`） | AI ペルソナの定義 |
+| `data/llm_state/chat_index/` | チャットの関連検索（実験的）の埋め込み索引。`<モデル>/<sha1(データセット名)[:16]>/` ごとに不変の `rows-*.json`・`vectors-*.npy` と `manifest.json`。再計算できるので消してよい（`chat-index clear`） |
 | `data/locks/` | 同期ドライブ上のファイルを守るロックの実体 |
 | `data/logs/` | クラッシュログ（`gui-crash-*.log`）と warning 以上のログ（`myanalysis.log`。1 MB で回転、3 世代） |
 | `data/pycache/` | `PYTHONPYCACHEPREFIX` の退避先 |
 | `data/agent_stage/<token>/` | チャットごとの stage。エージェントが長いコード・テキストを Write で置く一時置き場（`save_text` / `save_code` の `src=` が保存に成功するとファイルを消す。フォルダは自動では消さない） |
 | `~/.myanalysis/agent_home/` | claude の cwd |
 | `~/.myanalysis/codex_home/` | codex の cwd（`AGENTS.md` を自動生成・上書き） |
+| `~/.myanalysis/embeddings/` | チャットの関連検索の埋め込みモデル（`<モデル>/model.onnx`・`tokenizer.json`・`installed.json`）。固定した URL・大きさ・sha256 と照合して置く（`common/embed_model.py`） |
 | `~/.myanalysis/config_share_state.json` | R2 設定同期の状態（登録時刻 `entry_meta`・登録削除の記録 tombstone を含む。同期前に消すと削除した登録が復活する） |
 | `datasets.local.json`（+ `.lock`） | データセット登録簿（リポジトリ直下） |
 | `models.toml` / `llm_backend/config.toml` | モデル設定 / バックエンドの運用設定 |
@@ -222,6 +224,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `preflight.py` | ドライバの導入・認証状況の判定（`engines` CLI と状況ウィンドウが使う） |
 | `model_catalog.py` | 状況ウィンドウの「モデル取得」。ツール自身が知っているモデル ID を読み、候補リストへの追記分を計算する（推論しない・例外を出さない） |
 | `ping.py` | 疎通確認（1 ターン実行する。課金される唯一の判定） |
+| `embed_model.py` | チャットの関連検索の埋め込みモデル: 固定した catalog・導入と削除（`~/.myanalysis/embeddings/`）・任意依存（onnxruntime・tokenizers）の検出と pip・ONNX 推論 `OnnxEmbedder`（Issue #125） |
 
 ### `llm_bridge/`（トップレベルで PySide6 を import しない）
 
@@ -240,6 +243,7 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `personas.py` | AI ペルソナ定義の保存 |
 | `guard_write.py` | claude の PreToolUse hook（同期ドライブへの Write/Edit を拒否） |
 | `doctor.py` | 同期ドライブ上のデータの健全性チェック |
+| `chat_index.py` | チャットの関連検索（実験的・既定オフ）の設定・準備状態・埋め込み索引（`data/llm_state/chat_index/`）・差分更新・検索。CLI `chat-recall` / `chat-index`（Issue #125） |
 
 ### その他
 
@@ -434,7 +438,7 @@ python -m pytest tests/
 
 - リポジトリ直下から `python -m pytest tests/` で実行する。`pytest.ini` / `pyproject.toml` / `tests/__init__.py` は無く、conftest がトップレベルのモジュール（`dataset_registry` 等）を import するので、`pytest` コマンドを直接使うと conftest の読込で失敗する。
 - pytest-qt は使っていない。GUI テストの多くは各ファイルの `qapp` fixture で、残りはテスト内で直接 `QApplication` を作る。どちらも `QT_QPA_PLATFORM=offscreen` を自分で設定する（ヘッドレスで動く）。
-- テストの依存は `requirements-dev.txt` で揃う。`requirements.txt` の必須依存（PySide6・pyqtgraph・numpy・pandas・matplotlib・Pillow）はテストでも skip しないので、入っていないとそのテストは失敗する。skip するのは任意依存の tifffile を使うテストだけ（`test_figures.py`（matplotlib）、`test_mount_compat.py`（Pillow）、`test_backend_prompts.py`（PySide6）には以前からの skip が残っている）。
+- テストの依存は `requirements-dev.txt` で揃う。`requirements.txt` の必須依存（PySide6・pyqtgraph・numpy・pandas・matplotlib・Pillow）はテストでも skip しないので、入っていないとそのテストは失敗する。skip するのは任意依存の tifffile を使うテストだけ（`test_figures.py`（matplotlib）、`test_mount_compat.py`（Pillow）、`test_backend_prompts.py`（PySide6）には以前からの skip が残っている）。チャットの関連検索の任意依存（onnxruntime・tokenizers）はテストでは偽物に差し替えるので、無くても全部通る。実モデルの推論のテスト（`tests/test_embed_model.py` の `test_real_model_selfcheck`）は `MYANALYSIS_TEST_EMBED_MODEL=1` で、依存とモデル（`~/.myanalysis/embeddings/`）が入っているときだけ走る。
 - **CI ではテストが走らない**（`.gitlab-ci.yml` は `chatdock.html` を GitLab Pages に配信するだけ）。push の前に手元で実行する。
 
 **`tests/conftest.py` が隔離するもの**
@@ -443,6 +447,7 @@ python -m pytest tests/
 |---|---|
 | 登録簿 `datasets.local.json` | conftest の読込時とテストごとに一時パスへ差し替え、`config.DATASETS` を空にする |
 | `data/llm_state` の `last_window` / `recent_datasets` / `backend_sessions` / `ui_prefs` / `personas` | `llm_bridge.paths` の各 `*_path` を `tmp_path` に向ける |
+| チャットの関連検索の索引・モデル | `llm_bridge.paths.chat_index_dir` と `common.embed_model.install_root` を `tmp_path` に向け、`llm_bridge.chat_index` の埋め込み器と shard のキャッシュをテストの前後に捨てる |
 | FS 判定 | `MYANALYSIS_FS_OVERRIDE=<tmp_path>=local` を設定し、`MYANALYSIS_FORCE_FRAGILE` / `MYANALYSIS_WRITE_STRATEGY` を外す |
 | R2 設定同期 | `R2_AUTOSYNC=0`。`.env` の読込・状態ファイル・boto3 クライアントをスタブにする（ネットワーク禁止） |
 | session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
@@ -603,3 +608,4 @@ python -m devtools.mount_probe --describe-only   # FS 判定だけ表示
 | `data/llm_state` の一部が chokepoint 外 | `active.json`、コマンドキュー、`reload_manifest.json`、`command_log.jsonl`、`last_window.json`（`llm_bridge/session.py` の `write_last_window`。固定の tmp 名）は `common/paths.py` を通さず直接書いている（ローカルディスク前提） |
 | mock が完全にはオフラインでない | `mock` バックエンドは応答の一部を外部サイトから取得する（失敗しても 3 秒でタイムアウトして続行する） |
 | CI・リンタ設定が無い | CI でのテスト実行とリンタ設定が無い（依存定義は `requirements.txt` / `requirements-dev.txt`） |
+| チャットの関連検索の索引（実験的） | 索引に入るのはディスクに保存済みのチャットだけ（未保存の変更は入らない）。同期の揺らぎで `chat_sessions/` が一瞬空に見えると、そのデータセットの索引を消し、次の更新で全部を埋め込み直す（再計算できるので壊れはしない）。ロックを取らない検索は、manifest を読み直して 1 回だけ再試行する。その間にさらに更新が 2 回進むと、その問い合わせでだけそのデータセットが空になる |

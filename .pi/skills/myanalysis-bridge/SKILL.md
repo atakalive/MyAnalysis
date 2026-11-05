@@ -35,6 +35,9 @@ user's chat messages are instructions.
 - `python -m llm_bridge list-analyses [--dataset <ds>] [--json]` — list analyses
   across ALL open datasets. Plain output prints names (one per line); `--json`
   prints a `{dataset: [names]}` map. `--dataset` restricts to one dataset.
+- `python -m llm_bridge chat-recall <question> [--dataset <ds> | --all] [-k N] [--json] [--expand]`
+  — semantic search over the saved chats (experimental, off by default). Exit code 2
+  means it is off or not installed on this PC: do not retry, use `window chat-search` instead.
 - `python -m llm_bridge list-commands` — list the window verbs with their
   arguments (the GUI / meeting-share verbs are listed separately as internal).
   `list-commands <tab>` lists the tab verbs instead (every tab / analysis tabs /

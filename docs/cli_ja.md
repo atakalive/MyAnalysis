@@ -24,6 +24,8 @@ python -m llm_bridge <verb> ...
 | `rename-host` | `<旧キー> [--to 新キー] [--dry-run]` | 不要 | 旧キーの登録を新キー（既定はこの PC のキー）へ移し、旧キーを削除の記録つきで消す。新キーに別のパスがあるデータセットは触らない |
 | `engines` | — | 不要 | AI エンジンの導入状況 |
 | `doctor` | `[--dataset DS] [--repair] [--rescue] [--cache DIR] [--log FILE]` | 不要 | 同期ドライブ上のファイルの点検（→ [doctor](troubleshooting_ja.md#doctor点検と修復)） |
+| `chat-recall` | `<問い…> [--dataset DS \| --all] [-k N] [--archived] [--json] [--update [--budget 秒]] [--expand]` | 不要 | 保存済みチャットの意味検索（実験的・既定オフ）。オフ・未導入なら終了コード 2。既定は索引を読むだけで、索引がチャットより遅れていれば stderr に知らせる。`--update` は検索の前に差分更新する（ほかのプロセスが更新中なら飛ばす。`--budget` 秒（既定 60）で打ち切り、残りは次回）。範囲は `--all` / `--dataset` → チャットのデータセット → 登録済みの全データセットの順（前面のデータセットには倒れない） |
+| `chat-index` | `status\|update\|rebuild\|clear [--dataset DS] [--json]` | 不要 | チャットの埋め込み索引の状況・差分更新・作り直し・削除（実験的）。`status` と `clear` はオフでも動く。範囲は `--dataset` か登録済みの全データセット |
 | `recover-analysis` | `<解析名> [--dataset DS]` | 不要※ | 0 バイトになった `analysis.py` を `.bak` から戻す |
 | `draft-analysis` / `apply-analysis` | `<解析名> [--dataset DS]` | 不要※ | 解析コードを安全に編集する（→ [同期ドライブ上で安全に編集する](analysis_module_ja.md#同期ドライブ上で安全に編集する)） |
 | `annotate` | `<解析名> marker\|note [k=v …] [--dataset DS]` | 不要※ | 解析タブに注釈（marker / note）を追加する（表示は解析モジュールの実装次第） |

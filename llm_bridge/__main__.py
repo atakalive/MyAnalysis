@@ -135,6 +135,285 @@ def _harden_stdio() -> None:
             pass
 
 
+# ---------------------------------------------------------------- チャットの関連検索（Issue #125）
+
+_RECALL_WINDOW = "設定 → チャットの関連検索（実験的）…"
+
+# llm_bridge.chat_index の警告の code → 文（{dataset} と {detail} を埋める）。
+_RECALL_WARNINGS = {
+    "locked": "another process is updating the chat index; searched the existing index",
+    "budget": ("the index update stopped at the time budget ({detail}); the rest continues "
+               "with the next --update or chat-index update"),
+    "cancelled": "the index update was cancelled",
+    "unreachable": "{dataset}: the dataset folder is not reachable; kept its index ({detail})",
+    "work_dir": "{dataset}: cannot resolve work_dir; kept its index ({detail})",
+    "scan": "{dataset}: cannot list the saved chats; kept its index ({detail})",
+    "write": "{dataset}: cannot write the index ({detail})",
+    "unreadable": ("{dataset}: {detail} saved chat file(s) could not be read; "
+                   "kept their previous index"),
+    "unknown": "{dataset}: not a registered dataset",
+    "shard-invalid": "{dataset}: the index is damaged; the next update rebuilds it",
+}
+
+
+def _recall_k(v: str) -> int:
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {v!r}") from None
+    if not 1 <= n <= 200:
+        raise argparse.ArgumentTypeError(f"must be between 1 and 200: {n}")
+    return n
+
+
+def _positive_finite(v: str) -> float:
+    try:
+        f = float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {v!r}") from None
+    if not math.isfinite(f) or f <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive finite number: {v!r}")
+    return f
+
+
+def _recall_unavailable(chat_index) -> str | None:
+    """オフ・未導入なら案内の 1 行（終了コード 2）。使えるなら None。"""
+    if not chat_index.load_prefs().enabled:
+        return ("error: chat recall is an experimental feature and is off - "
+                f"enable it in {_RECALL_WINDOW}")
+    r = chat_index.readiness()
+    parts = []
+    if r.deps_missing:
+        parts.append("missing packages: " + ", ".join(r.deps_missing))
+    if r.model_state != "installed":
+        parts.append(f"model {r.model.id}: {r.model_state}")
+    if parts:
+        return (f"error: chat recall is not ready ({'; '.join(parts)}) - "
+                f"install them in {_RECALL_WINDOW}")
+    return None
+
+
+def _recall_warning_text(w) -> str:
+    tpl = _RECALL_WARNINGS.get(w.code)
+    if tpl is None:
+        return f"{w.code}: {w.dataset or '-'} {w.detail}".strip()
+    return tpl.format(dataset=w.dataset or "-", detail=w.detail)
+
+
+def _print_recall_warnings(warnings) -> None:
+    for w in warnings:
+        print(f"warning: {_recall_warning_text(w)}", file=sys.stderr)
+
+
+def _print_stale(stale: dict) -> None:
+    if not stale:
+        return
+    parts = [f"{ds} {n} file{'' if n == 1 else 's'}" for ds, n in sorted(stale.items())]
+    print("index is behind the saved chats: " + ", ".join(parts)
+          + " (run with --update or update from the GUI)", file=sys.stderr)
+
+
+def _one_line(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _indent(text: str) -> str:
+    lines = text.splitlines() or [""]
+    return "\n".join("    " + line for line in lines)
+
+
+def _human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _recall_scope(args, config) -> tuple[list[str] | None, str | None]:
+    """chat-recall の範囲: --all → 全登録 / --dataset → それ / チャットの DS → それ / 全登録。
+
+    → (datasets（None = 全登録）, エラー文)。前面のデータセットには倒れない。"""
+    if args.all_datasets:
+        return None, None
+    ds = args.dataset
+    if ds is not None:
+        if chat_dataset_value(ds) is None:
+            return None, f"error: --dataset must be a non-empty dataset name, got {ds!r}"
+    else:
+        ds = _chat_dataset_env()
+        if ds is None:
+            return None, None
+    if ds not in config.DATASETS:
+        return None, f"error: unknown dataset {ds!r}"
+    return [ds], None
+
+
+def _not_ready_message(e) -> str:
+    return f"error: chat recall is not ready ({e}) - check {_RECALL_WINDOW}"
+
+
+def _cmd_chat_recall(args) -> int:
+    from llm_bridge import chat_index
+    from llm_bridge.chat_search import format_ts
+    query = " ".join(args.query).strip()
+    try:
+        msg = _recall_unavailable(chat_index)
+        if msg is not None:
+            print(msg, file=sys.stderr)
+            return 2
+        import config
+        config.reload_datasets()
+        scope, err = _recall_scope(args, config)
+        if err is not None:
+            print(err, file=sys.stderr)
+            return 1
+        try:
+            index = chat_index.ChatIndex.open()
+        except chat_index.NotReady as e:
+            print(_not_ready_message(e), file=sys.stderr)
+            return 2
+        res = index.recall(query, datasets=scope, include_archived=args.archived, k=args.k,
+                           update=args.update,
+                           budget_s=(args.budget or 60.0) if args.update else None,
+                           blocking=False)
+    except Exception as e:  # noqa: BLE001 — traceback を出さない
+        print(f"error: chat recall failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    texts = {}
+    if args.expand:
+        for h in res.hits:
+            texts[(h.dataset, h.sid, h.idx)] = chat_index.read_message(h.dataset, h.sid, h.idx)
+    if args.json_out:
+        hits = []
+        for h in res.hits:
+            d = h.to_dict()
+            if args.expand:
+                d["text"] = texts[(h.dataset, h.sid, h.idx)]
+            hits.append(d)
+        print(json.dumps({"query": query,
+                          "scope": {"datasets": scope, "include_archived": args.archived},
+                          "updated_index": res.updated_index, "stale": res.stale,
+                          "warnings": [w.to_dict() for w in res.warnings], "hits": hits},
+                         ensure_ascii=False, indent=2))
+        return 0
+    for n, h in enumerate(res.hits, 1):
+        line = (f"{n}. sid={h.sid8} idx={h.idx} | ds={h.dataset} | {_one_line(h.title)} | "
+                f"{h.role} | {format_ts(h.updated)} | score={h.score:.4f}")
+        if h.archived:
+            line += " | archived"
+        print(line)
+        if args.expand:
+            body = texts[(h.dataset, h.sid, h.idx)]
+            if body is None:
+                print(_indent(h.snippet))
+                print("    (full text not readable)")
+            else:
+                print(_indent(body))
+        else:
+            print(_indent(h.snippet))
+    if not res.hits:
+        print("no matches", file=sys.stderr)
+    _print_recall_warnings(res.warnings)
+    _print_stale(res.stale)
+    return 0
+
+
+class _TtyProgress:
+    """埋め込みの進みを端末の stderr に 1 行で出す。"""
+
+    def __init__(self):
+        self.ds = None
+
+    def __call__(self, ds, done, total):
+        if self.ds not in (None, ds):
+            print(file=sys.stderr)
+        self.ds = ds
+        print(f"\r{ds}: {done}/{total}", end="", file=sys.stderr, flush=True)
+
+    def finish(self):
+        if self.ds is not None:
+            print(file=sys.stderr)
+
+
+def _cmd_chat_index(args) -> int:
+    from llm_bridge import chat_index
+    from llm_bridge.chat_search import format_ts
+    try:
+        import config
+        config.reload_datasets()
+        scope = None
+        if args.dataset is not None:
+            if chat_dataset_value(args.dataset) is None or args.dataset not in config.DATASETS:
+                print(f"error: unknown dataset {args.dataset!r}", file=sys.stderr)
+                return 1
+            scope = [args.dataset]
+        if args.action == "status":
+            st = chat_index.status(scope)
+            if args.json_out:
+                print(json.dumps(st.to_dict(), ensure_ascii=False, indent=2))
+                return 0
+            print(f"model={st.model} dims={st.dims if st.dims is not None else '-'} "
+                  f"enabled={str(st.enabled).lower()} ready={str(st.ready).lower()} "
+                  f"model_state={st.model_state} dir={st.slug_dir}")
+            if st.deps_missing:
+                print("missing packages: " + ", ".join(st.deps_missing))
+            width = max((len(s.name) for s in st.datasets), default=0)
+            for s in st.datasets:
+                updated = format_ts(s.updated) if s.updated is not None else "-"
+                print(f"{s.name:<{width}}  sessions={s.sessions} chunks={s.chunks} "
+                      f"size={_human_size(s.bytes)} updated={updated} stale={s.stale}")
+            print(f"total chunks={st.total_chunks} size={_human_size(st.total_bytes)}")
+            return 0
+        if args.action == "clear":
+            n = chat_index.clear(scope)
+            if args.json_out:
+                print(json.dumps({"cleared": n}))
+            else:
+                print(f"cleared {n} shard(s)")
+            return 0
+        msg = _recall_unavailable(chat_index)
+        if msg is not None:
+            print(msg, file=sys.stderr)
+            return 2
+        try:
+            index = chat_index.ChatIndex.open()
+        except chat_index.NotReady as e:
+            print(_not_ready_message(e), file=sys.stderr)
+            return 2
+        progress = _TtyProgress() if not args.json_out and sys.stderr.isatty() else None
+        fn = index.update if args.action == "update" else index.rebuild
+        try:
+            rep = fn(scope, progress=progress, blocking=True, reload=False)
+        finally:
+            if progress is not None:
+                progress.finish()
+    except chat_index.IndexLocked:
+        print("error: another process holds the chat index lock", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001 — traceback を出さない
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    failed = any(d.reason == "write" for d in rep.datasets)
+    if args.json_out:
+        print(json.dumps(rep.to_dict(), ensure_ascii=False, indent=2))
+        return 1 if failed else 0
+    for d in rep.datasets:
+        if d.state == "skipped":
+            print(f"{d.name}: skipped ({d.reason})")
+        elif d.state == "removed":
+            print(f"{d.name}: removed")
+        else:
+            line = (f"{d.name}: {d.state} sessions={d.sessions} chunks={d.chunks} "
+                    f"embedded={d.embedded} reused={d.reused}")
+            if d.partial:
+                line += " (partial)"
+            print(line)
+    _print_recall_warnings(rep.warnings())
+    print(f"done in {rep.elapsed_s:.1f} s")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _harden_stdio()
     parser = argparse.ArgumentParser(prog="python -m llm_bridge")
@@ -244,6 +523,31 @@ def main(argv: list[str] | None = None) -> int:
     p_doc.add_argument("--cache", default=None, help="rclone の VFS キャッシュディレクトリ（省略時は環境変数 MYANALYSIS_RCLONE_CACHE）")
     p_doc.add_argument("--log", default=None, help="rclone のログファイル（省略時は環境変数 MYANALYSIS_RCLONE_LOG）")
 
+    # チャットの関連検索（Issue #125。実験的・既定オフ）
+    p_cr = sub.add_parser(
+        "chat-recall", help="保存済みチャットの意味検索（実験的・既定オフ。オフ・未導入は終了コード 2）")
+    p_cr.add_argument("query", nargs="+", help="問い（空白で結合する）")
+    g_cr = p_cr.add_mutually_exclusive_group()
+    g_cr.add_argument("--dataset", default=None, help="このデータセットだけ")
+    g_cr.add_argument("--all", action="store_true", dest="all_datasets", default=False,
+                      help="登録済みの全データセット")
+    p_cr.add_argument("-k", type=_recall_k, default=20, help="件数（1〜200、既定 20）")
+    p_cr.add_argument("--archived", action="store_true", default=False,
+                      help="アーカイブしたチャットも含める")
+    p_cr.add_argument("--json", action="store_true", dest="json_out", default=False)
+    p_cr.add_argument("--update", action="store_true", default=False,
+                      help="検索の前に索引を差分更新する（ほかのプロセスが更新中なら飛ばす）")
+    p_cr.add_argument("--budget", type=_positive_finite, default=None,
+                      help="--update の時間の上限（秒、既定 60）")
+    p_cr.add_argument("--expand", action="store_true", default=False,
+                      help="各ヒットのメッセージの本文全文を出す")
+
+    p_ci = sub.add_parser(
+        "chat-index", help="チャットの埋め込み索引の状況・更新・再構築・削除（実験的）")
+    p_ci.add_argument("action", choices=("status", "update", "rebuild", "clear"))
+    p_ci.add_argument("--dataset", default=None)
+    p_ci.add_argument("--json", action="store_true", dest="json_out", default=False)
+
     p_csync = sub.add_parser("config-sync", help="R2 と設定を双方向同期（収束）")
     p_csync.add_argument("--dry-run", action="store_true", default=False)
     p_csync.add_argument("--include-env", action="store_true", default=False)
@@ -260,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
     p_cpull.add_argument("--key", default=None)
 
     args = parser.parse_args(argv)
+    if args.cmd == "chat-recall" and args.budget is not None and not args.update:
+        p_cr.error("--budget requires --update")
 
     if args.cmd == "state":
         if args.name is None:
@@ -418,6 +724,12 @@ def main(argv: list[str] | None = None) -> int:
         from llm_bridge import doctor
         return doctor.run(args.dataset, repair=args.repair, rescue=args.rescue,
                           cache=args.cache, log=args.log)
+
+    if args.cmd == "chat-recall":
+        return _cmd_chat_recall(args)
+
+    if args.cmd == "chat-index":
+        return _cmd_chat_index(args)
 
     if args.cmd == "host":
         keys = host_keys()
