@@ -200,6 +200,8 @@ GUI と CLI はファイルシステムで連携する（Windows / POSIX 両対�
 | `tools.py` | openai 互換バックエンド向けのツール定義 `TOOLS` と実行 `_dispatch` |
 | `open_dataset_dialog.py` | データセットピッカー |
 | `config_push.py` | `ConfigPusher`（Qt 非依存）。GUI での登録・登録削除の後に `config_share.try_push` をデーモンスレッドで 1 本ずつ実行する（実行中の要求は 1 回にまとめる）。終了時は最大 5 秒待ち、終わらなければそのまま（プロセス終了で消える）。push 本体は `try_push` の push ロックで直列化 |
+| `chat_indexer.py` | `ChatIndexer`（Qt 非依存）。チャットの関連検索の索引を、保存・データセットを開いた後に 5 秒のデバウンスで裏で差分更新する（`update(blocking=False, reload=False)`）。設定のウインドウの間は `hold` で止め、走っている回には中止を返して閉じた後に走り直す。終了時と Tier 3 で止める |
+| `embedding_settings_dialog.py` | 設定 → チャットの関連検索（実験的）… の `EmbeddingSettingsDialog`（有効化・pip での依存の導入・モデルの取得と削除・索引の更新／再構築／削除。導入の前に出所を全部見せる） |
 | `backend_selector_dialog.py` | バックエンド/モデル設定ダイアログ、チャット単位のエンジン上書き |
 | `backend_status_window.py` | バックエンドの状況ウィンドウ |
 | `persona_dialog.py` | AI ペルソナの設定ダイアログ |
