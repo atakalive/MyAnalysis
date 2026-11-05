@@ -1505,12 +1505,12 @@ class _FakeRecallIndex:
         self.calls: list = []
 
     def recall(self, query, *, datasets=None, include_archived=False, k=20, update=False,
-               budget_s=None, blocking=False):
+               budget_s=None, blocking=False, reload=True):
         import time as _t
         from llm_bridge.chat_index import RecallResult
         self.calls.append({"query": query, "datasets": datasets,
                            "include_archived": include_archived, "k": k, "update": update,
-                           "budget_s": budget_s, "blocking": blocking})
+                           "budget_s": budget_s, "blocking": blocking, "reload": reload})
         if self.delay:
             _t.sleep(self.delay)
         if self.error is not None:
@@ -1559,7 +1559,7 @@ def test_semantic_search_registered_tab_then_related(env, monkeypatch, jobs):
     jobs[0].run()
     assert idx.calls == [{"query": "offset correction", "datasets": None,
                           "include_archived": False, "k": 100, "update": True,
-                          "budget_s": 20.0, "blocking": False}]
+                          "budget_s": 20.0, "blocking": False, "reload": False}]
     md = _md_of(sess)
     assert tr("chat.search.related.running") not in md
     assert "&ds=dsC" in md and "(opendataset:dsC)" in md

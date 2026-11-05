@@ -980,6 +980,18 @@ def test_recall_combines(tmp_path, emb, idx):
     assert res.updated_index is False and emb.calls == ["needle"]
 
 
+def test_recall_reload_false_does_not_reload(tmp_path, idx, monkeypatch):
+    """GUI の裏のスレッド（Ctrl+F の埋め込み検索。Issue #128）は登録簿を読み直さない。"""
+    d = _register(tmp_path, "dsA")
+    _chat(d, [("user", "needle")], sid=SID_A)
+    called = []
+    monkeypatch.setattr(config, "reload_datasets", lambda *a, **k: called.append(1))
+    res = idx.recall("needle", update=True, reload=False)
+    assert called == [] and res.updated_index and [h.sid for h in res.hits] == [SID_A]
+    idx.recall("needle", update=True)
+    assert called == [1]
+
+
 def test_invalid_slug_rejected():
     with pytest.raises(ValueError):
         ci.ChatIndex(types.SimpleNamespace(model_id="../x", dims=8))

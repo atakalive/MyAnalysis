@@ -1176,12 +1176,15 @@ class ChatIndex:
 
     def recall(self, query: str, *, datasets=None, include_archived: bool = False, k: int = 20,
                update: bool = False, budget_s: float | None = None,
-               blocking: bool = False) -> RecallResult:
-        """（必要なら差分更新してから）検索し、索引の遅れを添える。"""
+               blocking: bool = False, reload: bool = True) -> RecallResult:
+        """（必要なら差分更新してから）検索し、索引の遅れを添える。
+
+        reload=False は登録簿を読み直さない（GUI の裏のスレッドから呼ぶとき。GUI と共有の
+        config.DATASETS を書き換えない。gui/chat_indexer.py と同じ）。"""
         warnings: list[IndexWarning] = []
         updated = False
         if update:
-            rep = self.update(datasets, blocking=blocking, budget_s=budget_s)
+            rep = self.update(datasets, blocking=blocking, budget_s=budget_s, reload=reload)
             updated = rep.ran
             warnings.extend(rep.warnings())
         hits, w = self.search(query, datasets=datasets, include_archived=include_archived, k=k)

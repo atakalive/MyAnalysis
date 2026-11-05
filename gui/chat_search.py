@@ -297,11 +297,12 @@ def run_recall(query: str, datasets, include_archived: bool):
     """RecallJob の中身（worker スレッド）。索引を差分更新してから検索する。
 
     更新は待たない（ほかの処理が索引を更新中ならそのまま今の索引で検索し updated_index=False）
-    うえで RECALL_BUDGET_S で打ち切り、間に合わなかった分は stale で返す。"""
+    うえで RECALL_BUDGET_S で打ち切り、間に合わなかった分は stale で返す。登録簿は読み直さない
+    （GUI と共有の config.DATASETS を裏のスレッドで書き換えない。gui/chat_indexer.py と同じ）。"""
     from llm_bridge import chat_index
     return chat_index.ChatIndex.open().recall(
         query, datasets=datasets, include_archived=include_archived, k=_MAX_MD_HITS,
-        update=True, blocking=False, budget_s=RECALL_BUDGET_S)
+        update=True, blocking=False, budget_s=RECALL_BUDGET_S, reload=False)
 
 
 def recall_note(result) -> str | None:
