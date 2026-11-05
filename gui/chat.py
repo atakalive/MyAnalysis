@@ -127,6 +127,21 @@ def _chat_recall_ready() -> bool:
         return False
 
 
+def _search_mode_of(sess) -> str | None:
+    """検索の結果タブの検索方法（Issue #128）。検索タブでなければ None。
+
+    search_spec の mode（埋め込み検索・無料検索だけが持つ）、無ければ ai から。"""
+    if getattr(sess, "kind", "chat") != "search":
+        return None
+    spec = getattr(sess, "search_spec", None)
+    if not isinstance(spec, dict):
+        return "text"
+    mode = spec.get("mode")
+    if mode in ("semantic", "hybrid") and spec.get("ai") is not True:
+        return mode
+    return "ai" if spec.get("ai") is True else "text"
+
+
 _HEXDIGITS = frozenset("0123456789abcdefABCDEF")
 
 
@@ -412,6 +427,22 @@ class _StreamWorker(QThread):
                 self.done.emit(self._sid)
             else:
                 self.failed.emit(self._sid, repr(e))
+
+
+@dataclass
+class _RecallPending:
+    """埋め込み検索・無料検索の結果タブが待っている関連の節（Issue #128）。
+
+    完了時に、開始時と同じ入力で本文を組み直し、開始時の本文（initial_md）がそのまま
+    msg_idx にあるときだけ差し替える。"""
+    job: object                 # gui.chat_search.RecallJob
+    req: object                 # llm_bridge.chat_search.SearchRequest
+    datasets: list
+    when: float
+    exact: list | None          # 無料検索の一致のヒット（埋め込み検索は None）
+    model: str
+    initial_md: str
+    msg_idx: int
 
 
 class _Turn:
@@ -1551,12 +1582,208 @@ class ChatWidget(QWidget):
     def _jump_to_session(self, sid) -> None:
         self._on_search_link(sid, None, [])
 
+    # ----- embedding search / free search (Issue #128) -----
+
+    def _run_embedding_search(self, req, *, with_exact: bool) -> None:
+        """埋め込み検索（with_exact=False）・無料検索の結果タブを出し、関連の節を裏で埋める。
+
+        無料検索の一致の節はここで（GUI スレッドで）確定する。関連の節は最初「検索中…」で、
+        RecallJob（索引の差分更新＋検索）が終わったら _on_recall_finished が差し替える。"""
+        import dataclasses
+        from gui import chat_search as cs
+        from llm_bridge import chat_search as core
+        if not cs.embedding_ready():
+            self._status_note(tr("chat.search.related.not_ready"))
+            return
+        if self._window is not None and hasattr(self._window, "current_chat_dataset"):
+            ds = self._window.current_chat_dataset()
+            if ds is not None:
+                self._current_dataset = ds
+        if req.scope == "dataset" and req.dataset is None:
+            if self._current_dataset is not None:
+                req = dataclasses.replace(req, dataset=self._current_dataset)
+            else:
+                req = dataclasses.replace(req, scope="unbound")
+        if req.scope == "unbound":
+            # 未所属のチャットは保存されず索引に無いので、登録済みの全データセットを探す
+            req = dataclasses.replace(req, scope="registered", dataset=None)
+        registered = req.scope == "registered"
+        target = None
+        if req.scope == "dataset" and req.dataset != self._current_dataset:
+            target = req.dataset
+        elif req.scope == "all" and self._current_dataset is None:
+            open_ds = self.search_context().open_datasets
+            if open_ds:
+                target = open_ds[0]
+        if target is not None and not self._switch_dataset_for_search(target):
+            self._status_note(tr("chat.search.dataset_closed", dataset=target))
+            return
+        ctx = self.search_context()
+        datasets = cs.search_datasets(req, ctx)
+        now = time.time()
+        exact = None
+        if with_exact:
+            # 一致検索はメモリ上の開いているデータセットのチャット（registered も "all" で）
+            exact = core.text_search(ctx, req.query, scope="all" if registered else req.scope,
+                                     dataset=req.dataset if req.scope == "dataset" else None,
+                                     include_archived=req.include_archived)
+        model = cs.embed_model_id()
+        spec = {"scope": "all" if registered else req.scope, "dataset": req.dataset,
+                "include_archived": req.include_archived, "ai": False, "mode": req.mode}
+        if registered:
+            spec["registered"] = True
+        target_label = cs.target_text(req, datasets) or ""
+        if with_exact:
+            user_line = tr("chat.search.hybrid_user_line", query=req.query, scope=target_label)
+        else:
+            user_line = tr("chat.search.semantic_user_line", query=req.query, scope=target_label)
+        md = cs.embedding_markdown(exact, req, datasets=datasets, when=now, model=model)
+        first = next((ln.strip() for ln in req.query.splitlines() if ln.strip()), "")[:30]
+        prev_id = self._active.id
+        self._commit_draft()
+        sess = chat_store.new_session(
+            self._backend.name, _SYSTEM_PROMPT, dataset=self._current_dataset,
+            title=tr("chat.search.title", query=first), kind="search", search_spec=spec,
+        )
+        sess.messages += [Message(role="user", content=user_line),
+                          Message(role="assistant", content=md)]
+        sess.updated = max(time.time(), sess.updated + 1e-3)
+        self._sessions.append(sess)
+        self._active = sess
+        self._last_active_by_ds[self._current_dataset] = sess.id
+        self._rebuild_tab_bar()
+        self._render_session(sess)
+        self._switch_active_composer(prev_id)
+        self._update_turn_ui()
+        self.messageAdded.emit(sess.id, "user", user_line, "local")
+        self.messageAdded.emit(sess.id, "assistant", md, "local")
+        if sess.dataset is not None:
+            self._mark_chat_dirty()
+        self._log.verticalScrollBar().setValue(0)
+
+        rng = [req.dataset] if req.scope == "dataset" else (None if registered else list(datasets))
+        job = cs.RecallJob(partial(cs.run_recall, req.query, rng, req.include_archived),
+                           parent=self)
+        pending = getattr(self, "_recall_jobs", None)
+        if pending is None:                    # getattr: patch リロード前に作られた ChatWidget
+            pending = self._recall_jobs = {}
+        pending[sess.id] = _RecallPending(job, req, datasets, now, exact, model, md,
+                                          len(sess.messages) - 1)
+        job.finished.connect(partial(self._on_recall_finished, sess.id, job))
+        cs._spawn(job)
+
+    def _on_recall_finished(self, sid, job, payload) -> None:
+        """RecallJob の完了（GUI スレッド）。結果のタブの関連の節を差し替え、検索履歴に残す。"""
+        from gui import chat_search as cs
+        pending = getattr(self, "_recall_jobs", None) or {}
+        info = pending.get(sid)
+        if info is None or info.job is not job:
+            return
+        del pending[sid]
+        job.deleteLater()
+        # 窓の作り直し（Tier 3）・再起動（Tier 4）・終了の途中なら捨てる（新しい窓のタブは
+        # 「検索中…」のまま。旧インスタンスの本文・履歴を書き換えない）。
+        if getattr(self, "_shutting_down", False) is True \
+                or getattr(self._window, "_shutting_down", False) is True:
+            return
+        sess = self._session_by_id(sid)
+        if sess is None:                       # 完了前にタブを閉じた
+            return
+        status, value = payload if isinstance(payload, tuple) and len(payload) == 2 \
+            else ("error", repr(payload))
+        result = value if status == "ok" else None
+        exact = info.exact
+        exclude = frozenset((h.session_id, h.msg_index) for h in exact or ())
+        if result is not None:
+            related = cs.related_section_markdown(
+                result.hits, info.req, exclude=exclude,
+                open_datasets=self.search_context().open_datasets)
+            n_hits = len(exact or ()) + len(cs.shown_related(result.hits, exclude))
+        else:
+            related = tr("chat.search.related.failed")
+            n_hits = len(exact) if exact is not None else None
+        msgs = sess.messages
+        i = info.msg_idx
+        if 0 <= i < len(msgs) and msgs[i].role == "assistant" and msgs[i].content == info.initial_md:
+            md = cs.embedding_markdown(exact, info.req, datasets=info.datasets, when=info.when,
+                                       model=info.model, related=related)
+            # 新しい Message に差し替える（送信中の worker が浅いコピーで持つ過去の本文を変えない）
+            msgs[i] = Message(role="assistant", content=md)
+            sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
+            if sess is self._active:
+                sb = self._log.verticalScrollBar()
+                old = sb.value()
+                self._render_active_preserving_status()
+                sb.setValue(min(old, sb.maximum()))
+            self.messageAdded.emit(sid, "assistant", md, "local")
+            if sess.dataset is not None:
+                self._mark_chat_dirty()
+        if sess.dataset is not None and not cs.record_search(
+                info.req, None, dataset=sess.dataset, n_hits=n_hits, session_id=sid,
+                ts=info.when, datasets=info.datasets):
+            self._status_note(tr("chat.search.history.write_failed"))
+            return
+        if result is not None:
+            note = cs.recall_note(result)
+            if note is not None:
+                self._status_note(note)
+
+    def _indexed_dataset_of(self, sid) -> str | None:
+        """関連検索の索引から sid のデータセットを引く（索引が無い・読めなければ None）。"""
+        try:
+            from llm_bridge import chat_index
+            return chat_index.dataset_of_session(sid)
+        except Exception:
+            _logger.debug("dataset_of_session failed", exc_info=True)
+            return None
+
+    def _closed_dataset_of(self, sid, ds) -> str | None:
+        """リンク先のチャットのデータセットが、開いていないと分かるならその名前。"""
+        name = ds if ds is not None else self._indexed_dataset_of(sid)
+        if name is None:
+            return None
+        open_ds = self.search_context().open_datasets
+        return name if isinstance(open_ds, list) and name not in open_ds else None
+
+    def _open_dataset_from_link(self, name: str) -> None:
+        """結果の「開く」（opendataset: リンク）。File → データセットを開く… と同じ経路で開き、
+        結果のタブに戻す（ジャンプは利用者がヒットをもう一度クリックする）。"""
+        origin = self._active.id
+        origin_ds = self._current_dataset
+        open_ds = self.search_context().open_datasets or []
+        if name not in open_ds:
+            w = self._window
+            if w is None or not hasattr(w, "has_command") or not w.has_command("open-dataset"):
+                self._status_note(tr("chat.search.open_failed", dataset=name))
+                return
+            try:
+                res = w.dispatch_command("open-dataset", name=name)
+            except Exception:
+                _logger.warning("open-dataset from a search link failed: %r", name, exc_info=True)
+                self._status_note(tr("chat.search.open_failed", dataset=name))
+                return
+            if isinstance(res, str) and res.startswith("error:"):
+                _logger.warning("open-dataset returned %r for %r", res, name)
+                self._status_note(tr("chat.search.open_failed", dataset=name))
+                return
+            if isinstance(res, str) and res.startswith("unreadable-session:"):
+                QMessageBox.warning(self, tr("err.session_unreadable.title"),
+                                    tr("err.session_unreadable.body", dataset=name))
+        # open-dataset は開いたデータセットを前面にするので、結果のタブへ戻す
+        if origin_ds is not None and origin_ds != self._current_dataset:
+            self._switch_dataset_for_search(origin_ds)
+        if self._active.id != origin and self._session_by_id(origin) is not None:
+            self.set_active_session_by_id(origin)
+        self._status_note(tr("chat.search.dataset_opened", dataset=name))
+
     def run_search(self, req) -> None:
         """検索を実行して結果の新しいチャットタブ（kind="search"）を追加する。"""
         import dataclasses
         from common import i18n
         from gui import chat_search as cs
         from llm_bridge import chat_search as core
+        if getattr(req, "mode", "") in ("semantic", "hybrid"):     # Issue #128
+            return self._run_embedding_search(req, with_exact=(req.mode == "hybrid"))
         if req.ai and cs.ai_search_engine()[0] is None \
                 and isinstance(self._backend, UnconfiguredBackend):
             self._status_note(tr("chat.engine.unconfigured"))     # Issue #115
@@ -1668,17 +1895,28 @@ class ChatWidget(QWidget):
                 self._status_note(tr("chat.search.history.write_failed"))
 
     def _on_search_link(self, sid, idx, terms, ds=None) -> None:
-        """chatsearch: リンク／履歴からのジャンプ。該当チャットへ切替・スクロール・ハイライト。"""
+        """chatsearch: リンク／履歴からのジャンプ。該当チャットへ切替・スクロール・ハイライト。
+
+        ds はリンクに載ったヒットのデータセット（埋め込み検索。Issue #128）。閉じている
+        データセットのチャットなら「開く」の導線を案内する（自動では開かない: 開くとタブの
+        復元・解析の読込・失敗のダイアログを伴うため）。"""
         from llm_bridge import chat_search as core
         sess = core.resolve_session(self.search_context(), sid)
         if sess is None:
-            self._status_note(tr("chat.search.link_missing"))
+            closed = self._closed_dataset_of(sid, ds)
+            if closed is not None:
+                self._status_note(tr("chat.search.dataset_closed_open", dataset=closed))
+            else:
+                self._status_note(tr("chat.search.link_missing"))
             return
         # データセット切替を先に（_on_unarchive_session は _current_dataset で
         # _last_active_by_ds を書き、可視集合で rebuild するため）。
         if sess.dataset is not None and sess.dataset != self._current_dataset:
             if not self._switch_dataset_for_search(sess.dataset):
-                self._status_note(tr("chat.search.dataset_closed", dataset=sess.dataset))
+                if ds is not None:
+                    self._status_note(tr("chat.search.dataset_closed_open", dataset=sess.dataset))
+                else:
+                    self._status_note(tr("chat.search.dataset_closed", dataset=sess.dataset))
                 return
         self._search_highlight = (sess.id, list(terms))   # 描画前にセット
         if _is_archived(sess):
@@ -1847,6 +2085,13 @@ class ChatWidget(QWidget):
     # ----- fork / edit (Issue #63) -----
 
     def _on_anchor_clicked(self, url: QUrl) -> None:
+        if url.scheme() == "opendataset":         # 埋め込み検索の結果の「開く」（Issue #128）
+            from llm_bridge import chat_search as core
+            name = core.parse_open_dataset_link(
+                url.toString(QUrl.ComponentFormattingOption.FullyEncoded))
+            if name is not None:
+                self._open_dataset_from_link(name)
+            return
         if url.scheme() == "chatsearch":
             from llm_bridge import chat_search as core
             parsed = core.parse_search_link(
@@ -2497,13 +2742,17 @@ class ChatWidget(QWidget):
         archived セッションも含めて返す。relay の _published_session_ids &= existing
         がこれに依存する（除外・物理削除しないこと）: 会議中アーカイブ→解除で配信復活
         の前提として、archived な id が existing に残り続ける必要がある。
+
+        search_mode は検索の結果タブの検索方法（text / ai / semantic / hybrid。それ以外の
+        チャットは None）。relay は semantic / hybrid のタブを強制的に非公開にする（Issue #128）。
         """
         return [
             {"id": s.id, "title": self._display_title(s),
              "busy": s.id in self._turns, "dataset": s.dataset,
              "archived": _is_archived(s),
              "forked_from": self._fork_parent.get(s.id),
-             "kind": getattr(s, "kind", "chat")}
+             "kind": getattr(s, "kind", "chat"),
+             "search_mode": _search_mode_of(s)}
             for s in self.sessions_for_persistence()
         ]
 

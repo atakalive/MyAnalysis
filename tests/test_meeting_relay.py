@@ -2840,3 +2840,123 @@ def test_search_tab_and_its_fork_first_seen_together(qapp, monkeypatch):
     assert "f" not in r.published_session_ids()
     assert {"s", "f"} <= r.session_optout()
     r.stop()
+
+
+# ---- 埋め込み検索・無料検索の結果タブは強制的に非公開（Issue #128） ----
+
+def _embed_search(sid, mode="semantic", dataset="ds1"):
+    d = _search(sid, dataset=dataset)
+    d["search_mode"] = mode
+    return d
+
+
+@pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+def test_embedding_search_tab_never_published(qapp, monkeypatch, mode):
+    chat = FakeChat([_sess_a("a"), _embed_search("e", mode)],
+                    messages={"e": [FakeMsg("user", "closed-dataset excerpt")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "e" not in r.published_session_ids() and "e" in r.forced_private()
+    # ホストが選んでも（opt-in・全選択）公開しない
+    r.set_session_optout(visible={"a", "e"}, checked={"a", "e"})
+    r.set_published_sessions({"a", "e"})
+    assert "e" not in r.published_session_ids()
+    assert "e" in r.session_optout()
+    r._on_capture_tick()
+    assert all("e" not in ids for ids in _sess_ids_in_puts(r))
+    assert "e" not in _backlog_sids(r)
+    assert not r._sid_out_ok("e") and not r._sid_shared("e")
+    r.stop()
+    r.meeting_start(3600)                        # 停止 → 開始でも
+    assert "e" not in r.published_session_ids()
+    r.stop()
+
+
+def test_text_and_ai_search_tabs_are_not_forced(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _embed_search("t", "text"), _embed_search("i", "ai")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert r.forced_private() == set()
+    r.set_session_optout(visible={"t", "i"}, checked={"t", "i"})
+    r.set_published_sessions({"a", "t", "i"})
+    assert r.published_session_ids() == {"a", "t", "i"}     # 従来どおりホストは選べる
+    r.stop()
+
+
+def test_embedding_search_tab_added_during_meeting(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a")])
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries.append(_embed_search("e", "hybrid"))
+    r._on_capture_tick()
+    assert "e" not in r.published_session_ids() and "e" in r.forced_private()
+    r.stop()
+
+
+def test_published_tab_turning_into_embedding_tab_is_withdrawn(qapp, monkeypatch):
+    """既に公開集合にある sid が（同期で取り込んだ等で）埋め込み検索のタブになれば、
+    新しいチャットが無い tick でも外れ、一覧・backlog に出ない。"""
+    chat = FakeChat([_sess_a("a"), _sess_a("x")],
+                    messages={"x": [FakeMsg("user", "q")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    assert "x" in r.published_session_ids()
+    chat._summaries[1] = _embed_search("x", "semantic")
+    r._worker._outbox.clear()
+    r._on_capture_tick()
+    assert "x" not in r.published_session_ids()
+    assert all("x" not in ids for ids in _sess_ids_in_puts(r))
+    assert "x" not in _backlog_sids(r)
+    assert not r._sid_out_ok("x")
+    r.stop()
+
+
+def test_fork_of_embedding_search_tab_is_forced_private(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _embed_search("e")],
+                    messages={"f": [FakeMsg("user", "excerpt")], "g": [FakeMsg("user", "x")]})
+    win = FakeWindow(chat, dataset="ds1")
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    r.meeting_start(3600)
+    chat._summaries += [_fork("g", "f"), _fork("f", "e")]     # 孫が先に並んでも
+    r._on_capture_tick()
+    assert {"f", "g"} <= r.forced_private()
+    r.set_session_optout(visible={"f", "g"}, checked={"f", "g"})
+    r.set_published_sessions({"a", "f", "g"})
+    assert r.published_session_ids() == {"a"}
+    r.stop()
+
+
+def test_forced_private_ids_function():
+    from meeting.relay import forced_private_ids
+    rows = [_sess_a("a"), _embed_search("e"), _fork("f", "e"), _fork("h", "a"),
+            _embed_search("t", "text")]
+    assert forced_private_ids(rows) == {"e", "f"}
+    assert forced_private_ids([_sess_a("a"), {"id": "s", "kind": "search"}]) == set()
+
+
+def test_share_window_hides_embedding_search_tab(qapp, monkeypatch):
+    chat = FakeChat([_sess_a("a"), _embed_search("e")])
+    win = FakeWindow(chat, dataset="ds1", tabs=[])
+    mr, r = _make_relay(monkeypatch, win)
+    _urlopen_ok(mr, monkeypatch)
+    sw = _share_window(win, r)
+    sw._refresh_lists()
+    assert set(sw._sess_boxes) == {"a"}                   # 共有前も
+    r.meeting_start(3600)
+    sw._sess_sig = None
+    sw._refresh_lists()
+    assert set(sw._sess_boxes) == {"a"}
+    sw._on_select_all_sessions()
+    sw._on_select_all_sessions()
+    assert "e" not in r.published_session_ids()
+    r.stop()
+    sw.deleteLater()

@@ -43,6 +43,7 @@ from llm_bridge.chat_search import EMBEDDING_MODES, SearchRequest
 
 _MAX_MD_HITS = 100
 _RELATED_SNIPPET = 160   # 埋め込み検索の 1 行の抜粋の長さ（一致検索の抜粋と同じくらい）
+RECALL_BUDGET_S = 20.0   # Ctrl+F の埋め込み検索が先に行う索引の差分更新の上限（秒）
 _HISTORY_COLS = 6
 _COL_DATASET = 5
 _RELATED_K = 30          # AI 検索の初回に同梱する関連箇所の候補数（Issue #127）
@@ -259,6 +260,11 @@ def embedding_markdown(text_hits, req, *, datasets: list[str], when: float, mode
     return "\n".join(lines)
 
 
+def shown_related(hits, exclude=frozenset()) -> list:
+    """関連の節に出すヒット（exclude の (完全な sid, idx) を除き、最大 _MAX_MD_HITS 件）。"""
+    return [h for h in hits if (h.sid, h.idx) not in exclude][:_MAX_MD_HITS]
+
+
 def related_section_markdown(hits, req, *, exclude=frozenset(), open_datasets=None) -> str:
     """埋め込み検索のヒット（chat_index.RecallHit）の行。exclude（(完全な sid, idx)）は除く。
 
@@ -266,11 +272,7 @@ def related_section_markdown(hits, req, *, exclude=frozenset(), open_datasets=No
     ため）。open_datasets（開いているデータセットの list）に無いデータセットのヒットには
     「開く」の opendataset: リンクを付ける。None（分からない）なら付けない。"""
     lines: list[str] = []
-    for h in hits:
-        if (h.sid, h.idx) in exclude:
-            continue
-        if len(lines) >= _MAX_MD_HITS:
-            break
+    for h in shown_related(hits, exclude):
         ds = h.dataset if isinstance(h.dataset, str) and h.dataset else None
         name = _md_escape(core._collapse(h.title))
         if ds is not None:
@@ -289,6 +291,39 @@ def related_section_markdown(hits, req, *, exclude=frozenset(), open_datasets=No
     if not lines:
         return tr("chat.search.related.none")
     return "\n".join(lines)
+
+
+def run_recall(query: str, datasets, include_archived: bool):
+    """RecallJob の中身（worker スレッド）。索引を差分更新してから検索する。
+
+    更新は待たない（ほかの処理が索引を更新中ならそのまま今の索引で検索し updated_index=False）
+    うえで RECALL_BUDGET_S で打ち切り、間に合わなかった分は stale で返す。"""
+    from llm_bridge import chat_index
+    return chat_index.ChatIndex.open().recall(
+        query, datasets=datasets, include_archived=include_archived, k=_MAX_MD_HITS,
+        update=True, blocking=False, budget_s=RECALL_BUDGET_S)
+
+
+def recall_note(result) -> str | None:
+    """埋め込み検索の完了時に status bar に出す 1 文（無ければ None）。
+
+    優先順: 索引をほかで更新中 → 届かないデータセット → 索引の遅れ → そのほかの警告。"""
+    if not getattr(result, "updated_index", True):
+        return tr("chat.search.related.index_busy")
+    warns = [(getattr(w, "code", ""), getattr(w, "dataset", None))
+             for w in getattr(result, "warnings", None) or ()]
+    unreachable = list(dict.fromkeys(ds for code, ds in warns if code == "unreachable" and ds))
+    if unreachable:
+        return tr("chat.search.related.unreachable", datasets=", ".join(unreachable))
+    stale = getattr(result, "stale", None) or {}
+    if stale:
+        return tr("chat.search.related.stale", datasets=", ".join(sorted(stale)))
+    # locked は updated_index、budget は stale で示す
+    other = list(dict.fromkeys(f"{code} ({ds})" if ds else str(code) for code, ds in warns
+                               if code not in ("locked", "budget", "unreachable")))
+    if other:
+        return tr("chat.search.related.warning", detail=", ".join(other))
+    return None
 
 
 class RecallJob(QObject):

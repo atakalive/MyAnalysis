@@ -108,6 +108,26 @@ def _qimage_digest(img: "QImage") -> bytes | None:
         return None
 
 
+def forced_private_ids(summaries) -> set[str]:
+    """会議共有で必ず非公開にするチャット（Issue #128）。
+
+    埋め込み検索・無料検索の結果タブ（kind="search" かつ search_mode が semantic / hybrid）は、
+    閉じているデータセットのチャットの抜粋を載せる（Issue #107 の「閉じたデータセットの
+    チャットは配信しない」を守るため、ホストが選んでも共有しない）。そこから分岐したチャットも
+    同じ抜粋を複製するので含める（forked_from を推移的に辿る）。"""
+    ids = {s["id"] for s in summaries
+           if s.get("kind") == "search" and s.get("search_mode") in ("semantic", "hybrid")}
+    parents = {s["id"]: s.get("forked_from") for s in summaries if s.get("forked_from")}
+    changed = True
+    while changed:                       # 親子の並び順に依存しない
+        changed = False
+        for sid, parent in parents.items():
+            if sid not in ids and parent in ids:
+                ids.add(sid)
+                changed = True
+    return ids
+
+
 class _RelayWorker(QThread):
     """Continuous network I/O for one channel. All urllib has timeout=5.0."""
 
@@ -566,7 +586,8 @@ class MeetingRelay(QObject):
             self._worker._poll_ms = self._poll_ms
 
     def set_published_sessions(self, ids) -> None:
-        new = set(ids)
+        # 強制的に非公開のチャット（Issue #128）は、ホストが選んでも公開しない
+        new = set(ids) - getattr(self, "_forced_private", set())
         removed = self._published_session_ids - new
         self._published_session_ids = new
         # Record every session the host explicitly decided (published OR opted
@@ -604,6 +625,24 @@ class MeetingRelay(QObject):
     def session_optout(self) -> set[str]:
         return set(getattr(self, "_session_optout", set()))
 
+    def forced_private(self) -> set[str]:
+        """選んでも共有しないチャット（埋め込み検索・無料検索の結果タブとその分岐。Issue #128）。"""
+        return set(getattr(self, "_forced_private", set()))
+
+    def _enforce_forced_private(self, summaries) -> None:
+        """強制的に非公開のチャットを記録し、opt-out に入れて公開集合から外す（毎回呼ぶ）。
+
+        一度決まったものは外さない（累積）。既に公開集合にあるもの（同期で取り込んだ既存の
+        タブが埋め込み検索のタブに変わった等）もここで外れる。"""
+        forced = self.__dict__.setdefault("_forced_private", set())
+        forced |= forced_private_ids(summaries)
+        if not forced:
+            return
+        self.__dict__.setdefault("_session_optout", set()).update(forced)
+        pub = getattr(self, "_published_session_ids", None)
+        if isinstance(pub, set):
+            pub -= forced
+
     def tab_optout(self) -> set[tuple[str, str]]:
         return set(getattr(self, "_tab_optout", set()))
 
@@ -617,7 +656,7 @@ class MeetingRelay(QObject):
         再構築で窓を作り直すときに消える）。"""
         v, c = set(visible), set(checked)
         cur = getattr(self, "_session_optout", set())
-        self._session_optout = (cur - v) | (v - c)
+        self._session_optout = (cur - v) | (v - c) | getattr(self, "_forced_private", set())
 
     def set_tab_optout(self, visible, checked) -> None:
         """set_session_optout のタブ版（キーは (dataset, name)）。"""
@@ -647,6 +686,8 @@ class MeetingRelay(QObject):
 
     def _sid_shared(self, sid: str) -> bool:
         """公開集合にあり、かつ開いているデータセットのチャットか（ゲストから受ける側の判定）。"""
+        if sid in getattr(self, "_forced_private", ()):
+            return False
         return sid in self._published_session_ids and self.ds_shared(self._session_dataset(sid))
 
     def _sid_out_ok(self, sid: str) -> bool:
@@ -658,7 +699,7 @@ class MeetingRelay(QObject):
         開き直したときに履歴が途切れない（backlog は開始時点の全文、以降は live out で補う、
         という既存の前提を保つ）。まだ backlog を送っていないチャットは送らない（開き直した後の
         tick で全文を backlog として送るので、ここで送ると重複する）。"""
-        if sid not in self._published_session_ids:
+        if sid not in self._published_session_ids or sid in getattr(self, "_forced_private", ()):
             return False
         if sid in getattr(self, "_backfilled_ids", set()):
             return True
@@ -670,6 +711,7 @@ class MeetingRelay(QObject):
         - opt-out された親から分岐したチャット（推移的。分岐ごとに 1 回だけ決める）
         - チャット検索の結果タブ（kind="search"。他のチャットの抜粋を載せるため。
           sid ごとに 1 回だけ決める＝ホストが共有を選べば以後は共有。Issue #108）"""
+        self._enforce_forced_private(summaries)      # 埋め込み検索のタブ（Issue #128）は毎回
         optout = self.__dict__.setdefault("_session_optout", set())
         decided = self.__dict__.setdefault("_fork_decided", set())
         search_decided = self.__dict__.setdefault("_search_decided", set())
@@ -1414,6 +1456,9 @@ class MeetingRelay(QObject):
             summaries = cw.session_summaries() if cw is not None else []
             existing = {s["id"] for s in summaries}
             archived_ids = {s["id"] for s in summaries if s.get("archived")}
+            # 強制的に非公開のチャット（Issue #128）は新しいチャットが無い tick でも外す
+            # （一覧と backlog は下で公開集合から直接作るため）
+            self._enforce_forced_private(summaries)
             self.absorb_new_sessions(summaries)
             self._published_session_ids &= existing
             # Stage each newly-published session's pre-meeting transcript once so

@@ -471,8 +471,12 @@ class MeetingShareWindow(QWidget):
         # absorb は archived 込みの full summaries で known をマークできるが、以降の表示
         # ・件数（行・has_new）は archived を除外する。共有されるのは開いているデータ
         # セットのチャットだけなので、閉じた・未設定のものも一覧に出さない（Issue #107）。
+        # 選んでも共有しないチャット（埋め込み検索・無料検索の結果タブとその分岐。Issue #128）は
+        # チェックしても効かないので出さない。
+        forced = getattr(self._relay, "forced_private", set)()
         summaries = [s for s in summaries
-                     if not s.get("archived") and self._relay.ds_shared(s["dataset"])]
+                     if not s.get("archived") and self._relay.ds_shared(s["dataset"])
+                     and s["id"] not in forced]
 
         sig = tuple((s["id"], s["dataset"], s["title"]) for s in summaries) + (sharing,)
         if sig != self._sess_sig:

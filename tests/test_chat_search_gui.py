@@ -1488,3 +1488,416 @@ def test_embedding_markdown_semantic_and_hybrid():
     assert tr("chat.search.section.exact") not in md0
     assert md0.splitlines()[-3:] == ["### " + tr("chat.search.section.related", model="m"),
                                      "", "R"]
+
+
+# ---- Ctrl+F の 4 モード（Issue #128）: 結果のタブ・完了・リンク ----
+
+
+class _FakeRecallIndex:
+    def __init__(self, hits=(), *, updated=True, stale=None, warnings=(), error=None,
+                 delay=0.0):
+        self.hits = list(hits)
+        self.updated = updated
+        self.stale = dict(stale or {})
+        self.warnings = list(warnings)
+        self.error = error
+        self.delay = delay
+        self.calls: list = []
+
+    def recall(self, query, *, datasets=None, include_archived=False, k=20, update=False,
+               budget_s=None, blocking=False):
+        import time as _t
+        from llm_bridge.chat_index import RecallResult
+        self.calls.append({"query": query, "datasets": datasets,
+                           "include_archived": include_archived, "k": k, "update": update,
+                           "budget_s": budget_s, "blocking": blocking})
+        if self.delay:
+            _t.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
+        return RecallResult(list(self.hits), self.updated, dict(self.stale), list(self.warnings))
+
+
+@pytest.fixture()
+def jobs(monkeypatch):
+    """RecallJob を溜めておき、テストが job.run() で（同じスレッドで）完了させる。"""
+    import gui.chat_search as gcs
+    got: list = []
+    monkeypatch.setattr(gcs, "_spawn", got.append)
+    return got
+
+
+def _ereq(query="peak", mode="semantic", scope="registered", dataset=None, archived=False):
+    from llm_bridge.chat_search import SearchRequest
+    return SearchRequest(query=query, scope=scope, dataset=dataset, include_archived=archived,
+                         ai=False, mode=mode)
+
+
+def _md_of(sess):
+    return sess.messages[2].content
+
+
+def test_semantic_search_registered_tab_then_related(env, monkeypatch, jobs):
+    w, _ = env
+    a = _add(w, "dsA", [("user", "baseline drift fixed")], title="Atitle")
+    idx = _FakeRecallIndex([_rhit(_SID1, 4, dataset="dsC", title="Closed"),
+                            _rhit(a.id, 1, dataset="dsA", title="Atitle")])
+    _recall_env(monkeypatch, index=idx)
+    emitted = []
+    w.messageAdded.connect(lambda *x: emitted.append(x))
+    n = len(w._sessions)
+    w.run_search(_ereq(query="offset correction"))
+    sess = w._active
+    assert len(w._sessions) == n + 1 and sess.kind == "search" and sess.dataset == "dsA"
+    assert sess.search_spec == {"scope": "all", "dataset": None, "include_archived": False,
+                                "ai": False, "mode": "semantic", "registered": True}
+    assert sess.messages[1].content == tr(
+        "chat.search.semantic_user_line", query="offset correction",
+        scope=tr("chat.search.scope.registered_short"))
+    assert _md_of(sess).endswith(tr("chat.search.related.running"))
+    assert len(jobs) == 1 and _history("dsA")[0] == []
+    jobs[0].run()
+    assert idx.calls == [{"query": "offset correction", "datasets": None,
+                          "include_archived": False, "k": 100, "update": True,
+                          "budget_s": 20.0, "blocking": False}]
+    md = _md_of(sess)
+    assert tr("chat.search.related.running") not in md
+    assert "&ds=dsC" in md and "(opendataset:dsC)" in md
+    assert f"chatsearch:{a.id[:8]}:1?q=offset%20correction&ds=dsA" in md
+    assert md.count("(opendataset:") == 1                  # 開いている dsA には付けない
+    assert [e[1] for e in emitted] == ["user", "assistant", "assistant"]
+    assert emitted[-1][2] == md
+    entries, _ = _history("dsA")
+    e = entries[-1]
+    assert (e["mode"], e["semantic"], e["exact"], e["scope"], e["registered"], e["n_hits"]) == \
+        ("text", True, False, "all", True, 2)
+    assert e["session_id"] == sess.id and e["datasets"] == []
+    html = w._log.document().toHtml()
+    assert "opendataset:dsC" in html and "&amp;ds=dsC" in html
+    assert w._recall_jobs == {}
+
+
+def test_hybrid_search_exact_now_related_later(env, monkeypatch, jobs):
+    w, _ = env
+    a = _add(w, "dsA", [("user", "peak here"), ("assistant", "peak there")], title="A")
+    idx = _FakeRecallIndex([_rhit(a.id, 1, dataset="dsA", title="A"),     # 一致の節にある
+                            _rhit(a.id, 9, dataset="dsA", title="A")])
+    _recall_env(monkeypatch, index=idx)
+    w.run_search(_ereq(query="peak", mode="hybrid", scope="dataset", dataset="dsA"))
+    sess = w._active
+    assert sess.search_spec == {"scope": "dataset", "dataset": "dsA", "include_archived": False,
+                                "ai": False, "mode": "hybrid"}
+    md0 = _md_of(sess)
+    assert "### " + tr("chat.search.section.exact") in md0
+    assert f"chatsearch:{a.id[:8]}:1?q=peak)" in md0 and f"chatsearch:{a.id[:8]}:2?q=peak)" in md0
+    assert md0.endswith(tr("chat.search.related.running"))
+    jobs[0].run()
+    assert idx.calls[0]["datasets"] == ["dsA"]
+    md = _md_of(sess)
+    related = md.split("### " + tr("chat.search.section.related", model="ruri-v3-30m"))[1]
+    assert f"chatsearch:{a.id[:8]}:9?q=peak&ds=dsA" in related
+    assert f":{a.id[:8]}:1?" not in related                  # 一致の節にある (sid, idx) は除く
+    assert md.startswith(md0.rsplit(tr("chat.search.related.running"), 1)[0])
+    assert _history("dsA")[0][-1]["n_hits"] == 3 and _history("dsA")[0][-1]["exact"] is True
+
+
+def test_embedding_search_all_scope_and_unbound_fallback(qapp, monkeypatch, dirs, jobs):
+    idx = _FakeRecallIndex()
+    _recall_env(monkeypatch, index=idx)
+    w, _win = _make_widget(monkeypatch)
+    w.run_search(_ereq(mode="semantic", scope="all"))
+    jobs[-1].run()
+    assert idx.calls[-1]["datasets"] == ["dsA", "dsB"]
+    assert _md_of(w._active).endswith(tr("chat.search.related.none"))
+    # データセットが無ければ「登録済みの全データセット」で探す（未所属のチャットは索引に無い）
+    w2, win2 = _make_widget(monkeypatch, open_ds=(), current=None)
+    w2.run_search(_ereq(mode="semantic", scope="unbound"))
+    s2 = w2._active
+    assert s2.search_spec["registered"] is True and s2.dataset is None
+    jobs[-1].run()
+    assert idx.calls[-1]["datasets"] is None
+    win2.set_active_dataset.assert_not_called()
+
+
+def test_embedding_search_failure_keeps_tab(env, monkeypatch, jobs):
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex(error=RuntimeError("onnx broke")))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    jobs[0].run()
+    assert _md_of(sess).endswith(tr("chat.search.related.failed"))
+    assert sess in w._sessions
+    assert _history("dsA")[0][-1]["n_hits"] is None
+
+
+@pytest.mark.parametrize("kw, note", [
+    ({"updated": False, "stale": {"dsA": 2}}, "index_busy"),
+    ({"stale": {"dsB": 1, "dsA": 2}}, "stale"),
+    ({"warnings": "unreachable", "stale": {"dsA": 1}}, "unreachable"),
+    ({"warnings": "shard-invalid"}, "warning"),
+    ({"warnings": "budget"}, None),
+    ({}, None),
+])
+def test_embedding_search_status_note(env, monkeypatch, jobs, kw, note):
+    from llm_bridge.chat_index import IndexWarning
+    w, win = env
+    if "warnings" in kw:
+        kw = dict(kw, warnings=[IndexWarning(kw["warnings"], "dsC", "x")])
+    _recall_env(monkeypatch, index=_FakeRecallIndex(**kw))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    jobs[0].run()
+    texts = _status_texts(win)
+    want = {
+        "index_busy": tr("chat.search.related.index_busy"),
+        "stale": tr("chat.search.related.stale", datasets="dsA, dsB"),
+        "unreachable": tr("chat.search.related.unreachable", datasets="dsC"),
+        "warning": tr("chat.search.related.warning", detail="shard-invalid (dsC)"),
+    }
+    if note is None:
+        assert not any(t in texts for t in want.values())
+    else:
+        assert want[note] in texts
+
+
+def test_embedding_search_not_ready(env, monkeypatch, jobs):
+    w, win = env
+    _recall_env(monkeypatch, ready=False)
+    n = len(w._sessions)
+    w.run_search(_ereq(mode="hybrid", scope="dataset", dataset="dsA"))
+    assert len(w._sessions) == n and jobs == []
+    assert tr("chat.search.related.not_ready") in _status_texts(win)
+
+
+def test_recall_after_tab_deleted(env, monkeypatch, jobs):
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    w._sessions.remove(sess)
+    w._active = w._sessions[0]
+    jobs[0].run()                                         # 落ちない
+    assert _history("dsA")[0] == []
+    assert w._recall_jobs == {}
+
+
+def test_recall_after_dataset_switch_updates_background_tab(env, monkeypatch, jobs):
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    w.set_current_dataset("dsB")
+    assert w._active is not sess
+    before = w._log.toPlainText()
+    jobs[0].run()
+    assert "(opendataset:dsC)" in _md_of(sess)
+    assert w._log.toPlainText() == before                 # 背景のタブは描き直さない
+    assert _history("dsA")[0][-1]["session_id"] == sess.id
+
+
+def test_recall_does_not_touch_changed_message(env, monkeypatch, jobs):
+    from llm_backend.base import Message
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    sess.messages[2] = Message(role="assistant", content="edited")
+    jobs[0].run()
+    assert _md_of(sess) == "edited"
+
+
+def test_recall_replaces_message_object_not_text(env, monkeypatch, jobs):
+    """送信中の worker が浅いコピーで持つ過去の本文を書き換えない（新しい Message に差し替える）。"""
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    w._input.setPlainText("follow-up")
+    w._on_send()
+    worker_msgs = w._turns[sess.id].worker._messages
+    initial = worker_msgs[2].content
+    jobs[0].run()
+    assert worker_msgs[2].content == initial
+    assert _md_of(sess) != initial and "(opendataset:dsC)" in _md_of(sess)
+    assert sess.messages[3].content == "follow-up"
+
+
+def test_recall_dropped_while_window_shuts_down(env, monkeypatch, jobs):
+    w, win = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    initial = _md_of(sess)
+    win._shutting_down = True                             # Tier 3 の 6b・終了の確定
+    jobs[0].run()
+    assert _md_of(sess) == initial and _history("dsA")[0] == []
+
+
+def test_recall_job_real_thread_delivers_on_gui_thread(env, monkeypatch):
+    import threading
+    import time
+    from PySide6.QtTest import QTest
+    w, _ = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1)], delay=0.05))
+    on_main = []
+    orig = w._on_recall_finished
+
+    def spy(*a):
+        on_main.append(threading.current_thread() is threading.main_thread())
+        orig(*a)
+
+    monkeypatch.setattr(w, "_on_recall_finished", spy)
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    deadline = time.monotonic() + 5.0
+    while w._recall_jobs and time.monotonic() < deadline:
+        QTest.qWait(20)
+    assert not w._recall_jobs
+    assert on_main == [True]
+    assert "(opendataset:dsC)" in _md_of(sess)
+
+
+def test_recall_job_parent_deleted_before_emit(qapp):
+    import threading
+    import shiboken6
+    from PySide6.QtCore import QObject
+    from PySide6.QtTest import QTest
+    from gui.chat_search import RecallJob
+    parent = QObject()
+    job = RecallJob(lambda: "result", parent=parent)
+    got = []
+    job.finished.connect(got.append)
+    shiboken6.delete(parent)                               # 親（ChatWidget）ごと消えた
+    errors = []
+
+    def body():
+        try:
+            job.run()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=body)
+    t.start()
+    t.join(5)
+    QTest.qWait(50)
+    assert errors == [] and got == []
+
+
+def test_link_closed_dataset_with_ds_offers_open(env):
+    w, win = env
+    _click(w, "chatsearch:abcdef01:3?q=peak&ds=dsC")
+    assert tr("chat.search.dataset_closed_open", dataset="dsC") in _status_texts(win)
+    win.dispatch_command.assert_not_called()             # 自動では開かない
+    _click(w, "chatsearch:abcdef01:3?ds=dsA")            # 開いている DS なら従来どおり
+    assert tr("chat.search.link_missing") in _status_texts(win)
+
+
+def test_link_closed_dataset_from_index(env, monkeypatch):
+    from llm_bridge import chat_index
+    w, win = env
+    monkeypatch.setattr(chat_index, "dataset_of_session", lambda sid: "dsC")
+    _click(w, "chatsearch:abcdef01:3")
+    assert tr("chat.search.dataset_closed_open", dataset="dsC") in _status_texts(win)
+
+
+def test_link_found_but_closed_dataset(env):
+    w, win = env
+    b = _add(w, "dsB", [("user", "peak b")])
+    win.set_active_dataset.side_effect = lambda ds: False
+    _click(w, f"chatsearch:{b.id[:8]}:1?ds=dsB")
+    assert tr("chat.search.dataset_closed_open", dataset="dsB") in _status_texts(win)
+    _click(w, f"chatsearch:{b.id[:8]}:1")                # ds 無し（一致検索のリンク）は従来どおり
+    assert tr("chat.search.dataset_closed", dataset="dsB") in _status_texts(win)
+
+
+def _setup_open(w, win, opened_front=True):
+    open_names = ["dsA", "dsB"]
+    win.open_dataset_names.side_effect = lambda: list(open_names)
+
+    def dispatch(verb, **kw):
+        open_names.append(kw["name"])
+        if opened_front:
+            w.set_current_dataset(kw["name"])            # open-dataset は開いた DS を前面にする
+        return "restored:0"
+
+    win.dispatch_command.side_effect = dispatch
+    win.has_command.return_value = True
+
+
+def test_open_dataset_link_opens_and_returns_to_results(env, monkeypatch, jobs):
+    w, win = env
+    _recall_env(monkeypatch, index=_FakeRecallIndex([_rhit(_SID1, dataset="dsC")]))
+    w.run_search(_ereq(mode="semantic", scope="dataset", dataset="dsA"))
+    sess = w._active
+    jobs[0].run()
+    _setup_open(w, win)
+    _click(w, "opendataset:dsC")
+    win.dispatch_command.assert_called_once_with("open-dataset", name="dsC")
+    assert w._current_dataset == "dsA" and w._active is sess
+    assert tr("chat.search.dataset_opened", dataset="dsC") in _status_texts(win)
+
+
+def test_open_dataset_link_already_open_does_not_dispatch(env):
+    w, win = env
+    win.has_command.return_value = True
+    _click(w, "opendataset:dsB")
+    win.dispatch_command.assert_not_called()
+    assert tr("chat.search.dataset_opened", dataset="dsB") in _status_texts(win)
+
+
+@pytest.mark.parametrize("res", ["error:dsC", RuntimeError("boom")])
+def test_open_dataset_link_failure(env, res):
+    w, win = env
+    win.has_command.return_value = True
+    if isinstance(res, Exception):
+        win.dispatch_command.side_effect = res
+    else:
+        win.dispatch_command.return_value = res
+    _click(w, "opendataset:dsC")
+    assert tr("chat.search.open_failed", dataset="dsC") in _status_texts(win)
+    assert tr("chat.search.dataset_opened", dataset="dsC") not in _status_texts(win)
+
+
+def test_open_dataset_link_unreadable_session_warns(env, monkeypatch):
+    import gui.chat as gchat
+    w, win = env
+    win.has_command.return_value = True
+    win.dispatch_command.return_value = "unreadable-session:dsC"
+    warned = []
+    monkeypatch.setattr(gchat.QMessageBox, "warning", lambda *a: warned.append(a[1:]))
+    _click(w, "opendataset:dsC")
+    assert warned == [(tr("err.session_unreadable.title"),
+                       tr("err.session_unreadable.body", dataset="dsC"))]
+    assert tr("chat.search.dataset_opened", dataset="dsC") in _status_texts(win)
+
+
+def test_open_dataset_link_without_command(env):
+    w, win = env
+    win.has_command.return_value = False
+    _click(w, "opendataset:dsC")
+    win.dispatch_command.assert_not_called()
+    assert tr("chat.search.open_failed", dataset="dsC") in _status_texts(win)
+
+
+def test_open_dataset_link_name_roundtrip_through_qurl(env):
+    from llm_bridge import chat_search as core
+    w, win = env
+    win.has_command.return_value = True
+    win.dispatch_command.return_value = "restored:0"
+    for name in ("測定 2026", "a&b=c", "x/y?z#w"):
+        _click(w, core.make_open_dataset_link(name))
+        assert win.dispatch_command.call_args.kwargs == {"name": name}
+
+
+def test_session_summaries_search_mode(env, monkeypatch, jobs):
+    w, _ = env
+    _add(w, "dsA", [("user", "peak")])
+    _recall_env(monkeypatch, index=_FakeRecallIndex())
+    w.run_search(_req())
+    text = w._active
+    w.run_search(_ereq(mode="hybrid", scope="dataset", dataset="dsA"))
+    hyb = w._active
+    rows = {r["id"]: r for r in w.session_summaries()}
+    assert rows[text.id]["search_mode"] == "text"
+    assert rows[hyb.id]["search_mode"] == "hybrid"
+    plain = next(s for s in w._sessions if s.kind == "chat")
+    assert rows[plain.id]["search_mode"] is None
