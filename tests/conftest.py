@@ -67,6 +67,10 @@ def _isolate_pc_local_state(monkeypatch, tmp_path):
     # mathjax_install.install_root() と属性で引くので、ここでの差し替えが効く。
     from common import mathjax_install
     monkeypatch.setattr(mathjax_install, "install_root", lambda: tmp_path / "mathjax")
+    # チャットの関連検索の埋め込みモデルの導入先も同じ（Issue #125）。呼び出し側は
+    # embed_model.install_root() と属性で引く。embed_model は numpy を関数の中で import するので軽い。
+    from common import embed_model
+    monkeypatch.setattr(embed_model, "install_root", lambda: tmp_path / "embeddings")
 
 
 @pytest.fixture(autouse=True)
