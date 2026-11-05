@@ -981,3 +981,202 @@ def test_dialog_ai_engine_label_unconfigured(env, monkeypatch):
     assert gcs.ai_engine_label_text() == tr(
         "chat.search.dialog.ai_engine", engine=tr("chat.engine.none"), model="-",
         mark=tr("chat.engine.mark_default"))
+
+
+
+# ---- 過去チャットの関連検索（Issue #127） ----
+
+
+class _FakeIndex:
+    def __init__(self, hits=(), error=None):
+        self.hits = list(hits)
+        self.error = error
+        self.calls: list = []
+
+    def search(self, query, *, datasets=None, include_archived=False, k=20):
+        self.calls.append((query, datasets, include_archived, k))
+        if self.error is not None:
+            raise self.error
+        return list(self.hits), []
+
+
+def _recall_hit(sid, idx=1, dataset="dsA", snippet="offset was 0.12"):
+    from llm_bridge.chat_index import RecallHit
+    return RecallHit(sid=sid, sid8=sid[:8], idx=idx, dataset=dataset, title="Peak chat",
+                     archived=False, role="assistant", score=0.03, cosine=0.8, lexical=0.0,
+                     snippet=snippet, updated=0.0)
+
+
+def _recall_env(monkeypatch, *, ready=True, in_ai=True, index=None):
+    """関連検索を使える状態にする（pref・is_ready・load_prefs・ChatIndex.open を差し替える）。"""
+    from llm_bridge import chat_index
+    from llm_bridge.paths import update_ui_pref
+    update_ui_pref("chat_recall_enabled", True)
+    ready_fn = ready if callable(ready) else (lambda: ready)
+    monkeypatch.setattr(chat_index, "is_ready", ready_fn)
+    monkeypatch.setattr(chat_index, "load_prefs", lambda: chat_index.RecallPrefs(
+        True, "ruri-v3-30m", in_ai))
+    idx = index if index is not None else _FakeIndex()
+    opened = []
+
+    def _open(embedder=None):
+        opened.append(True)
+        return idx
+
+    monkeypatch.setattr(chat_index.ChatIndex, "open", staticmethod(_open))
+
+    def _no_status(*a, **k):
+        raise AssertionError("status() must not be called on the GUI thread")
+
+    monkeypatch.setattr(chat_index, "status", _no_status)
+    return idx, opened
+
+
+class _RecallBackend:
+    name = "mock"
+    model = "fake-model"
+
+    def __init__(self):
+        self.recall_calls: list = []
+
+    def set_persona(self, value):
+        pass
+
+    def set_chat_recall(self, value):
+        self.recall_calls.append(value)
+
+
+def _wire_and_tools(w):
+    sess = w._active
+    worker = w._turns[sess.id].worker
+    return sess, worker._messages[-1].content, [t["function"]["name"] for t in worker._tools]
+
+
+def test_run_search_ai_not_ready_is_byte_identical(env, monkeypatch):
+    """使えない状態（既定）では、wire は新しい引数なしの build_ai_prompt と同じ。"""
+    from llm_bridge import chat_index
+    from llm_bridge import chat_search as core
+    w, win = env
+    _add(w, "dsA", [("user", "peak offset")], title="OtherChat")
+    calls = []
+    orig = core.build_ai_prompt
+
+    def spy(*a, **k):
+        calls.append((a, dict(k)))
+        return orig(*a, **k)
+
+    monkeypatch.setattr(core, "build_ai_prompt", spy)
+    monkeypatch.setattr(chat_index.ChatIndex, "open", staticmethod(
+        lambda embedder=None: (_ for _ in ()).throw(AssertionError("must not open"))))
+    w.run_search(_req(query="what did we conclude", ai=True, hint="peak"))
+    (args, kw), = calls
+    assert kw.pop("related_hits") == [] and kw.pop("recall_args") is None
+    _sess, wire, tools = _wire_and_tools(w)
+    assert wire == orig(*args, **kw)
+    assert "chat-recall" not in wire and "related_hits" not in wire
+    assert "chat_recall" not in tools
+    assert tr("chat.search.recall_skipped") not in _status_texts(win)
+
+
+@pytest.mark.parametrize("hint", ["", "peak"])
+def test_run_search_ai_with_related_hits(env, monkeypatch, hint):
+    w, _win = env
+    other = _add(w, "dsA", [("user", "peak offset")], title="OtherChat")
+    idx, _ = _recall_env(monkeypatch, index=_FakeIndex([_recall_hit(other.id)]))
+    monkeypatch.setattr(w, "_build_session_backend", lambda sess: _RecallBackend())
+    w.run_search(_req(query="what offset", ai=True, hint=hint))
+    sess, wire, tools = _wire_and_tools(w)
+    assert idx.calls == [("what offset", ["dsA"], False, 30)]
+    assert f"\n<related_hits>\n- sid={other.id[:8]} idx=1 | ds=dsA | Peak chat" in wire
+    assert 'chat-recall "<question or keywords>" [-k 20]' in wire
+    assert "--dataset" not in wire
+    assert ("<keyword_hits>\n" in wire) == bool(hint)
+    assert tools[-1] == "chat_recall"
+    assert w._session_backends[sess.id].recall_calls == [True]
+
+
+def test_run_search_ai_related_scope_all(env, monkeypatch):
+    w, _ = env
+    _add(w, "dsA", [("user", "peak offset")])
+    idx, _ = _recall_env(monkeypatch)
+    w.run_search(_req(query="q", scope="all", dataset=None, ai=True, archived=True))
+    _sess, wire, _tools = _wire_and_tools(w)
+    assert idx.calls == [("q", ["dsA", "dsB"], True, 30)]
+    assert 'chat-recall "<question or keywords>" --all --archived [-k 20]' in wire
+    assert "related_hits" not in wire           # 0 件ならブロックは付けない
+
+
+def test_run_search_ai_pref_off_keeps_tool_line(env, monkeypatch):
+    w, win = env
+    _add(w, "dsA", [("user", "peak offset")])
+    _idx, opened = _recall_env(monkeypatch, in_ai=False)
+    w.run_search(_req(query="q", ai=True))
+    _sess, wire, tools = _wire_and_tools(w)
+    assert "related_hits" not in wire and opened == []
+    assert "chat-recall" in wire and tools[-1] == "chat_recall"
+    assert tr("chat.search.recall_skipped") not in _status_texts(win)
+
+
+def test_run_search_ai_related_failure_is_reported(env, monkeypatch):
+    w, win = env
+    _add(w, "dsA", [("user", "peak offset")])
+    _recall_env(monkeypatch, index=_FakeIndex(error=RuntimeError("onnx broke")))
+    w.run_search(_req(query="q", ai=True))
+    sess, wire, _tools = _wire_and_tools(w)
+    assert sess.id in w._turns                  # ターンは始まる
+    assert "related_hits" not in wire and "chat-recall" in wire
+    assert tr("chat.search.recall_skipped") in _status_texts(win)
+
+
+def test_run_search_ai_unbound_has_no_recall(qapp, monkeypatch, dirs):
+    w, _ = _make_widget(monkeypatch, open_ds=(), current=None)
+    _add(w, None, [("user", "peak x")])
+    _idx, opened = _recall_env(monkeypatch)
+    w.run_search(_req(query="q", scope="unbound", dataset=None, ai=True))
+    _sess, wire, _tools = _wire_and_tools(w)
+    assert "chat-recall" not in wire and "related_hits" not in wire and opened == []
+
+
+def test_run_search_ai_uses_one_readiness_for_the_turn(env, monkeypatch):
+    """初回の判定を wire・system の規則・ツールで共有する（途中で状態が変わっても揃う）。"""
+    w, _ = env
+    _add(w, "dsA", [("user", "peak offset")])
+    answers = iter([True])
+    _recall_env(monkeypatch, ready=lambda: next(answers, False))
+    monkeypatch.setattr(w, "_build_session_backend", lambda sess: _RecallBackend())
+    w.run_search(_req(query="q", ai=True))
+    sess, wire, tools = _wire_and_tools(w)
+    assert "chat-recall" in wire and tools[-1] == "chat_recall"
+    assert w._session_backends[sess.id].recall_calls == [True]
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_ai_followup_recall_line_follows_readiness(env, monkeypatch, ready):
+    w, _ = env
+    _add(w, "dsA", [("user", "peak offset")])
+    w.run_search(_req(query="q", ai=True))
+    sess = w._active
+    _finish(w, sess)
+    _recall_env(monkeypatch, ready=ready)
+    w._input.setPlainText("and then?")
+    w._on_send()
+    _sess, wire, tools = _wire_and_tools(w)
+    assert "Follow-up question from the user:" in wire
+    assert ("chat-recall" in wire) is ready
+    assert ("chat_recall" in tools) is ready
+    assert "related_hits" not in wire
+
+
+def test_related_hits_for_ai_conditions(monkeypatch):
+    import gui.chat_search as gcs
+    hit = _recall_hit("0123456789abcdef0123456789abcdef")
+    idx, _ = _recall_env(monkeypatch, index=_FakeIndex([hit]))
+    assert gcs.related_hits_for_ai("q", ["dsA"], False) == [hit]
+    assert idx.calls == [("q", ["dsA"], False, 30)]
+    assert gcs.related_hits_for_ai("q", [], False) == []            # 範囲が空
+    _recall_env(monkeypatch, in_ai=False)
+    assert gcs.related_hits_for_ai("q", ["dsA"], False) == []       # AI 検索に渡さない設定
+    _recall_env(monkeypatch, ready=False)
+    assert gcs.related_hits_for_ai("q", ["dsA"], False) == []       # 使えない
+    _recall_env(monkeypatch, index=_FakeIndex(error=RuntimeError("x")))
+    assert gcs.related_hits_for_ai("q", ["dsA"], False) is None     # 失敗（送出しない）

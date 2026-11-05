@@ -447,6 +447,7 @@
 "chat.search.result.more" = "{n} more (add words to narrow down)"
 "chat.search.result.archived_mark" = "(archived)"
 "chat.search.no_sessions" = "There are no chats to search"
+"chat.search.recall_skipped" = "Could not look up related passages; the AI search started without them"
 "chat.search.link_missing" = "The linked chat was not found (deleted, or its dataset is not open)"
 "chat.search.dataset_closed" = "Cannot switch: dataset \"{dataset}\" is not open"
 "chat.search.restored_archived" = "Restored from the archive: {title}"

@@ -1590,6 +1590,9 @@ class ChatWidget(QWidget):
         started = True
         hits: list = []
         initial: list = []
+        related: list = []
+        recall = False
+        recall_args = None
         if not req.ai:
             hits = core.text_search(ctx, req.query, scope=req.scope, dataset=ds_arg,
                                     include_archived=req.include_archived)
@@ -1601,6 +1604,15 @@ class ChatWidget(QWidget):
             if req.hint.strip():
                 initial = core.text_search(ctx, req.hint, scope=req.scope, dataset=ds_arg,
                                            include_archived=req.include_archived, limit=30)
+            # 過去チャットの関連検索（Issue #127）。この判定をそのターンの規則・ツールにも渡す。
+            recall = _chat_recall_ready()
+            recall_args = core.recall_args_for(req) if recall else None
+            if recall_args is not None:
+                found = cs.related_hits_for_ai(req.query, datasets, req.include_archived)
+                if found is None:
+                    self._status_note(tr("chat.search.recall_skipped"))
+                else:
+                    related = found
         first = next((ln.strip() for ln in req.query.splitlines() if ln.strip()), "")[:30]
         prev_id = self._active.id
         self._commit_draft()
@@ -1647,7 +1659,8 @@ class ChatWidget(QWidget):
             else:
                 display = tr("chat.search.ai_user_line", query=req.query, scope=target_label)
             started = self._start_turn(sess, display, "local", wire_text=core.build_ai_prompt(
-                req, ctx, i18n.current_language(), search_sid=sess.id, initial_hits=initial))
+                req, ctx, i18n.current_language(), search_sid=sess.id, initial_hits=initial,
+                related_hits=related, recall_args=recall_args), chat_recall=recall)
         if started and sess.dataset is not None:
             if not cs.record_search(req, ctx, dataset=sess.dataset,
                                     n_hits=(None if req.ai else len(hits)),
@@ -1681,16 +1694,20 @@ class ChatWidget(QWidget):
             self._scroll_to_message(idx)
         self._log.setFocus()
 
-    def _search_followup_wire(self, sess: ChatSession, text: str) -> str | None:
-        """AI 検索タブの続きの質問に付ける指示。対象外・失敗は None（入力文をそのまま送る）。"""
+    def _search_followup_wire(self, sess: ChatSession, text: str,
+                              chat_recall: bool = False) -> str | None:
+        """AI 検索タブの続きの質問に付ける指示。対象外・失敗は None（入力文をそのまま送る）。
+
+        chat_recall はそのターンの関連検索の判定（Issue #127）。真なら chat-recall の行も並べる。"""
         try:
             from common import i18n
             from llm_bridge import chat_search as core
             req = core.request_from_search_session(sess)
             if req is None or not req.ai:
                 return None
-            return core.build_ai_followup_prompt(req, self.search_context(), text,
-                                                 i18n.current_language(), search_sid=sess.id)
+            return core.build_ai_followup_prompt(
+                req, self.search_context(), text, i18n.current_language(), search_sid=sess.id,
+                recall_args=core.recall_args_for(req) if chat_recall else None)
         except Exception:
             return None
 
@@ -2322,7 +2339,7 @@ class ChatWidget(QWidget):
             self._session_backends[sess.id] = backend
         recall = _chat_recall_ready() if chat_recall is None else bool(chat_recall)
         if wire_text is None:
-            wire_text = self._search_followup_wire(sess, text)
+            wire_text = self._search_followup_wire(sess, text, recall)
         sess.messages.append(Message(role="user", content=text))
         sess.updated = max(time.time(), (sess.updated or 0.0) + 1e-3)
         self.messageAdded.emit(sess.id, "user", text, origin)

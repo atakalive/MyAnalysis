@@ -10,6 +10,7 @@ Markdown、検索履歴の記録。検索そのものは Qt 非依存の llm_bri
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QTimer
@@ -41,6 +42,9 @@ from llm_bridge.chat_search import SearchRequest
 _MAX_MD_HITS = 100
 _HISTORY_COLS = 6
 _COL_DATASET = 5
+_RELATED_K = 30          # AI 検索の初回に同梱する関連箇所の候補数（Issue #127）
+
+_log = logging.getLogger(__name__)
 
 
 # ----- engine for AI search -----
@@ -74,6 +78,24 @@ def ai_engine_label_text() -> str:
     except Exception:
         return tr("chat.search.dialog.ai_engine", engine="-", model="-",
                   mark=tr("chat.engine.mark_default"))
+
+
+def related_hits_for_ai(query, datasets, include_archived) -> list | None:
+    """AI 検索の初回に同梱する関連箇所（Issue #127。埋め込み検索の上位 _RELATED_K 件）。never raise。
+
+    索引は更新せず、status() も呼ばない（同期ドライブの全 DS の走査を GUI スレッドでしない）。
+    使えない・「AI 検索に関連箇所を渡す」がオフ・範囲が空なら []、検索の失敗は None
+    （呼び出し側が知らせる）。初回だけ GUI スレッドでモデルの読み込み（1 秒ほど）が起きる。"""
+    try:
+        from llm_bridge import chat_index
+        if not datasets or not chat_index.is_ready() or not chat_index.load_prefs().in_ai_search:
+            return []
+        hits, _warnings = chat_index.ChatIndex.open().search(
+            query, datasets=list(datasets), include_archived=include_archived, k=_RELATED_K)
+        return list(hits)
+    except Exception:  # noqa: BLE001 — never raise（AI 検索は関連箇所なしで始める）
+        _log.debug("related hits for AI search failed", exc_info=True)
+        return None
 
 
 # ----- result Markdown -----

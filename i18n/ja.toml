@@ -447,6 +447,7 @@
 "chat.search.result.more" = "ほか {n} 件（語を増やして絞り込んでください）"
 "chat.search.result.archived_mark" = "（アーカイブ）"
 "chat.search.no_sessions" = "検索対象のチャットがありません"
+"chat.search.recall_skipped" = "関連箇所を取得できなかったため、関連箇所なしで AI 検索を始めました"
 "chat.search.link_missing" = "リンク先のチャットが見つかりません（削除されたか、データセットが開いていません）"
 "chat.search.dataset_closed" = "データセット「{dataset}」が開いていないため切り替えられません"
 "chat.search.restored_archived" = "アーカイブから戻しました: {title}"
