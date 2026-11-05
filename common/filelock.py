@@ -22,12 +22,21 @@ project's short GUI+CLI mutual exclusion; revisit if long holds are ever needed.
 
 マッピング先は `<repo>/data/locks/<sha1(絶対パス)>.lock`。`data/` は gitignored の
 PC ローカル状態で、`data/llm_state/` と同じ位置づけ。
+
+## 待たないロック（Issue #125）
+
+`try_exclusive_lock` は取れなければ待たずに False を yield する。`exclusive_lock` と同じ
+ファイルを同じ開き方（"a"）で開き、同じ 1 バイトをロックするので、両者は互いに排他になる。
+どちらも呼び出しごとに新しいハンドルで開くので、同じプロセスの中でも、持っているロックを
+もう一度取ろうとすると競合になる（再入しない）。親ディレクトリは呼び出し側が作る。
 """
 
 import contextlib
+import errno
 import hashlib
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -54,11 +63,26 @@ def lock_file_for(path: Path | str) -> Path:
     return d / f"{key}.lock"
 
 
+class LockTimeout(OSError):
+    """``exclusive_lock`` が win32 の上限（約 30 秒）まで待っても取れなかった（Issue #125）。
+
+    ``OSError`` の派生なので、``except OSError`` で受けている既存の呼び出し側は変わらない。
+    POSIX の ``flock`` は待ち続けるので送出しない。"""
+
+
+# 待たないロックが「他のハンドルが持っている」ときに返す errno（win32 の msvcrt は EACCES、
+# POSIX の flock は EWOULDBLOCK=EAGAIN）。これ以外の OSError は競合ではないので送出する。
+_CONTENDED = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK})
+# msvcrt.locking(LK_LOCK) が待ちの上限に当たったときの errno。
+_WIN_TIMEOUT = frozenset({getattr(errno, "EDEADLOCK", errno.EDEADLK), errno.EDEADLK, errno.EACCES})
+
+
 @contextlib.contextmanager
 def exclusive_lock(path: Path | str):
     """Acquire an exclusive advisory lock on `path` for the with-block.
 
     同期マウント上のパスは `lock_file_for` でローカルへマッピングされる（docstring 参照）。
+    win32 で上限まで待っても取れなければ `LockTimeout` を送出する。
     """
     path = lock_file_for(path)
     if sys.platform == "win32":
@@ -74,6 +98,9 @@ def exclusive_lock(path: Path | str):
                 except OSError as e:
                     last_err = e
             else:
+                # LK_LOCK は 10 回（約 10 秒）試して取れなければ EDEADLOCK を出す。
+                if last_err.errno in _WIN_TIMEOUT:
+                    raise LockTimeout(last_err.errno, f"lock timeout: {path}") from last_err
                 raise last_err
             try:
                 yield
@@ -91,3 +118,31 @@ def exclusive_lock(path: Path | str):
                 fcntl.flock(lf, fcntl.LOCK_UN)
         finally:
             lf.close()
+
+
+@contextlib.contextmanager
+def try_exclusive_lock(path: Path | str) -> Iterator[bool]:
+    """取れれば True、他のハンドルが持っていれば待たずに False を yield する（Issue #125）。
+
+    True のときだけ抜けるときに解放する。ファイルを開けない（親ディレクトリが無いなど）・
+    競合でないロックの失敗は送出する（「取れなかった」と混同しない）。
+    """
+    path = lock_file_for(path)
+    with open(path, "a") as lf:
+        try:
+            if sys.platform == "win32":
+                msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in _CONTENDED:
+                raise
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            if sys.platform == "win32":
+                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lf, fcntl.LOCK_UN)
