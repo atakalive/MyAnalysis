@@ -95,6 +95,7 @@ def test_atomic_write_text_ignores_stale_fixed_tmp(tmp_path):
 
 
 def test_atomic_write_text_replace_failure_keeps_old_and_cleans_tmp(monkeypatch, tmp_path):
+    _no_backoff(monkeypatch)      # replace を毎回失敗させるので、5 回の試行の待ち（約 6 秒）を省く
     target = tmp_path / "data.json"
     target.write_text("OLD", encoding="utf-8")
     real_replace = os.replace
@@ -174,6 +175,7 @@ def test_atomic_write_bytes_ignores_stale_fixed_tmp(tmp_path):
 
 
 def test_atomic_write_bytes_replace_failure_keeps_old_and_cleans_tmp(monkeypatch, tmp_path):
+    _no_backoff(monkeypatch)      # replace を毎回失敗させるので、5 回の試行の待ち（約 6 秒）を省く
     target = tmp_path / "img.png"
     target.write_bytes(b"OLD")
     real_replace = os.replace
@@ -420,6 +422,15 @@ def _no_sleep(monkeypatch):
     """リトライのバックオフを実時間で待たない（テストを高速に保つ）。"""
     import common.paths as cp
     monkeypatch.setattr(cp.time, "sleep", lambda _s: None)
+
+
+def _no_backoff(monkeypatch):
+    """書込検証の待ちだけを 0 にする（試行の回数は変えない）。
+
+    `_no_sleep` は time.sleep そのもの（time モジュールの属性）を差し替えるので、前のテストから
+    残っているスレッドの sleep まで止めてしまう。待ちを省くだけのテストはこちらを使う。"""
+    import common.paths as cp
+    monkeypatch.setattr(cp, "_VERIFY_BACKOFF", (0.0,) * len(cp._VERIFY_BACKOFF))
 
 
 def test_fragile_fs_never_renames_and_leaves_no_tmp(monkeypatch, tmp_path):

@@ -102,7 +102,10 @@ def test_close_dataset_flush_survives_save_all(win, tmp_path):
     assert win.dispatch_command("close-dataset", name="dsA") == "closed:dsA:1"
 
     from llm_bridge import session
-    session.save_all(win)   # simulate exit-time save
+    _saved, failed = session.save_all(win)   # simulate exit-time save
+    # 前のテストが session._touched に残した名前を拾うと、存在しない work_dir への書込に
+    # 失敗して書込検証の待ち（約 6 秒）を使い切る。failed に出るので、ここで捕まえる。
+    assert failed == []
     data = session.read_session("dsA")
     assert data is not None and [t["name"] for t in data["tabs"]] == ["a"]
 
@@ -743,8 +746,9 @@ def test_save_session_overwrite_unreadable_yes(win, tmp_path, monkeypatch):
     from llm_bridge import session
     wd = _unreadable_ds_with_tab(win, tmp_path, monkeypatch)
     _patch_question(monkeypatch, QMessageBox.StandardButton.Yes)
-    _patch_warning(monkeypatch)
+    warnings = _patch_warning(monkeypatch)
     win._save_session()
+    assert warnings == []      # 保存に失敗したデータセットが無い（_save_session は failed を warning で出す）
     assert (wd / "session.json").read_text(encoding="utf-8") != ""
     assert [t["name"] for t in session.read_session("dsU")["tabs"]] == ["a"]
 
@@ -753,8 +757,9 @@ def test_save_session_overwrite_unreadable_no(win, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
     wd = _unreadable_ds_with_tab(win, tmp_path, monkeypatch)
     _patch_question(monkeypatch, QMessageBox.StandardButton.No)
-    _patch_warning(monkeypatch)
+    warnings = _patch_warning(monkeypatch)
     win._save_session()
+    assert warnings == []      # dsU は「書かなかった」（skipped）で、失敗ではない
     assert (wd / "session.json").read_text(encoding="utf-8") == ""
     assert "dsU" in win.statusBar().currentMessage()
 

@@ -42,6 +42,10 @@ def test_bad_value_types_dropped(mru_env):
 
 def test_note_never_raises(monkeypatch, tmp_path):
     # unwritable path → note swallows the error
+    import common.paths
+    # 書込は毎回失敗するので、検証の 5 回の試行の待ち（約 6 秒）だけを省く（回数は変えない）。
+    monkeypatch.setattr(common.paths, "_VERIFY_BACKOFF",
+                        (0.0,) * len(common.paths._VERIFY_BACKOFF))
     monkeypatch.setattr(paths, "recent_datasets_path",
                         lambda: tmp_path / "nope" / "x.json")
     paths.note_recent_dataset("ds")   # must not raise

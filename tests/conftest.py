@@ -173,14 +173,20 @@ def _isolate_dataset_registry(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _isolate_session_ownership(monkeypatch):
-    """session の持ち主・チャット baseline の記録をテストごとに空にする（Issue #106）。
+    """session の持ち主・チャット baseline の記録と保存対象の集合をテストごとに空にする（Issue #106）。
 
     テスト間で持ち越すと結果が順序依存になる。関数はモジュールグローバルを実行時に
-    引くので、新しい dict への差し替えが効く。
+    引くので、新しい dict / set への差し替えが効く。
+
+    `_touched`（save_all が書く先のデータセット）が漏れると、後のテストの save_all が前のテストの
+    データセット名を拾い、そのテストの get_dataset_dir では存在しない work_dir に myanalysis.toml を
+    書こうとする。書込は失敗して検証の待ち（約 6 秒）を使い切り、save_all の failed に入ったまま
+    次のテストへ残り続けていた。
     """
     from llm_bridge import session
     for name in ("_restored", "_unreadable", "_chat_baseline", "_last_skipped"):
         monkeypatch.setattr(session, name, {})
+    monkeypatch.setattr(session, "_touched", set())
 
 
 @pytest.fixture(autouse=True)

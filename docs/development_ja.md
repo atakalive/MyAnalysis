@@ -452,7 +452,7 @@ python -m pytest tests/
 | チャットの関連検索の索引・モデル | `llm_bridge.paths.chat_index_dir` と `common.embed_model.install_root` を `tmp_path` に向け、`llm_bridge.chat_index` の埋め込み器と shard のキャッシュをテストの前後に捨てる |
 | FS 判定 | `MYANALYSIS_FS_OVERRIDE=<tmp_path>=local` を設定し、`MYANALYSIS_FORCE_FRAGILE` / `MYANALYSIS_WRITE_STRATEGY` を外す |
 | R2 設定同期 | `R2_AUTOSYNC=0`。`.env` の読込・状態ファイル・boto3 クライアントをスタブにする（ネットワーク禁止） |
-| session の持ち主・チャット baseline の記録 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に差し替える |
+| session の持ち主・チャット baseline の記録・保存対象 | `llm_bridge.session` の `_restored` / `_unreadable` / `_chat_baseline` / `_last_skipped` をテストごとに空の dict に、`_touched`（`save_all` が書く先のデータセット）を空の set に差し替える |
 | チャットのデータセットの環境変数 | `MYANALYSIS_CHAT_DATASET` を外す（チャットのエージェント内で pytest を実行しても継承しない） |
 | エージェントの stage | `common.paths.agent_stage_dir` を `tmp_path / "agent_stage"` に向け、`MYANALYSIS_AGENT_STAGE` を外す |
 | claude の `--replay-user-messages` 対応判定 | `llm_backend.claude_code._replay_supported` を常に `False` に差し替える（判定の `--version` の起動が、Popen を捕まえるテストに混ざらない）。追加送信のテストは対応側に上書きする |
