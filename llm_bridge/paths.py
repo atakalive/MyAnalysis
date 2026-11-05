@@ -46,6 +46,16 @@ def ui_prefs_path() -> Path:
     return global_state_dir() / "ui_prefs.json"
 
 
+def chat_index_dir() -> Path:
+    """Return data/llm_state/chat_index/ (not created).
+
+    PC-local embedding index of the saved chats (Issue #125). Recomputable, so it is
+    written with one copy and may be deleted at any time. Read/written via
+    llm_bridge/chat_index.py.
+    """
+    return global_state_dir() / "chat_index"
+
+
 def _preserve_unreadable(path: Path, status: str) -> bool:
     """``unreadable`` な既存ファイルを守るべきか（守るなら書込を skip する）。
 

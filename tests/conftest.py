@@ -17,6 +17,9 @@ ui_prefs.json（言語・tool_display・全体ペルソナ・数式の描画等�
 global_state_dir 経由で ui_prefs を解決するテストは、同一属性 ui_prefs_path を
 自前で patch し直すこと（後勝ちで autouse に勝つ）。
 
+チャットの関連検索（Issue #125）の索引 data/llm_state/chat_index/ と埋め込みモデルの導入先
+~/.myanalysis/embeddings/ も同じく tmp に向ける（開発者の実索引・実モデルに触らない）。
+
 dataset_registry の既定パス（`<repo>/datasets.local.json`）も同様。config は import 時
 （module 末尾の reload_datasets()）に登録簿を読むので、autouse fixture では collection 中の
 読み込みを隔離できない。**このモジュールのロード時**に `dataset_registry.registry_path` を
@@ -63,6 +66,8 @@ def _isolate_pc_local_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         lb_paths, "personas_path", lambda: tmp_path / "personas.json"
     )
+    # チャットの関連検索の埋め込み索引（Issue #125）。呼び出し側は lb_paths.chat_index_dir() と属性で引く。
+    monkeypatch.setattr(lb_paths, "chat_index_dir", lambda: tmp_path / "chat_index")
     # 数式描画モジュール（MathJax）の導入先も PC ローカルの状態（Issue #123）。呼び出し側は
     # mathjax_install.install_root() と属性で引くので、ここでの差し替えが効く。
     from common import mathjax_install
@@ -71,6 +76,26 @@ def _isolate_pc_local_state(monkeypatch, tmp_path):
     # embed_model.install_root() と属性で引く。embed_model は numpy を関数の中で import するので軽い。
     from common import embed_model
     monkeypatch.setattr(embed_model, "install_root", lambda: tmp_path / "embeddings")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_index():
+    """チャットの埋め込み索引のプロセス内キャッシュ（埋め込み器・shard）をテストごとに捨てる（Issue #125）。
+
+    モジュールを import しない（numpy を全テストに読ませない）。テストの途中で初めて import された
+    ときも片付くように、前と後の両方で直接空にする（monkeypatch で元に戻す方式だと、前のテストの
+    残りが戻ってくる）。"""
+    import sys
+
+    def _reset():
+        ci = sys.modules.get("llm_bridge.chat_index")
+        if ci is not None:
+            ci.release_embedder()
+            ci._SHARD_CACHE.clear()
+
+    _reset()
+    yield
+    _reset()
 
 
 @pytest.fixture(autouse=True)
