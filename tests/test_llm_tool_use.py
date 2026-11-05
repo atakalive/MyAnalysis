@@ -481,3 +481,166 @@ class TestPaneTools:
             ("window", None, "chat-show",
              {"sid": "abcd1234", "start": 3, "end": 4, "char_offset": 100}),
         ]
+
+
+# ---------------------------------------------------------------------------
+# 関数ツール chat_recall（Issue #127）
+# ---------------------------------------------------------------------------
+
+
+def _hit(sid="0123456789abcdef0123456789abcdef", idx=3, dataset="dsA", snippet="snip"):
+    from llm_bridge.chat_index import RecallHit
+    return RecallHit(sid=sid, sid8=sid[:8], idx=idx, dataset=dataset, title="T",
+                     archived=False, role="assistant", score=0.03, cosine=0.8,
+                     lexical=0.0, snippet=snippet, updated=0.0)
+
+
+class _FakeIndex:
+    def __init__(self, hits=(), warnings=()):
+        self.hits = list(hits)
+        self.warnings = list(warnings)
+        self.calls: list = []
+
+    def search(self, query, *, datasets=None, include_archived=False, k=20):
+        self.calls.append(("search", query, datasets, include_archived, k))
+        return list(self.hits), list(self.warnings)
+
+    def stale_summary(self, datasets=None):
+        self.calls.append(("stale", datasets))
+        return {"dsA": 2}
+
+    def __getattr__(self, name):          # update / rebuild / clear などは呼ばれてはならない
+        raise AssertionError(f"chat_recall must not call ChatIndex.{name}")
+
+
+class TestChatRecallTool:
+    @pytest.fixture()
+    def env(self, monkeypatch):
+        import config
+        from llm_bridge import chat_index
+        config.DATASETS.update({"dsA": {}, "dsB": {}})
+        idx = _FakeIndex(hits=[_hit()])
+        state = {"ready": True, "opened": 0}
+
+        def _open(embedder=None):
+            state["opened"] += 1
+            return idx
+
+        monkeypatch.setattr(chat_index, "is_ready", lambda: state["ready"])
+        monkeypatch.setattr(chat_index.ChatIndex, "open", staticmethod(_open))
+        return idx, state
+
+    @staticmethod
+    def _call(args, chat_dataset=None):
+        from gui.tools import make_dispatch
+        return json.loads(make_dispatch(None)("chat_recall", args, chat_dataset=chat_dataset))
+
+    def test_tools_for_turn(self):
+        from gui.tools import CHAT_RECALL_TOOL, TOOLS, tools_for_turn
+        before = list(TOOLS)
+        assert tools_for_turn(False) is TOOLS
+        on = tools_for_turn(True)
+        assert on[-1] is CHAT_RECALL_TOOL and on[:-1] == TOOLS
+        assert TOOLS == before                       # TOOLS 自体は変えない
+        fn = CHAT_RECALL_TOOL["function"]
+        assert fn["name"] == "chat_recall"
+        assert fn["parameters"]["required"] == ["query"]
+        assert set(fn["parameters"]["properties"]) == {
+            "query", "dataset", "all", "k", "archived", "expand"}
+
+    def test_not_ready_does_not_open(self, env):
+        _idx, state = env
+        state["ready"] = False
+        out = self._call({"query": "peak"})
+        assert "off or not installed" in out["error"]
+        assert state["opened"] == 0
+
+    @pytest.mark.parametrize(("args", "chat_ds", "want"), [
+        ({"query": "q"}, "dsA", ["dsA"]),                 # このチャットの DS
+        ({"query": "q"}, None, None),                     # DS の無いチャット → 全登録
+        ({"query": "q", "dataset": "dsB"}, "dsA", ["dsB"]),
+        ({"query": "q", "all": True}, "dsA", None),
+    ])
+    def test_scope(self, env, args, chat_ds, want):
+        idx, _ = env
+        out = self._call(args, chat_dataset=chat_ds)
+        assert out["scope"] == {"datasets": want, "include_archived": False}
+        assert idx.calls[0] == ("search", "q", want, False, 20)
+        assert idx.calls[1] == ("stale", want)
+
+    @pytest.mark.parametrize("args", [
+        {"query": "q", "dataset": "dsA", "all": True},
+        {"query": "q", "dataset": "nope"},
+        {"query": "q", "dataset": ""},
+        {"query": "  "},
+        {"query": 3},
+        {"query": "q", "k": "x"},
+        {"query": "q", "k": True},
+        {"query": "q", "archived": "yes"},
+        {"query": "q", "all": 1},
+        {"query": "q", "expand": "no"},
+    ])
+    def test_bad_arguments(self, env, args):
+        idx, _ = env
+        out = self._call(args)
+        assert isinstance(out.get("error"), str)
+        assert idx.calls == []
+
+    def test_unknown_chat_dataset_is_an_error(self, env):
+        idx, _ = env
+        out = self._call({"query": "q"}, chat_dataset="gone")
+        assert "unknown dataset" in out["error"] and idx.calls == []
+
+    @pytest.mark.parametrize(("k", "want"), [(0, 1), (999, 200), (5, 5)])
+    def test_k_is_clamped(self, env, k, want):
+        idx, _ = env
+        self._call({"query": "q", "k": k, "archived": True})
+        assert idx.calls[0] == ("search", "q", None, True, want)
+
+    def test_result_shape(self, env):
+        out = self._call({"query": " peak offset "}, chat_dataset="dsA")
+        assert out["query"] == "peak offset"
+        assert out["updated_index"] is False
+        assert out["stale"] == {"dsA": 2}
+        assert out["warnings"] == []
+        assert out["hits"] == [_hit().to_dict()]
+        assert out["hits"][0]["sid"] == "01234567"
+        assert "text" not in out["hits"][0] and "truncated" not in out
+
+    def test_not_ready_on_open(self, env, monkeypatch):
+        from common.embed_model import NotReady
+        from llm_bridge import chat_index
+
+        def _open(embedder=None):
+            raise NotReady("model ruri-v3-30m: missing")
+
+        monkeypatch.setattr(chat_index.ChatIndex, "open", staticmethod(_open))
+        out = self._call({"query": "q"})
+        assert out["error"].startswith("chat recall is not ready")
+
+    def test_expand_reads_full_sid_and_truncates(self, env, monkeypatch):
+        from llm_bridge import chat_index
+        idx, _ = env
+        sids = [f"{n:x}" * 8 for n in (10, 11, 12)]
+        idx.hits = [_hit(sid=s, idx=i) for i, s in enumerate(sids, 1)]
+        reads = []
+        bodies = {sids[0]: "a" * 15000, sids[1]: "b" * 8000, sids[2]: "c" * 10}
+
+        def fake_read(dataset, sid, i):
+            reads.append((dataset, sid, i))
+            return bodies[sid]
+
+        monkeypatch.setattr(chat_index, "read_message", fake_read)
+        out = self._call({"query": "q", "expand": True})
+        assert reads == [("dsA", s, i) for i, s in enumerate(sids, 1)]   # 完全な id で読む
+        h1, h2, h3 = out["hits"]
+        assert h1["text"] == "a" * 15000 and "text_truncated" not in h1
+        assert h2["text"] == "b" * 5000 and h2["text_truncated"] is True
+        assert h3["text"] == "" and h3["text_truncated"] is True
+        assert out["truncated"] is True
+
+    def test_expand_unreadable_message_is_null(self, env, monkeypatch):
+        from llm_bridge import chat_index
+        monkeypatch.setattr(chat_index, "read_message", lambda *a: None)
+        out = self._call({"query": "q", "expand": True})
+        assert out["hits"][0]["text"] is None and out["truncated"] is False

@@ -45,7 +45,7 @@ from gui.busy_glyph import BusyGlyph, pick_pattern
 from gui.math_engine import MathKey
 from gui.math_render import DISPLAY_PROP, TEX_PROP, build_markdown_doc, math_at
 from gui.tabbar import MultiRowTabBar
-from gui.tools import TOOLS
+from gui.tools import TOOLS, tools_for_turn
 
 
 _SYSTEM_PROMPT = (
@@ -350,12 +350,15 @@ class _StreamWorker(QThread):
     inject_support = Signal(str)  # (session_id,) backend が追加送信の可否を判定し終えた（Issue #119）
 
     def __init__(self, session_id: str, backend: LLMBackend, messages: list[Message],
-                 dispatch: Callable, parent: QWidget | None = None):
+                 dispatch: Callable, parent: QWidget | None = None, *,
+                 tools: list | None = None):
         super().__init__(parent)
         self._sid = session_id
         self._backend = backend
         self._messages = messages
         self._dispatch = dispatch
+        # このターンのツール一覧（Issue #127: 関連検索が使えるターンだけ chat_recall が入る）。
+        self._tools = TOOLS if tools is None else tools
 
     def run(self) -> None:
         messages = list(self._messages)
@@ -366,7 +369,7 @@ class _StreamWorker(QThread):
                     return
                 text_buf = ""
                 pending_calls: list[ToolCallRequest] = []
-                for event in self._backend.stream(messages, tools=TOOLS):
+                for event in self._backend.stream(messages, tools=getattr(self, "_tools", TOOLS)):
                     if self.isInterruptionRequested():
                         self.done.emit(self._sid)
                         return
@@ -2354,7 +2357,8 @@ class ChatWidget(QWidget):
             msgs[-1] = Message(role="user", content=wire_text)
         worker = _StreamWorker(
             sess.id, backend, msgs,
-            partial(self._dispatch, chat_dataset=chat_dataset_value(sess.dataset)), self)
+            partial(self._dispatch, chat_dataset=chat_dataset_value(sess.dataset)), self,
+            tools=tools_for_turn(recall))
         turn = _Turn(sess, backend, worker, kill_timer)
         turn.stream_id = uuid.uuid4().hex   # この応答の partial/最終を紐付ける安定 ID
         # 直前の空 assistant 本文の開始位置を anchor に（active のみ）。非アクティブは

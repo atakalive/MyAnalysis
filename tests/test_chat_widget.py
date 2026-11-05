@@ -2427,9 +2427,10 @@ def test_start_turn_passes_chat_dataset(qapp, monkeypatch, dataset):
     workers: list = []
 
     class _FakeWorker:
-        def __init__(self, sid, backend, msgs, dispatch, parent):
+        def __init__(self, sid, backend, msgs, dispatch, parent, tools=None):
             self.backend = backend
             self.dispatch = dispatch
+            self.tools = tools
             self.chunk = self.done = self.failed = self.finished = self.absorbed = self.unknown = _Sig()
             self.inject_support = _Sig()
             workers.append(self)
@@ -2796,8 +2797,9 @@ def _fake_workers(monkeypatch):
     workers: list = []
 
     class _W:
-        def __init__(self, sid, backend, msgs, dispatch, parent):
+        def __init__(self, sid, backend, msgs, dispatch, parent, tools=None):
             self.sid, self.backend, self.msgs = sid, backend, msgs
+            self.tools = tools   # このターンのツール一覧（Issue #127）
             self.chunk = self.done = self.failed = self.finished = _Sig119()
             self.absorbed = self.unknown = _Sig119()
             self.inject_support = _Sig119()
@@ -3551,3 +3553,44 @@ def test_start_turn_survives_failing_readiness(widget, monkeypatch):
         assert b.recall_calls == [False]
     finally:
         _cleanup(widget)
+
+
+def test_start_turn_passes_tools_matching_chat_recall(widget, monkeypatch):
+    """ツール一覧はそのターンの判定と揃う（使えるときだけ chat_recall。使えないときは TOOLS そのもの）。"""
+    from gui.tools import TOOLS
+    workers = _fake_workers(monkeypatch)
+    monkeypatch.setattr(widget, "_load_backend_session", lambda *a, **k: None)
+    sess = widget._active
+    widget._session_backends[sess.id] = _FakeBackend()
+    try:
+        assert widget._start_turn(sess, "one", chat_recall=True)
+        widget._turns.clear()
+        assert widget._start_turn(sess, "two", chat_recall=False)
+        on, off = workers
+        names = [t["function"]["name"] for t in on.tools]
+        assert names[-1] == "chat_recall" and names[:-1] == [t["function"]["name"] for t in TOOLS]
+        assert off.tools is TOOLS
+        assert "chat_recall" not in [t["function"]["name"] for t in TOOLS]
+    finally:
+        _cleanup(widget)
+
+
+def test_stream_worker_sends_its_tools(qapp):
+    """_StreamWorker.run はコンストラクタで受けたツール一覧を backend に渡す（既定は TOOLS）。"""
+    from gui.chat import _StreamWorker
+    from gui.tools import TOOLS
+    from llm_backend.base import Message, TextDelta
+
+    seen = []
+
+    class _B:
+        def stream(self, messages, tools=None):
+            seen.append(tools)
+            yield TextDelta(text="ok")
+
+    marker = [{"type": "function", "function": {"name": "x"}}]
+    for kwargs, want in (({}, TOOLS), ({"tools": marker}, marker)):
+        w = _StreamWorker("sid", _B(), [Message(role="user", content="hi")],
+                          lambda *a, **k: "", **kwargs)
+        w.run()
+        assert seen[-1] is want

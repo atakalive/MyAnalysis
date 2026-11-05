@@ -48,7 +48,8 @@ def test_every_tool_is_dispatched(monkeypatch, tmp_path):
     assert _is_unknown_tool(gui.tools._dispatch(win, "no_such_tool", {}))
 
     unknown = []
-    for tool in gui.tools.TOOLS:
+    # 使える状態のターンにだけ足すツール（Issue #127 の chat_recall）も含めて見る。
+    for tool in gui.tools.tools_for_turn(True):
         name = tool["function"]["name"]
         params = tool["function"].get("parameters", {})
         args = {
