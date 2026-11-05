@@ -508,12 +508,14 @@ def _stub_question(monkeypatch, replies, on_ask=None):
 
 def _spy_close_side_effects(monkeypatch, win):
     stopped = []
-    for attr in ("_stop_meeting_relay", "_stop_config_pusher", "_close_all_floats"):
+    for attr in ("_stop_meeting_relay", "_stop_config_pusher", "_stop_chat_indexer",
+                 "_close_all_floats"):
         monkeypatch.setattr(win, attr, lambda a=attr: stopped.append(a))
     return stopped
 
 
-_ALL_STOPPED = ["_stop_meeting_relay", "_stop_config_pusher", "_close_all_floats"]
+_ALL_STOPPED = ["_stop_meeting_relay", "_stop_config_pusher", "_stop_chat_indexer",
+                "_close_all_floats"]
 
 
 def test_close_while_busy_no_keeps_window(win, monkeypatch):

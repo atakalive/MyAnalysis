@@ -503,6 +503,10 @@ class HotReloadController(QObject):
             _scp = getattr(old_window, "_stop_config_pusher", None)
             if _scp is not None:
                 _scp()
+            # Stop the old background chat-index updater (Issue #126; same shape).
+            _sci = getattr(old_window, "_stop_chat_indexer", None)
+            if _sci is not None:
+                _sci()
 
             # 6b. re-dock any floated tabs before purge (#56). getattr-guarded:
             # the first patch reload has no _close_all_floats on the old window.

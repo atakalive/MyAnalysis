@@ -447,13 +447,25 @@ class ToolWindow(QMainWindow):
             dlg.deleteLater()
 
     def _open_embedding_settings(self) -> None:
-        """設定 → チャットの関連検索（実験的）…（Issue #126。gui/embedding_settings_dialog.py）。モーダル。"""
+        """設定 → チャットの関連検索（実験的）…（Issue #126。gui/embedding_settings_dialog.py）。モーダル。
+
+        開いている間は背景の差分更新を止める（hold。ウインドウの操作と索引のロック・モデルのファイルを
+        取り合わないように）。閉じたら、止めていた間の要求を 1 回だけ走らせる。"""
         from gui.embedding_settings_dialog import EmbeddingSettingsDialog
-        dlg = EmbeddingSettingsDialog(self)
+        ix = self._ensure_chat_indexer()
+        if ix is not None:
+            ix.hold()
         try:
-            dlg.exec()
+            dlg = EmbeddingSettingsDialog(
+                self, indexer=ix,
+                on_changed=lambda: self.request_chat_index_update("settings"))
+            try:
+                dlg.exec()
+            finally:
+                dlg.deleteLater()
         finally:
-            dlg.deleteLater()
+            if ix is not None:
+                ix.release()
 
     def _refresh_chat_math(self) -> None:
         cw = self.chat_widget()
@@ -1314,6 +1326,8 @@ class ToolWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, tr("err.open_dataset.title"), str(e))
             return
+        if not (isinstance(res, str) and res.startswith("error:")):
+            self.request_chat_index_update("open")
         if isinstance(res, str) and res.startswith("error:"):
             _log.warning("open-dataset returned %r for %r", res, name)
             QMessageBox.warning(
@@ -1369,6 +1383,8 @@ class ToolWindow(QMainWindow):
                 _log.warning("restore: open-dataset returned %r for %r", res, ds)
                 unreadable.append(str(ds))
             opened.append(ds)
+        if opened:
+            self.request_chat_index_update("open")
         active = state.get("active") if isinstance(state, dict) else None
         target = active if active in opened else (opened[0] if opened else None)
         if target is not None:
@@ -1414,6 +1430,8 @@ class ToolWindow(QMainWindow):
             QMessageBox.critical(self, tr("err.save.title"), str(e))
             return
         saved, failed = result
+        if not failed:
+            self.request_chat_index_update("save")
         skipped = session.skipped_datasets()
         if skipped:
             self.statusBar().showMessage(
@@ -1487,6 +1505,54 @@ class ToolWindow(QMainWindow):
         finally:
             self._config_pusher = None
 
+    def _ensure_chat_indexer(self):
+        """背景の差分更新（gui/chat_indexer.py。Issue #126）。最初の 1 回だけ作る。作れなければ None。
+
+        never raise（設定のウインドウを開けなくしない）。"""
+        ix = getattr(self, "_chat_indexer", None)
+        if ix is not None:
+            return ix
+        try:
+            from gui.chat_indexer import ChatIndexer
+            ix = ChatIndexer()
+        except Exception:
+            _log.debug("chat indexer unavailable", exc_info=True)
+            return None
+        self._chat_indexer = ix
+        return ix
+
+    def request_chat_index_update(self, reason: str) -> bool:
+        """チャットの関連検索の索引の差分更新を裏で要求する（best-effort・never raise）。Issue #126.
+
+        保存の成功後・データセットを開いた後・設定のウインドウの変更で呼ぶ。機能がオフ（既定）なら
+        ui_prefs を 1 回読むだけで、索引のモジュールも import せずスレッドも作らない。"""
+        try:
+            from llm_bridge.paths import read_ui_pref
+            if read_ui_pref("chat_recall_enabled", False) is not True:   # chat_index.PREF_ENABLED
+                return False
+            ix = self._ensure_chat_indexer()
+            return bool(ix is not None and ix.request_update(reason))
+        except Exception:
+            _log.debug("request_chat_index_update failed", exc_info=True)
+            return False
+
+    def _stop_chat_indexer(self) -> None:
+        """Stop the background chat-index updater (idempotent, bounded wait), then drop it.
+
+        Same shape as _stop_config_pusher: called on closeEvent accept paths and by the
+        hot-reload Tier 3 rebuild; the reference is dropped whether or not stop succeeds.
+        An update still running in the old one is serialized by the chat index lock.
+        """
+        ix = getattr(self, "_chat_indexer", None)
+        if ix is None:
+            return
+        try:
+            ix.stop()
+        except Exception:
+            _log.debug("chat indexer stop failed", exc_info=True)
+        finally:
+            self._chat_indexer = None
+
     def _chat_busy(self) -> bool:
         """True if the chat widget has an in-flight (streaming) turn."""
         cw = self.chat_widget()
@@ -1550,6 +1616,7 @@ class ToolWindow(QMainWindow):
             return
         self._stop_meeting_relay()
         self._stop_config_pusher()
+        self._stop_chat_indexer()
         self._close_all_floats()
         event.accept()
 

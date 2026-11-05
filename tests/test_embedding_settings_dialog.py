@@ -562,7 +562,7 @@ def test_status_after_close_is_dropped(world):
 
 def test_in_ai_saved_and_unknown_model_falls_back(world):
     update_ui_pref("chat_recall_model", "no-such-model")
-    dlg, calls = _dialog()
+    dlg, _ = _dialog()
     assert dlg.selected_model() == em.DEFAULT_MODEL
     assert dlg._in_ai.isChecked()
     dlg._in_ai.setChecked(False)
