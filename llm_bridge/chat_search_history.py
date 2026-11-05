@@ -18,6 +18,7 @@ from pathlib import Path
 
 HISTORY_FILE = "chat_search_history.json"
 _VERSION = 1
+_EMBEDDING_MODES = ("semantic", "hybrid")   # Issue #128
 
 
 def history_path(work_dir) -> Path:
@@ -127,18 +128,49 @@ def delete_history_entry(work_dir, entry_id) -> bool:
 
 
 def new_entry(req, *, datasets, n_hits, session_id, ts: float | None = None) -> dict:
-    """ts は実行時刻（None なら今）。結果の見出しと同じ時刻を渡す。"""
-    if req.scope not in ("dataset", "all"):
+    """ts は実行時刻（None なら今）。結果の見出しと同じ時刻を渡す。
+
+    埋め込み検索・無料検索（Issue #128）は旧ビルドが一致検索として読める形で書く:
+    mode は "text" のまま、任意キー semantic（True）・exact（無料検索なら True）を足す。
+    範囲 "registered" は scope "all" ＋ registered（True）。一致検索・AI 検索の entry は
+    従来とキー集合も同じ。"""
+    if req.scope not in ("dataset", "all", "registered"):
         raise ValueError(f"a search with scope={req.scope!r} is not recorded")
-    return {
+    mode = getattr(req, "mode", "ai" if req.ai else "text")
+    entry = {
         "id": uuid.uuid4().hex,
         "ts": time.time() if ts is None else ts,
         "mode": "ai" if req.ai else "text",
         "query": req.query,
         "hint": req.hint,
-        "scope": req.scope,
+        "scope": "all" if req.scope == "registered" else req.scope,
         "datasets": list(datasets),
         "include_archived": bool(req.include_archived),
         "n_hits": n_hits,
         "session_id": session_id,
     }
+    if mode in _EMBEDDING_MODES and not req.ai:
+        entry["semantic"] = True
+        entry["exact"] = mode == "hybrid"
+        if req.scope == "registered":
+            entry["registered"] = True
+    return entry
+
+
+def entry_mode(e: dict) -> str:
+    """entry の検索方法（"text" | "ai" | "semantic" | "hybrid"）。
+
+    任意キー semantic / exact は bool の True だけを認める。型違い・mode "ai" との矛盾は
+    無いものとして読む（valid_entry はこれらのキーで entry を無効にしない。無効にすると
+    append_history が書き戻さず、将来のビルドが書いた entry を消してしまうため）。"""
+    if e.get("mode") == "ai":
+        return "ai"
+    if e.get("semantic") is True:
+        return "hybrid" if e.get("exact") is True else "semantic"
+    return "text"
+
+
+def entry_registered(e: dict) -> bool:
+    """範囲が「登録済みの全データセット」か（埋め込み検索・無料検索の scope "all" のときだけ）。"""
+    return (e.get("registered") is True and e.get("scope") == "all"
+            and entry_mode(e) in _EMBEDDING_MODES)

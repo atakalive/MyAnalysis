@@ -81,14 +81,20 @@ class ChatSession:
     draft: str = ""
 
 
+# 保存する scope の 3 値（llm_bridge.chat_search.SCOPES の "registered" は、旧ビルドが読める
+# よう "all" ＋ registered: true で保存する。Issue #128）。chat_store は Qt 非依存かつ
+# chat_search を import しないのでここに直書きする。
 _SEARCH_SCOPES = ("dataset", "all", "unbound")
+_EMBEDDING_MODES = ("semantic", "hybrid")
 
 
 def normalize_search_spec(v) -> dict | None:
     """検索条件 dict を正規化する。不正なら None（Issue #108）。
 
-    scope の 3 値は llm_bridge.chat_search.SCOPES と同じ（chat_store は Qt 非依存かつ
-    chat_search を import しないのでここに直書きする）。
+    既存の 4 キー（scope・dataset・include_archived・ai）は必須。埋め込み検索・無料検索の
+    タブ（Issue #128）だけ、任意キー mode（"semantic" | "hybrid"）と registered（True）を
+    出力に含める。既定と同じ値・型違い・矛盾（ai=True と mode、"all" 以外の registered）は
+    捨てる（spec 自体は None にしない）。旧ビルドはこの 2 キーを落とし、一致検索の結果タブとして読む。
     """
     if not isinstance(v, dict):
         return None
@@ -104,7 +110,13 @@ def normalize_search_spec(v) -> dict | None:
             return None
     else:
         ds = None
-    return {"scope": scope, "dataset": ds, "include_archived": inc, "ai": ai}
+    out = {"scope": scope, "dataset": ds, "include_archived": inc, "ai": ai}
+    mode = v.get("mode")
+    if isinstance(mode, str) and mode in _EMBEDDING_MODES and ai is False:
+        out["mode"] = mode
+        if v.get("registered") is True and scope == "all":
+            out["registered"] = True
+    return out
 
 
 # ----- Message ⇄ dict -----

@@ -21,17 +21,36 @@ from datetime import datetime
 
 from llm_backend.base import strip_tool_lines
 
-SCOPES = ("dataset", "all", "unbound")
+# "registered" は登録済みの全データセット（Issue #128）。埋め込み検索・無料検索だけが使い、
+# メモリ上のセッションでは "all" から開いているデータセットの絞りを外したものになる
+# （閉じているデータセットのチャットはメモリに無いので、埋め込み検索はディスクの索引を見る）。
+SCOPES = ("dataset", "all", "unbound", "registered")
+
+# 検索の方法（Issue #128）。"text" = 一致検索、"ai" = AI 検索、"semantic" = 埋め込み検索、
+# "hybrid" = 無料検索（一致＋埋め込み）。
+MODES = ("text", "ai", "semantic", "hybrid")
+EMBEDDING_MODES = ("semantic", "hybrid")
 
 
 @dataclass
 class SearchRequest:
     query: str
-    scope: str                 # "dataset" | "all" | "unbound"
-    dataset: str | None        # scope="dataset" の対象 DS。"all"/"unbound" では常に None
+    scope: str                 # SCOPES のどれか
+    dataset: str | None        # scope="dataset" の対象 DS。それ以外では常に None
     include_archived: bool
-    ai: bool
+    ai: bool                   # mode == "ai" と常に一致する（旧来の呼び出し側のために残す）
     hint: str = ""             # AI 時の「覚えている語」。標準検索では常に ""
+    mode: str = "text"         # MODES のどれか（Issue #128）
+
+    def __post_init__(self):
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}: {self.mode!r}")
+        if self.ai and self.mode == "text":
+            self.mode = "ai"       # ai=True だけを渡す旧来の生成
+        if bool(self.ai) != (self.mode == "ai"):
+            raise ValueError(f"ai={self.ai!r} contradicts mode={self.mode!r}")
+        if self.scope == "registered" and self.mode not in EMBEDDING_MODES:
+            raise ValueError(f"scope='registered' needs an embedding mode: {self.mode!r}")
 
 
 @dataclass
@@ -181,6 +200,8 @@ def scope_sessions(ctx: SearchContext, *, scope: str = "dataset", dataset=None,
             if not (s.dataset is None or ctx.open_datasets is None
                     or s.dataset in ctx.open_datasets):
                 continue
+        elif scope == "registered":
+            pass
         else:  # unbound
             if s.dataset is not None:
                 continue
@@ -226,20 +247,51 @@ def resolve_session(ctx: SearchContext, sid):
     return found[0] if len(found) == 1 else None
 
 
-def make_search_link(session_id: str, msg_index: int, query: str = "") -> str:
+def make_search_link(session_id: str, msg_index: int, query: str = "",
+                     dataset: str | None = None) -> str:
+    """chatsearch: リンク。dataset はヒットのデータセット（埋め込み検索。Issue #128）。
+
+    dataset が無ければ出力は従来と同じ。"""
     href = f"chatsearch:{short_id(session_id)}:{int(msg_index)}"
+    params = []
     if query.strip():
-        href += "?q=" + urllib.parse.quote(query, safe="")
+        params.append("q=" + urllib.parse.quote(query, safe=""))
+    if dataset:
+        params.append("ds=" + urllib.parse.quote(dataset, safe=""))
+    if params:
+        href += "?" + "&".join(params)
     return href
 
 
+def _clean_name(v) -> str | None:
+    """リンクから読んだデータセット名。空・制御文字入りは None。"""
+    if not isinstance(v, str) or not v or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in v):
+        return None
+    return v
+
+
 def parse_search_link(href: str):
+    """(sid, idx, terms, dataset | None)。形が違えば None。"""
     m = re.fullmatch(r"chatsearch:([0-9A-Fa-f]{8,32}):([0-9]{1,9})(?:\?(.*))?", href, re.S)
     if m is None:
         return None
     sid, idx, qs = m.groups()
-    q = urllib.parse.parse_qs(qs or "").get("q", [""])[0]
-    return (sid.lower(), int(idx), split_terms(q))
+    params = urllib.parse.parse_qs(qs or "")
+    q = params.get("q", [""])[0]
+    ds = _clean_name(params.get("ds", [""])[0])
+    return (sid.lower(), int(idx), split_terms(q), ds)
+
+
+def make_open_dataset_link(dataset: str) -> str:
+    """閉じているデータセットを開く導線（Issue #128）。クリックで File → データセットを開く… と同じ経路。"""
+    return "opendataset:" + urllib.parse.quote(dataset, safe="")
+
+
+def parse_open_dataset_link(href: str) -> str | None:
+    m = re.fullmatch(r"opendataset:(.+)", href, re.S)
+    if m is None:
+        return None
+    return _clean_name(urllib.parse.unquote(m.group(1)))
 
 
 # ----- verb helpers -----
@@ -466,6 +518,8 @@ def describe_scope(req: SearchRequest, ctx: SearchContext) -> str:
         return "all open datasets"
     if req.scope == "unbound":
         return "chats not bound to any dataset"
+    if req.scope == "registered":
+        return "all registered datasets"
     if req.dataset is None:
         return "the front dataset"
     return f'dataset "{req.dataset}"'

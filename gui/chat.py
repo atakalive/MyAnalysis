@@ -1667,7 +1667,7 @@ class ChatWidget(QWidget):
                                     session_id=sess.id, ts=now):
                 self._status_note(tr("chat.search.history.write_failed"))
 
-    def _on_search_link(self, sid, idx, terms) -> None:
+    def _on_search_link(self, sid, idx, terms, ds=None) -> None:
         """chatsearch: リンク／履歴からのジャンプ。該当チャットへ切替・スクロール・ハイライト。"""
         from llm_bridge import chat_search as core
         sess = core.resolve_session(self.search_context(), sid)

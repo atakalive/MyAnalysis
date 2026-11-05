@@ -780,3 +780,74 @@ def test_content_fingerprint_distinguishes_kind():
     b.kind = "search"
     b.search_spec = {"scope": "all", "dataset": None, "include_archived": False, "ai": False}
     assert content_fingerprint(a) != content_fingerprint(b)
+
+
+# ---- 埋め込み検索・無料検索のタブの search_spec（Issue #128） ----
+
+
+def _v1_normalize_search_spec(v):
+    """旧ビルド（00d1d5f）の normalize_search_spec の写し。旧ビルドが新しい spec を読んだときを固める。"""
+    if not isinstance(v, dict):
+        return None
+    scope = v.get("scope")
+    if scope not in ("dataset", "all", "unbound"):
+        return None
+    inc, ai = v.get("include_archived"), v.get("ai")
+    if not isinstance(inc, bool) or not isinstance(ai, bool):
+        return None
+    ds = v.get("dataset")
+    if scope == "dataset":
+        if not isinstance(ds, str) or not ds:
+            return None
+    else:
+        ds = None
+    return {"scope": scope, "dataset": ds, "include_archived": inc, "ai": ai}
+
+
+_EMBED_SPECS = [
+    {"scope": "all", "dataset": None, "include_archived": False, "ai": False,
+     "mode": "semantic", "registered": True},
+    {"scope": "all", "dataset": None, "include_archived": True, "ai": False, "mode": "hybrid"},
+    {"scope": "dataset", "dataset": "dsA", "include_archived": False, "ai": False,
+     "mode": "hybrid"},
+]
+
+
+@pytest.mark.parametrize("spec", _EMBED_SPECS)
+def test_embedding_spec_kept_and_roundtrips(spec):
+    from llm_bridge.chat_store import normalize_search_spec
+    assert normalize_search_spec(spec) == spec
+    sess = _sample_session()
+    sess.kind = "search"
+    sess.search_spec = dict(spec)
+    got = session_from_dict(json.loads(json.dumps(session_to_dict(sess))))
+    assert got.search_spec == spec
+
+
+@pytest.mark.parametrize("spec", _EMBED_SPECS)
+def test_embedding_spec_reads_as_text_search_in_old_build(spec):
+    old = _v1_normalize_search_spec(spec)
+    assert old is not None and old["ai"] is False
+    assert set(old) == {"scope", "dataset", "include_archived", "ai"}
+    assert old["scope"] == spec["scope"] and old["dataset"] == spec["dataset"]
+
+
+def test_embedding_spec_drops_defaults_and_contradictions():
+    from llm_bridge.chat_store import normalize_search_spec
+    base = {"scope": "all", "dataset": None, "include_archived": False, "ai": False}
+    for extra in ({"mode": "text"}, {"mode": "ai"}, {"mode": "bogus"}, {"mode": 1},
+                  {"mode": ["semantic"]}, {"registered": True}, {"registered": False},
+                  {"mode": "semantic", "registered": False},
+                  {"mode": "semantic", "registered": "yes"},
+                  {"mode": "semantic", "registered": 1}):
+        want = dict(base)
+        if extra.get("mode") == "semantic":
+            want["mode"] = "semantic"
+        assert normalize_search_spec({**base, **extra}) == want, extra
+    # ai=True とは両立しない（mode を捨てる。spec は AI 検索のまま）
+    assert normalize_search_spec({**base, "ai": True, "mode": "hybrid", "registered": True}) == \
+        {**base, "ai": True}
+    # registered は scope "all" のときだけ
+    ds = {"scope": "dataset", "dataset": "dsA", "include_archived": False, "ai": False}
+    assert normalize_search_spec({**ds, "mode": "semantic", "registered": True}) == \
+        {**ds, "mode": "semantic"}

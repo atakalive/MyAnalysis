@@ -143,9 +143,9 @@ def test_links_roundtrip():
     href = cs.make_search_link(sid, 7, "peak offset)")
     assert href.startswith("chatsearch:abcdef01:7?q=")
     assert "%20" in href
-    assert cs.parse_search_link(href) == ("abcdef01", 7, ["peak", "offset)"])
+    assert cs.parse_search_link(href) == ("abcdef01", 7, ["peak", "offset)"], None)
     assert cs.make_search_link(sid, 3) == "chatsearch:abcdef01:3"
-    assert cs.parse_search_link("chatsearch:abcdef01:3") == ("abcdef01", 3, [])
+    assert cs.parse_search_link("chatsearch:abcdef01:3") == ("abcdef01", 3, [], None)
     assert cs.parse_search_link("chatsearch:abcdef0:3") is None
     assert cs.parse_search_link("chatsearch:zzzzzzzz:3") is None
     assert cs.parse_search_link("chatsearch:abcdef01:３") is None
@@ -671,3 +671,89 @@ def test_followup_with_recall_line_has_no_related_block():
                                     recall_args=cs.recall_args_for(req))
     assert 'chat-recall "<question or keywords>" --archived [-k 20]' in p
     assert "<related_hits>" not in p
+
+
+# ---- Issue #128: 埋め込み検索のモード・範囲・リンクの ds ----
+
+
+def test_search_request_mode_and_ai_stay_in_sync():
+    def req(**kw):
+        base = dict(query="q", scope="dataset", dataset="dsA", include_archived=False, ai=False)
+        base.update(kw)
+        return SearchRequest(**base)
+
+    assert req().mode == "text" and not req().ai
+    r = req(ai=True)                                  # 旧来の生成（ai だけ）
+    assert r.mode == "ai" and r.ai
+    assert req(ai=True, mode="ai").mode == "ai"
+    for m in ("semantic", "hybrid"):
+        r = req(mode=m)
+        assert r.mode == m and not r.ai
+        with pytest.raises(ValueError):
+            req(ai=True, mode=m)
+    with pytest.raises(ValueError):
+        req(mode="ai")                                # ai=False との矛盾
+    with pytest.raises(ValueError):
+        req(mode="bogus")
+    r = req(scope="registered", dataset=None, mode="semantic")
+    assert r.scope == "registered"
+    for m in ("text", "ai"):
+        with pytest.raises(ValueError):
+            req(scope="registered", dataset=None, mode=m, ai=(m == "ai"))
+    import dataclasses
+    with pytest.raises(ValueError):
+        dataclasses.replace(req(mode="hybrid"), ai=True)
+
+
+def test_scope_sessions_registered():
+    a = _sess([("user", "x")], dataset="dsA")
+    c = _sess([("user", "x")], dataset="dsC")         # 開いていない DS
+    n = _sess([("user", "x")], dataset=None)
+    srch = _sess([("user", "x")], dataset="dsA", kind="search",
+                 search_spec={"scope": "all", "dataset": None, "include_archived": False,
+                              "ai": False})
+    ctx = _ctx([a, c, n, srch])
+    assert {s.id for s in cs.scope_sessions(ctx, scope="registered")} == {a.id, c.id, n.id}
+    assert {h.session_id for h in cs.text_search(ctx, "x", scope="registered")} == \
+        {a.id, c.id, n.id}
+    assert "registered" in cs.SCOPES
+
+
+def test_describe_scope_registered():
+    r = SearchRequest(query="", scope="registered", dataset=None, include_archived=False,
+                      ai=False, mode="semantic")
+    assert cs.describe_scope(r, _ctx([])) == "all registered datasets"
+
+
+@pytest.mark.parametrize("query", ["peak offset", "", "ピーク&補正", "a=b&ds=x"])
+@pytest.mark.parametrize("ds", ["dsA", "測定 2026", "a&b=c", "x/y?z#w"])
+def test_links_with_dataset(query, ds):
+    sid = "abcdef0123456789abcdef0123456789"
+    href = cs.make_search_link(sid, 12, query, dataset=ds)
+    assert href.startswith("chatsearch:abcdef01:12?")
+    assert cs.parse_search_link(href) == ("abcdef01", 12, cs.split_terms(query), ds)
+
+
+def test_links_without_dataset_are_unchanged():
+    sid = "abcdef0123456789abcdef0123456789"
+    for q in ("peak offset", ""):
+        assert cs.make_search_link(sid, 4, q) == cs.make_search_link(sid, 4, q, dataset=None)
+        assert cs.make_search_link(sid, 4, q) == cs.make_search_link(sid, 4, q, dataset="")
+    assert cs.make_search_link(sid, 4, "peak") == "chatsearch:abcdef01:4?q=peak"
+    assert cs.parse_search_link("chatsearch:abcdef01:4?q=peak&ds=") == \
+        ("abcdef01", 4, ["peak"], None)
+    assert cs.parse_search_link("chatsearch:abcdef01:4?ds=a%0Ab") == ("abcdef01", 4, [], None)
+
+
+@pytest.mark.parametrize("ds", ["dsA", "測定 2026", "a&b=c", "x/y?z#w", "(paren)"])
+def test_open_dataset_link_roundtrip(ds):
+    href = cs.make_open_dataset_link(ds)
+    assert href.startswith("opendataset:")
+    assert not any(ch in href[len("opendataset:"):] for ch in " ()[]&?#/")
+    assert cs.parse_open_dataset_link(href) == ds
+
+
+def test_open_dataset_link_invalid():
+    for bad in ("opendataset:", "opendataset:%0A", "opendataset:a%00b", "chatsearch:x",
+                "http://x"):
+        assert cs.parse_open_dataset_link(bad) is None
