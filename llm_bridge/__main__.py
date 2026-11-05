@@ -145,9 +145,10 @@ _RECALL_WARNINGS = {
     "budget": ("the index update stopped at the time budget ({detail}); the rest continues "
                "with the next --update or chat-index update"),
     "cancelled": "the index update was cancelled",
-    "unreachable": "{dataset}: the dataset folder is not reachable; kept its index ({detail})",
-    "work_dir": "{dataset}: cannot resolve work_dir; kept its index ({detail})",
-    "scan": "{dataset}: cannot list the saved chats; kept its index ({detail})",
+    "unreachable": ("{dataset}: the dataset folder is not reachable; skipped "
+                    "(an existing index is kept) ({detail})"),
+    "work_dir": "{dataset}: cannot resolve work_dir; skipped (an existing index is kept) ({detail})",
+    "scan": "{dataset}: cannot list the saved chats; skipped (an existing index is kept) ({detail})",
     "write": "{dataset}: cannot write the index ({detail})",
     "unreadable": ("{dataset}: {detail} saved chat file(s) could not be read; "
                    "kept their previous index"),

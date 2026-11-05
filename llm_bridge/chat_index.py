@@ -949,8 +949,11 @@ class ChatIndex:
         def budget_over() -> bool:
             return deadline is not None and _monotonic() >= deadline
 
+        # 予算はグループの間でだけ見る（埋め込みの途中では止めない）。途中で止めると、予算より
+        # 大きいセッションがいつまでも公開されない。1 回の更新で少なくとも 1 グループは公開し、
+        # 予算を越えるのは最大 1 グループ分。利用者の cancel はバッチの間で止める。
         while k < len(order):
-            if budget_over():
+            if k > 0 and budget_over():
                 partial = True
                 break
             group: list[str] = []
@@ -973,15 +976,10 @@ class ChatIndex:
                         progress(name, base + d, total_new)
 
                 try:
-                    vecs = self.embedder.embed_documents(
-                        texts, progress=_prog,
-                        cancel=lambda: user_cancelled() or budget_over())
+                    vecs = self.embedder.embed_documents(texts, progress=_prog,
+                                                         cancel=user_cancelled)
                 except Cancelled:
-                    if user_cancelled():
-                        return DatasetReport(name, "skipped", "cancelled")
-                    k -= len(group)
-                    partial = True
-                    break
+                    return DatasetReport(name, "skipped", "cancelled")
                 vecs = np.asarray(vecs, dtype=np.float32)
                 if vecs.shape != (len(texts), self.dims):
                     raise RuntimeError(f"embedder returned shape {vecs.shape}")

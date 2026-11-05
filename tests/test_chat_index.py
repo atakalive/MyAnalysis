@@ -688,6 +688,24 @@ def test_budget_publishes_finished_sessions(tmp_path, emb, idx, monkeypatch):
         ["old 1", "old 2", "mid 1", "mid 2", "new 1", "new 2"])
 
 
+def test_budget_shorter_than_one_group_still_progresses(tmp_path, emb, idx, monkeypatch):
+    # 1 セッションの埋め込みが予算より長くても、1 回の更新で少なくとも 1 セッションは公開する
+    d = _register(tmp_path, "dsA")
+    sids = [f"{i:08x}" + "3" * 24 for i in range(3)]
+    for i, sid in enumerate(sids):
+        _chat(d, [("user", f"s{i} text {j}") for j in range(70)], sid=sid, updated=100.0 + i)
+    clock = [0.0]
+    monkeypatch.setattr(ci, "_monotonic", lambda: clock[0])
+    emb.after_batch = lambda: clock.__setitem__(0, clock[0] + 1.0)   # 4 件ごとに 1 秒
+    published = []
+    for _run in range(3):
+        dr = idx.update(budget_s=5).datasets[0]
+        published.append(dr.sessions)
+    assert published == [1, 2, 3]
+    assert idx.stale_summary() == {}
+    assert len(emb.calls) == 210                            # 捨てて埋め込み直した分は無い
+
+
 def test_budget_validation(idx):
     for bad in (0, -1, float("nan"), float("inf"), True):
         with pytest.raises(ValueError):
