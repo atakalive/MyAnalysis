@@ -13,6 +13,7 @@ from llm_backend.preflight import EngineStatus, check_engine
 
 # autouse fixture が差し替える前の本物（C-6 のテストで使う）。
 _REAL_CLAUDE_AUTH = preflight._claude_auth
+_REAL_CODEX_BINARY = preflight._codex_binary
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +26,8 @@ def _no_real_processes(monkeypatch):
     monkeypatch.setattr(preflight, "_pi_providers_from_authfile", lambda: None)
     # 実リポジトリの llm_backend/config.toml / models.toml を読まない。
     monkeypatch.setattr(preflight, "_claude_config", lambda: {})
+    monkeypatch.setattr(preflight, "_codex_config", lambda: {})
+    monkeypatch.setattr(preflight, "_codex_binary", lambda: ("missing", None, ""))
 
 
 def _tools(monkeypatch, *, node="v24.18.0", npm="11.16.0", present=("node", "npm")):
@@ -314,6 +317,8 @@ def test_note_keys_exist_in_every_catalog():
         "backend.status.note.offline_auth",
         "backend.status.note.openai_env_unset",
         "backend.status.note.vscode_ext",
+        "backend.status.note.codex_vscode",
+        "backend.status.note.codex_install",
         "backend.status.note.permission_mode_empty",
         "backend.status.note.claude_sub",
         "backend.status.note.claude_sub_token_bad",
@@ -628,3 +633,131 @@ def test_parse_list_models_pairs_in_output_order():
         ("github-copilot", "gpt-5.5"),
         ("openai-codex", "gpt-5.5"),
     ]
+
+
+# ---- Codex: extension-only acquisition and the effective configured binary ----
+
+
+@pytest.mark.parametrize("present", [(), ("node", "npm")])
+def test_codex_bundled_engine_has_no_npm_prerequisite_or_update(monkeypatch, present):
+    _tools(monkeypatch, present=present)
+    path = "/editor/user with spaces/codex"
+    monkeypatch.setattr(preflight, "_codex_binary", lambda: ("ok", path, "vscode"))
+    calls = []
+
+    def run(cmd, timeout):
+        calls.append(cmd)
+        return (0, "codex-cli 0.155.0" if "--version" in cmd else "Logged in")
+
+    monkeypatch.setattr(preflight, "_run", run)
+    status = check_engine("codex")
+    assert status.prereq_state == "n/a"
+    assert status.binary_state == status.auth_state == "ok"
+    assert status.blocking_stage is None
+    assert status.install is None
+    assert status.login == (path, "login")
+    assert "backend.status.note.codex_vscode" in dict(status.notes)
+    assert [c for c in calls if c[0] == path] == [
+        [path, "--version"], [path, "login", "status"]
+    ]
+
+
+@pytest.mark.parametrize("present", [(), ("node", "npm")])
+def test_missing_codex_offers_extension_without_blocking_on_npm(monkeypatch, present):
+    _tools(monkeypatch, present=present)
+    status = check_engine("codex")
+    assert status.prereq_state == "n/a"
+    assert status.blocking_stage == "binary"
+    assert "backend.status.note.codex_install" in dict(status.notes)
+    assert bool(status.install) == bool(present)
+    assert status.login is None
+
+
+def test_path_codex_keeps_its_cli_update_route(monkeypatch):
+    _tools(monkeypatch)
+    monkeypatch.setattr(preflight, "_codex_binary", lambda: ("ok", "/cli/codex", "path"))
+    monkeypatch.setattr(preflight, "_run", lambda *a: (0, "0.155.0"))
+    status = check_engine("codex")
+    assert status.install == ("npm", "i", "-g", "@openai/codex")
+    assert status.login == ("/cli/codex", "login")
+
+
+@pytest.mark.parametrize("result", [None, (1, "broken executable")])
+def test_codex_probe_failure_is_unknown_without_install_or_login(monkeypatch, result):
+    _tools(monkeypatch)
+    monkeypatch.setattr(preflight, "_codex_binary", lambda: ("ok", "/cli/codex", "path"))
+    calls = []
+
+    def run(cmd, timeout):
+        calls.append(cmd)
+        return result
+
+    monkeypatch.setattr(preflight, "_run", run)
+    status = check_engine("codex")
+    assert status.binary_state == "unknown"
+    assert status.install is status.login is None
+    assert status.auth_state == "unknown"
+    # Toolchain probes can run too; no authentication or model call follows failure.
+    assert [c for c in calls if c[0] == "/cli/codex"] == [["/cli/codex", "--version"]]
+
+
+def test_codex_status_uses_effective_merged_config(monkeypatch, tmp_path):
+    from llm_backend import codex
+    path = tmp_path / "configured codex.exe"
+    path.touch()
+    config = {"bin": str(path), "model": "custom"}
+    seen = []
+    monkeypatch.setattr(preflight, "_codex_config", lambda: config)
+    monkeypatch.setattr(preflight, "_codex_binary", _REAL_CODEX_BINARY)
+
+    def discover(backend):
+        seen.append(backend._config)
+        return codex._CodexBinary(str(path), "config")
+
+    monkeypatch.setattr(codex.CodexBackend, "_discover_binary_info", discover)
+    monkeypatch.setattr(preflight, "_run", lambda *a: (0, "0.155.0"))
+    status = check_engine("codex")
+    assert seen == [config]
+    assert status.binary == str(path)
+    assert status.login == (str(path), "login")
+    assert status.install is None
+
+
+@pytest.mark.parametrize("setting", ["config", "env"])
+def test_missing_explicit_codex_is_not_replaced_by_an_install(
+    monkeypatch, tmp_path, setting
+):
+    _tools(monkeypatch)
+    monkeypatch.setattr(preflight, "_codex_binary", _REAL_CODEX_BINARY)
+    missing = str(tmp_path / "missing-codex.exe")
+    if setting == "config":
+        monkeypatch.setattr(preflight, "_codex_config", lambda: {"bin": missing})
+    else:
+        monkeypatch.setenv("CODEX_BIN", missing)
+    status = check_engine("codex")
+    assert status.binary_state == "missing"
+    assert status.binary == missing
+    assert status.install is status.login is None
+
+
+def test_codex_extension_only_status_uses_real_discovery(monkeypatch, tmp_path):
+    from llm_backend import codex
+    _tools(monkeypatch, present=())
+    monkeypatch.setattr(preflight, "_codex_binary", _REAL_CODEX_BINARY)
+    monkeypatch.setattr(codex.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex.shutil, "which", lambda name: None)
+    monkeypatch.setattr(codex, "_bundled_target", lambda: "linux-x86_64")
+    monkeypatch.delenv("CODEX_BIN", raising=False)
+    path = tmp_path / ".vscode" / "extensions" / (
+        "openai.chatgpt-26.9.1-win32-x64"
+    ) / "bin" / "linux-x86_64" / "codex"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    path.chmod(0o755)
+    monkeypatch.setattr(preflight, "_run", lambda *a: (0, "codex-cli 0.155.0"))
+    status = check_engine("codex")
+    assert status.binary == str(path)
+    assert status.binary_state == status.auth_state == "ok"
+    assert status.prereq_state == "n/a"
+    assert status.install is None
+    assert status.login == (str(path), "login")

@@ -5,7 +5,8 @@ turn starts a fresh thread; later turns continue it with
 ``codex exec resume <thread_id>``. Events stream as JSONL on stdout
 (``--json``): ``thread.started`` carries the thread id, ``item.completed``
 carries assistant text / command runs, ``turn.completed`` carries token usage.
-Auth is shared with the interactive CLI via ``~/.codex`` (``codex login``).
+The VS Code extension's bundled engine and a standalone CLI share auth via
+``~/.codex`` (``codex login``).
 
 Approvals/sandbox: exec closes stdin after the prompt, so anything interactive
 would deadlock — the default is ``--dangerously-bypass-approvals-and-sandbox``
@@ -27,6 +28,8 @@ import collections
 import functools
 import json
 import os
+import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -34,6 +37,7 @@ import sys
 import threading
 import tomllib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
@@ -189,6 +193,80 @@ def sendable_effort(model: object, effort: object) -> str:
     return ev if levels is None or ev in levels else ""
 
 
+@dataclass(frozen=True)
+class _CodexBinary:
+    path: str
+    source: str  # config | env | path | vscode
+
+
+_EXTENSION_VERSION = re.compile(r"openai\.chatgpt-(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
+
+
+def _bundled_target() -> str | None:
+    os_part = {"win32": "windows", "darwin": "macos", "linux": "linux"}.get(sys.platform)
+    arch = {
+        "x86_64": "x86_64", "amd64": "x86_64", "x64": "x86_64",
+        "arm64": "aarch64", "aarch64": "aarch64",
+    }.get(platform.machine().lower())
+    return f"{os_part}-{arch}" if os_part and arch else None
+
+
+def _is_bundled_binary(path: str) -> bool:
+    """Recognize an extension binary, including an explicit path or symlink."""
+    try:
+        p = Path(path).resolve()
+        return (
+            p.name in ("codex", "codex.exe")
+            and p.parent.parent.name == "bin"
+            and _EXTENSION_VERSION.fullmatch(p.parents[2].name) is not None
+        )
+    except (OSError, RuntimeError, IndexError):
+        return False
+
+
+def _path_binary(command: str) -> str | None:
+    if sys.platform == "win32":
+        # Prefer runnable Windows commands over npm's extensionless bash shim.
+        for suffix in (".exe", ".cmd", ".bat"):
+            found = shutil.which(command + suffix)
+            if found:
+                return found
+    return shutil.which(command)
+
+
+def _bundled_binary() -> str | None:
+    """Find a host-compatible engine without caching its versioned path."""
+    target = _bundled_target()
+    if target is None:
+        return None
+    binname = "codex.exe" if target.startswith("windows-") else "codex"
+    home = Path.home()
+    roots = [
+        home / ".vscode" / "extensions",
+        home / ".vscode-insiders" / "extensions",
+        home / ".vscode-server" / "extensions",
+        home / ".cursor" / "extensions",
+        home / ".windsurf" / "extensions",
+    ]
+    candidates = []
+    for index, directory in enumerate(roots):
+        try:
+            for extension in directory.glob("openai.chatgpt-*"):
+                match = _EXTENSION_VERSION.fullmatch(extension.name)
+                if match is None:
+                    continue
+                binary = extension / "bin" / target / binname
+                try:
+                    if binary.is_file() and os.access(binary, os.X_OK):
+                        version = tuple(int(v) for v in match.groups())
+                        candidates.append((version, -index, str(binary)))
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return max(candidates)[2] if candidates else None
+
+
 class CodexBackend:
     name = "codex"
 
@@ -235,7 +313,12 @@ class CodexBackend:
         flags = ["--json", "--skip-git-repo-check"]
         sandbox = (config.get("sandbox_mode") or "").strip()
         if sandbox:
-            flags += ["--sandbox", sandbox]
+            if self._session_id:
+                # exec resume has no --sandbox option. Its config overrides
+                # accept sandbox_mode and apply it to the resumed turn.
+                flags += ["-c", f"sandbox_mode={sandbox}"]
+            else:
+                flags += ["--sandbox", sandbox]
         else:
             flags.append("--dangerously-bypass-approvals-and-sandbox")
         model = config.get("model", "")
@@ -418,32 +501,42 @@ class CodexBackend:
         return str(err or event.get("message") or "unknown error")
 
     def _discover_binary(self) -> str:
-        """Locate the codex CLI: config `bin` → env CODEX_BIN → PATH."""
-        configured = self._config.get("bin") or os.environ.get("CODEX_BIN") or "codex"
-        if (
-            os.path.isabs(configured)
-            or os.path.exists(configured)
-            or os.sep in configured
-            or "/" in configured
-            or "\\" in configured
-        ):
-            return configured
-        if sys.platform == "win32":
-            # npm puts an extension-less bash shim next to codex.cmd; which()
-            # can return the former, which CreateProcess can't run — prefer the
-            # runnable variants explicitly.
-            for cand in (configured + ".exe", configured + ".cmd", configured + ".bat"):
-                found = shutil.which(cand)
-                if found:
-                    return found
-        found = shutil.which(configured)
-        if found is None:
-            raise RuntimeError(
-                "codex not found in PATH. Install: npm i -g @openai/codex "
-                "(then `codex login`), or set [codex].bin in "
-                "llm_backend/config.toml (or the CODEX_BIN env var)."
-            )
-        return found
+        return self._discover_binary_info().path
+
+    def _discover_binary_info(self) -> _CodexBinary:
+        """Resolve config, environment, PATH, then an extension-bundled engine."""
+        configured = str(self._config.get("bin") or "").strip()
+        env_bin = os.environ.get("CODEX_BIN", "").strip()
+        command = configured or env_bin
+        if command:
+            source = "config" if configured else "env"
+            if (
+                os.path.isabs(command)
+                or os.path.exists(command)
+                or "/" in command
+                or "\\" in command
+            ):
+                # Preserve explicit paths, including a missing path: Popen reports
+                # that error. Never silently run a different engine.
+                found = command
+            else:
+                found = _path_binary(command)
+            if found:
+                return _CodexBinary(found, "vscode" if _is_bundled_binary(found) else source)
+            raise RuntimeError(f"Configured Codex executable not found: {command}")
+
+        found = _path_binary("codex")
+        if found:
+            return _CodexBinary(found, "vscode" if _is_bundled_binary(found) else "path")
+        found = _bundled_binary()
+        if found:
+            return _CodexBinary(found, "vscode")
+        raise RuntimeError(
+            "Codex engine not found. Install the Codex extension in VS Code "
+            "and sign in (no separate CLI installation required), or install "
+            "the Codex CLI and run codex login. You can also set [codex].bin "
+            "in llm_backend/config.toml or the CODEX_BIN environment variable."
+        )
 
     def _agent_home(self) -> Path:
         """A neutral working dir OUTSIDE the repo, with AGENTS.md injected.

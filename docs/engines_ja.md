@@ -11,7 +11,7 @@
 | Claude（VS Code 同梱エンジン）**推奨** | `claude`（`bin` 空） | `[claude_code]` | ○ | VS Code / Cursor / Windsurf の Claude Code 拡張にサインイン（見つからなければ PATH 上の `claude` を使う）。有料プラン（Pro / Max / Team / Enterprise）のアカウント。Windows では Git for Windows が要る（MyAnalysis のエージェントへの指示は Bash ツールを前提にしている。Git Bash が無いと Claude Code はフックを PowerShell で実行して失敗し、同期・ネットワークドライブ上への Write/Edit を止める仕組みが働かない） |
 | Claude（PATH の CLI） | `claude`（`bin` 指定） | `[claude_code]` | ○ | 公式インストーラー（Windows は PowerShell で `irm https://claude.ai/install.ps1 \| iex`、macOS / Linux は `curl -fsSL https://claude.ai/install.sh \| bash`。Node.js は要らない）か `npm i -g @anthropic-ai/claude-code` → `claude` でログイン。`bin` が空でも、拡張が見つからなければ PATH 上の `claude` を使う |
 | Claude（サブのアカウント） | `claude-sub` | `[claude_sub]` | ○ | 2 つ目の Claude のアカウントで `claude setup-token` を実行して作った長期トークン（ダイアログに貼る）。実行ファイルはメインと同じ。macOS ではログインキーチェーンに置く（→ [エンジン別の補足](#エンジン別の補足)） |
-| Codex CLI（OpenAI） | `codex` | `[codex]` | ○ | `npm i -g @openai/codex` → `codex login` |
+| Codex（VS Code 拡張 / CLI） | `codex` | `[codex]` | ○ | Codex 拡張にログイン（CLI・Node.js・npm の別途導入は不要）。PATH 上の Codex CLI も利用可 |
 | pi コーディングエージェント | `pi` | `[pi]` | ○ | Node.js 22.19+、pi 0.67.4 以上、`npm i -g @earendil-works/pi-coding-agent` → `pi` を起動して `/login`。Windows では Git Bash |
 | OpenAI 互換 HTTP | `openai` | `[openai-compat]` | ×（GUI 操作のみ） | `.env` の `OPENAI_BASE_URL` 等 |
 | モック（動作確認） | `mock` | — | × | 不要 |
@@ -123,6 +123,8 @@ macOS で nodejs.org のインストーラーの Node.js を使うと、`npm i -
   - Claude の設定（`~/.claude/settings.json`・作業フォルダとその上の `.claude/settings*.json`・管理者の設定・ポリシーのレジストリ）に `apiKeyHelper` か `env` の認証の変数（`ANTHROPIC_API_KEY` など）があると、Claude サブは起動しない。それらはトークンより先に使われ、メインや別の認証で応答してしまうため。
   - 状況ウィンドウの認証の ✓ はトークンの形と設定を見るだけ。トークンが有効か（期限切れ・取り消し）は **疎通確認** で確かめる。
 - **Codex**: ツールの実行は逐次表示されるが、応答の本文は一度にまとめて表示される。
+  - 実行ファイルは `[codex].bin` → `CODEX_BIN` → PATH → 拡張同梱版の順。明示指定が無効でも別のエンジンに切り替えない。同梱版は VS Code / Insiders / Remote・Cursor・Windsurf の標準の拡張配置先から、この OS/CPU に合う最新版を検出する。拡張更新後は次の送信・**再確認**から新しい実行ファイルを使う。検出した絶対パスは設定へ保存しない。
+  - 認証は同じユーザー環境・`CODEX_HOME`（既定 `~/.codex`）の拡張と共有する。同梱版の更新はエディターの拡張機能から行う（状況画面に npm の **インストール / 更新** は出ない）。未導入時も拡張を入れればよく、Node.js/npm は必須ではない。
 - **pi**: プロバイダの候補は `openai-codex` / `github-copilot` / `llama.cpp`（ローカル）。effort は `--thinking` として渡す（→ [モデルの指定](#モデルの指定)）。Windows では bash（Git Bash 推奨）が無いとツール実行が失敗する。図を見て判断させるには、画像入力対応のモデルが必要。
 - **OpenAI 互換 HTTP**（Ollama / LM Studio / llama.cpp server 等）:
   - `.env` に `OPENAI_BASE_URL`（`/v1` まで含める。例 `http://localhost:11434/v1`）、必要なら `OPENAI_API_KEY`。モデル名は `models.toml` の `[openai-compat].model`（無ければ `OPENAI_MODEL`）。

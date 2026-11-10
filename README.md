@@ -113,15 +113,16 @@ Set it up in step 3 of [QuickStart](#quickstart).
 - Claude is recommended (it is the most tested). "Claude (VS Code bundled engine)" uses the `claude` command on PATH when the VS Code extension is not found.
 - Without VS Code, install the `claude` command with Claude Code's official installer (no Node.js needed): on Windows, `irm https://claude.ai/install.ps1 | iex` in PowerShell; on macOS / Linux, `curl -fsSL https://claude.ai/install.sh | bash` in Terminal. Check that `claude --version` works in a newly opened terminal, then run `claude` and log in. Then launch MyAnalysis again (PATH is read at launch, so on macOS / Linux run `run.sh` from a new Terminal). Keep the engine as "Claude (VS Code bundled engine)".
 - Claude sub (a second Claude account) can also be selected. Paste a token made with `claude setup-token` into the settings dialog (→ [docs/engines_ja.md](docs/engines_ja.md)).
-- Claude Code, Codex CLI, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
-- Only Claude Code / Codex CLI / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
+- With the VS Code Codex extension installed and signed in, select "Codex (VS Code extension / CLI)". No separate Codex CLI, Node.js, or npm installation is needed. MyAnalysis uses a Codex command on PATH first, then looks for an extension-bundled engine.
+- Claude Code, Codex, and pi are meant to be used by logging in to each engine (a subscription to the respective service, or a local llama.cpp server through pi). Pay-per-use API keys are not the intended path and are untested; the app has no API-key setting (only the OpenAI-compatible HTTP engine reads `OPENAI_API_KEY` from `.env`).
+- Only Claude Code / Codex / pi can run analyses (execute Python). The OpenAI-compatible HTTP engine can only operate the GUI, such as opening tabs.
 - **What to put in the model field**
   - Claude / Codex: can be left empty (that engine's default model). To specify one for Claude, use an alias such as `opus` / `sonnet` / `haiku`. For Claude, the result of **Connectivity check**, `OK (…s / <model name>)`, shows the official model ID, which can be used as is. Both Claude and Codex have suggestions in the dialog, and **Fetch models** in **Settings → Backend status…** adds the newer IDs the engine knows to the suggestions.
   - pi: choose the **Provider** (`openai-codex` / `github-copilot` / `llama.cpp`); the model is an ID shown by `pi --list-models` (the dialog has suggestions; **Fetch models** adds more).
   - OpenAI-compatible HTTP: the server-side model name (the names shown by `ollama list` for Ollama). When empty, `OPENAI_MODEL` in `.env` is used, and if that is also unset, `gpt-4o-mini`, which fails with Ollama and the like.
 - Effort (how much it thinks) can be chosen in **Settings → Backend / model settings…** (Claude / Codex / pi; also per chat). Usually leave it at "Default" (→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)).
 
-To use an engine other than Claude (Codex CLI / pi / an OpenAI-compatible HTTP server such as Ollama), to change the model per chat, or to write the configuration file by hand, read [docs/engines_ja.md](docs/engines_ja.md).
+To use an engine other than Claude (Codex / pi / an OpenAI-compatible HTTP server such as Ollama), to change the model per chat, or to write the configuration file by hand, read [docs/engines_ja.md](docs/engines_ja.md).
 
 ---
 

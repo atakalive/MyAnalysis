@@ -64,7 +64,13 @@ Chat-dock LLM access goes through the `llm_backend/` package. Backends implement
 the `LLMBackend` Protocol in `llm_backend/base.py`; `get_backend()` selects one
 by name. Five backends ship: `claude` (VS Code Claude Code engine), `openai`
 (OpenAI-compatible HTTP), `mock` (smoke test; ignores the input, but fetches the crude-oil price from stooq.com), `pi` (pi-coding-agent
-subprocess), `codex` (OpenAI Codex CLI subprocess).
+subprocess), `codex` (Codex subprocess, from PATH or the VS Code extension).
+
+Codex resolves `[codex].bin` → `CODEX_BIN` → PATH → the editor extension's bundled
+engine, without persisting a versioned extension path. Explicit overrides never fall
+back to another executable. `_discover_binary_info` carries the acquisition source
+so preflight uses the same merged settings and resolver. Extension-only use needs
+no separate CLI, Node.js, or npm; its update route is the editor extension manager.
 
 **No local persistence (all backends).** Every backend's system prompt appends
 the shared `NO_LOCAL_PERSISTENCE` rule from `llm_backend/base.py`: the agent must
@@ -130,7 +136,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
   driver, **independent of which engine is currently selected**. Detection lives in
   Qt-free [preflight.py](llm_backend/preflight.py) (`check_all()`), also exposed as
   `python -m llm_bridge engines`. Stages are **0. prereq (node+npm) → 1. installed →
-  2. auth**, and only the first blocking stage's button is shown — offering "install"
+  2. auth** (Codex's bundled engine has no node/npm prerequisite), and only the first blocking stage's button is shown — offering "install"
   when npm is missing would just fail.
   - **Nothing here bills.** No LLM turn runs on open/re-check; the per-row 疎通確認
     button (`ping.ping_backend`) is the only paid path and only fires on click. There is

@@ -577,3 +577,28 @@ def test_recheck_is_disabled_while_busy_and_while_probing(no_probe, no_start,
     assert not w._refresh_btn.isEnabled()
     w._forget(w._probe)
     assert w._refresh_btn.isEnabled()
+
+
+def test_bundled_codex_shows_login_without_npm_update(no_probe, parent_widget):
+    window = _win(no_probe, parent_widget)
+    window._paint(_st(
+        "codex", prereq_state="n/a", binary_state="ok", auth_state="ok",
+        login=("/editor/codex", "login"),
+        notes=(("backend.status.note.codex_vscode", {}),),
+    ))
+    row = window._rows["codex"]
+    assert row["action"].isHidden()
+    assert not row["login"].isHidden()
+    assert not row["ping"].isHidden()
+    assert row["note"].text() == no_probe.tr("backend.status.note.codex_vscode")
+
+
+def test_posix_login_command_quotes_extension_path_with_spaces(
+    no_probe, parent_widget, monkeypatch
+):
+    import shlex
+    window = _win(no_probe, parent_widget)
+    monkeypatch.setattr(no_probe.sys, "platform", "darwin")
+    command = ["/Users/user with spaces/.vscode/extensions/codex", "login"]
+    window._launch_login(command)
+    assert shlex.join(command) in window._log.toPlainText()

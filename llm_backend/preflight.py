@@ -399,12 +399,27 @@ def _claude_binary(bin_value: str) -> tuple[str, str | None]:
     return ("ok", path) if _resolvable(path) else ("missing", None)
 
 
-def _codex_binary() -> tuple[str, str | None]:
+def _codex_config() -> dict:
+    """Use the same merged settings as the Codex backend factory."""
+    from llm_backend import backend_config
+    from llm_backend.model_settings import merged_settings
+    return merged_settings("codex", backend_config().get("codex", {}))
+
+
+def _codex_binary() -> tuple[str, str | None, str]:
+    from llm_backend.codex import CodexBackend
+    config = _codex_config()
+    source = (
+        "config" if str(config.get("bin") or "").strip()
+        else "env" if os.environ.get("CODEX_BIN", "").strip() else ""
+    )
     try:
-        from llm_backend.codex import CodexBackend
-        return "ok", CodexBackend({})._discover_binary()
-    except Exception:
-        return "missing", None
+        found = CodexBackend(config)._discover_binary_info()
+    except RuntimeError:
+        return "missing", None, source
+    except OSError:
+        return "unknown", None, source
+    return ("ok" if _resolvable(found.path) else "missing"), found.path, found.source
 
 
 def _claude_config() -> dict:
@@ -555,25 +570,34 @@ def _check_engine(engine_id: str) -> EngineStatus:
         )
 
     if engine_id == "codex":
-        pre_state, pre_detail, notes = _prereq(tc, None)
-        state, path = _codex_binary()
+        state, path, source = _codex_binary()
+        pre_state, pre_detail, notes = "n/a", "", ()
+        npm_ready = _prereq(tc, None)[0] == "ok"
+        if source == "vscode":
+            notes = (("backend.status.note.codex_vscode", {}),)
+        elif source == "path":
+            pre_state, pre_detail, notes = _prereq(tc, None)
+        elif not source:
+            # The extension route does not require Node/npm, even when neither
+            # engine is installed. npm remains an optional CLI acquisition route.
+            notes = (("backend.status.note.codex_install", {}),)
         ver = None
         auth_state, auth_detail = "unknown", ""
         if state == "ok" and path:
             r = _run([path, "--version"], _VERSION_TIMEOUT)
-            if r is None:
+            if r is None or r[0] != 0:
                 state = "unknown"
-            elif r[0] == 0:
+            else:
                 ver = _parse_version(r[1])
-            if state == "ok":
                 auth_state, auth_detail = _codex_auth(path)
         return EngineStatus(
             engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail, notes=notes,
             install=(_NPM, "i", "-g", "@openai/codex")
-            if state in ("missing", "ok") and pre_state == "ok" else None,
-            login=(path or "codex", "login") if state == "ok" else None,
+            if state in ("missing", "ok") and source in ("", "path") and npm_ready
+            else None,
+            login=(path, "login") if state == "ok" and path else None,
         )
 
     if engine_id == "openai-http":

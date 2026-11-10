@@ -384,3 +384,49 @@ def test_session_following_global_effort_with_other_model(
     assert _effort_flag(fake_popen.last.cmd) is None
     _run(build_backend("codex", engines.session_settings(codex, "a", "", effort="")))
     assert _effort_flag(fake_popen.last.cmd) == "model_reasoning_effort=ultra"
+
+
+def test_extension_update_is_rediscovered_without_losing_conversation(
+    fake_popen, tmp_path, monkeypatch
+):
+    home = tmp_path / "user with spaces"
+    monkeypatch.setattr(codex_mod.Path, "home", lambda: home)
+    monkeypatch.setattr(codex_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(codex_mod, "_bundled_target", lambda: "windows-x86_64")
+    monkeypatch.delenv("CODEX_BIN", raising=False)
+
+    def install(version):
+        path = home / ".vscode" / "extensions" / (
+            f"openai.chatgpt-{version}-win32-x64"
+        ) / "bin" / "windows-x86_64" / "codex.exe"
+        path.parent.mkdir(parents=True)
+        path.touch()
+        path.chmod(0o755)
+        return path
+
+    old = install("26.9.1")
+    backend = CodexBackend({"cwd": str(tmp_path / "agent")})
+    fake_popen.events = _TURN
+    _run(backend)
+    assert fake_popen.last.cmd[0] == str(old)
+    newer = install("26.10.1")
+    old.unlink()
+    _run(backend, "continue")
+    assert fake_popen.last.cmd[:3] == [str(newer), "exec", "resume"]
+    assert "th-123" in fake_popen.last.cmd
+    assert backend._config == {"cwd": str(tmp_path / "agent")}
+    assert backend.last_usage["input"] == 1000
+
+
+def test_resumed_sandbox_uses_config_supported_by_extension(fake_popen, tmp_path):
+    fake_popen.events = _TURN
+    backend = _backend(tmp_path, sandbox_mode="read-only")
+    _run(backend)
+    assert "--sandbox" in fake_popen.last.cmd
+    _run(backend, "continue")
+    cmd = fake_popen.last.cmd
+    assert cmd[1:3] == ["exec", "resume"]
+    assert "--sandbox" not in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    index = cmd.index("sandbox_mode=read-only")
+    assert cmd[index - 1] == "-c"

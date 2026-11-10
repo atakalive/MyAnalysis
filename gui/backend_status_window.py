@@ -12,6 +12,7 @@ LLM 推論は 1 回も走らない。実際に 1 ターン投げる疎通確認�
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -384,7 +385,7 @@ class BackendStatusWindow(QWidget):
         非 Windows では端末エミュレータを推測せず、コマンドを表示するに留める。
         """
         if sys.platform != "win32":
-            self._append(tr("backend.status.login_manual", cmd=" ".join(cmd)))
+            self._append(tr("backend.status.login_manual", cmd=shlex.join(cmd)))
             return
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         try:

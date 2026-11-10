@@ -111,15 +111,16 @@ macOS / Linux での動作は未検証。インストールは [QuickStart](#qui
 - 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
 - VS Code を使わないときは、Claude Code の公式インストーラーで `claude` コマンドを入れる（Node.js は要らない）。Windows は PowerShell で `irm https://claude.ai/install.ps1 | iex`、macOS / Linux はターミナルで `curl -fsSL https://claude.ai/install.sh | bash`。新しく開いた端末で `claude --version` が動くことを確かめてから、`claude` を実行してログインする。そのあと MyAnalysis を起動し直す（PATH は起動したときに読むので、macOS / Linux は新しいターミナルから `run.sh`）。エンジンは「Claude（VS Code 同梱エンジン）」のままでよい。
 - Claude サブ（2 つ目の Claude のアカウント）も選べる。`claude setup-token` で作ったトークンを設定ダイアログに貼る（→ [docs/engines_ja.md](docs/engines_ja.md)）。
-- Claude Code / Codex CLI / pi は、それぞれのエンジンにログインして使う前提（各サービスのサブスクリプション、または pi のローカル llama.cpp）。API キーでの従量課金利用は想定しておらず、動作確認もしていない。アプリに API キーの設定欄は無い（OpenAI 互換 HTTP だけは `.env` の `OPENAI_API_KEY` を使う）。
-- 解析（Python の実行）ができるのは Claude Code / Codex CLI / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
+- Codex 拡張を導入してログイン済みなら「Codex（VS Code 拡張 / CLI）」を選ぶだけで使える。Codex CLI・Node.js・npm の別途導入は不要。PATH 上の Codex を優先し、見つからなければ拡張同梱版を自動検出する。
+- Claude Code / Codex / pi は、それぞれのエンジンにログインして使う前提（各サービスのサブスクリプション、または pi のローカル llama.cpp）。API キーでの従量課金利用は想定しておらず、動作確認もしていない。アプリに API キーの設定欄は無い（OpenAI 互換 HTTP だけは `.env` の `OPENAI_API_KEY` を使う）。
+- 解析（Python の実行）ができるのは Claude Code / Codex / pi。OpenAI 互換 HTTP は、タブを開くなどの GUI 操作しかできない。
 - **モデル欄に入れるもの**
   - Claude・Codex: 空でよい（そのエンジンの既定モデル）。Claude で指定するなら `opus` / `sonnet` / `haiku` などのエイリアス。Claude では **疎通確認** の結果 `OK（…秒 / <モデル名>）` に正式なモデル ID が出るので、それをそのまま使える。Claude・Codex ともダイアログに候補があり、**設定 → バックエンドの状況…** の **モデル取得** で、エンジンが知っている新しい ID を候補に追加できる。
   - pi: **プロバイダ**（`openai-codex` / `github-copilot` / `llama.cpp`）を選び、モデルは `pi --list-models` に出る ID（ダイアログに候補あり。**モデル取得** でも追加できる）。
   - OpenAI 互換 HTTP: サーバー側のモデル名を入れる（Ollama なら `ollama list` に出る名前）。空だと `.env` の `OPENAI_MODEL`、それも無ければ `gpt-4o-mini` になり、Ollama などでは失敗する。
 - effort（考える量）は **設定 → バックエンド/モデル設定…** で選べる（Claude・Codex・pi。チャットごとにも変えられる）。通常は「既定」のままでよい（→ [docs/engines_ja.md](docs/engines_ja.md#モデルの指定)）。
 
-Claude 以外のエンジン（Codex CLI / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
+Claude 以外のエンジン（Codex / pi / Ollama などの OpenAI 互換 HTTP）を使うとき、チャットごとにモデルを変えるとき、設定ファイルを手で書くときは [docs/engines_ja.md](docs/engines_ja.md) を読む。
 
 ---
 
