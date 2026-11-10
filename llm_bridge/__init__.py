@@ -816,6 +816,13 @@ def _chat_show_verb(window, *, sid, start=0, end=None, char_offset=0, max_chars=
         max_chars=_int_arg(max_chars, "max_chars"), raw=_flag(raw))
 
 
+def _setup_readiness(window, setup_token=None):
+    import os
+    if setup_token is not None and setup_token != os.environ.get("MYANALYSIS_STARTUP_TOKEN"):
+        raise LookupError("Readiness request belongs to another process")
+    return {"open": list(window.open_dataset_names()), "active": window.current_dataset}
+
+
 def _rewire_window(window) -> None:
     """(Re)register the window-tier verbs + session saver.
 
@@ -845,8 +852,7 @@ def _rewire_window(window) -> None:
     # Top-level "open datasets" layer verbs (Issue #51).
     window.register_command(
         "list-open-datasets",
-        lambda: {"open": list(window.open_dataset_names()),
-                 "active": window.current_dataset},
+        lambda setup_token=None: _setup_readiness(window, setup_token),
     )
     _set_active_ds = lambda name: _do_set_active_dataset(window, name)  # noqa: E731
     window.register_command("set-active-dataset", _set_active_ds)

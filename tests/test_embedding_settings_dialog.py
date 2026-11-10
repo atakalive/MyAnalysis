@@ -121,7 +121,7 @@ def world(monkeypatch):
     monkeypatch.setattr(em, "missing_packages", lambda: list(w.deps))
     monkeypatch.setattr(em, "install", _unexpected("install"))
     monkeypatch.setattr(em, "uninstall", _unexpected("uninstall"))
-    monkeypatch.setattr(em, "install_packages", _unexpected("install_packages"))
+    monkeypatch.setattr(em, "install_packages_worker", _unexpected("install_packages"))
     monkeypatch.setattr(ci, "status", w.status)
     monkeypatch.setattr(ci, "release_embedder", lambda: w.calls.append(("release",)))
     monkeypatch.setattr(ci, "clear", w.clear)
@@ -213,7 +213,7 @@ def test_install_packages_then_refresh(world, monkeypatch):
         seen["msg"] = dlg.message_text()
         world.deps = []
         return em.InstallResult(True)
-    monkeypatch.setattr(em, "install_packages", fake)
+    monkeypatch.setattr(em, "install_packages_worker", fake)
     dlg, calls = _dialog()
     dlg._on_install()
     assert seen["msg"] == tr("chat.recall.progress.pip", line="Collecting onnxruntime")
@@ -226,11 +226,11 @@ def test_install_packages_then_refresh(world, monkeypatch):
 
 def test_install_packages_restart_and_failure(world, monkeypatch):
     world.deps = ["onnxruntime"]
-    monkeypatch.setattr(em, "install_packages", lambda p, c: em.InstallResult(True))
+    monkeypatch.setattr(em, "install_packages_worker", lambda p, c: em.InstallResult(True))
     dlg, _ = _dialog()
     dlg._on_install()
     assert dlg.message_text() == tr("chat.recall.done.deps_restart")    # 入れたのに見えない
-    monkeypatch.setattr(em, "install_packages", lambda p, c: em.InstallResult(False, "pip", "boom"))
+    monkeypatch.setattr(em, "install_packages_worker", lambda p, c: em.InstallResult(False, "pip", "boom"))
     dlg._on_install()
     assert dlg.message_text() == tr("chat.recall.error.pip", message="boom")
     dlg.deleteLater()

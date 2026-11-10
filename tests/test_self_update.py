@@ -222,3 +222,17 @@ def test_python_for_pip_prefers_console_python(tmp_path, monkeypatch):
     assert SU.python_for_pip() == str(tmp_path / "pythonw.exe")
     monkeypatch.setattr(SU.sys, "executable", str(tmp_path / "python3"))
     assert SU.python_for_pip() == str(tmp_path / "python3")
+
+
+def test_detached_update_worker_fast_forwards_local_repo(user, hub, monkeypatch):
+    """The GUI worker performs real Git operations without contacting GitHub."""
+    from pathlib import Path
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
+    bare, dev, before = hub
+    after = publish(bare, dev, "f.txt", "worker update\n", "worker update")
+    (user / "datasets.local.json").write_text("private", encoding="utf-8")
+    result = SU.run_update_worker(user, running=before, url=str(bare))
+    assert result.status == "done", result.output
+    assert result.before == before and result.after == after and result.pip is None
+    assert read_head(user) == after
+    assert (user / "datasets.local.json").read_text() == "private"

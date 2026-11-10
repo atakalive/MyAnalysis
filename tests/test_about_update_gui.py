@@ -230,7 +230,7 @@ def upd(win, qapp, monkeypatch):
         state["asks"].append(text)
         return state["answer"]
 
-    monkeypatch.setattr(U.self_update, "run_update", run_update)
+    monkeypatch.setattr(U.self_update, "run_update_worker", run_update)
     monkeypatch.setattr(U, "show_message", show_message)
     monkeypatch.setattr(U, "ask_restart", ask_restart)
     monkeypatch.setattr(U, "read_commit_time", lambda repo, commit: None)
@@ -432,7 +432,7 @@ def test_emit_after_the_window_is_gone(qapp, monkeypatch):
     from PySide6.QtWidgets import QMainWindow
 
     from gui import updater as U
-    monkeypatch.setattr(U.self_update, "run_update",
+    monkeypatch.setattr(U.self_update, "run_update_worker",
                         lambda repo, running=None, progress=None: UpdateResult("done"))
     host = QMainWindow()
     updater = U.SelfUpdater(host)

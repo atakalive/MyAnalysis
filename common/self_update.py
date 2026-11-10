@@ -17,7 +17,7 @@
 4. 動いているコードの HEAD（``running``。起動時の HEAD、分からなければ手順の前の HEAD）と更新後の
    HEAD の間で ``requirements.txt`` が変わっていれば ``pip install -r requirements.txt``。起動時の
    HEAD を基準にするので、pip が失敗した後や再起動を後にした後にもう一度押すと、pip をやり直す。
-   版を固定していないので、入っているパッケージは上げず、足りないものだけが入る。
+   通常の pip の依存解決を使う。セットアップ時の既存版固定・wheel 限定とは別の方針。
 
 反映（再起動）は GUI が既存の Tier 4（``HotReloadController.restart``）で行う。
 """
@@ -70,9 +70,24 @@ def run_update(repo, *, running: str | None = None, url: str = UPDATE_URL,
     running は動いているコードの HEAD（pip の要否の基準）。progress は pip に入るときに
     ``"pip"`` で呼ぶ（呼ぶのは実行しているスレッド）。url / branch はテストが手元の bare を渡す。"""
     try:
-        return _run_update(Path(repo), running, url, branch, progress)
+        from installer.core import mutation_lock, check_children
+        with mutation_lock(repo):
+            check_children()
+            return _run_update(Path(repo), running, url, branch, progress)
     except Exception as e:  # noqa: BLE001 — 何があっても結果で返す
         return UpdateResult("failed", stage="fetch", output=f"{type(e).__name__}: {e}")
+
+
+def run_update_worker(repo, *, running=None, url=UPDATE_URL, branch=UPDATE_BRANCH, progress=None):
+    """GUI entry: the worker keeps the mutation lock if the window closes."""
+    from installer.tasks import monitor
+    try:
+        def notify(text):
+            if progress and "pip" in text:
+                progress("pip")
+        return UpdateResult(**monitor("update", repo, progress=notify, running=running, url=url, branch=branch))
+    except Exception as exc:
+        return UpdateResult("failed", stage="fetch", output=str(exc))
 
 
 def _run_update(repo: Path, running: str | None, url: str, branch: str,
@@ -121,7 +136,7 @@ def _failed(stage: str, branch: str | None, before: str, res: CommandResult) -> 
 
 def _requirements_changed(repo: Path, base: str, after: str) -> bool:
     """base と after の間で requirements.txt が変わったか。git diff が 0 以外（差分あり・base が
-    手元に無いなど）は変わったとみなす（pip は入っているものを上げないので、余計に走っても害が無い）。"""
+    手元に無いなど）は変わったとみなす。確認に失敗した場合も依存追加を見逃さない。"""
     res = git.run_git(repo, ["diff", "--quiet", base, after, "--", "requirements.txt"],
                       LOCAL_TIMEOUT_S)
     return res.returncode != 0

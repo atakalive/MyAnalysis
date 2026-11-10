@@ -376,7 +376,7 @@ class EmbeddingSettingsDialog(QDialog):
         cancel = self._cancel
         if r.deps_missing:
             def work():
-                res = embed_model.install_packages(self._emit_line, cancel.is_set)
+                res = embed_model.install_packages_worker(self._emit_line, cancel.is_set)
                 self._emit_finished("deps", res)
             self._start("deps", work)
             return

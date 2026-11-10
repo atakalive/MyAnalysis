@@ -16,43 +16,27 @@ The detailed documents under `docs/` are available in Japanese only.
 
 ## QuickStart
 
-**Prerequisites**:
-- **OS**: Windows 11, or macOS (untested). For Linux, read [macOS / Linux](#macos--linux).
-- **Python 3.11 or later**: on Windows, the python.org build (tested with 3.12). On macOS, the python.org build or Homebrew (the `python3` that comes with macOS is 3.9 and cannot be used).
-- **Git**:
-  - Windows: Git for Windows. Besides clone and update, it provides Git Bash, which Claude Code runs commands with. Without Git Bash, the safeguard that stops the agent from writing files directly on sync or network drives does not work.
-  - macOS: run `xcode-select --install` in Terminal and wait for the installation to finish (it installs Git).
-- **Claude Code**: signed in with an account on a paid plan (Pro / Max / Team / Enterprise). The free plan cannot use it. Either the Claude Code extension for VS Code, or the `claude` command installed with the official installer (→ [AI engines](#ai-engines)). To use another engine, also see [AI engines](#ai-engines).
+**Supported OS**: Windows 11 x64; macOS 14.4+ (Intel / Apple Silicon); Ubuntu 24.04+ or Debian 12+ (amd64). macOS GUI testing is pending.
+
+**AI engine**: an account and authentication for your chosen service are required. Claude Code needs a paid plan. Install missing engines through **Settings → Backend status…** in the app (→ [AI engines](#ai-engines)).
 
 > [!WARNING]
 > The agent runs commands with your user privileges, without asking for confirmation. Your requests and the data it reads are sent to the engine's provider. → [Security](#security)
 
-1. **Install**: put it somewhere that is not a sync folder such as OneDrive or iCloud.
-   - **Windows**: run in a Command Prompt (Win+R → `cmd`) opened after installing Python and Git (a window that was already open before cannot find `git` or `py`).
+1. **Install**: download your OS's file from [Releases](https://github.com/atakalive/MyAnalysis/releases/latest) and open it.
 
-     ```bat
-     cd /d %USERPROFILE%
-     git clone https://github.com/atakalive/MyAnalysis.git
-     cd MyAnalysis
-     py -3 -m venv .venv
-     .venv\Scripts\python -m pip install -r requirements.txt
-     ```
+   | OS | File and action |
+   |---|---|
+   | Windows | Double-click `setup.bat` |
+   | macOS | Install `MyAnalysis.pkg`, then open **MyAnalysis** in Applications |
+   | Ubuntu / Debian | Install `MyAnalysis.deb` with the graphical package installer, then open **MyAnalysis** from the application menu |
 
-     If `py` is missing (Microsoft Store Python), use `python -m venv .venv` instead.
-   - **macOS**: run in Terminal (Applications → Utilities). First check with `python3 --version` that it is 3.11 or later (if it says 3.9, check that the Terminal was opened after installing Python, or call it with the version, such as `python3.12`).
+   A terminal shows progress on first launch. Usable Python, Git, checkouts and packages are reused; only missing components are installed. Windows uses python.org Python, never Microsoft Store Python. Complete any OS installer or authentication dialog. Installing the `.pkg`/`.deb` and preparing the app as your normal user are two separate stages.
 
-     ```sh
-     cd ~
-     git clone https://github.com/atakalive/MyAnalysis.git
-     cd MyAnalysis
-     python3 -m venv .venv
-     .venv/bin/python -m pip install -r requirements.txt
-     ```
+   macOS packages are unsigned: if blocked, allow this specific file in **System Settings → Privacy & Security → Open Anyway**. If Windows SAC or organizational policy blocks execution, read its reason and use the [detailed installation steps](#detailed-installation). OS protection settings are not changed automatically.
 
-     - Do not put it under `~/Desktop` or `~/Documents` if iCloud syncs "Desktop & Documents", or under `~/Library/CloudStorage` (where cloud storage apps such as OneDrive and Dropbox keep their folders). Starting with `cd ~` as above puts it directly under your home folder (`~/MyAnalysis`).
-     - On macOS, MyAnalysis uses the HostName (if set) or the local host name (System Settings → General → Sharing) as this PC's name. It does not change with the network. If you renamed the Mac, its name got a "-2", or you want to fix the name, run `sudo scutil --set HostName <name>` (letters, digits, and `-`).
+2. **Launch**: setup opens the GUI when finished. Afterwards use **MyAnalysis** in the Windows Start menu, macOS Applications, or Linux application menu. Keep the terminal open on macOS / Linux. The UI starts in English (Japanese: **Settings → Language / 言語 → 日本語**). If no window appears, see [Troubleshooting](#troubleshooting).
 
-2. **Launch**: on Windows, double-click `run.bat` in the `MyAnalysis` folder (no need to activate the venv). On macOS, run `./run.sh` in the same Terminal (from then on, `~/MyAnalysis/run.sh` in Terminal). The app runs inside the Terminal, so keep the Terminal open while you use it. If it fails to start, the reason is shown in the Terminal. The UI starts in English (to switch to Japanese: **Settings → Language / 言語 → 日本語**). If no window appears → [Troubleshooting](#troubleshooting)
 3. **AI engine**: open **Settings → Backend / model settings…** and choose **Claude (VS Code bundled engine)** under "Engine (how to run)". The model field can be left empty. Press **Connectivity check**; when it shows `OK (…s / <model name>)`, press **Apply**. If it shows "Failed", check that you are signed in to the Claude Code extension in VS Code (or the `claude` command) with an account on a paid plan. On the second and later PCs that use [R2 config sync](docs/config_sync_ja.md), first read [the section for the second and later PCs](docs/config_sync_ja.md#2-台目以降).
 4. **Dataset**: choose the folder with your measurement data in **File → New dataset**. The folder name is filled in as the name; change it if it contains symbols or starts with `-` (→ [Datasets](#datasets)). When registration finishes, the dataset opens.
 5. **Ask**: type something like "describe what is in this dataset" or "plot the relationship between `<column A>` and `<column B>`" in the chat pane on the right and press **Ctrl+Enter** (**⌘+Return** on macOS). A reply can take from tens of seconds to a few minutes, and figures open in tabs on the left. If you see `[error: …]` (`[エラー: …]` in the Japanese UI) → [Troubleshooting](#troubleshooting)
@@ -63,6 +47,7 @@ The detailed documents under `docs/` are available in Japanese only.
 ## Contents
 
 - [Installation and launch](#installation-and-launch)
+- [Detailed installation](#detailed-installation)
 - [AI engines](#ai-engines)
 - [Datasets](#datasets)
 - [Usage](#usage)
@@ -85,14 +70,14 @@ The detailed documents under `docs/` are available in Japanese only.
 - A copy installed with GitHub's **Download ZIP** can be launched, but **Help → Update MyAnalysis** does not work because there is no `.git`. Install with `git clone`.
 - To update by hand, close the app, run `git pull` and then `.venv\Scripts\python -m pip install -r requirements.txt` (`.venv/bin/python` on macOS / Linux), and launch again.
 
-- If `activate` fails in PowerShell, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` or use Command Prompt.
+- If `activate` fails in PowerShell, use Command Prompt or call `.venv\Scripts\python` directly.
 - To open TIFF images, also run `.venv\Scripts\python -m pip install tifffile` (`.venv/bin/python` on macOS / Linux).
 - Package versions are not pinned. If something does not work, match the tested versions (Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2 / Pillow 10.3.0. These are the versions for Python 3.12).
 - To try the screens without data, run `python tool.py --demo`.
 
 ### macOS / Linux
 
-macOS / Linux are untested. To install, follow the macOS steps in step 1 of [QuickStart](#quickstart).
+See the [validation matrix](docs/installer-validation.md) for OS testing status and [detailed installation](#detailed-installation) for terminal setup.
 
 - **Launch**: launch with `./run.sh`. `run.sh` uses `.venv/bin/python` and keeps the bytecode (`__pycache__`) in the repository's `data/pycache`. Running `.venv/bin/python tool.py` directly creates `__pycache__` inside a sync folder when you open an analysis stored there.
 - **Terminal**: the app runs inside the Terminal, so keep it open while you use the app (also after an update or a restart). If the app fails to start, the reason is shown in the Terminal, not in a dialog.
@@ -185,16 +170,50 @@ To restrict the agent's permissions, read [docs/security_ja.md](docs/security_ja
 
 ---
 
+## Detailed installation
+
+For terminal installation, use `setup.bat --install-dir C:\Apps\MyAnalysis --no-pause`, or `bash setup.sh --install-dir "$HOME/MyAnalysis" --no-pause` on macOS / Linux. `--no-launch` prepares without opening the GUI. Rerunning setup rechecks actual components, skips usable installations and resumes missing stages. It does not implicitly upgrade healthy Python or Git. Update the app through **Help → Update MyAnalysis**.
+
+Setup reuses saved locations, an existing source checkout and the old home-directory `MyAnalysis` location; use `--install-dir` to select one. Venvs are never moved. ZIP copies, unrelated repositories, unknown directories and user data are preserved.
+
+New installations go to `%LOCALAPPDATA%\Programs\MyAnalysis` on Windows, `~/Library/Application Support/MyAnalysis/app` on macOS, and `${XDG_DATA_HOME:-~/.local/share}/myanalysis/app` on Linux. The installer itself may be opened from a sync folder.
+
+Manual setup requires ordinary 64-bit Python 3.11+ (python.org on Windows), Git, and Git Bash on Windows. New Intel Mac environments use Python 3.11–3.13. If macOS Git is missing, run `xcode-select --install` and wait for the OS installer to finish.
+
+```bat
+cd /d %USERPROFILE%
+git clone https://github.com/atakalive/MyAnalysis.git
+cd MyAnalysis
+py -3 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+run.bat
+```
+
+macOS / Linux:
+
+```sh
+cd ~
+git clone https://github.com/atakalive/MyAnalysis.git
+cd MyAnalysis
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+./run.sh
+```
+
+A complete environment requires no network, pip or administrator authentication on rerun. Closing the monitor does not terminate an active OS installer; finish it before rerunning. Dependency conflicts and detection timeouts do not trigger replacement. Logs are shown on screen and stored under `%LOCALAPPDATA%\MyAnalysis\setup`, `~/Library/Application Support/MyAnalysis/setup`, or `${XDG_STATE_HOME:-~/.local/state}/myanalysis/setup` respectively. Pinned downloads and testing status are recorded in the [validation matrix](docs/installer-validation.md).
+
+---
+
 ## Troubleshooting
 
 | Symptom | What to do |
 |---|---|
 | No window appears with `run.bat` | A dialog shows the cause. If Python is too old, there is only the dialog (nothing is logged). Otherwise a traceback is left in `data/logs/gui-crash-*.log` (logs at warning level and above go to `data/logs/myanalysis.log`). If it says "A required package is missing", run `.venv\Scripts\python -m pip install -r requirements.txt` in the `MyAnalysis` folder (if `.venv` does not exist, redo step 1 of QuickStart). A Windows "pythonw not found" error also means `.venv` is missing. To see details, activate the venv and run `python tool.py` |
-| `'py' is not recognized as an internal or external command`, or `py -3` fails with `Unable to create process` | Python was installed from the Microsoft Store or without the launcher, or the launcher points to a Python that was removed (`py -0p` shows the paths). Install Python from python.org (the launcher is included by default) and redo step 1. If you keep the Microsoft Store build, `python -m venv .venv` works instead (the note under step 1) |
+| `'py' is not recognized as an internal or external command`, or `py -3` fails with `Unable to create process` | The launcher may be missing or point to a removed Python. Rerun `setup.bat` to detect or prepare python.org Python. Store builds are excluded; see [detailed installation](#detailed-installation). |
 | The chat says "No AI engine is selected, so nothing can be sent" | No AI engine is configured → step 3 of [QuickStart](#quickstart) |
 | `[error: RuntimeError('Claude Code engine not found…')]` | Install the Claude Code extension or the `claude` command and sign in (→ [AI engines](#ai-engines)). Or point to `claude` with `[claude_code].bin` in `llm_backend/config.toml` or the `CLAUDE_CODE_BIN` environment variable |
 | The chat shows `[error: …]` | Expired authentication, rate limits, etc. Send again, or log in to the engine again |
-| No window appears with `./run.sh` (macOS / Linux) | The reason is shown in the Terminal (and left in `data/logs/gui-crash-*.log`). If it says `MyAnalysis needs Python 3.11 or newer`, delete the venv with `rm -rf .venv` and create it again from step 1 with a `python3` that is 3.11 or later. If it says "A required package is missing", run `.venv/bin/python -m pip install -r requirements.txt` |
+| No window appears with `./run.sh` (macOS / Linux) | Read the Terminal and `data/logs/gui-crash-*.log`, then rerun `bash setup.sh` to inspect and resume missing stages. For manual repair see [detailed installation](#detailed-installation). |
 | On Linux, `Could not load the Qt platform plugin "xcb"` | Install `libxcb-cursor0` (`sudo apt install libxcb-cursor0` on Debian / Ubuntu) |
 | On macOS, `CERTIFICATE_VERIFY_FAILED` | With the python.org build of Python, run Install Certificates.command (→ [macOS / Linux](#macos--linux)) |
 | On macOS, a dataset shows "No path on this host" | Check the current name with `python -m llm_bridge host`, and move registrations under an old name with `python -m llm_bridge rename-host <old name>` (you can also add the path with **Register path on this PC…** in **File → Open dataset…**) |
@@ -206,8 +225,10 @@ Other symptoms, problems with sync drives, and what to include when reporting a 
 
 ## Uninstall
 
-1. Delete the app folder (the repository) and `%USERPROFILE%\.myanalysis` (`~/.myanalysis` on macOS / Linux).
-2. To restore a dataset folder, delete `myanalysis.toml`, `meta.json*`, `analyses/`, and `_work/`. `analyses/` holds the analysis modules and `_work/` holds the chat history and outputs.
+1. Close the app and remove its launcher: MyAnalysis in the Windows Start menu, `/Applications/MyAnalysis.app` on macOS, or the `myanalysis` package through the Linux package manager. Removing the `.deb` leaves per-user files.
+   On Linux, also remove the launcher created during first-run setup: `${XDG_DATA_HOME:-~/.local/share}/applications/myanalysis.desktop`.
+2. If needed, remove the checkout: Windows `%LOCALAPPDATA%\Programs\MyAnalysis`, macOS `~/Library/Application Support/MyAnalysis/app`, Linux `${XDG_DATA_HOME:-~/.local/share}/myanalysis/app`, or the existing location reused by setup. Settings and datasets are separate. Keep needed data before selecting what to remove. Python, Git and existing AI engines are not removed automatically.
+3. To restore a dataset folder, delete `myanalysis.toml`, `meta.json*`, `analyses/`, and `_work/`. `analyses/` holds the analysis modules and `_work/` holds the chat history and outputs.
 
 To also remove the engines' conversation records and the R2 / Cloudflare settings, read [docs/usage_ja.md](docs/usage_ja.md#アンインストールの詳細).
 
@@ -215,7 +236,7 @@ To also remove the engines' conversation records and the R2 / Cloudflare setting
 
 ## Limitations
 
-- Tested on Windows 11 only (macOS / Linux are untested → [macOS / Linux](#macos--linux)).
+- Tested on Windows 11 only (validation status → [macOS / Linux](#macos--linux)).
 - An analysis tab keeps its data in memory while it is open. Opening many large datasets puts pressure on memory.
 - In the Japanese UI, some displays remain in English (→ [display language](docs/usage_ja.md#表示言語)).
 - Details → [docs/usage_ja.md](docs/usage_ja.md#制限事項の詳細)

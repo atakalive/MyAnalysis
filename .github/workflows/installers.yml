@@ -1,0 +1,40 @@
+name: Installer assets
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build entry points and Debian package
+        if: runner.os == 'Linux'
+        run: python -m installer.build --out dist --deb
+      - name: Build unsigned macOS package
+        if: runner.os == 'macOS'
+        run: python -m installer.build --out dist --pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: dist/*
+      - name: Attach release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            gh release upload "$RELEASE_TAG" dist/setup.bat dist/setup.sh dist/MyAnalysis.deb --clobber
+          else
+            gh release upload "$RELEASE_TAG" dist/MyAnalysis.pkg --clobber
+          fi

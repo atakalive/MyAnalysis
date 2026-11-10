@@ -109,7 +109,7 @@ class SelfUpdater(QObject):
 
     def _work(self, repo, running: str | None) -> None:
         """実行しているスレッドで。run_update は投げない。"""
-        result = self_update.run_update(repo, running=running, progress=self._emit_progress)
+        result = self_update.run_update_worker(repo, running=running, progress=self._emit_progress)
         try:
             self._finished.emit(result)
         except RuntimeError:        # 先にウィンドウ（と、この QObject）が消えた

@@ -116,6 +116,13 @@ def run_capture(argv: list[str], *, cwd, env: dict[str, str] | None,
     stdin は DEVNULL、コンソール窓は出さない（no_window_kwargs）。POSIX では新しいセッションで
     起動し、時間切れはツリーごと止める（kill_tree → 待つ、まだなら kill() → 待つ）。
     """
+    if os.environ.get("MYANALYSIS_MUTATION_WORKER") == "1":
+        from installer.core import run, SetupError
+        try:
+            return CommandResult(True, run(argv, cwd=cwd, env=env, timeout=timeout), 0)
+        except SetupError as exc:
+            return CommandResult(False, str(exc), timed_out="Timed out" in str(exc),
+                                 left_running="remains running" in str(exc))
     try:
         proc = subprocess.Popen(
             argv, cwd=None if cwd is None else str(cwd), env=env,

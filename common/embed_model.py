@@ -469,11 +469,41 @@ def _terminate(p) -> None:
 
 def install_packages(progress: Callable[[str], None],
                      cancelled: Callable[[], bool]) -> InstallResult:
+    from common.paths import repo_root
+    from installer.core import mutation_lock, check_children
+    try:
+        with mutation_lock(repo_root()):
+            check_children()
+            return _install_packages(progress, cancelled)
+    except Exception as exc:
+        return InstallResult(False, "pip", str(exc))
+
+
+def install_packages_worker(progress, cancelled):
+    from common.paths import repo_root
+    from installer.tasks import monitor
+    try:
+        return InstallResult(**monitor("optional-pip", repo_root(), progress=progress, cancelled=cancelled))
+    except Exception as exc:
+        return InstallResult(False, "pip", str(exc))
+
+
+def _install_packages(progress: Callable[[str], None],
+                      cancelled: Callable[[], bool]) -> InstallResult:
     """``pip install onnxruntime tokenizers`` を実行する。never raise。
 
     出力は 1 行ずつ ``progress(line)`` に渡す（呼び出したスレッドで呼ぶ）。Windows では読み込み
     済みの onnxruntime の DLL を置き換えられないので、更新は次回の起動から効く。"""
     from common import proc, self_update
+    if os.environ.get("MYANALYSIS_MUTATION_WORKER") == "1":
+        from installer.core import run, SetupError
+        try:
+            text = run(pip_install_argv(), timeout=self_update.PIP_TIMEOUT_S,
+                       env=dict(os.environ, PIP_NO_INPUT="1"), cancelled=cancelled,
+                       progress=progress)
+            return InstallResult(True, message=text[-8192:])
+        except SetupError as exc:
+            return InstallResult(False, "cancelled" if cancelled() else "pip", str(exc))
     tail: deque[str] = deque(maxlen=20)
     try:
         env = dict(os.environ)

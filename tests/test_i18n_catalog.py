@@ -15,7 +15,7 @@ import pytest
 from common.paths import i18n_dir
 
 _SCAN_DIRS = (
-    "common", "core", "devtools", "export", "gui",
+    "common", "core", "devtools", "export", "gui", "installer",
     "llm_backend", "llm_bridge", "meeting", "newanalysis",
 )
 

@@ -9,6 +9,10 @@ if __name__ == "__main__":
     crashlog.install()
     crashlog.install_file_logging()
 
+    from installer.core import register_app
+    from pathlib import Path
+    register_app(Path(__file__).resolve().parent)
+
     # 起動したコードの版（ヘルプ → バージョン情報）。重い import より前に .git から読む（git は実行
     # しない）。読めなくても起動は止めない。main() で読み直し、読み込みの間に進んでいたら「不明」にする。
     try:
@@ -222,6 +226,9 @@ def _startup_head() -> str | None:
 def main() -> None:
     crashlog.install()
     load_env()
+    from installer.core import apply_runtime
+    from pathlib import Path
+    apply_runtime(Path(__file__).resolve().parent)
     # 言語初期化は create_main_window() 側に一本化（Tier 3 再構築でも復元されるよう）。
 
     # 起動時の best-effort config 同期（short timeout で有界・繋がるときだけ）。

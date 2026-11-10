@@ -14,43 +14,27 @@
 
 ## QuickStart
 
-**前提**:
-- **OS**: Windows 11、または macOS（動作は未検証）。Linux は [macOS / Linux](#macos--linux) を読む。
-- **Python 3.11 以上**: Windows は python.org 版（動作確認は 3.12）。macOS は python.org 版か Homebrew 版（macOS に最初からある `python3` は 3.9 なので使えない）。
-- **Git**:
-  - Windows: Git for Windows。clone と更新のほか、Claude Code がコマンドを実行する Git Bash に使う。Git Bash が無いと、エージェントが同期・ネットワークドライブ上のファイルを直接書き換えるのを止める仕組みが働かない。
-  - macOS: ターミナルで `xcode-select --install` を実行し、インストールが終わるまで待つ（Git が入る）。
-- **Claude Code**: 有料プラン（Pro / Max / Team / Enterprise）のアカウントでサインインしたもの。無料プランでは使えない。VS Code の Claude Code 拡張か、公式インストーラーで入れた `claude` コマンドのどちらか（→ [AI エンジン](#ai-エンジン)）。他のエンジンを使う場合も [AI エンジン](#ai-エンジン)。
+**対応 OS**: Windows 11 x64、macOS 14.4 以降（Intel / Apple Silicon）、Ubuntu 24.04 以降・Debian 12 以降（amd64）。macOS の実画面試験は未実施。
+
+**AI エンジン**: 選択するサービスのアカウントと認証が必要。Claude Code は有料プランでログインする。未導入のエンジンはアプリの **設定 → バックエンドの状況…** から導入できる（→ [AI エンジン](#ai-エンジン)）。
 
 > [!WARNING]
 > エージェントは、あなたのユーザー権限で、確認なしにコマンドを実行する。依頼内容と読んだデータはエンジンの提供元に送られる。→ [セキュリティ](#セキュリティ)
 
-1. **インストール**: 置き場所は OneDrive・iCloud などの同期フォルダ以外。
-   - **Windows**: Python と Git を入れた後に開いたコマンドプロンプト（Win+R → `cmd`）で実行する（入れる前から開いていた窓では `git` も `py` も見つからない）。
+1. **インストール**: [Releases](https://github.com/atakalive/MyAnalysis/releases/latest) から自分の OS のファイルを取得して開く。
 
-     ```bat
-     cd /d %USERPROFILE%
-     git clone https://github.com/atakalive/MyAnalysis.git
-     cd MyAnalysis
-     py -3 -m venv .venv
-     .venv\Scripts\python -m pip install -r requirements.txt
-     ```
+   | OS | ファイルと開き方 |
+   |---|---|
+   | Windows | `setup.bat` をダブルクリック |
+   | macOS | `MyAnalysis.pkg` を開いて導入後、アプリケーションの **MyAnalysis** を開く |
+   | Ubuntu / Debian | `MyAnalysis.deb` をソフトウェアのインストール画面で導入後、アプリメニューの **MyAnalysis** を開く |
 
-     `py` が無い（Microsoft Store 版の Python）ときは `python -m venv .venv`。
-   - **macOS**: ターミナル（アプリケーション → ユーティリティ）で実行する。先に `python3 --version` で 3.11 以上か確かめる（3.9 と出たら、Python を入れた後に開いたターミナルか確かめるか、`python3.12` のように版を付けて呼ぶ）。
+   初回は端末に進捗が表示され、既存の Python・Git・本体・パッケージは再利用し、不足分だけを導入する。Windows の Python は python.org 版を使い、Microsoft Store 版は使わない。OS の導入画面が出たときは操作する。`.pkg`・`.deb` の導入と、通常ユーザーでの初回準備は2段階。
 
-     ```sh
-     cd ~
-     git clone https://github.com/atakalive/MyAnalysis.git
-     cd MyAnalysis
-     python3 -m venv .venv
-     .venv/bin/python -m pip install -r requirements.txt
-     ```
+   macOS の配布物は未署名。拒否された場合は **システム設定 → プライバシーとセキュリティ → このまま開く** でこのファイルだけを許可する。Windows の SAC や組織のポリシーで拒否された場合は、表示された理由を確認し、[詳しい導入手順](#詳しい導入手順)を使う。OS の保護機能は自動変更しない。
 
-     - iCloud で「デスクトップと書類」を同期しているなら `~/Desktop`・`~/Documents` の下、`~/Library/CloudStorage`（OneDrive・Dropbox などのクラウドストレージのフォルダがある場所）の下には置かない。上のとおり `cd ~` から始めればホームの直下（`~/MyAnalysis`）に入る。
-     - MyAnalysis は、macOS では HostName（設定されていれば）か、ローカルホスト名（システム設定 → 一般 → 共有）を、この PC の名前に使う。ネットワークでは変わらない。Mac の名前を変えた・名前に「-2」が付いた・名前を固定したいときは、`sudo scutil --set HostName <名前>`（英数字と `-`）。
+2. **起動**: セットアップ完了後に画面が開く。次からは Windows のスタートメニュー、macOS のアプリケーション、Linux のアプリメニューの **MyAnalysis** を使う。macOS / Linux では端末を閉じずに使う。UI は英語で起動するので、**Settings → Language / 言語 → 日本語** に切り替える。画面が出なければ [トラブルシューティング](#トラブルシューティング)。
 
-2. **起動**: Windows は `MyAnalysis` フォルダの `run.bat` をダブルクリックする（venv の有効化は不要）。macOS は同じターミナルで `./run.sh`（次からはターミナルで `~/MyAnalysis/run.sh`）。アプリはターミナルの中で動くので、使っている間はターミナルを閉じない。起動に失敗した理由はターミナルに出る。UI は英語で起動するので、先に **Settings → Language / 言語 → 日本語** に切り替える。以降の手順は日本語表示のメニュー名で書く。ウィンドウが出なければ → [トラブルシューティング](#トラブルシューティング)
 3. **AI エンジン**: **設定 → バックエンド/モデル設定…** を開き、「利用方法（エンジン）」で **Claude（VS Code 同梱エンジン）** を選ぶ。モデル欄は空のままでよい。**疎通確認** を押して `OK（…秒 / <モデル名>）` と出たら **適用**。失敗と出たら、VS Code の Claude Code 拡張（または `claude` コマンド）に、有料プランのアカウントでサインインしているか確かめる。[R2 設定同期](docs/config_sync_ja.md) を使う 2 台目以降の PC では、先に [2 台目以降](docs/config_sync_ja.md#2-台目以降) を読む。
 4. **データセット**: **ファイル → データセットを新規登録** で計測データのフォルダを選ぶ。名前にはフォルダ名が入るので、記号入り・`-` 始まりなら変える（→ [データセット](#データセット)）。登録が済むと、そのデータセットが開く。
 5. **依頼**: 右のチャット欄に「このデータセットの中身を説明して」「`<列A>` と `<列B>` の関係を図にして」などと書いて **Ctrl+Enter**（macOS は **⌘+Return**）。応答には数十秒〜数分かかることがあり、図は左側のタブに開く。`[エラー: …]`（英語表示では `[error: …]`）が出たら → [トラブルシューティング](#トラブルシューティング)
@@ -61,6 +45,7 @@
 ## 目次
 
 - [インストールと起動](#インストールと起動)
+- [詳しい導入手順](#詳しい導入手順)
 - [AI エンジン](#ai-エンジン)
 - [データセット](#データセット)
 - [使い方](#使い方)
@@ -83,14 +68,14 @@
 - GitHub の **Download ZIP** で入れたものは起動できるが、`.git` が無いので **ヘルプ → MyAnalysis を更新** が使えない。`git clone` で入れる。
 - 手で更新するときは、アプリを閉じて `git pull` → `.venv\Scripts\python -m pip install -r requirements.txt`（macOS / Linux は `.venv/bin/python`）→ 起動。
 
-- PowerShell で `activate` が失敗するときは、`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を実行するか、コマンドプロンプトを使う。
+- PowerShell で `activate` が失敗するときは、コマンドプロンプトを使うか、`.venv\Scripts\python` を直接実行する。
 - TIFF 画像を開くときは `.venv\Scripts\python -m pip install tifffile`（macOS / Linux は `.venv/bin/python`）も入れる。
 - パッケージの版は固定していない。動かないときは動作確認済みの版に合わせる（Python 3.12.1 / PySide6 6.10.1 / pyqtgraph 0.14.0 / numpy 1.26.4 / pandas 2.2.0 / matplotlib 3.8.2 / Pillow 10.3.0。これらは Python 3.12 向け）。
 - データなしで画面を試すときは `python tool.py --demo`。
 
 ### macOS / Linux
 
-macOS / Linux での動作は未検証。インストールは [QuickStart](#quickstart) の手順 1 の macOS の手順。
+GUI の OS 別実機試験の結果は [検証表](docs/installer-validation.md) を参照。端末での導入は [詳しい導入手順](#詳しい導入手順)。
 
 - **起動**: `./run.sh` で起動する。`run.sh` は `.venv/bin/python` を使い、バイトコード（`__pycache__`）をリポジトリの `data/pycache` に置く。`.venv/bin/python tool.py` を直接実行すると、同期フォルダ上の解析を開いたときにそのフォルダへ `__pycache__` を作る。
 - **ターミナル**: アプリはターミナルの中で動くので、使っている間（更新や再起動の後も）ターミナルを閉じない。起動に失敗した理由は、ダイアログではなくターミナルに出る。
@@ -106,7 +91,7 @@ macOS / Linux での動作は未検証。インストールは [QuickStart](#qui
 
 ## AI エンジン
 
-設定は [QuickStart](#quickstart) の手順 3。
+初回の設定は [QuickStart](#quickstart) の AI エンジンの項目。
 
 - 推奨は Claude（動作確認が最も多い）。「Claude（VS Code 同梱エンジン）」は、VS Code の拡張が見つからなければ PATH 上の `claude` コマンドを使う。
 - 未導入の Claude・Codex・pi は **設定 → バックエンドの状況… → インストール** で入れられる。Node.js / npm の準備は不要。公式配布物を `~/.myanalysis/backends` に配置し、pi 用の実行環境も自動で用意する。再起動や PATH 設定なしで認識されるので、導入後は **ログイン** へ進む。Claude は「Claude（VS Code 同梱エンジン）」のままでも、拡張がなければアプリ管理版を使う。
@@ -183,16 +168,52 @@ Claude 以外のエンジン（Codex / pi / Ollama などの OpenAI 互換 HTTP�
 
 ---
 
+## 詳しい導入手順
+
+GUI の導入は上の [QuickStart](#quickstart)。端末からは `setup.bat --install-dir C:\Apps\MyAnalysis --no-pause`、macOS / Linux は `bash setup.sh --install-dir "$HOME/MyAnalysis" --no-pause`。`--no-launch` は準備だけを行う。正常な Python・Git を暗黙に更新しない。本体の更新は **ヘルプ → MyAnalysis を更新**。
+
+既存配置、ホーム直下の旧 `MyAnalysis`、以前選んだ配置を再利用する。複数ある場合は `--install-dir` で指定できる。venv は移動しない。ZIP・別リポジトリ・判定不能なフォルダと既存データは上書きしない。
+
+新規の既定配置は Windows `%LOCALAPPDATA%\Programs\MyAnalysis`、macOS `~/Library/Application Support/MyAnalysis/app`、Linux `${XDG_DATA_HOME:-~/.local/share}/myanalysis/app`。インストーラーは同期フォルダから開けるが、本体はローカルへ配置する。
+
+手動で準備する場合は Python 3.11 以上の通常版・64 bit（Windows は python.org 版）、Git と Windows の Git Bash が必要。Intel Mac の新規環境は Python 3.11～3.13。macOS で Git が無い場合は `xcode-select --install` を実行し、OS の導入完了を待つ。Debian / Ubuntu の OS 依存は自動セットアップで不足分だけ入る。
+
+```bat
+cd /d %USERPROFILE%
+git clone https://github.com/atakalive/MyAnalysis.git
+cd MyAnalysis
+py -3 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+run.bat
+```
+
+macOS / Linux:
+
+```sh
+cd ~
+git clone https://github.com/atakalive/MyAnalysis.git
+cd MyAnalysis
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+./run.sh
+```
+
+セットアップを再実行すれば不足工程を再検査して再開する。正常な環境では通信・pip・管理者認証を行わない。画面を閉じても進行中の OS インストーラーは終了しないので、その導入が終わってから再実行する。依存の競合や検出タイムアウトを未導入とみなして上書きしない。ログの場所は画面に表示され、Windows `%LOCALAPPDATA%\MyAnalysis\setup`、macOS `~/Library/Application Support/MyAnalysis/setup`、Linux `${XDG_STATE_HOME:-~/.local/state}/myanalysis/setup` に残る。
+
+配布物の固定版・照合情報と検証状況は [検証表](docs/installer-validation.md)。
+
+---
+
 ## トラブルシューティング
 
 | 症状 | 対処 |
 |---|---|
-| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。「必要なパッケージがありません」と出たら `MyAnalysis` フォルダで `.venv\Scripts\python -m pip install -r requirements.txt`（`.venv` が無ければ QuickStart の手順 1）。Windows の「pythonw が見つからない」エラーも `.venv` が無いとき。詳しく見るには venv を有効にして `python tool.py` |
-| `'py' は、内部コマンドまたは外部コマンド…として認識されていません`、または `py -3` が `Unable to create process` で失敗する | Microsoft Store 版 Python か、ランチャ無しで入れた Python、またはランチャが消した Python を指している（`py -0p` でパスが見える）。python.org 版を入れて（ランチャは既定で入る）手順 1 からやり直す。Store 版のまま使うなら `python -m venv .venv` で代替できる（手順 1 の注記） |
+| `run.bat` でウィンドウが出ない | 原因を示すダイアログが出る。Python が古い場合はダイアログだけ（ログには残らない）。それ以外は `data/logs/gui-crash-*.log` に traceback が残る（warning 以上のログは `data/logs/myanalysis.log`）。「必要なパッケージがありません」と出たら `MyAnalysis` フォルダで `.venv\Scripts\python -m pip install -r requirements.txt`（`.venv` が無ければ [詳しい導入手順](#詳しい導入手順)）。Windows の「pythonw が見つからない」エラーも `.venv` が無いとき。詳しく見るには venv を有効にして `python tool.py` |
+| `'py' は、内部コマンドまたは外部コマンド…として認識されていません`、または `py -3` が `Unable to create process` で失敗する | Microsoft Store 版 Python か、ランチャ無しで入れた Python、またはランチャが消した Python を指している（`py -0p` でパスが見える）。python.org 版を入れて（ランチャは既定で入る）[詳しい導入手順](#詳しい導入手順)からやり直す。Store 版はセットアップ対象外。`setup.bat` を再実行すると公式 Python を検出・準備する |
 | チャットに「AI エンジンが選ばれていないため送信できません」と出る | AI エンジンが設定されていない → [QuickStart](#quickstart) の手順 3 |
 | `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code の拡張か `claude` コマンドを入れてサインインする（→ [AI エンジン](#ai-エンジン)）。または `llm_backend/config.toml` の `[claude_code].bin` か環境変数 `CLAUDE_CODE_BIN` で `claude` の場所を指定する |
 | チャットに `[エラー: …]` と出る | 認証切れ・レート制限など。再送するか、エンジンにログインし直す |
-| `./run.sh` でウィンドウが出ない（macOS / Linux） | 理由はターミナルに出る（`data/logs/gui-crash-*.log` にも残る）。`MyAnalysis needs Python 3.11 or newer` と出たら、`rm -rf .venv` で消してから、3.11 以上の `python3` で手順 1 の venv を作り直す。「必要なパッケージがありません」と出たら `.venv/bin/python -m pip install -r requirements.txt` |
+| `./run.sh` でウィンドウが出ない（macOS / Linux） | 理由はターミナルと `data/logs/gui-crash-*.log` に出る。`bash setup.sh` を再実行すると不足工程を再検査する。手動での修復は [詳しい導入手順](#詳しい導入手順) |
 | Linux で `Could not load the Qt platform plugin "xcb"` と出る | `libxcb-cursor0` を入れる（Debian / Ubuntu は `sudo apt install libxcb-cursor0`） |
 | macOS で `CERTIFICATE_VERIFY_FAILED` と出る | python.org 版の Python なら Install Certificates.command を実行する（→ [macOS / Linux](#macos--linux)） |
 | macOS で、データセットが「このホストにパス無し」になる | `python -m llm_bridge host` で今の名前を確かめ、古い名前の登録は `python -m llm_bridge rename-host <古い名前>` で移す（**ファイル → データセットを開く…** の **この PC のパスを登録…** でも足せる） |
@@ -204,8 +225,10 @@ Claude 以外のエンジン（Codex / pi / Ollama などの OpenAI 互換 HTTP�
 
 ## アンインストール
 
-1. アプリのフォルダ（リポジトリ）と `%USERPROFILE%\.myanalysis`（macOS / Linux は `~/.myanalysis`）を削除する。
-2. データセットのフォルダを元に戻すなら、`myanalysis.toml`・`meta.json*`・`analyses/`・`_work/` を削除する。`analyses/` には解析モジュールが、`_work/` にはチャット履歴と出力がある。
+1. アプリを終了してランチャーを削除する。Windows はスタートメニューの MyAnalysis、macOS は `/Applications/MyAnalysis.app`、Linux はソフトウェア管理画面で `myanalysis` を削除する。`.deb` を削除してもユーザー領域の本体は残る。
+   Linux では初回準備で作成した `${XDG_DATA_HOME:-~/.local/share}/applications/myanalysis.desktop` も削除する。
+2. 必要なら本体を削除する。既定は Windows `%LOCALAPPDATA%\Programs\MyAnalysis`、macOS `~/Library/Application Support/MyAnalysis/app`、Linux `${XDG_DATA_HOME:-~/.local/share}/myanalysis/app`。旧配置を再利用した場合はその場所。設定・データ・`~/.myanalysis` は別に残るので、必要なものを保存してから選んで削除する。Python・Git・既存 AI エンジンは自動削除しない。
+3. データセットのフォルダを元に戻すなら、`myanalysis.toml`・`meta.json*`・`analyses/`・`_work/` を削除する。`analyses/` には解析モジュールが、`_work/` にはチャット履歴と出力がある。
 
 エンジン側の会話記録や、R2・Cloudflare の設定まで消すときは [docs/usage_ja.md](docs/usage_ja.md#アンインストールの詳細) を読む。
 
@@ -213,7 +236,7 @@ Claude 以外のエンジン（Codex / pi / Ollama などの OpenAI 互換 HTTP�
 
 ## 制限事項
 
-- 動作確認は Windows 11 だけ（macOS / Linux は未検証 → [macOS / Linux](#macos--linux)）。
+- 動作確認は Windows 11 だけ（検証状況 → [macOS / Linux](#macos--linux)）。
 - 解析タブは、開いている間データをメモリに置き続ける。大きなデータを多数開くとメモリを圧迫する。
 - 一部の表示は英語のまま（→ [表示言語](docs/usage_ja.md#表示言語)）。
 - 詳細 → [docs/usage_ja.md](docs/usage_ja.md#制限事項の詳細)

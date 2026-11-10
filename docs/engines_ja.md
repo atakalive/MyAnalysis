@@ -2,7 +2,7 @@
 
 [← README に戻る](../README_ja.md)
 
-最初の設定は README の [QuickStart](../README_ja.md#quickstart) の手順 3 だけで足りる（要点は [AI エンジン](../README_ja.md#ai-エンジン)）。この文書は、別のエンジンを使う・チャットごとに変える・設定ファイルを手で書くときの参照用。
+最初の設定は README の [QuickStart](../README_ja.md#quickstart) の AI エンジン設定だけで足りる（要点は [AI エンジン](../README_ja.md#ai-エンジン)）。この文書は、別のエンジンを使う・チャットごとに変える・設定ファイルを手で書くときの参照用。
 
 ## エンジン一覧
 
