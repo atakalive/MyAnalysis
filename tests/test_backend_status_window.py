@@ -409,6 +409,25 @@ def test_auto_fetch_once_after_successful_install(no_probe, no_start, parent_wid
     assert no_start["models"] == []
     w._on_row(w._generation, _st("pi", binary_state="ok"))
     assert len(no_start["models"]) == 1
+
+
+def test_models_wait_for_both_install_and_fresh_probe_workers(
+    no_probe, no_start, parent_widget
+):
+    w = _win(no_probe, parent_widget)
+    _install(w)
+    cmd = w._cmd
+    w._on_install_done(w._install_token, 0)
+    probe = MagicMock()
+    w._probe = probe
+    w._on_row(w._generation, _st("pi", binary_state="ok"))
+    assert no_start["models"] == []
+    w._forget(cmd)
+    assert no_start["models"] == []
+    w._on_probe_done(w._generation)
+    assert no_start["models"] == []
+    w._forget(probe)
+    assert len(no_start["models"]) == 1
     assert no_start["models"][0]._engine_id == "pi"
     w._forget(w._models)
     w._on_row(w._generation, _st("pi", binary_state="ok"))
@@ -602,3 +621,15 @@ def test_posix_login_command_quotes_extension_path_with_spaces(
     command = ["/Users/user with spaces/.vscode/extensions/codex", "login"]
     window._launch_login(command)
     assert shlex.join(command) in window._log.toPlainText()
+
+
+def test_posix_managed_login_keeps_the_private_update_policy(
+    no_probe, parent_widget, monkeypatch
+):
+    import shlex
+    from llm_backend import runtime
+    window = _win(no_probe, parent_widget)
+    monkeypatch.setattr(no_probe.sys, "platform", "linux")
+    command = str(runtime.engine_dir("claude") / "releases" / "1.2.3-test" / "claude")
+    window._launch_login([command])
+    assert shlex.join(["env", "DISABLE_UPDATES=1", command]) in window._log.toPlainText()

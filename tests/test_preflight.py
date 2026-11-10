@@ -48,38 +48,47 @@ def _tools(monkeypatch, *, node="v24.18.0", npm="11.16.0", present=("node", "npm
 # ---- 0 段目: node と npm は別実体 ----
 
 
-def test_npm_missing_blocks_install_even_with_node(monkeypatch):
-    """インストールで叩くのは npm。node があっても npm が無ければ導入不可。"""
+def test_npm_missing_does_not_block_private_install(monkeypatch):
     _tools(monkeypatch, present=("node",))
     s = check_engine("pi")
-    assert s.prereq_state == "missing"
-    assert s.install is None
-    assert s.blocking_stage == "prereq"
-    keys = dict(s.notes)
-    assert "backend.status.note.missing_tools" in keys
-    assert keys["backend.status.note.missing_tools"]["tools"] == "npm"
+    assert s.prereq_state == "n/a"
+    assert s.install == preflight.runtime.install_command("pi")
+    assert s.blocking_stage == "binary"
+    assert "backend.status.note.missing_tools" not in dict(s.notes)
 
 
-def test_node_missing_blocks_install(monkeypatch):
+def test_node_missing_does_not_block_private_install(monkeypatch):
     _tools(monkeypatch, present=("npm",))
     s = check_engine("pi")
-    assert s.prereq_state == "missing" and s.install is None
+    assert s.prereq_state == "n/a" and s.install is not None
 
 
-def test_node_too_old_blocks_pi_install(monkeypatch):
-    """pi の engines は node>=22.19。満たさないなら押させない。"""
+def test_old_system_node_does_not_block_private_pi_install(monkeypatch):
     _tools(monkeypatch, node="v20.11.0")
     s = check_engine("pi")
-    assert s.prereq_state == "missing"
-    assert s.install is None
-    assert dict(s.notes)["backend.status.note.node_too_old"]["need"] == "22.19"
+    assert s.prereq_state == "n/a"
+    assert s.install is not None
+    assert "backend.status.note.node_too_old" not in dict(s.notes)
 
 
 def test_node_new_enough_allows_pi_install(monkeypatch):
     _tools(monkeypatch)
     s = check_engine("pi")
-    assert s.prereq_state == "ok"
-    assert s.install == ("npm", "i", "-g", "@earendil-works/pi-coding-agent")
+    assert s.prereq_state == "n/a"
+    assert s.install == preflight.runtime.install_command("pi")
+
+
+def test_all_install_routes_work_without_probing_system_node_or_npm(monkeypatch):
+    def which(name):
+        assert name not in ("node", "npm"), "System development tools must not be required"
+        return None
+    monkeypatch.setattr(preflight, "_which", which)
+    monkeypatch.setattr(preflight, "_claude_binary", lambda value: ("missing", None))
+    for engine in ("claude-vscode", "claude-cli", "codex", "pi"):
+        status = check_engine(engine)
+        assert status.prereq_state == "n/a"
+        assert status.binary_state == "missing"
+        assert status.install is not None
 
 
 # ---- 1 段目: missing と unknown を混ぜない ----
@@ -118,7 +127,7 @@ def test_claude_cli_not_on_path_is_missing_not_unknown(monkeypatch):
     )
     s = check_engine("claude-cli")
     assert s.binary_state == "missing"
-    assert s.install == ("npm", "i", "-g", "@anthropic-ai/claude-code")
+    assert s.install == preflight.runtime.install_command("claude")
 
 
 # ---- バージョン文字列の形はエンジンごとに違う ----
@@ -233,7 +242,7 @@ def test_never_raises_on_broken_authfile(monkeypatch, tmp_path):
 def test_never_raises_when_discovery_explodes(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("boom")
-    monkeypatch.setattr(preflight, "_toolchain", _boom)
+    monkeypatch.setattr(preflight, "_codex_binary", _boom)
     s = check_engine("codex")
     assert isinstance(s, EngineStatus) and s.binary_state == "unknown"
 
@@ -346,7 +355,7 @@ def test_installed_engine_still_offers_the_command_for_updating(monkeypatch):
     monkeypatch.setattr(preflight, "_run", _run)
     s = check_engine("pi")
     assert s.binary_state == "ok"
-    assert s.install == ("npm", "i", "-g", "@earendil-works/pi-coding-agent")
+    assert s.install == preflight.runtime.install_command("pi")
 
 
 # ---- pi の provider は「使う想定のもの」だけ見せる ----
@@ -668,8 +677,8 @@ def test_missing_codex_offers_extension_without_blocking_on_npm(monkeypatch, pre
     status = check_engine("codex")
     assert status.prereq_state == "n/a"
     assert status.blocking_stage == "binary"
-    assert "backend.status.note.codex_install" in dict(status.notes)
-    assert bool(status.install) == bool(present)
+    assert "backend.status.note.managed_install" in dict(status.notes)
+    assert status.install is not None
     assert status.login is None
 
 
@@ -678,7 +687,7 @@ def test_path_codex_keeps_its_cli_update_route(monkeypatch):
     monkeypatch.setattr(preflight, "_codex_binary", lambda: ("ok", "/cli/codex", "path"))
     monkeypatch.setattr(preflight, "_run", lambda *a: (0, "0.155.0"))
     status = check_engine("codex")
-    assert status.install == ("npm", "i", "-g", "@openai/codex")
+    assert status.install == preflight.runtime.install_command("codex")
     assert status.login == ("/cli/codex", "login")
 
 

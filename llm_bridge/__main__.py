@@ -710,7 +710,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"install={mark.get(st.binary_state, '')} {st.version or '':10s} "
                   f"auth={mark.get(st.auth_state, '')} {auth}")
             if st.install:
-                print(f"{'':14s}   install: {' '.join(st.install)}")
+                import shlex
+                import subprocess
+                command = (subprocess.list2cmdline(st.install) if sys.platform == "win32"
+                           else shlex.join(st.install))
+                print(f"{'':14s}   install: {command}")
             # preflight は i18n を知らないので、文の組み立てはここで行う。
             from common.i18n import tr
             for key, params in st.notes:

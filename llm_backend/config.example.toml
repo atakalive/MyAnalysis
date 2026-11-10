@@ -13,7 +13,7 @@ name = "claude"      # "claude" | "claude-sub" | "pi" | "codex" | "openai" | "mo
 # cwd = 'C:/path/to/workdir'   # 省略時はリポジトリ root
 #   cwd に関係なく AGENTS.md / CLAUDE.md は読み込まない（--no-context-files。
 #   グローバルの ~/.pi/agent/AGENTS.md も読まない。pi 0.67.4 以上）
-bin  = "pi"          # 実行ファイル(PATH 名 or 絶対パス)
+bin  = "pi"          # アプリ管理版 → PATH。独自のコマンド名・絶対パスも指定可
 # model / provider はモデル設定なので models.toml の [pi] で指定(models.example.toml 参照)
 tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
                      #   "read,write"=許可リスト, "none"=--no-tools)
@@ -27,7 +27,7 @@ tools = ""           # --tools 許可リスト(空=全ツール=フラグ省略,
 # Codex（VS Code 拡張 / CLI）。拡張にログイン済みなら CLI の別途導入は不要。
 # 拡張同梱版は Node.js/npm も不要。認証は CODEX_HOME（既定 ~/.codex）を共有。
 # 1 ターン = 1 `codex exec --json`、2 ターン目以降は `codex exec resume <thread_id>`。
-bin = ""             # 空 = env CODEX_BIN → PATH の codex → 拡張同梱版の順で解決。
+bin = ""             # 空 = env CODEX_BIN → アプリ管理版 → PATH → 拡張同梱版の順で解決。
                      # 非空なら最優先（無効でも別のエンジンに切り替えない）。
 # 拡張同梱版は OS/CPU の合う最新版を毎回検出し、検出パスは設定へ保存しない。
 # 空(既定) = --dangerously-bypass-approvals-and-sandbox で無人実行。
@@ -46,7 +46,7 @@ sandbox_mode = ""    # "" | "read-only" | "workspace-write" | "danger-full-acces
 # binary under ~/.vscode/extensions/anthropic.claude-code-*/resources/
 # native-binary/). Shares your VS Code login/sessions via ~/.claude.
 # Driven in stream-json mode (NOT `claude -p`), with multi-turn --resume.
-bin = ""             # 省略時は VS Code 拡張同梱バイナリを自動検出
+bin = ""             # 空 = 拡張同梱版 → アプリ管理版 → PATH。"claude" = アプリ管理版 → PATH
                      #   (env CLAUDE_CODE_BIN でも上書き可)
 # model / thinking / effort はモデル設定なので models.toml の [claude_code] で指定
 #   (models.example.toml 参照)

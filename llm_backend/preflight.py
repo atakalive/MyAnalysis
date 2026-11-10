@@ -5,10 +5,9 @@
 呼ばずに状態だけ知る手段をここに集める。
 
 **これは「今どのエンジンを選んでいるか」とは無関係な一覧**である。全ドライバを同じ形で並べ、
-claude は「VS Code 同梱」と「PATH の CLI」を別々の入手経路として独立に見る。
-
-段階は **0. 前提(node+npm) → 1. 導入 → 2. 認証**。0 を 1 に混ぜると「インストールを押したのに
-失敗する」になるので分けてある。
+claude は「拡張同梱」と「単体 CLI」の入手経路を分けて見る。
+導入と認証を別々に判定する。必要な実行環境は専用の導入処理が用意するので、
+システムの Node.js / npm は探さない。prereq 系のフィールドは CLI 互換用に残す。
 
 課金しない: ここから LLM 推論は一切走らない（実際に 1 ターン投げる疎通確認は
 ``llm_backend.ping`` 側で、ユーザーが明示的に押したときだけ動く）。
@@ -30,22 +29,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common.proc import no_window_kwargs
+from llm_backend import runtime
 
 # --version は速い（実測 107-2623ms）。--list-models はネットワークに出る（実測 4657ms）。
 # 余裕を持たせつつ、固まったバイナリでワーカーを塞がない値。
 _VERSION_TIMEOUT = 15.0
 _PROBE_TIMEOUT = 30.0
 
-# pi の package.json の engines.node。ここを満たさないと npm i が通らない。
-_PI_MIN_NODE = (22, 19)
-
 # pi の --no-context-files（開発者向け CLAUDE.md / AGENTS.md を読ませない）が入った版。
 _PI_MIN_VERSION = (0, 67, 4)
 
 # claude が env のトークンで認証する経路（credentials ファイルが無くても使える）。
 _CLAUDE_TOKEN_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-
-_NPM = "npm"
 
 # pi から使うことを想定している provider だけを表示する。
 # pi の auth.json / --list-models には他の provider（anthropic 等）も現れ得るが、
@@ -70,7 +65,7 @@ class EngineStatus:
     """
 
     engine_id: str
-    prereq_state: str = "n/a"       # 0 段目: node + npm
+    prereq_state: str = "n/a"       # retained for CLI compatibility
     prereq_detail: str = ""
     binary_state: str = "n/a"       # 1 段目: 導入
     binary: str | None = None
@@ -78,9 +73,8 @@ class EngineStatus:
     auth_state: str = "n/a"         # 2 段目: 認証
     auth_detail: str = ""
     authed_providers: tuple[str, ...] = ()
-    # npm コマンド。未導入なら「インストール」、導入済みなら「更新」として使う
-    # （`npm i -g <pkg>` はどちらも同じ）。**unknown のときは None** — 判定できていない
-    # だけなのに再インストールを勧めないため。
+    # App-managed installer argv, shared by installation and update.
+    # Unknown states never offer installation; editor extensions update externally.
     install: tuple[str, ...] | None = None
     login: tuple[str, ...] | None = None     # 端末で起こすコマンド（不可/不要なら None）
     # 人間向けの文は **ここで作らない**。このモジュールは Qt だけでなく i18n も知らない
@@ -120,7 +114,8 @@ def _wrap(cmd: list[str]) -> list[str]:
     if not cmd or not isinstance(cmd[0], str) or not cmd[0]:
         return list(cmd)                 # 壊れた argv でも raise しない（_run が起動失敗として拾う）
     exe = _which(cmd[0]) or cmd[0]
-    out = [exe] + list(cmd[1:])
+    out = runtime.expand_command([exe] + list(cmd[1:]))
+    exe = out[0]
     if sys.platform == "win32" and exe.lower().endswith((".cmd", ".bat")):
         return ["cmd.exe", "/c"] + out
     return out
@@ -137,6 +132,7 @@ def _run(cmd: list[str], timeout: float) -> tuple[int, str] | None:
     try:
         p = subprocess.run(
             _wrap(cmd),
+            env=runtime.environment(cmd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -181,6 +177,10 @@ def _which(name) -> str | None:
     """
     if not isinstance(name, str) or not name:
         return None
+    if name in runtime.ENGINES:
+        managed = runtime.managed_binary(name)
+        if managed:
+            return managed
     if sys.platform == "win32":
         for cand in (name + ".exe", name + ".cmd", name + ".bat"):
             found = shutil.which(cand)
@@ -193,57 +193,6 @@ def _version_tuple(v: str | None) -> tuple[int, ...]:
     if not v:
         return ()
     return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
-
-
-# ----- 0 段目: node + npm -----
-
-
-@dataclass
-class _Toolchain:
-    node: str | None = None
-    npm: str | None = None
-    node_missing: bool = False
-    npm_missing: bool = False
-
-
-def _toolchain() -> _Toolchain:
-    """node と npm を **別々に** 見る。
-
-    インストールで実際に叩くのは ``npm`` であって ``node`` ではない。実測でも npm は
-    node 本体とは別実体（`C:\\Program Files\\nodejs\\npm.cmd`）で、nvm 構成などでは
-    node はあるが npm が無いことが起こり得る。
-    """
-    tc = _Toolchain()
-    if _which("node") is None:
-        tc.node_missing = True
-    else:
-        r = _run(["node", "--version"], _VERSION_TIMEOUT)
-        tc.node = _parse_version(r[1]) if r and r[0] == 0 else None
-    npm_path = _which(_NPM)
-    if npm_path is None:
-        tc.npm_missing = True
-    else:
-        r = _run([npm_path, "--version"], _VERSION_TIMEOUT)
-        tc.npm = _parse_version(r[1]) if r and r[0] == 0 else None
-    return tc
-
-
-def _prereq(tc: _Toolchain, min_node):
-    """``(state, detail, notes)``。detail は中立な事実だけ、理由は notes の i18n キーで返す。"""
-    if tc.node_missing or tc.npm_missing:
-        miss = " / ".join(
-            n for n, m in (("node", tc.node_missing), ("npm", tc.npm_missing)) if m
-        )
-        return "missing", "", (("backend.status.note.missing_tools", {"tools": miss}),)
-    detail = f"node {tc.node or '?'} / npm {tc.npm or '?'}"
-    if min_node and tc.node:
-        cur = _version_tuple(tc.node)
-        if cur and cur < min_node:
-            need = ".".join(str(x) for x in min_node)
-            return "missing", detail, (
-                ("backend.status.note.node_too_old", {"need": need}),
-            )
-    return "ok", detail, ()
 
 
 # ----- 2 段目: 認証 -----
@@ -464,7 +413,6 @@ def check_engine(engine_id: str) -> EngineStatus:
 
 
 def _check_engine(engine_id: str) -> EngineStatus:
-    tc = _toolchain()
 
     if engine_id in ("claude-vscode", "claude-cli"):
         vscode = engine_id == "claude-vscode"
@@ -476,23 +424,23 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 state = "unknown"           # 起動できない/固まった → 「無い」ではない
             elif r[0] == 0:
                 ver = _parse_version(r[1])
+            else:
+                state = "unknown"
         auth_state, auth_detail = _claude_auth(path if state == "ok" else None)
-        if vscode:
-            return EngineStatus(
-                engine_id=engine_id, binary_state=state, binary=path, version=ver,
-                auth_state=auth_state, auth_detail=auth_detail,
-                note_key="backend.status.note.vscode_ext",
-                notes=_claude_permission_notes(),
-            )
-        pre_state, pre_detail, notes = _prereq(tc, None)
+        extension = bool(path and any(p.name.startswith("anthropic.claude-code-")
+                                     for p in Path(path).parents))
+        notes = _claude_permission_notes()
+        if not runtime.supported(engine_id):
+            notes += (("backend.status.note.unsupported", {"target": str(runtime.host_target())}),)
         return EngineStatus(
-            engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
+            engine_id=engine_id,
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail,
-            notes=notes + _claude_permission_notes(),
-            install=(_NPM, "i", "-g", "@anthropic-ai/claude-code")
-            if state in ("missing", "ok") and pre_state == "ok" else None,
-            login=("claude",) if state == "ok" else None,
+            notes=notes,
+            note_key="backend.status.note.vscode_ext" if extension else "backend.status.note.managed_install",
+            install=runtime.install_command(engine_id)
+            if state in ("missing", "ok") and not extension else None,
+            login=(path,) if state == "ok" and path else None,
         )
 
     if engine_id == "claude-sub":
@@ -526,8 +474,12 @@ def _check_engine(engine_id: str) -> EngineStatus:
         )
 
     if engine_id == "pi":
-        pre_state, pre_detail, notes = _prereq(tc, _PI_MIN_NODE)
-        path = _which("pi")
+        from llm_backend import backend_config
+        from llm_backend.model_settings import merged_settings
+        config = merged_settings("pi", backend_config().get("pi", {}))
+        bin_value = config.get("bin") or "pi"
+        path = _which(bin_value)
+        notes = ()
         state = "ok" if path else "missing"
         ver = None
         providers: tuple[str, ...] = ()
@@ -538,11 +490,13 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 state = "unknown"
             elif r[0] == 0:
                 ver = _parse_version(r[1])
+            else:
+                state = "unknown"
             cur = _version_tuple(ver)
             if cur and cur < _PI_MIN_VERSION:
                 notes = notes + (("backend.status.note.pi_too_old",
                                   {"need": ".".join(str(x) for x in _PI_MIN_VERSION)}),)
-            live = _pi_providers_from_list_models(path)
+            live = _pi_providers_from_list_models(path) if state == "ok" else None
             if live is not None:
                 providers, auth_state = _visible_pi(live), "ok"
             else:
@@ -558,29 +512,28 @@ def _check_engine(engine_id: str) -> EngineStatus:
                 auth_state = "missing"
         if (os.environ.get("PI_API_KEY") or "").strip():
             notes = notes + (("backend.status.note.pi_api_key_unused", {}),)
+        if not runtime.supported(engine_id):
+            notes += (("backend.status.note.unsupported", {"target": str(runtime.host_target())}),)
         return EngineStatus(
-            engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
+            engine_id=engine_id,
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail, authed_providers=providers,
             notes=notes,
-            install=(_NPM, "i", "-g", "@earendil-works/pi-coding-agent")
-            if state in ("missing", "ok") and pre_state == "ok" else None,
+            install=runtime.install_command(engine_id)
+            if state in ("missing", "ok") and bin_value == "pi" else None,
             # pi の /login は対話 TUI。端末を起こしてユーザーに操作してもらうしかない。
-            login=("pi",) if state == "ok" else None,
+            login=tuple(runtime.expand_command([path])) if state == "ok" and path else None,
         )
 
     if engine_id == "codex":
         state, path, source = _codex_binary()
         pre_state, pre_detail, notes = "n/a", "", ()
-        npm_ready = _prereq(tc, None)[0] == "ok"
         if source == "vscode":
             notes = (("backend.status.note.codex_vscode", {}),)
-        elif source == "path":
-            pre_state, pre_detail, notes = _prereq(tc, None)
-        elif not source:
-            # The extension route does not require Node/npm, even when neither
-            # engine is installed. npm remains an optional CLI acquisition route.
-            notes = (("backend.status.note.codex_install", {}),)
+        else:
+            notes = (("backend.status.note.managed_install", {}),)
+        if not runtime.supported(engine_id):
+            notes += (("backend.status.note.unsupported", {"target": str(runtime.host_target())}),)
         ver = None
         auth_state, auth_detail = "unknown", ""
         if state == "ok" and path:
@@ -594,8 +547,8 @@ def _check_engine(engine_id: str) -> EngineStatus:
             engine_id=engine_id, prereq_state=pre_state, prereq_detail=pre_detail,
             binary_state=state, binary=path, version=ver,
             auth_state=auth_state, auth_detail=auth_detail, notes=notes,
-            install=(_NPM, "i", "-g", "@openai/codex")
-            if state in ("missing", "ok") and source in ("", "path") and npm_ready
+            install=runtime.install_command(engine_id)
+            if state in ("missing", "ok") and source in ("", "path", "managed")
             else None,
             login=(path, "login") if state == "ok" and path else None,
         )

@@ -40,6 +40,8 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from llm_backend import runtime
+
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
@@ -461,7 +463,7 @@ class ClaudeCodeBackend:
             # 等が全部消える）ため、シムは実体に解決して直接 spawn する。
             cmd = _wrap_shim(cmd)
 
-            child_env = self._build_env(auth)
+            child_env = runtime.environment(cmd, self._build_env(auth))
             cwd = config.get("cwd") or str(self._agent_home())
 
             with self._lock:
@@ -740,7 +742,7 @@ class ClaudeCodeBackend:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=self._config.get("cwd") or str(self._agent_home()),
-            env=self._build_env(auth),
+            env=runtime.environment(cmd, self._build_env(auth)),
             start_new_session=(sys.platform != "win32"),
             **no_window_kwargs(),
         )
@@ -1242,6 +1244,10 @@ class ClaudeCodeBackend:
         up on PATH with shutil.which so a PATH-installed CLI (or its claude.cmd /
         claude.exe shim) is found; if which misses, the bare name is returned as-is.
         """
+        if value == "claude":
+            managed = runtime.managed_binary("claude")
+            if managed:
+                return managed
         if (
             os.path.isabs(value)
             or os.path.exists(value)
@@ -1297,7 +1303,7 @@ class ClaudeCodeBackend:
         if candidates:
             return str(max(candidates, key=self._version_key))
 
-        found = shutil.which("claude")
+        found = runtime.managed_binary("claude") or shutil.which("claude")
         if found:
             return found
         raise RuntimeError(

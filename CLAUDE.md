@@ -66,7 +66,7 @@ by name. Five backends ship: `claude` (VS Code Claude Code engine), `openai`
 (OpenAI-compatible HTTP), `mock` (smoke test; ignores the input, but fetches the crude-oil price from stooq.com), `pi` (pi-coding-agent
 subprocess), `codex` (Codex subprocess, from PATH or the VS Code extension).
 
-Codex resolves `[codex].bin` → `CODEX_BIN` → PATH → the editor extension's bundled
+Codex resolves `[codex].bin` → `CODEX_BIN` → app-managed CLI → PATH → the editor extension's bundled
 engine, without persisting a versioned extension path. Explicit overrides never fall
 back to another executable. `_discover_binary_info` carries the acquisition source
 so preflight uses the same merged settings and resolver. Extension-only use needs
@@ -135,9 +135,21 @@ catalog until llama-server has them loaded, which is why the list is editable.
 - **Backend status window** (設定 → バックエンドの状況…) — an inventory of every supported
   driver, **independent of which engine is currently selected**. Detection lives in
   Qt-free [preflight.py](llm_backend/preflight.py) (`check_all()`), also exposed as
-  `python -m llm_bridge engines`. Stages are **0. prereq (node+npm) → 1. installed →
-  2. auth** (Codex's bundled engine has no node/npm prerequisite), and only the first blocking stage's button is shown — offering "install"
-  when npm is missing would just fail.
+  `python -m llm_bridge engines`. Installation and authentication are separate.
+  System Node/npm are not prerequisites; the GUI no longer shows that column.
+  `prereq_*` fields remain `n/a` for CLI compatibility.
+  - **Private installation (Issue #130).** `llm_backend.install` downloads official
+    Claude binaries and complete Codex packages, or private Node 22/npm plus Pi's
+    official release manifest/lock. It verifies hashes and `--version` in staging,
+    takes a per-engine process lock, then atomically replaces a small current-release
+    pointer under `~/.myanalysis/backends/<engine>/<os-arch>/`. Old releases and
+    external installations are never overwritten/deleted. No vendor installer,
+    persistent PATH edit, global npm config/cache, authentication, or inference is used.
+    `runtime.py` reads only committed releases; `MYANALYSIS_BACKENDS_DIR` overrides
+    the root for isolated tests. Never write discovered absolute paths to synced config.
+    Pi's argv expands directly to private Node + CLI JS; managed Claude children get
+    `DISABLE_UPDATES=1`. Standard command names prefer the managed CLI, custom
+    executable overrides stay authoritative; default Claude still prefers its extension.
   - **Nothing here bills.** No LLM turn runs on open/re-check; the per-row 疎通確認
     button (`ping.ping_backend`) is the only paid path and only fires on click. There is
     deliberately no refresh timer (each probe spawns processes). モデル取得 (fetch models)
@@ -148,7 +160,7 @@ catalog until llama-server has them loaded, which is why the list is editable.
     it logs the others out. Measured-safe probes: `--version`, `codex login status`,
     `pi --list-models`, `claude auth status --json` (all leave the auth files
     byte-identical; the last measured on claude 2.1.282 / Linux).
-  - `install` doubles as the **update** command (`npm i -g <pkg>` is the same either
+  - `install` doubles as the **update** command (`python -m llm_backend.install` in either
     way); the row labels it インストール when missing and 更新 when present, so an
     installed driver still has an upgrade path. ログイン is a separate button and stays
     available even when authenticated (account switching is legitimate).
@@ -181,16 +193,16 @@ catalog until llama-server has them loaded, which is why the list is editable.
     web scraping, no filtering UI for huge lists. The append goes through
     `model_catalog.append_fetched` → `engines.update_choices`, so it lands on the list as it
     is on disk at that moment, not on the list the fetch started from. An ID the tool still
-    lists comes back on the next fetch even if the user removed it (append-only). On win32
-    npm cannot replace a running `claude.exe` / pi (EBUSY), so the window's install/update,
+    lists comes back on the next fetch even if the user removed it (append-only). The window's install/update,
     fetch and 疎通確認 share one busy state (`_busy()` / `_apply_busy()`): only one runs at a
     time, and 再確認 is disabled while busy too (the probe spawns `--version` etc.). A
     worker still running after the window closes keeps its slot — and so busy — until it
     finishes (`_stop_all` does not drop it), and an install's done only changes state when
     its token matches `_install_token`, so a late done from before the close cannot clear or
     re-arm a newer install. Engine processes outside this window (a chat turn, the settings dialog's 疎通確認,
-    other apps) are not tracked; an update then may fail with npm's own error (rc ≠ 0, no
-    auto fetch).
+    other apps) keep using their immutable old release until their turn ends. Model
+    acquisition waits for both installer and fresh probe workers to finish. Missing
+    auth/model cache does not turn a verified installation into a failed install.
 - **Per-chat-session engine override** — the dialog above sets the *global default*;
   each chat tab can override it (タブ右クリック →「このチャットのモデル…」). Same two
   layers as `tool_display`: `ChatSession.engine` / `engine_model` / `engine_provider` / `engine_effort`

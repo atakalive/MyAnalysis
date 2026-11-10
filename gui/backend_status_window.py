@@ -1,7 +1,7 @@
 """バックエンド状況ウィンドウ — 対応 LLM ドライバの導入状況を棚卸しし、
 CLI をなるべく使わずに導入まで進める（設定 → バックエンドの状況…）。
 
-非モーダル（開いたまま本体を触れる）。npm インストールは 20 秒ほどかかるし、ログインは
+非モーダル（開いたまま本体を触れる）。配布物の取得には時間がかかり、ログインは
 別ウィンドウの端末で操作してもらう間ずっとこの窓が開いている必要があるため。
 
 **課金しない**: 開く／再確認で走るのは `llm_backend.preflight` のローカル判定だけで、
@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from common.i18n import tr
-from common.proc import no_window_kwargs
-from llm_backend import build_backend, model_catalog, preflight
+from common.paths import repo_root
+from common.proc import kill_tree, no_window_kwargs
+from llm_backend import build_backend, model_catalog, preflight, runtime
 from llm_backend.engines import ENGINES, engine_by_id, engine_label, session_settings
 from llm_backend.ping import ping_backend
 
@@ -85,6 +86,9 @@ class _CmdWorker(QThread):
                 text=True,
                 encoding="utf-8",               # cp932 で化けさせない
                 errors="replace",
+                cwd=str(repo_root()),
+                env={**runtime.environment(self._cmd), "PYTHONUTF8": "1"},
+                start_new_session=(sys.platform != "win32"),
                 **no_window_kwargs(),
             )
             for ln in self._proc.stdout:
@@ -99,7 +103,7 @@ class _CmdWorker(QThread):
     def kill(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             try:
-                self._proc.kill()
+                kill_tree(self._proc)
             except Exception:
                 pass
 
@@ -152,6 +156,8 @@ class BackendStatusWindow(QWidget):
         self._install_seq = 0
         self._install_token: int | None = None
         self._models_after_install: str | None = None   # インストール/更新成功後に取得するエンジン
+        self._models_after_install_seen = False
+        self._install_probe_done = False
         self._rows: dict[str, dict] = {}
         self._status: dict[str, preflight.EngineStatus] = {}
 
@@ -162,7 +168,7 @@ class BackendStatusWindow(QWidget):
         head = QGroupBox(tr("backend.status.drivers"), self)
         self._grid = QGridLayout(head)
         for col, key in enumerate((
-            "backend.status.col.driver", "backend.status.col.prereq",
+            "backend.status.col.driver",
             "backend.status.col.install", "backend.status.col.auth",
             "backend.status.col.action",
         )):
@@ -205,13 +211,14 @@ class BackendStatusWindow(QWidget):
         note = QLabel("")
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;font-size:11px")
-        for col, w in enumerate((name, prereq, install, auth)):
+        prereq.setVisible(False)  # EngineStatus keeps the old CLI fields for compatibility.
+        for col, w in enumerate((name, install, auth)):
             self._grid.addWidget(w, r, col)
-        self._grid.addWidget(act, r, 4)
-        self._grid.addWidget(login, r, 5)
-        self._grid.addWidget(ping, r, 6)
-        self._grid.addWidget(models, r, 7)
-        self._grid.addWidget(note, r, 8)
+        self._grid.addWidget(act, r, 3)
+        self._grid.addWidget(login, r, 4)
+        self._grid.addWidget(ping, r, 5)
+        self._grid.addWidget(models, r, 6)
+        self._grid.addWidget(note, r, 7)
         self._rows[engine_id] = {
             "prereq": prereq, "install": install, "auth": auth,
             "action": act, "login": login, "ping": ping, "models": models,
@@ -239,10 +246,8 @@ class BackendStatusWindow(QWidget):
         row["note"].setText(notes)
         row["note"].setToolTip(notes)
 
-        # インストール/更新は同じ `npm i -g <pkg>`。ラベルだけ状態で変える。
-        # preflight 側が unknown / 前提不足のとき install を None にしているので、
-        # 「node が無いのにインストールを押せる」「遅いだけなのに再インストールを勧める」
-        # は構造的に起きない。
+        # Both actions use the private installer. Unknown states and extension
+        # update routes have no action, so a failed probe never suggests reinstall.
         act = row["action"]
         if s.install:
             act.setText(tr("backend.status.btn.install") if s.binary_state == "missing"
@@ -288,23 +293,29 @@ class BackendStatusWindow(QWidget):
             return                      # stale: 連打された古いワーカーの結果
         self._paint(status)
         eid = status.engine_id
-        if self._models_after_install == eid and status.binary_state == "ok":
-            self._models_after_install = None
-            if not self._start_models(eid, auto=True):
-                self._append(tr("backend.status.models.install_skipped",
-                                name=self._engine_name(eid)))
+        if self._models_after_install == eid:
+            self._models_after_install_seen = True
+        self._maybe_fetch_after_install()
         self._apply_busy()
 
     def _on_probe_done(self, generation: int) -> None:
         if generation == self._generation:
-            eid = self._models_after_install
-            if eid is not None:
-                # 再確認が終わっても ok にならなかった（PATH が起動時のままで ✗ 等）。
-                self._append(tr("backend.status.models.install_skipped",
-                                name=self._engine_name(eid)))
-                self._models_after_install = None
+            self._install_probe_done = True
+            self._maybe_fetch_after_install()
             # 再確認ボタンは、判定ワーカーが終わって _forget で枠が空いたときに戻る。
             self._apply_busy()
+
+    def _maybe_fetch_after_install(self) -> None:
+        eid = self._models_after_install
+        if eid is None or self._cmd is not None or self._probe is not None:
+            return
+        status = self._status.get(eid)
+        if self._models_after_install_seen and status is not None and status.binary_state == "ok":
+            self._models_after_install = None
+            self._start_models(eid, auto=True)
+        elif self._install_probe_done:
+            self._models_after_install = None
+            self._append(tr("backend.status.models.install_skipped", name=self._engine_name(eid)))
 
     @staticmethod
     def _engine_name(engine_id: str) -> str:
@@ -315,19 +326,18 @@ class BackendStatusWindow(QWidget):
 
     def _busy(self) -> bool:
         """この窓からエンジンのプロセスを動かす操作（インストール/更新・モデル取得・
-        疎通確認）のどれかが実行中か。win32 では起動中の claude.exe / pi を npm が
-        置き換えられない（EBUSY）ので、同時に 1 つだけにする。窓の外のプロセスは見ない。
+        疎通確認・再確認）のどれかが実行中か。この窓の操作は直列にする。
 
         ワーカーの枠（_cmd / _models / _ping）は、窓を閉じた後もスレッドが終わるまで
         残る（_stop_all 参照）。だから閉じて再表示しても、まだ走っているものは busy のまま。"""
-        return (self._install_eid is not None or self._models_after_install is not None
+        return (self._probe is not None or self._install_eid is not None or self._models_after_install is not None
                 or self._cmd is not None or self._models is not None
                 or self._ping is not None)
 
     def _apply_busy(self) -> None:
         busy = self._busy()
         for row in self._rows.values():
-            for key in ("action", "models", "ping"):
+            for key in ("action", "models", "ping", "login"):
                 row[key].setEnabled(not busy)
         # 再確認も --version 等でエンジンを起動するので、busy の間と判定中は押せない。
         self._refresh_btn.setEnabled(not busy and self._probe is None)
@@ -335,12 +345,14 @@ class BackendStatusWindow(QWidget):
     # ----- actions -----
 
     def _on_action(self, engine_id: str) -> None:
-        """インストール / 更新。コマンドはどちらも同じ ``npm i -g <pkg>``。"""
+        """Install/update the app-managed distribution."""
         s = self._status.get(engine_id)
         if s is not None and s.install:
             self._run_install(list(s.install), engine_id=engine_id)
 
     def _on_login(self, engine_id: str) -> None:
+        if self._busy():
+            return
         s = self._status.get(engine_id)
         if s is not None and s.login:
             self._launch_login(list(s.login))
@@ -373,9 +385,10 @@ class BackendStatusWindow(QWidget):
         eid, self._install_eid = self._install_eid, None
         if rc == 0 and eid in model_catalog.SUPPORTED:
             self._models_after_install = eid
+            self._models_after_install_seen = False
+            self._install_probe_done = False
         self._apply_busy()
-        # 新しく入ったバイナリを拾い直す。PATH は起動時のものなので、npm の global bin が
-        # PATH に無い構成では missing のままになる — その場合は再起動が要る。
+        # Re-read the committed private release without modifying PATH.
         self.refresh()
 
     def _launch_login(self, cmd: list[str]) -> None:
@@ -385,11 +398,18 @@ class BackendStatusWindow(QWidget):
         非 Windows では端末エミュレータを推測せず、コマンドを表示するに留める。
         """
         if sys.platform != "win32":
-            self._append(tr("backend.status.login_manual", cmd=shlex.join(cmd)))
+            display = list(cmd)
+            if cmd and runtime.is_managed_path(cmd[0], "claude"):
+                display = ["env", "DISABLE_UPDATES=1", *cmd]
+            elif cmd and runtime.is_managed_path(cmd[0], "pi"):
+                display = ["env", "-u", "NODE_OPTIONS", "-u", "NODE_PATH",
+                           *runtime.expand_command(cmd)]
+            self._append(tr("backend.status.login_manual", cmd=shlex.join(display)))
             return
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         try:
-            subprocess.Popen(preflight._wrap(cmd), creationflags=flags)
+            subprocess.Popen(preflight._wrap(cmd), creationflags=flags,
+                             env=runtime.environment(cmd))
         except Exception as e:
             self._append(f"[error] {e}")
             return
@@ -526,6 +546,7 @@ class BackendStatusWindow(QWidget):
         for attr in ("_probe", "_cmd", "_ping", "_models"):
             if getattr(self, attr, None) is worker:
                 setattr(self, attr, None)
+        self._maybe_fetch_after_install()
         self._apply_busy()
 
     @staticmethod

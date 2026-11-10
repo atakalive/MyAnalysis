@@ -119,7 +119,7 @@ def _fetch_pi(engine_id: str, settings: dict) -> ModelList:
                     {"provider": prov, "allowed": " / ".join(engines.PI_PROVIDERS)}),),
         )
     allowed = (prov,) if prov else engines.PI_PROVIDERS
-    bin_name = settings.get("bin", "pi")
+    bin_name = settings.get("bin") or "pi"
     pi_bin = preflight._which(bin_name)
     if pi_bin is None:
         return ModelList(engine_id, "missing", detail=f"pi not found: {bin_name!r}")

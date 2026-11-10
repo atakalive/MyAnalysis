@@ -48,6 +48,7 @@ def pytest_unconfigure(config):
 
 @pytest.fixture(autouse=True)
 def _isolate_pc_local_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("MYANALYSIS_BACKENDS_DIR", str(tmp_path / "backends"))
     from llm_bridge import paths as lb_paths
     monkeypatch.setattr(
         lb_paths, "last_window_path", lambda: tmp_path / "last_window.json"

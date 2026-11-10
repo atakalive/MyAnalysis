@@ -59,7 +59,7 @@ python -m llm_bridge doctor [--dataset <ds>] [--repair] [--rescue] [--cache <rcl
 | GUI の起動時に登録簿の破損を知らせるダイアログが出る / CLI が `RegistryError` で落ちる | `datasets.local.json` の破損 | ファイルを `datasets.local.json.corrupt` などに退避して手で直す（R2 同期を使っていれば退避後に `config-pull`） |
 | チャットに「AI エンジンが選ばれていないため送信できません」と出る | エンジン未設定、または `llm_backend/config.toml` の構文が壊れていて、`.env` にも `LLM_BACKEND` / `OPENAI_BASE_URL` が無い（このとき何も送らない） | [エンジンを設定](../README_ja.md#ai-エンジン)（`config.toml` が壊れていれば **適用** で `.bak` に退避して作り直される） |
 | `[エラー: RuntimeError('Claude Code engine not found…')]` | Claude Code が見つからない | 拡張を入れる、`claude` を PATH に通す、または `[claude_code].bin` / `CLAUDE_CODE_BIN` を指定 |
-| `[エラー: … not found in PATH…]`（pi / codex） | CLI 未導入 | `npm i -g …`（バックエンドの状況ウィンドウからも可）。Codex は `codex login` も必要 |
+| エンジンが見つからない（Claude / pi / Codex） | 未導入、または独自の実行ファイル指定が無効 | **設定 → バックエンドの状況… → インストール**。Node.js / npm の準備や PATH 設定は不要。導入後は **ログイン**。独自パスを指定している場合はその指定も確認する |
 | チャットに `[エラー: …]` | エンジン側のエラー（認証切れ・レート制限等） | 多くはそのまま再送で回復。認証切れはログインし直す |
 | インストールしたのに ✗ のまま | PATH は起動時のものを使う | アプリを再起動 |
 | 起動が数秒遅い | R2 同期のネットワーク待ち | `R2_AUTOSYNC=0` |

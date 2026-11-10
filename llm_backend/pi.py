@@ -20,6 +20,8 @@ import sys
 import threading
 from collections.abc import Iterator
 
+from llm_backend import runtime
+
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
@@ -95,11 +97,10 @@ class PiCodingAgentBackend:
             # チャットの DS は新規セッションの最初の送信でだけ伝える（Issue #111）。
             prompt = with_chat_context(prompt, getattr(self, "_chat_dataset", None))
 
-        pi_bin = shutil.which(config.get("bin", "pi"))
+        pi_bin = runtime.which_pi(config.get("bin", "pi"))
         if pi_bin is None:
             raise RuntimeError(
-                "pi not found in PATH. "
-                "Install: npm i -g @earendil-works/pi-coding-agent"
+                "Pi engine not found. Install it from Settings > Backend status."
             )
 
         # cwd は既存セッションの互換のため repo 直下のまま。開発者向け CLAUDE.md /
@@ -144,7 +145,8 @@ class PiCodingAgentBackend:
             else:
                 cmd = ["cmd.exe", "/c"] + cmd
 
-        child_env = self._build_env()
+        cmd = runtime.expand_command(cmd)
+        child_env = runtime.environment(cmd, self._build_env())
 
         proc = subprocess.Popen(
             cmd,

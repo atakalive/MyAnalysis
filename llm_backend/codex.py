@@ -40,6 +40,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm_backend import runtime
+
 from common.chat_dataset import CHAT_DATASET_ENV, chat_dataset_value
 from common.paths import pycache_prefix, repo_root
 from common.proc import no_window_kwargs, resolve_cmd_shim
@@ -509,6 +511,10 @@ class CodexBackend:
         env_bin = os.environ.get("CODEX_BIN", "").strip()
         command = configured or env_bin
         if command:
+            if command == "codex":
+                managed = runtime.managed_binary("codex")
+                if managed:
+                    return _CodexBinary(managed, "managed")
             source = "config" if configured else "env"
             if (
                 os.path.isabs(command)
@@ -522,9 +528,14 @@ class CodexBackend:
             else:
                 found = _path_binary(command)
             if found:
+                if runtime.is_managed_path(found, "codex"):
+                    source = "managed"
                 return _CodexBinary(found, "vscode" if _is_bundled_binary(found) else source)
             raise RuntimeError(f"Configured Codex executable not found: {command}")
 
+        managed = runtime.managed_binary("codex")
+        if managed:
+            return _CodexBinary(managed, "managed")
         found = _path_binary("codex")
         if found:
             return _CodexBinary(found, "vscode" if _is_bundled_binary(found) else "path")
