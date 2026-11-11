@@ -35,7 +35,7 @@ DYNAMIC_TR_CALLS = {
 }
 
 # ファイル単位で許す CJK リテラル。ペルソナ名の予約語で、表示用の文字列ではない。
-CJK_LITERAL_ALLOW = {"gui/persona_dialog.py": {"無し（お客様対応窓口）", "（なし）"}}
+CJK_LITERAL_ALLOW = {"gui/persona_dialog.py": {"無し", "無し（お客様対応窓口）", "（なし）"}}
 
 # CJK リテラル検査から外すファイル。CLI の argparse の help とエージェント向けの出力で、
 # GUI の言語設定の対象外（CLI プロセスは init_language() を呼ばない）。キーの存在検査と

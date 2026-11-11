@@ -47,8 +47,9 @@ from llm_bridge.personas import (
 # reserved-names テストが i18n/*.toml を舐めて担保する）。旧ラベルも紛らわしいので
 # 予約に残す。
 _RESERVED_NAMES = frozenset({
+    "無し", "(none)",
     "無し（お客様対応窓口）", "(none — customer-service tone)",
-    "（なし）", "(none)",
+    "（なし）",
 })
 
 

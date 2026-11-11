@@ -628,9 +628,9 @@ def test_fork_carries_engine_override():
 
 def test_persona_roundtrip():
     sess = _sample_session()
-    sess.persona = "粗野な知識人"
+    sess.persona = "確信のある解析者"
     d = session_to_dict(sess)
-    assert d["persona"] == "粗野な知識人"
+    assert d["persona"] == "確信のある解析者"
     assert session_from_dict(d) == sess
 
 
@@ -669,9 +669,9 @@ def test_persona_non_str_degrades_to_none():
 def test_fork_carries_persona():
     """分岐先も同じ口調で続けるのが期待値。"""
     src = _sample_session()
-    src.persona = "粗野な知識人"
+    src.persona = "確信のある解析者"
     new = fork_session(src, cut=2, title="forked")
-    assert new.persona == "粗野な知識人"
+    assert new.persona == "確信のある解析者"
 
 
 def test_read_session_file_status_ok_absent_unreadable(tmp_path):
